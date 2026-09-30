@@ -129,6 +129,12 @@ def validate_launch_shape(profile_id: str, profile: Mapping[str, Any]) -> None:
             f"profile {profile_id!r} has unknown runtime {runtime!r} (known: {known}); "
             f'set `runtime = "{DEFAULT_HEAD_RUNTIME}"` or drop the key'
         )
+    from .memory import DEFAULT_MEMORY_LIMIT_MIB, memory_limit_mib
+
+    try:
+        memory_limit_mib(profile.get("memory_limit_mib", DEFAULT_MEMORY_LIMIT_MIB), profile_id)
+    except ValueError as exc:
+        raise HeadCommandError(str(exc)) from None
 
 
 def _named(value: object, what: str) -> str:
@@ -230,14 +236,16 @@ def wrap_role_command(
     )
 
 
-def with_pid_heartbeat(command: str, pid_file: str, *, identity: Mapping[str, str] | None = None) -> str:
+def with_pid_heartbeat(
+    command: str, pid_file: str, *, identity: Mapping[str, str] | None = None,
+    in_process: bool = False,
+) -> str:
     """Prefix a head command with an atomic versioned launch-identity heartbeat.
 
-    `$$` inside a shell always names that shell's own pid, and the trailing `exec` replaces the
-    shell's process image with the head instead of forking it, so the pid written here stays the
-    head's own for its whole life. The two statements before `;` force a real shell to run first,
-    which is what makes `$$` mean anything. Orca keeps the pane's wrapping shell around once the head
-    exits, but that shell is no longer this pid.
+    `$$` inside a shell names that shell's own pid. The final `exec` replaces that process
+    with the head, so the record keeps the same pid for its whole life. Scoped heads use
+    `in_process` to publish the record in that process too; a separate writer would
+    temporarily add a task to the cgroup and defeat sole-victim OOM attribution.
 
     A wrapped head command starts with a leading `NAME=value` assignment, and POSIX `exec` treats the
     word right after it as the program to run, so `exec PYTHONPATH=... python3` fails. Routing the
@@ -247,11 +255,12 @@ def with_pid_heartbeat(command: str, pid_file: str, *, identity: Mapping[str, st
     """
     # Keep the terminal process group for TTY semantics and safe group signalling.
     # Write the PID identity before exec and replace its record atomically.
+    writer_args = "path, pid, identity, command = sys.argv[1:]" if in_process else "path, pid, identity = sys.argv[1:]"
     writer = """import json
 import os
 import sys
 import tempfile
-path, pid, identity = sys.argv[1:]
+__WRITER_ARGS__
 stat = open(f'/proc/{pid}/stat', encoding='utf-8').read()
 close = stat.rfind(')')
 fields = stat[close + 2:].split()
@@ -289,8 +298,15 @@ publish(record)
 before = record.get('leaf')
 bind_leaf(record)
 if record.get('leaf') != before:
-    publish(record)"""
+    publish(record)""".replace("__WRITER_ARGS__", writer_args)
     encoded_identity = json.dumps(dict(identity or {}), sort_keys=True, separators=(",", ":"))
+    if in_process:
+        # Publish identity in the head process so the recorded PID survives exec.
+        writer += "\nos.execvpe('/bin/sh', ['/bin/sh', '-c', 'exec env ' + command], os.environ)"
+        return (
+            f'exec python3 -P -c {shlex.quote(writer)} {shlex.quote(pid_file)} "$$" '
+            f"{shlex.quote(encoded_identity)} {shlex.quote(command)}"
+        )
     return (
         f'python3 -P -c {shlex.quote(writer)} {shlex.quote(pid_file)} "$$" '
         f"{shlex.quote(encoded_identity)}; exec env {command}"

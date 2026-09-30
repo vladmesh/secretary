@@ -109,10 +109,14 @@ class HeadRun:
     stopped_by: StopInitiator | None = None
     # Round-trip policy state so malformed or historic values remain unknown.
     fanout_policy: dict[str, Any] = field(default_factory=dict)
+    # Scoped incarnations can reuse a run directory; stop must name the one it owns.
+    scope_generation: str = ""
 
     def __post_init__(self) -> None:
         if not self.run_id:
             raise HeadRunError("a head run has an identity of its own")
+        if not isinstance(self.scope_generation, str):
+            raise HeadRunError("a scope generation is a string")
         if self.lifecycle not in LIFECYCLE:
             raise HeadRunError(
                 f"a head run's lifecycle is one of {', '.join(LIFECYCLE)}, not {self.lifecycle!r}"
@@ -222,6 +226,7 @@ class HeadRun:
             "lifecycle": self.lifecycle,
             "stopped_by": self.stopped_by.to_json() if self.stopped_by else {},
             "fanout_policy": _fanout_policy_json(self.fanout_policy),
+            **({"scope_generation": self.scope_generation} if self.scope_generation else {}),
         }
 
     @classmethod
@@ -240,6 +245,7 @@ class HeadRun:
             lifecycle=str(payload.get("lifecycle") or SPAWNED),
             stopped_by=StopInitiator.from_json(payload.get("stopped_by")),
             fanout_policy=_fanout_policy_json(payload.get("fanout_policy")),
+            scope_generation=payload.get("scope_generation", ""),
         )
 
 
@@ -257,7 +263,7 @@ def _spec_json(spec: HeadSpec) -> dict[str, Any]:
     whole — so a field is added here only when it really identifies the head. `spec.runtime` does
     not; `HeadRun.to_json` records it beside this block and says why.
     """
-    return {
+    result: dict[str, Any] = {
         "profile_id": spec.profile_id,
         "adapter": spec.adapter,
         "model": spec.model or "",
@@ -266,6 +272,9 @@ def _spec_json(spec: HeadSpec) -> dict[str, Any]:
         "codex_mode": spec.codex_mode or "",
         "fallback": list(spec.fallback),
     }
+    if spec.memory_limit_mib is not None:
+        result["memory_limit_mib"] = spec.memory_limit_mib
+    return result
 
 
 def _spec_from_json(payload: Any, runtime: str = "") -> HeadSpec:
@@ -286,6 +295,14 @@ def _spec_from_json(payload: Any, runtime: str = "") -> HeadSpec:
         # Never infer a missing adapter from a damaged record.
         raise HeadRunError("a recorded head run names its profile and its adapter")
     fallback = payload.get("fallback")
+    raw_memory_limit = payload.get("memory_limit_mib")
+    if raw_memory_limit is not None:
+        from .memory import memory_limit_mib
+
+        try:
+            raw_memory_limit = memory_limit_mib(raw_memory_limit, profile_id)
+        except ValueError as exc:
+            raise HeadRunError(str(exc)) from None
     return HeadSpec(
         profile_id=profile_id,
         adapter=adapter,
@@ -295,6 +312,7 @@ def _spec_from_json(payload: Any, runtime: str = "") -> HeadSpec:
         codex_mode=str(payload.get("codex_mode") or "") or None,
         fallback=tuple(str(entry) for entry in fallback) if isinstance(fallback, list) else (),
         runtime=runtime or RECORD_RUNTIME_WHEN_ABSENT,
+        memory_limit_mib=raw_memory_limit,
     )
 
 

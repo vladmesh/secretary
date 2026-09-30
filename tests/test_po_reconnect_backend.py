@@ -18,7 +18,7 @@ import psycopg
 from secretary.po.runner import PoRunner
 from secretary.po.service import PoService
 from secretary.po.store import COMPLETED, PoStore, PoStoreError
-from tests.po_cli_fakes import FAKE_CLAUDE, eventually
+from tests.po_cli_fakes import FAKE_CLAUDE, eventually, unscoped_test_launch
 from tests.sql_backend_fixtures import PostgresBoard
 
 
@@ -39,6 +39,7 @@ class PoServiceReconnectTests(unittest.TestCase):
             self.store,
             self.data,
             executables={"claude": str(executable)},
+            turn_launcher=unscoped_test_launch,
             env={**os.environ, "FAKE_LOG": str(self.root / "fake.log")},
         )
         self.service = PoService(

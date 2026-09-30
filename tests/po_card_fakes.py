@@ -33,7 +33,7 @@ from secretary.dispatch.state import DispatcherRecord, new_attempt_id
 from secretary.po import store as po_store
 from secretary.po.runner import PoRunner
 from secretary.po.service import PoService, listening
-from tests.po_cli_fakes import FAKE_CLAUDE, eventually
+from tests.po_cli_fakes import FAKE_CLAUDE, eventually, unscoped_test_launch
 from tests.po_fake_store import FakeBoard, FakePoStore, FakeSprints
 
 REF = "secretary-1900"
@@ -201,6 +201,7 @@ class DispatcherFixture(unittest.TestCase):
             self.data,
             executables={"claude": self.claude},
             env={**os.environ, "FAKE_LOG": str(self.log)},
+            turn_launcher=unscoped_test_launch,
         )
         service = PoService(runner, data_dir=self.data, sprints=self.po_sprints, models={"claude": ("opus",)})
         self.services.append(service)

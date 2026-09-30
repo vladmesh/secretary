@@ -913,6 +913,8 @@ class CommandHostRuntime:
             task_ref=task_ref,
             role=role,
             pid_file=pid_file,
+            # The launch intent allocates a fresh run ID before either preflight call.
+            scope_generation=run_id if spec.memory_limit_mib is not None else "",
         )
         if spec.adapter == "claude":
             prepared = _prepare_claude_provider_progress_source(run)
@@ -1287,6 +1289,8 @@ class CommandHostRuntime:
             role=OBSERVER_ROLE,
             pid_file=pid_file,
         )
+        if lifecycle_run.spec.memory_limit_mib is not None:
+            lifecycle_run = replace(lifecycle_run, scope_generation=lifecycle_run.run_id)
         if lifecycle_run.spec.adapter in {"codex", "claude"}:
             try:
                 attested = self.preflight_codex_run(
@@ -1822,6 +1826,13 @@ class CommandHostRuntime:
         """
         run = record.review_head_run if kind == "review" else record.worker_head_run
         return head_run_turn_reading(self._local_pty_root(), str((run or {}).get("run_id") or ""))
+
+    def head_loss_reason(self, run: Any) -> str | None:
+        """Typed loss recorded by this run's own supervisor, with no process inference."""
+        from secretary.runtime.local_pty_head import head_run_loss_reason
+
+        run_id = str((run or {}).get("run_id") or "") if isinstance(run, dict) else ""
+        return head_run_loss_reason(self._local_pty_root(), run_id) if run_id else None
 
     def safe_recover_worker_continuation(
         self,
@@ -2531,10 +2542,9 @@ class CommandHostRuntime:
         run has no head to stop: a bring-up that never got as far as a durable run raised nothing.
         """
         for run, role in ((_durable_head_run(run), role) for run, role in runs):
-            if run is None or run.settled:
-                # A settled run's own stop already ran and was committed, so its run directory may
-                # be gone; asking a supervisor that no longer exists would only wait out the
-                # confirmation bound to learn what the record already says.
+            if run is None:
+                # Head exit and scope cleanup are separate. Even a settled HeadRun can
+                # still have a durable scope owner that must be checked before removal.
                 continue
             receipt = self.head_runtime_for(run).stop(
                 run,
@@ -3304,6 +3314,7 @@ class CommandHostRuntime:
             run_id=run_id,
             role=role,
             run=preflight_run,
+            scope_generation=preflight_run.scope_generation,
             commit=ingress.commit_run if ingress is not None else None,
         )
         if not receipt.ok:
@@ -3352,7 +3363,12 @@ class CommandHostRuntime:
         try:
             return HeadSpec.from_profile(head, self.catalog.head_profile(head))
         except (HeadSpecError, HostError, AttributeError, KeyError, TypeError):
-            return HeadSpec(profile_id=head, adapter=adapter or "unknown", runtime=LOCAL_PTY_RUNTIME)
+            from secretary.runtime.head.memory import DEFAULT_MEMORY_LIMIT_MIB
+
+            return HeadSpec(
+                profile_id=head, adapter=adapter or "unknown", runtime=LOCAL_PTY_RUNTIME,
+                memory_limit_mib=DEFAULT_MEMORY_LIMIT_MIB,
+            )
 
     @staticmethod
     def _task_ref(task: dict[str, Any] | None, role: str, document: str) -> head_ops.TaskRef:
@@ -3573,6 +3589,7 @@ class CommandHostRuntime:
             run_id=run.run_id,
             role=run.role,
             run=run,
+            scope_generation=run.scope_generation,
         )
         if not receipt.ok:
             raise HostError(receipt.reason)

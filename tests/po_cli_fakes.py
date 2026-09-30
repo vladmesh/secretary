@@ -17,6 +17,17 @@ set, so a test never writes into a real Codex home.
 from __future__ import annotations
 
 import time
+import subprocess
+
+
+def unscoped_test_launch(session, seq, argv, files, environment, spec):
+    """Keep the existing fake CLI process tests independent of a CI systemd scope."""
+    del seq, spec
+    with files.prompt.open("rb") as stdin, files.stdout.open("ab") as stdout, files.stderr.open("ab") as stderr:
+        return subprocess.Popen(
+            argv, cwd=session.cwd, stdin=stdin, stdout=stdout, stderr=stderr,
+            env=environment, start_new_session=True,
+        )
 
 SETTLE_SECONDS = 30
 # The full id the fake Claude reports for each alias it may be given.

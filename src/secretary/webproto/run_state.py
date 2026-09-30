@@ -320,12 +320,15 @@ def _exit_status(events: tuple[dict[str, Any], ...]) -> dict[str, Any]:
             continue
         code = event.get("exit_code")
         signal = event.get("signal")
-        return {
+        result: dict[str, Any] = {
             "recorded": True,
             "code": code if isinstance(code, int) else None,
             "signal": signal if isinstance(signal, int) else None,
             "at": event.get("at"),
         }
+        if event.get("head_loss_reason") == "memory_limit" and signal == 9:
+            result["head_loss_reason"] = "memory_limit"
+        return result
     return _empty_exit()
 
 

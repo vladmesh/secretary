@@ -29,7 +29,7 @@ from secretary.po.runner import (
     process_identity,
 )
 from secretary.po.store import PoStore, PoStoreError, TurnInProgress
-from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, SETTLE_SECONDS, eventually
+from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, SETTLE_SECONDS, eventually, unscoped_test_launch
 from tests.sql_backend_fixtures import PostgresBoard
 
 BOARD: PostgresBoard
@@ -101,6 +101,7 @@ class PoRunnerTests(unittest.TestCase):
             self.store,
             self.data,
             executables=self.executables,
+            turn_launcher=unscoped_test_launch,
             env={
                 **os.environ,
                 "FAKE_LOG": str(self.log),
@@ -496,7 +497,8 @@ class PoRunnerTests(unittest.TestCase):
             return dict(line.split("=", 1) for line in self.log.read_text(encoding="utf-8").splitlines())
 
         with mock.patch.dict(os.environ, service, clear=True):
-            built = PoRunner(self.store, self.data, executables={"claude": str(recorder)})
+            built = PoRunner(self.store, self.data, executables={"claude": str(recorder)},
+                             turn_launcher=unscoped_test_launch)
         seen = turn(built)
         runtime = Path(sys.executable).parent
         self.assertEqual(Path(seen["python3"]), runtime / "python3")
@@ -505,7 +507,8 @@ class PoRunnerTests(unittest.TestCase):
         self.assertEqual(Path(seen["cwd"]).resolve(), (self.data / "po").resolve())
         self.assertEqual((seen["home"], seen["mark"]), (os.environ.get("HOME", ""), "kept/kept"))
 
-        explicit = PoRunner(self.store, self.data, executables={"claude": str(recorder)}, env=service)
+        explicit = PoRunner(self.store, self.data, executables={"claude": str(recorder)}, env=service,
+                            turn_launcher=unscoped_test_launch)
         seen = turn(explicit)
         self.assertEqual(Path(seen["python3"]), system / "python3")
         self.assertEqual(seen["module"], "1")

@@ -14,6 +14,7 @@ import json
 import os
 import re
 import select
+import shlex
 import shutil
 import signal
 import socket
@@ -56,6 +57,8 @@ from secretary.runtime.head.local_pty.journal import (
     read_events,
     read_tail,
 )
+from secretary.runtime.head.memory import scope_unit
+from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 
 REPO = Path(__file__).resolve().parents[1]
 CHILD = REPO / "tests" / "fixtures" / "local_pty_child.py"
@@ -127,6 +130,9 @@ class LocalPtySubstrateTests(unittest.TestCase):
 
     def _reap_everything(self) -> None:
         for handle in self._started:
+            owner = ScopedHeadLifecycle.from_run_dir(handle.run_dir)
+            if owner is not None:
+                owner.stop_and_prove_empty()
             _kill(handle.head_pid, group=True)
             _kill(handle.head_pid)
             _kill(handle.supervisor_pid)
@@ -145,6 +151,40 @@ class LocalPtySubstrateTests(unittest.TestCase):
         )
         self._started.append(handle)
         return handle
+
+    @unittest.skipUnless(os.environ.get("GITHUB_ACTIONS") == "true", "transient system scope proof runs in CI")
+    def test_tiny_scope_records_a_real_memory_limit_kill(self) -> None:
+        # Touch each page: a zero-filled bytearray may stay lazily backed and never count
+        # against the scope's MemoryMax.
+        pressure = (
+            "import subprocess, sys, threading, time; sys.stdin.readline(); "
+            "threading.Thread(target=time.sleep, args=(5,), daemon=True).start(); "
+            "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)']); "
+            "data = bytearray(192 * 1024 * 1024); "
+            "data[::4096] = b'x' * (len(data) // 4096); time.sleep(5)"
+        )
+        command = (
+            f"{shlex.quote(sys.executable)} -u -c "
+            + shlex.quote(pressure)
+        )
+        handle = self._start(run_id="tiny-memory-limit", command=command, memory_limit_mib=96)
+        unified = next(
+            line[3:] for line in Path(f"/proc/{handle.head_pid}/cgroup").read_text().splitlines()
+            if line.startswith("0::")
+        )
+        cgroup = Path("/sys/fs/cgroup") / unified.lstrip("/")
+        self.assertEqual(cgroup.name, scope_unit(handle.run_id))
+        self.assertEqual((cgroup / "memory.max").read_text().strip(), str(96 * 1024 * 1024))
+        self.assertEqual((cgroup / "memory.swap.max").read_text().strip(), "0")
+        self.assertTrue(self._client(handle).send_input("go\n")["ok"])
+        self._await(
+            lambda: bool(handle.events().of_kind(RUN_EXITED)), timeout=20.0,
+            message="the over-limit head did not exit",
+        )
+        exited = handle.events().of_kind(RUN_EXITED)[-1]
+        self.assertEqual(exited.get("signal"), signal.SIGKILL, exited)
+        self.assertEqual(exited.get("head_loss_reason"), "memory_limit")
+        self.assertTrue(scope_unit(handle.run_id).startswith("secretary-head-"))
 
     def _client(self, handle: HeadHandle) -> SupervisorClient:
         client = handle.connect()
@@ -1356,27 +1396,21 @@ class LocalPtySubstrateTests(unittest.TestCase):
 
 
 class SubstrateIsNotWiredInTests(unittest.TestCase):
-    """This package is a substrate. What stands on it is one backend, and nothing else.
+    """This package is a substrate. Only the runtime backend and PO runner consume it.
 
-    secretary-1463 wrote this as "nothing outside the package reaches for it", which was the whole
-    truth while there was no backend. secretary-1465 built `runtime.local_pty_head` on top, so the
-    guard says the same thing about one more module rather than less about all of them: exactly one
-    consumer, named here, and the rest of the product still untouched.
-
-    secretary-1467 wired that backend into the dispatcher, so the dispatcher now names the module
-    `local_pty_head` — and a substring search for `local_pty` cannot tell that from reaching into
-    this package. The property is unchanged and is asked of the imports instead: nothing outside
-    the backend imports this package. `OnlyTheResolverWiresThisBackendIn` in
-    `test_local_pty_head_runtime` is what says which half of that card's own guard survived.
+    The dispatcher reaches it through `runtime.local_pty_head`; the PO service reaches it through
+    `po.runner`. Both use the scoped lifecycle's supervisor, journal and cgroup contract. An import
+    anywhere else creates a third lifecycle entry path, which this guard refuses.
     """
 
-    def test_only_the_one_backend_built_on_it_reaches_for_it(self) -> None:
+    def test_only_the_scoped_head_consumers_reach_for_it(self) -> None:
         package = REPO / "src" / "secretary" / "runtime" / "head" / "local_pty"
         backend = REPO / "src" / "secretary" / "runtime" / "local_pty_head.py"
+        po_runner = REPO / "src" / "secretary" / "po" / "runner.py"
         substrate = "secretary.runtime.head.local_pty"
         offenders = []
         for path in (REPO / "src").rglob("*.py"):
-            if package in path.parents or path == backend:
+            if package in path.parents or path in (backend, po_runner):
                 continue
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 names = []
@@ -1386,7 +1420,7 @@ class SubstrateIsNotWiredInTests(unittest.TestCase):
                     names = [node.module]
                 if any(name == substrate or name.startswith(substrate + ".") for name in names):
                     offenders.append(str(path.relative_to(REPO)))
-        self.assertEqual(offenders, [], "the substrate is reached from outside its one backend")
+        self.assertEqual(offenders, [], "the substrate is reached outside its runtime and PO consumers")
 
     def test_the_substrate_implements_none_of_the_six_verbs_as_a_boundary(self) -> None:
         """Prose about `HeadRuntime` is fine; an implementation of it is what this card excludes."""

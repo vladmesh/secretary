@@ -27,10 +27,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..memory import MemoryScopeError
+from .scoped_lifecycle import ScopedHeadLifecycle
 from . import protocol
 from .journal import RUN_STARTED, JournalReadResult, read_events
 
 SUPERVISOR_MODULE = "secretary.runtime.head.local_pty.supervisor"
+SCOPE_LAUNCHER_MODULE = "secretary.runtime.head.local_pty.scope_launcher"
 #: How long `spawn_head` waits for the run directory to say the head is up.
 SPAWN_TIMEOUT_SECONDS = 20.0
 _POLL_SECONDS = 0.02
@@ -43,10 +46,12 @@ class LocalPtyError(RuntimeError):
 class LocalPtySpawnError(LocalPtyError):
     """A head did not come up, and the reason the run directory gave for it."""
 
-    def __init__(self, reason: str, detail: str) -> None:
+    def __init__(self, reason: str, detail: str, *, cleanup_complete: bool = True, scope_generation: str = "") -> None:
         super().__init__(detail)
         self.reason = reason
         self.detail = detail
+        self.cleanup_complete = cleanup_complete
+        self.scope_generation = scope_generation
 
 
 @dataclass(frozen=True)
@@ -62,6 +67,7 @@ class HeadHandle:
     pid_file: Path
     supervisor_pid: int
     head_pid: int
+    scope_generation: str = ""
 
     def connect(self, timeout: float = 5.0) -> SupervisorClient:
         return SupervisorClient.connect(self.socket_path, timeout=timeout)
@@ -109,6 +115,9 @@ def spawn_head(
     env: Mapping[str, str] | None = None,
     timeout: float = SPAWN_TIMEOUT_SECONDS,
     pid_file: str | os.PathLike[str] = "",
+    memory_limit_mib: int | None = None,
+    owner_unit: str = "",
+    scope_generation: str = "",
 ) -> HeadHandle:
     """Bring one head up under a supervisor that outlives this process, and wait until it answers.
 
@@ -149,8 +158,9 @@ def spawn_head(
         str(cols),
         "--term",
         term,
-        "--daemonize",
     ]
+    if memory_limit_mib is None:
+        argv.append("--daemonize")
     if cwd:
         argv += ["--cwd", str(cwd)]
     if quiet_seconds is not None:
@@ -160,40 +170,76 @@ def spawn_head(
     identity_file = Path(pid_file).absolute() if pid_file else run_dir / protocol.PID_FILE_NAME
     if pid_file:
         argv += ["--pid-file", str(identity_file)]
+    if memory_limit_mib is not None:
+        argv += ["--memory-limit-mib", str(memory_limit_mib)]
     log_path = run_dir / protocol.SUPERVISOR_LOG_NAME
-    with open(log_path, "ab", buffering=0) as log:
-        intermediate = subprocess.Popen(
-            argv,
-            cwd=str(cwd) if cwd else None,
-            env=_supervisor_environment(env),
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=log,
-            start_new_session=True,
-            close_fds=True,
+    launch_env = _supervisor_environment(env)
+    lifecycle = ScopedHeadLifecycle(run_id, memory_limit_mib, owner_unit, run_dir) if memory_limit_mib is not None else None
+    if lifecycle is not None:
+        if scope_generation:
+            lifecycle.generation = scope_generation
+        previous = None
+        try:
+            previous = ScopedHeadLifecycle.from_run_dir(run_dir)
+            if previous is not None:
+                if scope_generation:
+                    raise MemoryScopeError("a write-ahead scope generation cannot replace an existing owner")
+                previous.stop_and_prove_empty()
+            lifecycle.persist(run_dir, role=role, task=task, workspace=str(cwd), replace_existing=not bool(scope_generation))
+            descriptor = os.open(run_dir.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except MemoryScopeError as exc:
+            raise LocalPtySpawnError("cleanup_failed", str(exc), cleanup_complete=False,
+                                     scope_generation=scope_generation or (previous.generation if previous is not None else lifecycle.generation)) from exc
+        argv = lifecycle.launcher_argv(
+            argv, run_dir=run_dir, log_path=log_path, timeout=timeout,
+            pythonpath=launch_env["PYTHONPATH"],
         )
-    # The intermediate has already forked the supervisor and is on its way out; reaping it here is
-    # what guarantees this process leaves no child behind, whatever it does next.
-    status = intermediate.wait()
+    try:
+        with open(log_path, "ab", buffering=0) as log:
+            intermediate = subprocess.Popen(
+                argv,
+                cwd=str(cwd) if cwd else None,
+                env=launch_env,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=log,
+                start_new_session=True,
+                close_fds=True,
+            )
+        # Reap the launcher before cleanup, so it cannot register a late scope afterwards.
+        status = intermediate.wait()
+    except (OSError, subprocess.SubprocessError) as exc:
+        error = LocalPtySpawnError("scope_failed", f"head scope launcher failed: {exc}")
+        raise _after_failed_launch(error, lifecycle, journal_path, socket_path, already) from exc
+    if memory_limit_mib is not None and status != 0:
+        tail = log_path.read_text(encoding="utf-8", errors="replace")[-2048:]
+        error = LocalPtySpawnError("scope_failed", f"head scope did not start (exit {status}): {tail}")
+        raise _after_failed_launch(error, lifecycle, journal_path, socket_path, already)
 
     deadline = time.monotonic() + timeout
     while True:
         for error_path in error_paths:
             failure = _startup_error(error_path)
             if failure is not None:
-                raise LocalPtySpawnError(
+                error = LocalPtySpawnError(
                     str(failure.get("reason") or "startup_failed"),
                     str(failure.get("detail") or ""),
                 )
+                raise _after_failed_launch(error, lifecycle, journal_path, socket_path, already)
         result = read_events(journal_path)
+        observed = lifecycle.started_or_exited(result.events, already) if lifecycle else None
         started = [event for event in result.events[already:] if event.get("kind") == RUN_STARTED]
+        record = observed[0] if observed else (started[-1] if started else None)
+        exited = observed[1] if observed else False
         if (
-            started
-            and socket_path.exists()
+            record is not None
             and _identity_written(identity_file, run_id)
-            and _answers(socket_path)
+            and (exited or (socket_path.exists() and _answers(socket_path)))
         ):
-            record = started[-1]
             return HeadHandle(
                 run_dir=run_dir,
                 run_id=run_id,
@@ -204,6 +250,7 @@ def spawn_head(
                 pid_file=identity_file,
                 supervisor_pid=int(record.get("supervisor_pid") or 0),
                 head_pid=int(record.get("head_pid") or 0),
+                scope_generation=lifecycle.generation if lifecycle is not None else "",
             )
         if time.monotonic() >= deadline:
             tail = ""
@@ -211,12 +258,36 @@ def spawn_head(
                 tail = log_path.read_text(encoding="utf-8", errors="replace")[-2048:]
             except OSError:
                 pass
-            raise LocalPtySpawnError(
+            error = LocalPtySpawnError(
                 "timeout",
                 f"the supervisor for {run_id} did not answer within {timeout:g}s "
                 f"(intermediate exit {status}); log tail: {tail!r}",
             )
+            raise _after_failed_launch(error, lifecycle, journal_path, socket_path, already)
         time.sleep(_POLL_SECONDS)
+
+
+def _after_failed_launch(
+    error: LocalPtySpawnError, lifecycle: ScopedHeadLifecycle | None,
+    journal_path: Path, socket_path: Path, since: int,
+) -> LocalPtySpawnError:
+    if lifecycle is None:
+        return error
+    observed = lifecycle.started_or_exited(read_events(journal_path).events, since)
+    try:
+        if observed is not None and not observed[1]:
+            lifecycle.cancel_started(
+                socket_path=socket_path, journal_path=journal_path,
+                started_seq=int(observed[0].get("seq") or 0),
+            )
+        else:
+            lifecycle.stop_and_prove_empty()
+    except MemoryScopeError as exc:
+        return LocalPtySpawnError(
+            "cleanup_failed", f"{error.detail}; {exc}", cleanup_complete=False,
+            scope_generation=lifecycle.generation,
+        )
+    return error
 
 
 def _identity_written(pid_file: Path, run_id: str) -> bool:

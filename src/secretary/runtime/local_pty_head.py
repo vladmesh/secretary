@@ -175,6 +175,8 @@ from typing import Any
 from secretary.runtime.head import local_pty
 from secretary.runtime.head.identity import task_binding
 from secretary.runtime.head.local_pty import protocol
+from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+from secretary.runtime.head.memory import MemoryScopeError
 from secretary.runtime.head.operations import (
     HeadNudgeFailed,
     HeadOperationError,
@@ -654,6 +656,7 @@ class LocalPtyHeadRuntime:
         delivery_seconds: float | None = None,
         env: Mapping[str, str] | None = None,
         pid_file: str = "",
+        scope_generation: str = "",
         transport: Any = None,
         **ignored: Any,
     ) -> StartReceipt:
@@ -679,6 +682,10 @@ class LocalPtyHeadRuntime:
         the head existed. The head writes its launch identity there, once, through the supervisor;
         the command it is handed is the bare head command.
 
+        `scope_generation` names a caller's durable write-ahead admission. That launch preserves
+        it and cannot replace an existing scope owner. Ordinary replacement starts omit it and
+        acquire a fresh generation after proving the previous owner empty.
+
         A `pointer` handed over with a `transport` is an agent's prompt, and it is delivered the
         way `deliver` delivers one (see there): once the head has settled, typed, then submitted,
         with a turn seen to start. That wait happens outside this runtime's lock, after the spawn.
@@ -700,6 +707,7 @@ class LocalPtyHeadRuntime:
             delivery_seconds=delivery_seconds,
             env=env,
             pid_file=pid_file,
+            scope_generation=scope_generation,
         )
         live = receipt.run
         if pointer is None or transport is None or live is None or not receipt.ok:
@@ -746,6 +754,7 @@ class LocalPtyHeadRuntime:
         delivery_seconds: float | None,
         env: Mapping[str, str] | None,
         pid_file: str,
+        scope_generation: str,
     ) -> StartReceipt:
         """`start` under the lock: the refusals, the spawn and a bare pointer's one delivery.
 
@@ -781,6 +790,8 @@ class LocalPtyHeadRuntime:
                 if already_up is not None:
                     return already_up
             identity = claimed or new_run_id()
+            candidate = run or HeadRun(run_id=identity, spec=spec, workspace=workspace,
+                                       task_ref=task_ref, role=role)
             designated = {"pid_file": pid_file} if pid_file else {}
             try:
                 handle = self._spawn(
@@ -795,14 +806,20 @@ class LocalPtyHeadRuntime:
                     quiet_seconds=quiet_seconds,
                     delivery_seconds=delivery_seconds,
                     env=env,
+                    **({"memory_limit_mib": spec.memory_limit_mib} if spec.memory_limit_mib is not None else {}),
+                    **({"scope_generation": scope_generation} if scope_generation else {}),
                     **designated,
                 )
             except local_pty.LocalPtySpawnError as exc:
+                retained = candidate if not exc.cleanup_complete else run
+                if retained is not None and exc.scope_generation:
+                    retained = replace(retained, scope_generation=exc.scope_generation)
+                    retained = _with_pid_file(retained, pid_file)
                 return StartReceipt(
                     status=_spawn_status(exc),
-                    run=run,
+                    run=retained,
                     reason=str(exc),
-                    failure=_spawn_failure(exc, run),
+                    failure=_spawn_failure(exc, retained),
                     evidence={"reason": exc.reason, "detail": exc.detail},
                     epoch=self.activity.epoch(identity),
                 )
@@ -817,6 +834,7 @@ class LocalPtyHeadRuntime:
                 )
             ).rebound(str(handle.socket_path), leaf=identity)
             live = _with_pid_file(live, str(handle.pid_file))
+            live = replace(live, scope_generation=getattr(handle, "scope_generation", ""))
             # A new supervisor incarnation drops prior terminal state and reuses its journal scale.
             self.activity.forget(identity)
             self._fatal.pop(identity, None)
@@ -1280,13 +1298,17 @@ class LocalPtyHeadRuntime:
         for that by name, through `stop_if_quiescent`.
 
         The initiator is recorded on the run before the signal is sent, so a stop that outlives
-        this process still names who began it. The confirmation is the launch identity going dead —
-        not the socket disappearing, which says the supervisor let go and says nothing about the
-        head.
+        this process still names who began it. A scoped head also requires the durable owner's
+        recursive empty proof; the launch identity going dead only confirms the head's exit.
         """
-        del ignored
         with self._lock:
+            preflight = ignored.get("preflight")
+            if callable(preflight):
+                preflight(run)
             finishing = run.finishing(initiator)
+            commit = ignored.get("commit")
+            if callable(commit):
+                commit(finishing)
             address = self._address(run)
             if address is None:
                 return StopReceipt(
@@ -1297,8 +1319,40 @@ class LocalPtyHeadRuntime:
                     epoch=self.activity.epoch(run.run_id),
                     lease=self.activity.lease(run.run_id),
                 )
-            asked = self._ask_to_stop(address, initiator, signal_name)
-            gone = self._await_head_gone(address, run)
+            asked = None
+            try:
+                owner = ScopedHeadLifecycle.from_run_dir(address.run_dir)
+                if owner is not None:
+                    if owner.run_id != run.run_id or owner.generation != run.scope_generation:
+                        raise MemoryScopeError("scope owner does not match the stop's run")
+                    with owner.ownership() as record:
+                        if address.pid_file.exists():
+                            status = self._identity(str(address.pid_file), expected={
+                                "run_id": run.run_id, "role": run.role, "task": _task_of(run),
+                            })
+                            if status.get("state") not in ("dead", "live-match") or (status.get("record") or {}).get("run_id") != run.run_id:
+                                raise MemoryScopeError("head identity does not match the scoped stop")
+                        record["stop_initiator"] = initiator.to_json()
+                        owner.update_owner(address.run_dir, record)
+                        asked = self._ask_to_stop(address, initiator, signal_name)
+                        owner.stop_owned(record)
+                        # A launch can fail before any head identity or journal exists.
+                        # Only this generation's durable recursive proof settles that case.
+                        gone = record["cleanup_complete"] and (
+                            not address.pid_file.exists() or self._await_head_gone(address, run)
+                        )
+                else:
+                    if run.scope_generation:
+                        raise MemoryScopeError("the scoped run has lost its owner")
+                    asked = self._ask_to_stop(address, initiator, signal_name)
+                    gone = self._await_head_gone(address, run)
+            except (MemoryScopeError, OSError, ValueError) as exc:
+                return StopReceipt(
+                    status=HEAD_ALIVE, run=finishing, reason=str(exc),
+                    failure=HeadStopFailed(str(exc), run=finishing), evidence=asked,
+                    epoch=self.activity.epoch(run.run_id),
+                    lease=self.activity.lease(run.run_id), rotation_ready=False,
+                )
             if not gone:
                 return StopReceipt(
                     status=HEAD_ALIVE,
@@ -1321,7 +1375,7 @@ class LocalPtyHeadRuntime:
             self.activity.forget(run.run_id)
             self._fatal.pop(run.run_id, None)
             self._admission_notes.pop(run.run_id, None)
-            return StopReceipt(status=HEAD_OK, run=finishing.exited(), evidence=asked, epoch=epoch)
+            return StopReceipt(status=HEAD_OK, run=finishing if finishing.settled else finishing.exited(), evidence=asked, epoch=epoch)
 
     def attach(self, run: HeadRun) -> AttachReceipt:
         """Join a caller to this head's live stream, through the substrate's own bounded attach.
@@ -1510,6 +1564,9 @@ class LocalPtyHeadRuntime:
         if not run_id:
             return
         with self._lock:
+            owner = ScopedHeadLifecycle.from_run_dir(protocol.run_dir_for(self.root, run_id))
+            if owner is not None:
+                owner.stop_and_prove_empty()
             self.activity.forget(run_id)
             self._fatal.pop(run_id, None)
             self._admission_notes.pop(run_id, None)
@@ -3037,7 +3094,7 @@ def _spawn_status(exc: local_pty.LocalPtySpawnError) -> str:
     draws on the legacy path, and for the same reason: treating it as a failure is how live heads
     get a second head opened beside them.
     """
-    if exc.reason in ("timeout", "already_running"):
+    if not exc.cleanup_complete or exc.reason in ("timeout", "already_running"):
         return HEAD_ALIVE
     return HEAD_GONE
 
@@ -3225,6 +3282,27 @@ def head_run_journal_tail(run_dir: str | os.PathLike[str]) -> local_pty.JournalR
     its end and nothing else. `OSError` propagates for the reason it does there.
     """
     return local_pty.read_tail(Path(run_dir) / protocol.JOURNAL_NAME)
+
+
+def head_run_loss_reason(root: str | os.PathLike[str], run_id: str) -> str | None:
+    """Read a supervisor's typed death record for this exact run, if one exists."""
+    from secretary.runtime.head.memory import MEMORY_LIMIT_REASON
+
+    try:
+        events = head_run_journal_tail(protocol.run_dir_for(root, run_id)).events
+    except (OSError, ValueError):
+        return None
+    for event in reversed(events):
+        if event.get("run_id") != run_id:
+            continue
+        if event.get("kind") == local_pty.RUN_STARTED:
+            return None
+        if event.get("kind") != local_pty.RUN_EXITED:
+            continue
+        if event.get("head_loss_reason") == MEMORY_LIMIT_REASON and event.get("signal") == 9:
+            return MEMORY_LIMIT_REASON
+        return None
+    return None
 
 
 def _flock_holders(info: os.stat_result) -> list[int]:

@@ -1,7 +1,7 @@
 """Headless turns of the PO head: one Claude or Codex process per turn, in the PO workspace.
 
-No Orca and no local-pty: a turn is an ordinary child process started with `subprocess`, in its
-own process group, with the PO workspace as its working directory and full permissions. The owner's
+Each turn uses the scoped local-pty supervisor, with the CLI's standard streams redirected to
+the turn's files and its own process group. The owner's
 message goes to the child on stdin; its stdout is kept raw in a file under
 ``<data_dir>/po-runs/<session>/`` (outside the workspace the agent can write), and a waiter thread
 settles the turn when the process exits. Only the owner's message and the agent's final answer reach
@@ -29,12 +29,15 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -57,6 +60,13 @@ from secretary.po.store import (
 )
 from secretary.po.workspace import workspace_dir
 from secretary.runtime.provider_models import codex_rollout_path, codex_session_models
+from secretary.runtime.head.local_pty.client import HeadHandle, spawn_head
+from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+from secretary.runtime.head.memory import MemoryScopeError
+from secretary.runtime.head.local_pty.journal import RUN_EXITED, read_events
+from secretary.runtime.head.local_pty import protocol
+from secretary.runtime.head.spec import HeadSpec, load_head_specs
+from secretary.runtime.heads import Registry, load_registry
 
 RUNS_DIR_NAME = "po-runs"
 STOPPED_REASON = "stopped by the owner"
@@ -252,8 +262,33 @@ class TurnFiles:
 
 @dataclass
 class _Live:
-    process: subprocess.Popen[bytes]
+    process: Any
     thread: threading.Thread
+
+
+class ScopedPoProcess:
+    """The PO service's waitable view of a head owned by the scoped supervisor."""
+
+    def __init__(self, handle: HeadHandle) -> None:
+        self.handle = handle
+        self.pid = handle.head_pid
+        self._supervisor_identity = process_identity(handle.supervisor_pid)
+        self.head_loss_reason: str | None = None
+
+    def wait(self, timeout: float | None = None) -> int:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            for event in reversed(read_events(self.handle.journal_path).events):
+                if event.get("kind") == RUN_EXITED and event.get("run_id") == self.handle.run_id:
+                    self.head_loss_reason = event.get("head_loss_reason")
+                    code = event.get("exit_code")
+                    number = event.get("signal")
+                    return int(code) if code is not None else -int(number or 0)
+            if not still_running(self.handle.supervisor_pid, self._supervisor_identity):
+                raise RunnerError(f"PO head supervisor {self.handle.supervisor_pid} exited without a run.exited record")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired("PO head", timeout)
+            time.sleep(0.05)
 
 
 class PoRunner:
@@ -269,6 +304,9 @@ class PoRunner:
         on_settled: Callable[[str, int], None] | None = None,
         on_failed: Callable[[str, int, str], None] | None = None,
         efforts: Mapping[str, tuple[str, ...]] | None = None,
+        head_specs: Mapping[str, HeadSpec] | None = None,
+        turn_launcher: Callable[..., Any] | None = None,
+        scope_owner_unit: str = "secretary-po.service",
     ) -> None:
         self.store = store
         # What a new session's effort is checked against unless its create passes its own list.
@@ -283,10 +321,13 @@ class PoRunner:
         self.workspace = workspace_dir(self.data_dir)
         self.runs = runs_dir(self.data_dir)
         self.executables = {"claude": "claude", "codex": "codex", **dict(executables or {})}
+        self.head_specs = dict(head_specs) if head_specs is not None else load_head_specs()
+        self._turn_launcher = turn_launcher or self._scoped_launch
+        self.scope_owner_unit = scope_owner_unit
         # A turn gets `turn_environment()` unless the caller passes its own.
         self.env = dict(env) if env is not None else turn_environment()
         # Held only while a turn is started, stopped or recovered, never while one runs.
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._live: dict[tuple[str, int], _Live] = {}
         # Re-runs whose launch failed after the allowance was spent, with why: the next recovery pass
         # settles the row `failed` with this reason if `_abandon` could not.
@@ -294,7 +335,143 @@ class PoRunner:
 
     @classmethod
     def for_instance(cls, instance_dir: Path | str, data_dir: Path | str, **kwargs: Any) -> PoRunner:
+        base = Path(instance_dir)
+        if base.name == "instance.yaml":
+            base = base.parent
+        registry_path = base / "heads" / "heads.yaml"
+        registry: Registry = load_registry(registry_path)
+        kwargs.setdefault("head_specs", load_head_specs(registry))
         return cls(PoStore.for_instance(instance_dir), data_dir, **kwargs)
+
+    def _head_spec(self, session: Session) -> HeadSpec:
+        for spec in self.head_specs.values():
+            if (spec.adapter, spec.model, spec.effort) == (session.cli, session.model, session.effort):
+                return spec
+        return HeadSpec.from_profile(
+            f"po-{session.cli}-{session.model}-{session.effort}",
+            {"adapter": session.cli, "model": session.model, "effort": session.effort},
+        )
+
+    def _scoped_launch(
+        self, session: Session, seq: int, argv: list[str], files: TurnFiles,
+        environment: Mapping[str, str], spec: HeadSpec,
+    ) -> ScopedPoProcess:
+        # A shell exec keeps the heartbeat PID equal to the CLI PID. Redirection preserves the
+        # PO feed's structured stdout and the existing stderr/last-message files.
+        command = (
+            f"{shlex.join(argv)} < {shlex.quote(str(files.prompt))} "
+            f">> {shlex.quote(str(files.stdout))} 2>> {shlex.quote(str(files.stderr))}"
+        )
+        scope_dir = self._scope_dir(session.session_id, seq)
+        scope_dir.parent.mkdir(parents=True, exist_ok=True)
+        previous = ScopedHeadLifecycle.from_run_dir(scope_dir)
+        with previous.ownership() if previous is not None else nullcontext(None) as record:
+            if previous is not None:
+                if self._owner_outcome(record) is not None:
+                    raise RunnerError("the turn's retained terminal intent must settle before any relaunch")
+                previous.stop_owned(record)
+            lifecycle = ScopedHeadLifecycle(uuid.uuid4().hex[:24], spec.memory_limit_mib,
+                                            self.scope_owner_unit)
+            # Keep the old owner serialized through pointer replacement. Its resolved
+            # canonical directory stays fixed for concurrent callers holding that owner.
+            run_dir = protocol.run_dir_for(self.data_dir / "po-heads", lifecycle.run_id)
+            run_dir.mkdir(parents=True, exist_ok=True)
+            if scope_dir.is_symlink():
+                scope_dir.unlink()
+            scope_dir.symlink_to(run_dir, target_is_directory=True)
+            descriptor = os.open(scope_dir.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            handle = spawn_head(
+                root=self.data_dir / "po-heads", run_id=lifecycle.run_id, role="po",
+                task=f"po:{spec.profile_id}:{session.session_id}:{seq}", command=command, cwd=session.cwd,
+                env=environment, memory_limit_mib=spec.memory_limit_mib,
+                owner_unit=self.scope_owner_unit,
+            )
+            return ScopedPoProcess(handle)
+
+    def _cleanup_turn_scope(self, session_id: str, seq: int) -> bool:
+        """The persisted scope, rather than a head PID, owns all turn descendants."""
+        lifecycle = ScopedHeadLifecycle.from_run_dir(self._scope_dir(session_id, seq))
+        if lifecycle is None:
+            return False
+        lifecycle.stop_and_prove_empty()
+        return True
+
+    def _scope_dir(self, session_id: str, seq: int) -> Path:
+        return self.files(session_id, seq).directory / f"turn-{seq:04d}.scope"
+
+    def _pending_outcome(self, session_id: str, seq: int) -> dict[str, Any] | None:
+        owner = ScopedHeadLifecycle.from_run_dir(self._scope_dir(session_id, seq))
+        if owner is None:
+            return None
+        assert owner.directory is not None
+        with owner.ownership() as record:
+            return self._owner_outcome(record)
+
+    def _remember_outcome(self, session_id: str, seq: int, outcome: dict[str, Any]) -> None:
+        self._terminal(session_id, seq, outcome, settle=False)
+
+    @staticmethod
+    def _owner_outcome(record: dict[str, Any]) -> dict[str, Any] | None:
+        outcome = record.get("outcome")
+        if outcome is None:
+            return None
+        if not isinstance(outcome, dict) or outcome.get("state") not in (COMPLETED, FAILED, INTERRUPTED):
+            raise MemoryScopeError("scope owner has invalid terminal intent")
+        field = "answer" if outcome["state"] == COMPLETED else "reason"
+        if not isinstance(outcome.get(field), str):
+            raise MemoryScopeError("scope owner has incomplete terminal intent")
+        return dict(outcome)
+
+    def _terminal(
+        self, session_id: str, seq: int, proposed: dict[str, Any] | None, *, settle: bool = True,
+    ) -> bool:
+        """Select intent, prove empty and commit that intent as one owner operation.
+
+        The store's running-row transition remains the idempotency boundary. An owner
+        interruption overrides uncommitted intent, never an already terminal row.
+        The runner lock also serializes genuinely unscoped turns in this process.
+        """
+        with self._lock:
+            owner = ScopedHeadLifecycle.from_run_dir(self._scope_dir(session_id, seq))
+            if owner is None:
+                if not settle or proposed is None:
+                    return False
+                return self._commit_outcome(session_id, seq, proposed)
+            with owner.ownership() as record:
+                if self.store.turn(session_id, seq).state != RUNNING:
+                    return False
+                selected = self._owner_outcome(record)
+                if proposed is not None and (selected is None or proposed["state"] == INTERRUPTED):
+                    record["outcome"] = proposed
+                    selected = self._owner_outcome(record)
+                    owner.update_owner(owner.directory, record)
+                if not settle:
+                    return False
+                if selected is None:
+                    raise MemoryScopeError("scope owner has no terminal intent")
+                owner.stop_owned(record)
+                if not record["cleanup_complete"]:
+                    raise MemoryScopeError("scope owner has no durable empty proof")
+                return self._commit_outcome(session_id, seq, selected)
+
+    def _commit_outcome(self, session_id: str, seq: int, outcome: dict[str, Any]) -> bool:
+        """Only _terminal calls this, while its serialization still covers the store commit."""
+        state = outcome["state"]
+        resolved = outcome.get("resolved_model")
+        if state == COMPLETED:
+            return self.store.complete_turn(session_id, seq, outcome["answer"], resolved_model=resolved)
+        extra = {"resolved_model": resolved} if resolved is not None else {}
+        settled = self.store.finish_turn(session_id, seq, state, outcome["reason"], **extra)
+        if settled and state == FAILED and self.on_failed is not None:
+            try:
+                self.on_failed(session_id, seq, outcome["reason"])
+            except Exception as exc:  # noqa: BLE001 - a listener never unsettles a turn
+                print(f"secretary po: after failed turn {session_id}/{seq}: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return settled
 
     # --- sessions ---------------------------------------------------------------------------
 
@@ -523,28 +700,23 @@ class PoRunner:
 
     def _launch(
         self, session: Session, seq: int, argv: list[str], files: TurnFiles
-    ) -> subprocess.Popen[bytes]:
+    ) -> Any:
         """Start one CLI process for a turn and record it, or leave no live process group behind.
 
         Output is appended, so a turn relaunched by `_resume_instead` keeps both attempts' raw output.
         """
         try:
-            with (
-                files.prompt.open("rb") as stdin,
-                files.stdout.open("ab") as stdout,
-                files.stderr.open("ab") as stderr,
-            ):
-                process = subprocess.Popen(
-                    argv,
-                    cwd=session.cwd,
-                    stdin=stdin,
-                    stdout=stdout,
-                    stderr=stderr,
-                    env=self.session_environment(session, seq),
-                    start_new_session=True,
-                )
-        except OSError as exc:
+            process = self._turn_launcher(
+                session, seq, argv, files, self.session_environment(session, seq),
+                self._head_spec(session),
+            )
+        except (OSError, RuntimeError) as exc:
             reason = f"could not start {argv[0]}: {exc}"
+            if getattr(exc, "cleanup_complete", True) is False:
+                # The scope may still own a head. Leave the turn running for recovery
+                # rather than record a failed turn while that head can execute.
+                self._remember_outcome(session.session_id, seq, {"state": FAILED, "reason": reason})
+                raise RunnerError(reason) from None
             self._abandon(session.session_id, seq, None, reason)
             raise RunnerError(reason) from None
         try:
@@ -596,17 +768,7 @@ class PoRunner:
         A turn it settled `failed` is told to `on_failed` once, here and nowhere else: every failure
         path of the runner (a launch, a waiter, a re-run, a recovery) ends in this call.
         """
-        extra = {"resolved_model": resolved_model} if resolved_model is not None else {}
-        settled = self.store.finish_turn(session_id, seq, state, reason, **extra)
-        if settled and state == FAILED and self.on_failed is not None:
-            try:
-                self.on_failed(session_id, seq, reason)
-            except Exception as exc:  # noqa: BLE001 - a listener never unsettles a turn
-                print(
-                    f"secretary po: after failed turn {session_id}/{seq}: {type(exc).__name__}: {exc}",
-                    file=sys.stderr,
-                )
-        return settled
+        return self._terminal(session_id, seq, {"state": state, "reason": reason, "resolved_model": resolved_model})
 
     def _keep_card(self, session_id: str, seq: int, card: Mapping[str, Any]) -> None:
         """The card facts of a claimed dispatcher input, beside its turn's files (best effort)."""
@@ -628,27 +790,29 @@ class PoRunner:
         return document if isinstance(document, dict) else None
 
     def _abandon(
-        self, session_id: str, seq: int, process: subprocess.Popen[bytes] | None, reason: str
+        self, session_id: str, seq: int, process: Any | None, reason: str
     ) -> None:
         """Kill and reap a turn's process group, then settle the turn `failed` if the store answers.
 
         If it does not, the row stays `running` with no recorded process, and `recover()` settles
         it (or re-runs it once) at the next start; there is nothing left alive for it to kill.
         """
-        if process is not None:
+        if process is not None and ScopedHeadLifecycle.from_run_dir(self._scope_dir(session_id, seq)) is None:
             _kill_group(process.pid)
-            try:
-                process.wait(STOP_JOIN_SECONDS)
-            except subprocess.TimeoutExpired:
-                pass
         try:
             self._finish(session_id, seq, FAILED, reason)
+        except MemoryScopeError:
+            raise  # retain ownership and the running row for service recovery
         except Exception as exc:  # noqa: BLE001 - the unsettled row is recover()'s to settle
             print(
                 f"secretary po: turn {session_id}/{seq} left running for recovery: {reason}; "
-                f"settling it failed: {type(exc).__name__}: {exc}",
-                file=sys.stderr,
+                f"settling it failed: {type(exc).__name__}: {exc}", file=sys.stderr,
             )
+        if process is not None:
+            try:
+                process.wait(STOP_JOIN_SECONDS)
+            except (subprocess.TimeoutExpired, RunnerError):
+                pass
 
     def stop(self, session_id: str) -> Turn | None:
         """Kill the running turn's process group; the turn is `interrupted`, the session goes on."""
@@ -668,13 +832,13 @@ class PoRunner:
             if not running or (seq is not None and running[0].seq != seq):
                 return None
             turn = running[0]
-            # Mark first, so the waiter sees a settled turn and does not call the kill a failure.
-            self._finish(session_id, turn.seq, INTERRUPTED, STOPPED_REASON)
             live = self._live.get((session_id, turn.seq))
-            if live is not None:
+            scoped = ScopedHeadLifecycle.from_run_dir(self._scope_dir(session_id, turn.seq)) is not None
+            if not scoped and live is not None:
                 _kill_group(live.process.pid)
-            elif turn.pid and turn.process_identity and process_identity(turn.pid) == turn.process_identity:
+            elif not scoped and turn.pid and turn.process_identity and process_identity(turn.pid) == turn.process_identity:
                 _kill_group(turn.pid)
+            self._finish(session_id, turn.seq, INTERRUPTED, STOPPED_REASON)
         if live is not None:
             live.thread.join(STOP_JOIN_SECONDS)
         else:
@@ -703,9 +867,9 @@ class PoRunner:
         for turn in self.store.running_turns():
             key = (turn.session_id, turn.seq)
             with self._lock:
-                if key in self._live:
-                    continue
                 try:
+                    if key in self._live and self._pending_outcome(turn.session_id, turn.seq) is None:
+                        continue
                     done = self._recover_one(turn, rerun)
                 except Exception as exc:  # noqa: BLE001 - this row stays for the next pass
                     print(
@@ -724,7 +888,11 @@ class PoRunner:
     def _recover_one(self, turn: Turn, rerun: bool) -> bool:
         """Settle or re-run one turn this runner does not own; False when nothing changed. Holds `_lock`."""
         key = (turn.session_id, turn.seq)
+        outcome = self._pending_outcome(turn.session_id, turn.seq)
+        if outcome is not None:
+            return self._terminal(turn.session_id, turn.seq, None)
         alive = still_running(turn.pid, turn.process_identity)
+        scoped = self._cleanup_turn_scope(turn.session_id, turn.seq)
         if not rerun or turn.reason is not None:
             failed = self._rerun_failures.get(key)
             if failed is not None:
@@ -737,9 +905,9 @@ class PoRunner:
             else:
                 state, reason = INTERRUPTED, RECOVERED_REASON
             reason += "; its process was killed" if alive else ""
-            settled = self._finish(turn.session_id, turn.seq, state, reason)
-            if alive and settled:
+            if alive and not scoped:
                 _kill_group(int(turn.pid))
+            settled = self._finish(turn.session_id, turn.seq, state, reason)
             if settled:
                 self._rerun_failures.pop(key, None)
                 self._capture_thread_id(self.store.session(turn.session_id), Path(turn.stdout_path))
@@ -751,7 +919,7 @@ class PoRunner:
         except PoStoreError:
             raise
         except Exception as exc:  # noqa: BLE001 - not a passing store failure: the row can never re-run
-            if alive:
+            if alive and not scoped:
                 _kill_group(int(turn.pid))
             return self._finish(
                 turn.session_id,
@@ -759,7 +927,7 @@ class PoRunner:
                 FAILED,
                 f"{RERUN_REASON}, but its re-run could not be prepared: {type(exc).__name__}: {exc}",
             )
-        if alive:
+        if alive and not scoped:
             _kill_group(int(turn.pid))
         why = RERUN_REASON + ("; its process was killed first" if alive else "")
         if not self.store.mark_rerun(turn.session_id, turn.seq, why):
@@ -779,7 +947,8 @@ class PoRunner:
         """`running` rows with no waiter of this runner: what recovery has not settled or re-run yet."""
         running = self.store.running_turns()
         with self._lock:
-            return [turn for turn in running if (turn.session_id, turn.seq) not in self._live]
+            return [turn for turn in running if (turn.session_id, turn.seq) not in self._live
+                    or self._pending_outcome(turn.session_id, turn.seq) is not None]
 
     def _owner_text(self, session_id: str, seq: int) -> str:
         """The owner's message that started turn `seq`, from the feed the claim wrote it to."""
@@ -802,7 +971,7 @@ class PoRunner:
         self,
         session: Session,
         seq: int,
-        process: subprocess.Popen[bytes],
+        process: Any,
         argv: list[str],
         files: TurnFiles,
     ) -> None:
@@ -811,15 +980,17 @@ class PoRunner:
             relaunched = self._resume_instead(session, seq, code, argv, files)
             if relaunched is not None:
                 code = relaunched.wait()
-            self._settle(session, seq, code, files)
+            final_process = relaunched if relaunched is not None else process
+            self._settle(session, seq, code, files, head_loss_reason=getattr(final_process, "head_loss_reason", None))
         except Exception as exc:  # noqa: BLE001 - a waiter must never leave a turn running without a word
             try:
-                self._finish(
-                    session.session_id,
-                    seq,
-                    FAILED,
-                    f"the runner could not settle this turn: {type(exc).__name__}: {exc}",
-                )
+                if self._pending_outcome(session.session_id, seq) is None:
+                    self._finish(
+                        session.session_id,
+                        seq,
+                        FAILED,
+                        f"the runner could not settle this turn: {type(exc).__name__}: {exc}",
+                    )
             except Exception as nested:  # noqa: BLE001 - the store itself is what failed
                 print(
                     f"secretary po: turn {session.session_id}/{seq} left running: "
@@ -845,7 +1016,7 @@ class PoRunner:
 
     def _resume_instead(
         self, session: Session, seq: int, code: int, argv: list[str], files: TurnFiles
-    ) -> subprocess.Popen[bytes] | None:
+    ) -> Any | None:
         """Relaunch as `--resume` when Claude says an earlier stopped or failed turn saved the conversation.
 
         Claude Code 2.1.270 answers `--session-id` over an existing conversation with
@@ -853,12 +1024,14 @@ class PoRunner:
         `No conversation found with session ID: <uuid>`. Only the first can follow a turn that never
         completed, and it is retried here, inside the same turn.
         """
-        if session.cli != "claude" or code == 0 or "--session-id" not in argv:
+        if session.cli != "claude" or code != 1 or "--session-id" not in argv:
             return None
         if CLAUDE_SESSION_IN_USE not in self._stderr_tail(files):
             return None
         with self._lock:
             if self.store.turn(session.session_id, seq).state != RUNNING:
+                return None
+            if self._pending_outcome(session.session_id, seq) is not None:
                 return None
             process = self._launch(session, seq, self.argv(session, files, established=True), files)
             live = self._live.get((session.session_id, seq))
@@ -866,7 +1039,10 @@ class PoRunner:
                 live.process = process
         return process
 
-    def _settle(self, session: Session, seq: int, code: int, files: TurnFiles) -> None:
+    def _settle(
+        self, session: Session, seq: int, code: int, files: TurnFiles,
+        *, head_loss_reason: str | None = None,
+    ) -> None:
         stdout = files.stdout.read_bytes().decode("utf-8", errors="replace")
         self._capture_thread_id(session, files.stdout, stdout)
         if session.cli == "claude":
@@ -878,7 +1054,7 @@ class PoRunner:
                 self.codex_home(), session.cli_session_id or codex_thread_id(stdout)
             )
         if code != 0:
-            reason = f"{session.cli} exited with status {code}"
+            reason = f"{head_loss_reason}: {session.cli} exited with status {code}" if head_loss_reason else f"{session.cli} exited with status {code}"
             tail = self._stderr_tail(files)
             if tail:
                 reason += f": {tail}"
@@ -888,7 +1064,9 @@ class PoRunner:
                 session.session_id, seq, FAILED, missing or "no final answer", resolved_model=resolved
             )
         else:
-            self.store.complete_turn(session.session_id, seq, answer, resolved_model=resolved)
+            self._terminal(session.session_id, seq, {
+                "state": COMPLETED, "answer": answer, "resolved_model": resolved,
+            })
 
     def codex_home(self) -> Path:
         """The Codex home a turn runs with: `$CODEX_HOME` of the turn environment, else `~/.codex`."""

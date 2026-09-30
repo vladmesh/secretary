@@ -31,7 +31,7 @@ from secretary.web.app import WebApp
 from secretary.webproto.errors import PoRequestConflict, ValidationRefused
 from secretary.webproto.po_auth import PoTokenLayer
 from secretary.webproto.po_ops import PoLayer
-from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, eventually
+from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, eventually, unscoped_test_launch
 from tests.sql_backend_fixtures import PostgresBoard
 from tests.web_fakes import Recording
 
@@ -71,7 +71,8 @@ class PoWebOperationTests(unittest.TestCase):
         self.store = PoStore(config.for_role("app"))
         # The Codex home is the test's own, so no turn reads a rollout of this host's.
         env = {**os.environ, "FAKE_LOG": str(self.log), "CODEX_HOME": str(self.root / "codex-home")}
-        self.runner = PoRunner(self.store, self.data, executables=executables, env=env)
+        self.runner = PoRunner(self.store, self.data, executables=executables, env=env,
+                               turn_launcher=unscoped_test_launch)
         self.addCleanup(self.stop_everything)
         self.service = PoService(self.runner, data_dir=self.data)
         self.enterContext(listening(self.service))

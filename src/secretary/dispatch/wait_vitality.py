@@ -221,6 +221,7 @@ def _decide_wait_by_verdict(
     if verdict is VitalityVerdict.DEAD:
         # The heartbeat names a gone process: the existing not-live handling, from
         # the same evidence the reduction used.
+        loss_reason = status.get("head_loss_reason")
         return _trigger_wait_watchdog(runtime,
             task,
             record,
@@ -228,7 +229,11 @@ def _decide_wait_by_verdict(
             payload,
             attempt_id,
             kind=kind,
-            trigger="the pid heartbeat names a gone or unreaped process",
+            trigger=(
+                "memory_limit: the supervisor recorded a head memory-limit kill"
+                if loss_reason == "memory_limit"
+                else "the pid heartbeat names a gone or unreaped process"
+            ),
         )
     if verdict is VitalityVerdict.CONFIRMED_STALL:
         reason = (

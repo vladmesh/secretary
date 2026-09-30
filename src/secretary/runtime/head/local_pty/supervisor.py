@@ -39,6 +39,7 @@ import json
 import os
 import pty
 import re
+import select
 import selectors
 import signal
 import socket
@@ -52,6 +53,8 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..command import with_pid_heartbeat
+from ..memory import MemoryScopeError, ScopeEvidence, OOM_STREAM_ENV, read_oom_victim
+from .scoped_lifecycle import ScopedHeadLifecycle
 from . import protocol
 from .journal import (
     DRAIN_REQUESTED,
@@ -192,6 +195,7 @@ class Supervisor:
         quiet_seconds: float = TURN_QUIET_SECONDS,
         delivery_seconds: float = protocol.INPUT_DELIVERY_SECONDS,
         pid_file: str | os.PathLike[str] = "",
+        memory_limit_mib: int | None = None,
     ) -> None:
         self.run_dir = Path(run_dir)
         self.run_id = run_id
@@ -207,6 +211,7 @@ class Supervisor:
         self.socket_path = protocol.socket_path_for(self.run_dir)
         self.journal_path = self.run_dir / protocol.JOURNAL_NAME
         self.pid_file = Path(pid_file) if pid_file else self.run_dir / protocol.PID_FILE_NAME
+        self.memory_limit_mib = memory_limit_mib
 
         self._lock_fd = -1
         self._listener: socket.socket | None = None
@@ -217,6 +222,10 @@ class Supervisor:
         self._master = -1
         self._head_pid = 0
         self._head_status: int | None = None
+        self._memory_lifecycle = ScopedHeadLifecycle(run_id, memory_limit_mib) if memory_limit_mib is not None else None
+        self._memory_evidence: ScopeEvidence | None = None
+        self._oom_victim: dict[str, int] | None = None
+        self._oom_stream = -1
 
         self._output = bytearray()
         self._output_dropped = 0
@@ -326,7 +335,10 @@ class Supervisor:
 
     def _head_argv(self) -> list[str]:
         identity = {"run_id": self.run_id, "role": self.role, "task": self.task}
-        wrapped = with_pid_heartbeat(self.command, str(self.pid_file), identity=identity)
+        wrapped = with_pid_heartbeat(
+            self.command, str(self.pid_file), identity=identity,
+            in_process=self._memory_lifecycle is not None,
+        )
         return ["/bin/sh", "-c", wrapped]
 
     def start_head(self) -> int:
@@ -347,9 +359,27 @@ class Supervisor:
         environment["TERM"] = self.term
         master, slave = pty.openpty()
         self._prepare_terminal(slave)
+        ready_read, ready_write = os.pipe2(os.O_CLOEXEC) if self._memory_lifecycle is not None else (-1, -1)
+        go_read, go_write = os.pipe2(os.O_CLOEXEC) if self._memory_lifecycle is not None else (-1, -1)
         pid = os.fork()
         if pid == 0:  # pragma: no cover - the child never returns to the test process
             try:
+                if self._memory_lifecycle is not None:
+                    os.close(self._oom_stream)
+                    environment.pop(OOM_STREAM_ENV, None)
+                    os.close(ready_read)
+                    os.close(go_write)
+                    # Reserve the new PID while still OOM-protected. The parent drops
+                    # earlier kernel records before allowing this incarnation to execute.
+                    os.write(ready_write, b"R")
+                    if os.read(go_read, 1) != b"1":
+                        os._exit(127)
+                    os.close(go_read)
+                    # The scope bootstrap protected only the supervisor. Every head descendant
+                    # inherits this ordinary score and is included in a group OOM kill.
+                    Path("/proc/self/oom_score_adj").write_text("0\n", encoding="ascii")
+                    os.write(ready_write, b"1")
+                    os.close(ready_write)
                 os.close(master)
                 os.setsid()
                 fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
@@ -368,6 +398,23 @@ class Supervisor:
         self._master = master
         os.set_blocking(master, False)
         os.set_inheritable(master, False)
+        if ready_read >= 0:
+            os.close(ready_write)
+            os.close(go_read)
+            try:
+                readable, _, _ = select.select([ready_read], [], [], 5.0)
+                if not readable or os.read(ready_read, 1) != b"R":
+                    raise SupervisorStartupError("memory_scope_unavailable", "head launch barrier failed")
+                os.lseek(self._oom_stream, 0, os.SEEK_END)
+                os.write(go_write, b"1")
+                readable, _, _ = select.select([ready_read], [], [], 5.0)
+                if not readable or os.read(ready_read, 1) != b"1":
+                    raise SupervisorStartupError(
+                        "memory_scope_unavailable", "the head could not clear inherited OOM protection"
+                    )
+            finally:
+                os.close(ready_read)
+                os.close(go_write)
         return pid
 
     def _prepare_terminal(self, slave: int) -> None:
@@ -455,6 +502,7 @@ class Supervisor:
         """Bring the head up and say so, in the order a reader of the run directory needs."""
         self._journal = JournalWriter(self.journal_path, self.run_id).open()
         self._install_signals()
+        self._prepare_memory_scope()
         self.start_head()
         (self.run_dir / protocol.SUPERVISOR_PID_NAME).write_text(f"{os.getpid()}\n", "utf-8")
         self._append(
@@ -477,6 +525,22 @@ class Supervisor:
         self._selector.register(self._listener, selectors.EVENT_READ, "listener")
         self._selector.register(self._master, selectors.EVENT_READ, "master")
         self._selector.register(self._wakeup_read, selectors.EVENT_READ, "wakeup")
+
+    def _prepare_memory_scope(self) -> None:
+        """Refuse a scoped launch until the limit is observable on this supervisor itself."""
+        if self._memory_lifecycle is None:
+            return
+        self._memory_evidence = None
+        try:
+            self._memory_evidence = self._memory_lifecycle.verify_self()
+            try:
+                self._oom_stream = int(os.environ.pop(OOM_STREAM_ENV))
+                os.fstat(self._oom_stream)
+                os.set_inheritable(self._oom_stream, False)
+            except (KeyError, ValueError, OSError) as exc:
+                raise MemoryScopeError("kernel OOM victim stream is unavailable") from exc
+        except MemoryScopeError as exc:
+            raise SupervisorStartupError("memory_scope_unavailable", str(exc)) from exc
 
     def _abandon_head(self) -> None:
         """End a head this supervisor forked and then failed to take ownership of.
@@ -560,6 +624,12 @@ class Supervisor:
         if self._head_pid <= 0 or self._head_status is not None:
             return
         try:
+            if self._memory_evidence is not None:
+                exited = os.waitid(os.P_PID, self._head_pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                if exited is None:
+                    return
+                # Reserve the zombie's PID until the kernel kill evidence is consumed.
+                self._oom_victim = read_oom_victim(self._oom_stream, self._head_pid)
             pid, status = os.waitpid(self._head_pid, os.WNOHANG)
         except ChildProcessError:
             self._head_status = 0
@@ -1160,11 +1230,13 @@ class Supervisor:
             "dropped_bytes": self._output_dropped,
             "stopping": self._stopping,
         }
-        if os.WIFSIGNALED(status):
-            exited["signal"] = os.WTERMSIG(status)
-            exited["exit_code"] = None
+        if self._memory_lifecycle is not None and self._memory_evidence is not None:
+            exited.update(self._memory_lifecycle.exit_fields(
+                status, self._memory_evidence, stopping=self._stopping,
+                oom_victim=self._oom_victim,
+            ))
         else:
-            exited["signal"] = None
+            exited["signal"] = os.WTERMSIG(status) if os.WIFSIGNALED(status) else None
             exited["exit_code"] = os.WEXITSTATUS(status) if os.WIFEXITED(status) else None
         record = self._append(RUN_EXITED, **exited)
         for client in list(self._clients.values()):
@@ -1182,6 +1254,9 @@ class Supervisor:
 
     def _shutdown(self) -> None:
         """Let go of everything, in the order that leaves nothing addressable behind."""
+        if self._oom_stream >= 0:
+            os.close(self._oom_stream)
+            self._oom_stream = -1
         if self._listener is not None:
             try:
                 self._selector.unregister(self._listener)
@@ -1301,6 +1376,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--term", default="xterm-256color")
     parser.add_argument("--quiet-seconds", type=float, default=TURN_QUIET_SECONDS)
     parser.add_argument("--delivery-seconds", type=float, default=protocol.INPUT_DELIVERY_SECONDS)
+    parser.add_argument("--memory-limit-mib", type=int, default=None)
     parser.add_argument(
         "--pid-file",
         default="",
@@ -1341,6 +1417,7 @@ def main(argv: list[str] | None = None) -> int:
         quiet_seconds=args.quiet_seconds,
         delivery_seconds=args.delivery_seconds,
         pid_file=args.pid_file,
+        memory_limit_mib=args.memory_limit_mib,
     )
     try:
         supervisor.claim()
@@ -1353,6 +1430,8 @@ def main(argv: list[str] | None = None) -> int:
         return supervisor.run()
     except Exception as exc:  # noqa: BLE001 - the launcher is owed the reason, whatever it is
         name, reason, code = failure_of(supervisor.started)
+        if isinstance(exc, SupervisorStartupError):
+            reason = exc.reason
         where = "after the run was up" if supervisor.started else "on the way up"
         _write_failure(run_dir, name, reason, f"the supervisor failed {where}: {exc!r}")
         traceback.print_exc()

@@ -31,6 +31,16 @@ Every one-shot unit that can launch a local-pty head (the production tick and th
 steward and deep-sweep ticks) sets `KillMode=process`: the head's supervisor outlives the tick, and
 systemd's default control-group kill would SIGTERM it the moment the tick exits. A new one-shot unit
 either sets it too or is listed in `tests/test_board_boot_race.py` as one that launches no head.
+Profile-backed heads enter a unique transient system scope through noninteractive sudo, then return
+to the unit's runtime UID before the supervisor starts. The supervisor stays as the scope's
+synchronous command after the dispatcher tick exits, so the memory ceiling remains active for the
+whole head run. `MemoryMax` is 8192 MiB by default; `MemorySwapMax=0` keeps swapping from
+evading that per-head ceiling. A
+profile can set `memory_limit_mib`, and the shipped high tiers use 12288 MiB. A scope registration
+failure refuses the launch. The supervisor records `head_loss_reason=memory_limit` only from a
+kernel OOM kill record naming its reserved head PID, together with SIGKILL and no operator stop.
+The durable owner must prove recursive scope membership empty before stop or settlement succeeds.
+See [Head scopes](../../docs/HEAD_SCOPES.md) for launch, cleanup, causal evidence and upgrade boundaries.
 `secretary-instance-maintenance.timer` fires daily (`Persistent=true`) a one-shot
 `secretary instance-maintenance` at idle CPU and I/O priority: Git's own `gc --auto` heuristic run
 outside any tick, because the lifecycle sets `gc.auto=0` in the instance repository so that no

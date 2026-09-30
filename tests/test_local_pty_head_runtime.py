@@ -2176,8 +2176,8 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
     whole point of that card — and they are replaced here by the properties that survive the
     wiring rather than deleted:
 
-      * the substrate is still reached only through its one backend. The dispatcher names the
-        *backend*; nothing outside it reaches past that into `head.local_pty`;
+      * the dispatcher still reaches the substrate only through its backend. The PO runner is the
+        other authorized consumer: each PO turn now uses the same scoped supervisor;
       * the dispatcher builds its backends in exactly one place. Per-profile selection is a
         resolver, not an `if` at each caller, so a second construction site is a defect;
       * **no profile of the registry this product ships runs on it.** That one is unchanged, and it
@@ -2185,13 +2185,14 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
         change to the installation's own canon, not to the product.
     """
 
-    def test_the_substrate_is_reached_only_through_its_one_backend(self) -> None:
+    def test_the_substrate_is_reached_only_through_its_scoped_consumers(self) -> None:
         package = REPO / "src" / "secretary" / "runtime" / "head" / "local_pty"
         backend = REPO / "src" / "secretary" / "runtime" / "local_pty_head.py"
+        po_runner = REPO / "src" / "secretary" / "po" / "runner.py"
         substrate = "secretary.runtime.head.local_pty"
         offenders = []
         for path in (REPO / "src").rglob("*.py"):
-            if package in path.parents or path == backend:
+            if package in path.parents or path in (backend, po_runner):
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
@@ -2202,7 +2203,7 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
                     names = [node.module]
                 if any(name == substrate or name.startswith(substrate + ".") for name in names):
                     offenders.append(str(path.relative_to(REPO)))
-        self.assertEqual(offenders, [], "the substrate is reached from outside its one backend")
+        self.assertEqual(offenders, [], "the substrate is reached outside its runtime and PO consumers")
 
     def test_the_product_builds_its_backends_in_exactly_one_place(self) -> None:
         """Criterion 4 of secretary-1467, criterion 1 of secretary-1474: one build site.

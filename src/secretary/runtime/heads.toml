@@ -19,6 +19,8 @@
 # Adding a head (another model, another runtime) is a new [profiles.<id>] entry plus, only if its
 # launch shape is genuinely new, one more render_<adapter> function in heads.py — the dispatcher
 # and worker.py never change.
+# Each launched profile runs in its own transient systemd system scope with MemoryMax set before
+# the head starts. memory_limit_mib defaults to 8192 MiB; high tiers pin 12288 MiB below.
 
 [resources.claude-sub]
 # A Claude subscription reached through the OAuth-authenticated `claude` CLI — one account, no
@@ -55,6 +57,7 @@ probe = "python3 -P -m secretary.runtime.resource_probe --resource openai-sub"
 # `orca-legacy` is refused when it loads.
 
 [profiles.codex-terra-high]
+memory_limit_mib = 12288
 resource = "openai-sub"
 adapter = "codex"
 model = "gpt-5.6-terra"
@@ -71,6 +74,7 @@ codex_mode = "tui"
 fallback = ["claude-opus-medium"]
 
 [profiles.codex-sol-high]
+memory_limit_mib = 12288
 resource = "openai-sub"
 adapter = "codex"
 model = "gpt-6-sol"
@@ -86,6 +90,7 @@ effort = "medium"
 fallback = ["codex-sol-medium"]
 
 [profiles.claude-opus-high]
+memory_limit_mib = 12288
 resource = "claude-sub"
 adapter = "claude"
 model = "opus"
