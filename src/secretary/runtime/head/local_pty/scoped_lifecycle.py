@@ -17,6 +17,7 @@ from ..memory import (
     head_loss_reason,
     memory_events,
     own_cgroup,
+    peak_tasks,
     scope_argv,
     scope_unit,
     supervisor_oom_protected,
@@ -84,6 +85,50 @@ class ScopedHeadLifecycle:
         )
         return record, exited
 
+    def cancel_started(self, *, socket_path: Path, journal_path: Path, started_seq: int) -> None:
+        """Stop a launched head and wait for its supervisor to reap it before launch fails.
+
+        The heartbeat can lag run.started. In that interval the caller has no handle, but
+        the supervisor already owns a live head. Its socket is the normal cancellation
+        path; stopping the scope is the fallback if the supervisor cannot answer.
+        """
+        from .client import SupervisorClient
+        from .journal import RUN_EXITED, read_events
+
+        def reaped() -> bool:
+            return any(
+                event.get("kind") == RUN_EXITED and int(event.get("seq") or 0) > started_seq
+                for event in read_events(journal_path).events
+            )
+
+        if reaped():
+            return
+        requested = False
+        try:
+            with SupervisorClient.connect(socket_path, timeout=1.0) as client:
+                client.stop(initiator="startup_failed", signal_name="KILL")
+                requested = True
+        except (OSError, RuntimeError):
+            pass
+        deadline = time.monotonic() + (10.0 if requested else 0.0)
+        while time.monotonic() < deadline:
+            if reaped():
+                return
+            time.sleep(0.05)
+        if reaped():
+            return
+        try:
+            stopped = subprocess.run(
+                ["sudo", "-n", "systemctl", "stop", scope_unit(self.run_id)],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                check=False, timeout=15.0,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise MemoryScopeError(f"could not stop head scope {scope_unit(self.run_id)}: {exc}") from exc
+        if stopped.returncode != 0:
+            detail = stopped.stderr.decode("utf-8", errors="replace").strip()
+            raise MemoryScopeError(f"could not stop head scope {scope_unit(self.run_id)}: {detail}")
+
     def verify_self(self) -> ScopeEvidence:
         """Run before `run.started`; a supervisor outside its configured scope refuses launch."""
         cgroup = own_cgroup()
@@ -106,7 +151,7 @@ class ScopedHeadLifecycle:
                 f"head scope {scope_unit(self.run_id)} did not materialize "
                 f"MemoryMax={expected}, MemorySwapMax=0, memory.oom.group=1 and a protected supervisor"
             )
-        return ScopeEvidence(cgroup, before)
+        return ScopeEvidence(cgroup, before, peak_tasks(cgroup))
 
     @staticmethod
     def exit_fields(status: int, evidence: ScopeEvidence, *, stopping: bool = False) -> dict[str, Any]:
@@ -118,6 +163,7 @@ class ScopedHeadLifecycle:
         }
         reason = None if stopping else head_loss_reason(
             signal_number=signal_number, before=evidence.before, after=memory_events(evidence.cgroup),
+            sole_victim=evidence.tasks_before == 1 and peak_tasks(evidence.cgroup) == 2,
         )
         if reason is not None:
             fields["head_loss_reason"] = reason

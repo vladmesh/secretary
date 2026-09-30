@@ -9,8 +9,9 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary.po.runner import PoRunner
-from secretary.runtime.head.local_pty.client import HeadHandle
-from secretary.runtime.head.local_pty.journal import RUN_EXITED, JournalWriter
+from secretary.runtime.head.local_pty.client import HeadHandle, LocalPtySpawnError
+from secretary.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, JournalWriter
+from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from secretary.runtime.head.spec import HeadSpec
 from secretary.runtime.heads import Registry
 
@@ -70,6 +71,66 @@ class PoScopedLaunchTests(unittest.TestCase):
             self.assertEqual(process.wait(), -9)
             self.assertEqual(process.head_loss_reason, "memory_limit")
             self.assertEqual(spawned.call_count, 1)
+
+    def test_delayed_heartbeat_cancels_started_scope_before_turn_is_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            cancelled = []
+            settled = []
+            store = SimpleNamespace(
+                turn_request_id=lambda *_: None,
+                finish_turn=lambda *_args, **_kwargs: settled.append(bool(cancelled)) or True,
+            )
+            spec = HeadSpec.from_profile("po-codex", {"adapter": "codex", "memory_limit_mib": 96})
+            runner = PoRunner(store, root, head_specs={spec.profile_id: spec})
+            session = SimpleNamespace(
+                session_id="session", cli="codex", model=None, effort="default", cwd=str(root),
+            )
+            files = runner.files("session", 1)
+            files.directory.mkdir(parents=True)
+            files.prompt.write_text("hello", encoding="utf-8")
+
+            def start(_argv, **kwargs):
+                run_dir = next((root / "po-heads").iterdir())
+                with JournalWriter(run_dir / "journal.jsonl", run_dir.name) as writer:
+                    writer.append(RUN_STARTED, head_pid=123, supervisor_pid=456)
+                return SimpleNamespace(wait=lambda: 0)
+
+            def cancel(_self, *, socket_path, journal_path, started_seq):
+                self.assertEqual(socket_path.parent, journal_path.parent)
+                self.assertGreater(started_seq, 0)
+                cancelled.append(True)
+
+            with (
+                mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen", side_effect=start),
+                mock.patch("secretary.runtime.head.local_pty.client._identity_written", return_value=False),
+                mock.patch("secretary.runtime.head.local_pty.client.SPAWN_TIMEOUT_SECONDS", 0.02),
+                mock.patch.object(ScopedHeadLifecycle, "cancel_started", cancel),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "did not answer"):
+                    runner._launch(session, 1, ["/bin/true"], files)
+            self.assertEqual(settled, [True])
+
+    def test_failed_scope_cleanup_does_not_settle_a_live_po_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = SimpleNamespace(
+                turn_request_id=lambda *_: None,
+                finish_turn=mock.Mock(),
+            )
+            runner = PoRunner(store, Path(temp))
+            session = SimpleNamespace(
+                session_id="session", cli="codex", model=None, effort="default", cwd=temp,
+            )
+            files = runner.files("session", 1)
+            with mock.patch(
+                "secretary.po.runner.spawn_head",
+                side_effect=LocalPtySpawnError(
+                    "cleanup_failed", "scope is still alive", cleanup_complete=False,
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "scope is still alive"):
+                    runner._launch(session, 1, ["/bin/true"], files)
+            store.finish_turn.assert_not_called()
 
 
 if __name__ == "__main__":

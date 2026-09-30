@@ -603,6 +603,10 @@ class PoRunner:
             )
         except (OSError, RuntimeError) as exc:
             reason = f"could not start {argv[0]}: {exc}"
+            if getattr(exc, "cleanup_complete", True) is False:
+                # The scope may still own a head. Leave the turn running for recovery
+                # rather than record a failed turn while that head can execute.
+                raise RunnerError(reason) from None
             self._abandon(session.session_id, seq, None, reason)
             raise RunnerError(reason) from None
         try:

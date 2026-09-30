@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..memory import MemoryScopeError
 from .scoped_lifecycle import ScopedHeadLifecycle
 from . import protocol
 from .journal import RUN_STARTED, JournalReadResult, read_events
@@ -45,10 +46,11 @@ class LocalPtyError(RuntimeError):
 class LocalPtySpawnError(LocalPtyError):
     """A head did not come up, and the reason the run directory gave for it."""
 
-    def __init__(self, reason: str, detail: str) -> None:
+    def __init__(self, reason: str, detail: str, *, cleanup_complete: bool = True) -> None:
         super().__init__(detail)
         self.reason = reason
         self.detail = detail
+        self.cleanup_complete = cleanup_complete
 
 
 @dataclass(frozen=True)
@@ -198,10 +200,11 @@ def spawn_head(
         for error_path in error_paths:
             failure = _startup_error(error_path)
             if failure is not None:
-                raise LocalPtySpawnError(
+                error = LocalPtySpawnError(
                     str(failure.get("reason") or "startup_failed"),
                     str(failure.get("detail") or ""),
                 )
+                raise _after_failed_launch(error, lifecycle, journal_path, socket_path, already)
         result = read_events(journal_path)
         observed = lifecycle.started_or_exited(result.events, already) if lifecycle else None
         started = [event for event in result.events[already:] if event.get("kind") == RUN_STARTED]
@@ -229,12 +232,34 @@ def spawn_head(
                 tail = log_path.read_text(encoding="utf-8", errors="replace")[-2048:]
             except OSError:
                 pass
-            raise LocalPtySpawnError(
+            error = LocalPtySpawnError(
                 "timeout",
                 f"the supervisor for {run_id} did not answer within {timeout:g}s "
                 f"(intermediate exit {status}); log tail: {tail!r}",
             )
+            raise _after_failed_launch(error, lifecycle, journal_path, socket_path, already)
         time.sleep(_POLL_SECONDS)
+
+
+def _after_failed_launch(
+    error: LocalPtySpawnError, lifecycle: ScopedHeadLifecycle | None,
+    journal_path: Path, socket_path: Path, since: int,
+) -> LocalPtySpawnError:
+    if lifecycle is None:
+        return error
+    observed = lifecycle.started_or_exited(read_events(journal_path).events, since)
+    if observed is None or observed[1]:
+        return error
+    try:
+        lifecycle.cancel_started(
+            socket_path=socket_path, journal_path=journal_path,
+            started_seq=int(observed[0].get("seq") or 0),
+        )
+    except MemoryScopeError as exc:
+        return LocalPtySpawnError(
+            "cleanup_failed", f"{error.detail}; {exc}", cleanup_complete=False,
+        )
+    return error
 
 
 def _identity_written(pid_file: Path, run_id: str) -> bool:
