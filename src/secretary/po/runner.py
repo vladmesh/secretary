@@ -1,7 +1,7 @@
 """Headless turns of the PO head: one Claude or Codex process per turn, in the PO workspace.
 
-No Orca and no local-pty: a turn is an ordinary child process started with `subprocess`, in its
-own process group, with the PO workspace as its working directory and full permissions. The owner's
+Each turn uses the scoped local-pty supervisor, with the CLI's standard streams redirected to
+the turn's files and its own process group. The owner's
 message goes to the child on stdin; its stdout is kept raw in a file under
 ``<data_dir>/po-runs/<session>/`` (outside the workspace the agent can write), and a waiter thread
 settles the turn when the process exits. Only the owner's message and the agent's final answer reach
@@ -29,10 +29,12 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -57,6 +59,10 @@ from secretary.po.store import (
 )
 from secretary.po.workspace import workspace_dir
 from secretary.runtime.provider_models import codex_rollout_path, codex_session_models
+from secretary.runtime.head.local_pty.client import HeadHandle, spawn_head
+from secretary.runtime.head.local_pty.journal import RUN_EXITED, read_events
+from secretary.runtime.head.spec import HeadSpec, load_head_specs
+from secretary.runtime.heads import Registry, load_registry
 
 RUNS_DIR_NAME = "po-runs"
 STOPPED_REASON = "stopped by the owner"
@@ -252,8 +258,33 @@ class TurnFiles:
 
 @dataclass
 class _Live:
-    process: subprocess.Popen[bytes]
+    process: Any
     thread: threading.Thread
+
+
+class ScopedPoProcess:
+    """The PO service's waitable view of a head owned by the scoped supervisor."""
+
+    def __init__(self, handle: HeadHandle) -> None:
+        self.handle = handle
+        self.pid = handle.head_pid
+        self._supervisor_identity = process_identity(handle.supervisor_pid)
+        self.head_loss_reason: str | None = None
+
+    def wait(self, timeout: float | None = None) -> int:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            for event in reversed(read_events(self.handle.journal_path).events):
+                if event.get("kind") == RUN_EXITED and event.get("run_id") == self.handle.run_id:
+                    self.head_loss_reason = event.get("head_loss_reason")
+                    code = event.get("exit_code")
+                    number = event.get("signal")
+                    return int(code) if code is not None else -int(number or 0)
+            if not still_running(self.handle.supervisor_pid, self._supervisor_identity):
+                raise RunnerError(f"PO head supervisor {self.handle.supervisor_pid} exited without a run.exited record")
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired("PO head", timeout)
+            time.sleep(0.05)
 
 
 class PoRunner:
@@ -269,6 +300,8 @@ class PoRunner:
         on_settled: Callable[[str, int], None] | None = None,
         on_failed: Callable[[str, int, str], None] | None = None,
         efforts: Mapping[str, tuple[str, ...]] | None = None,
+        head_specs: Mapping[str, HeadSpec] | None = None,
+        turn_launcher: Callable[..., Any] | None = None,
     ) -> None:
         self.store = store
         # What a new session's effort is checked against unless its create passes its own list.
@@ -283,6 +316,8 @@ class PoRunner:
         self.workspace = workspace_dir(self.data_dir)
         self.runs = runs_dir(self.data_dir)
         self.executables = {"claude": "claude", "codex": "codex", **dict(executables or {})}
+        self.head_specs = dict(head_specs) if head_specs is not None else load_head_specs()
+        self._turn_launcher = turn_launcher or self._scoped_launch
         # A turn gets `turn_environment()` unless the caller passes its own.
         self.env = dict(env) if env is not None else turn_environment()
         # Held only while a turn is started, stopped or recovered, never while one runs.
@@ -294,7 +329,40 @@ class PoRunner:
 
     @classmethod
     def for_instance(cls, instance_dir: Path | str, data_dir: Path | str, **kwargs: Any) -> PoRunner:
+        base = Path(instance_dir)
+        if base.name == "instance.yaml":
+            base = base.parent
+        registry_path = base / "heads" / "heads.yaml"
+        registry: Registry = load_registry(registry_path)
+        kwargs.setdefault("head_specs", load_head_specs(registry))
         return cls(PoStore.for_instance(instance_dir), data_dir, **kwargs)
+
+    def _head_spec(self, session: Session) -> HeadSpec:
+        for spec in self.head_specs.values():
+            if (spec.adapter, spec.model, spec.effort) == (session.cli, session.model, session.effort):
+                return spec
+        return HeadSpec.from_profile(
+            f"po-{session.cli}-{session.model}-{session.effort}",
+            {"adapter": session.cli, "model": session.model, "effort": session.effort},
+        )
+
+    def _scoped_launch(
+        self, session: Session, seq: int, argv: list[str], files: TurnFiles,
+        environment: Mapping[str, str], spec: HeadSpec,
+    ) -> ScopedPoProcess:
+        # A shell exec keeps the heartbeat PID equal to the CLI PID. Redirection preserves the
+        # PO feed's structured stdout and the existing stderr/last-message files.
+        command = (
+            f"{shlex.join(argv)} < {shlex.quote(str(files.prompt))} "
+            f">> {shlex.quote(str(files.stdout))} 2>> {shlex.quote(str(files.stderr))}"
+        )
+        handle = spawn_head(
+            root=self.data_dir / "po-heads", run_id=uuid.uuid4().hex[:24], role="po",
+            task=f"po:{spec.profile_id}:{session.session_id}:{seq}", command=command, cwd=session.cwd,
+            env=environment, memory_limit_mib=spec.memory_limit_mib,
+            owner_unit="secretary-po.service",
+        )
+        return ScopedPoProcess(handle)
 
     # --- sessions ---------------------------------------------------------------------------
 
@@ -523,27 +591,17 @@ class PoRunner:
 
     def _launch(
         self, session: Session, seq: int, argv: list[str], files: TurnFiles
-    ) -> subprocess.Popen[bytes]:
+    ) -> Any:
         """Start one CLI process for a turn and record it, or leave no live process group behind.
 
         Output is appended, so a turn relaunched by `_resume_instead` keeps both attempts' raw output.
         """
         try:
-            with (
-                files.prompt.open("rb") as stdin,
-                files.stdout.open("ab") as stdout,
-                files.stderr.open("ab") as stderr,
-            ):
-                process = subprocess.Popen(
-                    argv,
-                    cwd=session.cwd,
-                    stdin=stdin,
-                    stdout=stdout,
-                    stderr=stderr,
-                    env=self.session_environment(session, seq),
-                    start_new_session=True,
-                )
-        except OSError as exc:
+            process = self._turn_launcher(
+                session, seq, argv, files, self.session_environment(session, seq),
+                self._head_spec(session),
+            )
+        except (OSError, RuntimeError) as exc:
             reason = f"could not start {argv[0]}: {exc}"
             self._abandon(session.session_id, seq, None, reason)
             raise RunnerError(reason) from None
@@ -628,7 +686,7 @@ class PoRunner:
         return document if isinstance(document, dict) else None
 
     def _abandon(
-        self, session_id: str, seq: int, process: subprocess.Popen[bytes] | None, reason: str
+        self, session_id: str, seq: int, process: Any | None, reason: str
     ) -> None:
         """Kill and reap a turn's process group, then settle the turn `failed` if the store answers.
 
@@ -802,7 +860,7 @@ class PoRunner:
         self,
         session: Session,
         seq: int,
-        process: subprocess.Popen[bytes],
+        process: Any,
         argv: list[str],
         files: TurnFiles,
     ) -> None:
@@ -811,7 +869,8 @@ class PoRunner:
             relaunched = self._resume_instead(session, seq, code, argv, files)
             if relaunched is not None:
                 code = relaunched.wait()
-            self._settle(session, seq, code, files)
+            final_process = relaunched if relaunched is not None else process
+            self._settle(session, seq, code, files, head_loss_reason=getattr(final_process, "head_loss_reason", None))
         except Exception as exc:  # noqa: BLE001 - a waiter must never leave a turn running without a word
             try:
                 self._finish(
@@ -845,7 +904,7 @@ class PoRunner:
 
     def _resume_instead(
         self, session: Session, seq: int, code: int, argv: list[str], files: TurnFiles
-    ) -> subprocess.Popen[bytes] | None:
+    ) -> Any | None:
         """Relaunch as `--resume` when Claude says an earlier stopped or failed turn saved the conversation.
 
         Claude Code 2.1.270 answers `--session-id` over an existing conversation with
@@ -853,7 +912,7 @@ class PoRunner:
         `No conversation found with session ID: <uuid>`. Only the first can follow a turn that never
         completed, and it is retried here, inside the same turn.
         """
-        if session.cli != "claude" or code == 0 or "--session-id" not in argv:
+        if session.cli != "claude" or code != 1 or "--session-id" not in argv:
             return None
         if CLAUDE_SESSION_IN_USE not in self._stderr_tail(files):
             return None
@@ -866,7 +925,10 @@ class PoRunner:
                 live.process = process
         return process
 
-    def _settle(self, session: Session, seq: int, code: int, files: TurnFiles) -> None:
+    def _settle(
+        self, session: Session, seq: int, code: int, files: TurnFiles,
+        *, head_loss_reason: str | None = None,
+    ) -> None:
         stdout = files.stdout.read_bytes().decode("utf-8", errors="replace")
         self._capture_thread_id(session, files.stdout, stdout)
         if session.cli == "claude":
@@ -878,7 +940,7 @@ class PoRunner:
                 self.codex_home(), session.cli_session_id or codex_thread_id(stdout)
             )
         if code != 0:
-            reason = f"{session.cli} exited with status {code}"
+            reason = f"{head_loss_reason}: {session.cli} exited with status {code}" if head_loss_reason else f"{session.cli} exited with status {code}"
             tail = self._stderr_tail(files)
             if tail:
                 reason += f": {tail}"

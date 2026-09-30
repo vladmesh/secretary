@@ -11,7 +11,7 @@ from unittest import mock
 
 from secretary.dispatch import review, wait_vitality
 from secretary.dispatch.head_vitality_episode import VitalityVerdict
-from secretary.runtime.head.local_pty import protocol, scope_launcher
+from secretary.runtime.head.local_pty import protocol, scope_bootstrap, scope_launcher
 from secretary.runtime.head.local_pty.client import spawn_head
 from secretary.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, JournalWriter, read_events
 from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
@@ -52,6 +52,20 @@ class HeadMemoryTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaisesRegex(HeadSpecError, "memory_limit_mib"):
                 HeadSpec.from_profile("bad", {"adapter": "codex", "memory_limit_mib": bad})
 
+    def test_scope_bootstrap_protects_only_the_supervisor_before_head_start(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            cgroup = Path(temp)
+            protection = cgroup / "oom_score_adj"
+            scope_bootstrap.install_oom_contract(cgroup, protection)
+            self.assertEqual((cgroup / "memory.oom.group").read_text(), "1\n")
+            self.assertEqual(protection.read_text(), "-1000\n")
+            argv = scope_argv("run", 96, ["/bin/true"])
+            self.assertIn("secretary.runtime.head.local_pty.scope_bootstrap", argv)
+            self.assertIn("--property=Delegate=yes", argv)
+            owned = scope_argv("po-run", 96, ["/bin/true"], owner_unit="secretary-po.service")
+            self.assertIn("--property=BindsTo=secretary-po.service", owned)
+            self.assertIn("--property=After=secretary-po.service", owned)
+
     def test_supervisor_refuses_until_its_own_scope_has_the_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             run_id = "scope-preflight"
@@ -59,12 +73,14 @@ class HeadMemoryTests(unittest.TestCase):
             cgroup.mkdir()
             (cgroup / "memory.max").write_text("1048576\n", encoding="ascii")
             (cgroup / "memory.swap.max").write_text("0\n", encoding="ascii")
-            (cgroup / "memory.events.local").write_text("max 0\noom_kill 0\n", encoding="ascii")
+            (cgroup / "memory.oom.group").write_text("1\n", encoding="ascii")
+            (cgroup / "memory.events.local").write_text("max 0\noom_kill 0\noom_group_kill 0\n", encoding="ascii")
             supervisor = Supervisor(run_dir=Path(temp), run_id=run_id, role="worker",
                                     task="card:1", command="true", memory_limit_mib=1)
-            with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.own_cgroup", return_value=cgroup):
+            with (mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.own_cgroup", return_value=cgroup),
+                  mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.supervisor_oom_protected", return_value=True)):
                 supervisor._prepare_memory_scope()
-                self.assertEqual(supervisor._memory_evidence, ScopeEvidence(cgroup, {"max": 0, "oom_kill": 0}))
+                self.assertEqual(supervisor._memory_evidence, ScopeEvidence(cgroup, {"max": 0, "oom_kill": 0, "oom_group_kill": 0}))
                 (cgroup / "memory.max").write_text("2097152\n", encoding="ascii")
                 with self.assertRaisesRegex(SupervisorStartupError, "MemoryMax=1048576"):
                     supervisor._prepare_memory_scope()
@@ -89,8 +105,8 @@ class HeadMemoryTests(unittest.TestCase):
                 )
                 supervisor._head_pid = 12345
                 supervisor._head_status = signal.SIGKILL
-                supervisor._memory_evidence = ScopeEvidence(Path(temp), {"max": 0, "oom_kill": 0})
-                (Path(temp) / "memory.events.local").write_text("max 1\noom_kill 1\n", encoding="ascii")
+                supervisor._memory_evidence = ScopeEvidence(Path(temp), {"max": 0, "oom_kill": 0, "oom_group_kill": 0})
+                (Path(temp) / "memory.events.local").write_text("max 1\noom_kill 1\noom_group_kill 1\n", encoding="ascii")
                 supervisor._journal = JournalWriter(run_dir / "journal.jsonl", run_id).open()
                 try:
                     with (
@@ -107,15 +123,53 @@ class HeadMemoryTests(unittest.TestCase):
                 self.assertEqual(_exit_status((exit_record,))["head_loss_reason"], "memory_limit")
 
     def test_other_deaths_are_not_called_memory_exhaustion(self) -> None:
-        before = {"max": 0, "oom_kill": 0}
-        over = {"max": 1, "oom_kill": 1}
+        before = {"max": 0, "oom_kill": 0, "oom_group_kill": 0}
+        over = {"max": 1, "oom_kill": 1, "oom_group_kill": 1}
         for number, after in ((None, over), (signal.SIGTERM, over), (signal.SIGKILL, before),
-                              (signal.SIGKILL, {"max": 0, "oom_kill": 1})):
+                              (signal.SIGKILL, {"max": 0, "oom_kill": 1}),
+                              (signal.SIGKILL, {"max": 1, "oom_kill": 1, "oom_group_kill": 0})):
             self.assertIsNone(head_loss_reason(signal_number=number, before=before, after=after))
+        with tempfile.TemporaryDirectory() as temp:
+            cgroup = Path(temp)
+            (cgroup / "memory.events.local").write_text(
+                "max 1\noom_kill 1\noom_group_kill 1\n", encoding="ascii"
+            )
+            self.assertNotIn("head_loss_reason", ScopedHeadLifecycle.exit_fields(
+                signal.SIGKILL, ScopeEvidence(cgroup, before), stopping=True,
+            ))
         self.assertIsNone(memory_events(None))
         self.assertNotIn("head_loss_reason", _exit_status(({
             "kind": RUN_EXITED, "signal": signal.SIGKILL, "head_loss_reason": "other"
         },)))
+
+    def test_child_oom_then_head_stop_does_not_persist_memory_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_id = "child-oom-stop"
+            run_dir = protocol.run_dir_for(temp, run_id)
+            run_dir.mkdir()
+            before = {"max": 0, "oom_kill": 0, "oom_group_kill": 0}
+            (run_dir / "memory.events.local").write_text(
+                "max 1\noom_kill 1\noom_group_kill 0\n", encoding="ascii"
+            )
+            supervisor = Supervisor(
+                run_dir=run_dir, run_id=run_id, role="worker", task="card:1",
+                command="true", memory_limit_mib=1,
+            )
+            supervisor._head_pid = 12345
+            supervisor._head_status = signal.SIGKILL
+            supervisor._stopping = True
+            supervisor._memory_evidence = ScopeEvidence(run_dir, before)
+            supervisor._journal = JournalWriter(run_dir / "journal.jsonl", run_id).open()
+            try:
+                with (mock.patch.object(supervisor, "_finish_delivery"),
+                      mock.patch.object(supervisor, "_flush_progress")):
+                    supervisor._finish()
+            finally:
+                supervisor._journal.close()
+            exited = read_events(run_dir / "journal.jsonl").of_kind(RUN_EXITED)[0]
+            self.assertEqual(exited["signal"], signal.SIGKILL)
+            self.assertTrue(exited["stopping"])
+            self.assertNotIn("head_loss_reason", exited)
 
     def test_spawn_materializes_scope_before_supervisor_starts(self) -> None:
         for role in ("observer", "worker", "review", "po"):

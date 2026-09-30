@@ -70,7 +70,7 @@ from secretary.webproto.errors import (
 from secretary.webproto.po_auth import PoTokenLayer
 from secretary.webproto.po_ops import PoLayer
 from tests.fakes.upgrade import FakeUnitInstaller
-from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, eventually
+from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, eventually, unscoped_test_launch
 from tests.po_fake_store import FakeBoard, FakePoStore, FakeSprints
 from tests.web_fakes import Recording
 
@@ -118,6 +118,7 @@ class ServiceFixture(unittest.TestCase):
             FakePoStore(self.board),
             self.data,
             executables=self.executables,
+            turn_launcher=unscoped_test_launch,
             env={
                 **os.environ,
                 "FAKE_LOG": str(self.log),
@@ -1055,7 +1056,8 @@ class RecoveryProgressTests(ServiceFixture):
     def test_a_launch_failure_the_store_could_not_record_is_settled_by_the_next_pass(self) -> None:
         session_id = self.interrupted()
         runner = PoRunner(
-            FakePoStore(self.board), self.data, executables={"claude": str(self.root / "missing")}
+            FakePoStore(self.board), self.data, executables={"claude": str(self.root / "missing")},
+            turn_launcher=unscoped_test_launch,
         )
         real_finish = FakePoStore.finish_turn
         calls = []

@@ -25,8 +25,10 @@ between dispatcher ticks; none of it is a thing a file or a signal can do.
 head a cgroup with `MemoryMax` set before its turn runs. It needs no unit file or host reconcile.
 The launcher registers the scope through the system manager and drops back to the runtime user
 before starting the supervisor. The supervisor still owns the pty, socket, stop sequence and
-`run.exited` journal record. It reads that scope's `memory.events.local` to distinguish a
-memory-limit kill from another `SIGKILL`. The scope supplies a resource boundary; it does not
+`run.exited` journal record. The scope enables group OOM kills while the supervisor alone is
+protected, then the supervisor requires a local `oom_group_kill` event and the head's `SIGKILL`
+before recording `memory_limit`. A child OOM event on its own cannot name the head as the victim.
+The scope supplies a resource boundary; it does not
 replace the supervisor's process ownership or exit record.
 
 **Then why not bare `setsid` plus a double fork, with no supervisor at all?** Because a detached

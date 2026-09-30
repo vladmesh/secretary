@@ -1390,27 +1390,21 @@ class LocalPtySubstrateTests(unittest.TestCase):
 
 
 class SubstrateIsNotWiredInTests(unittest.TestCase):
-    """This package is a substrate. What stands on it is one backend, and nothing else.
+    """This package is a substrate. Only the runtime backend and PO runner consume it.
 
-    secretary-1463 wrote this as "nothing outside the package reaches for it", which was the whole
-    truth while there was no backend. secretary-1465 built `runtime.local_pty_head` on top, so the
-    guard says the same thing about one more module rather than less about all of them: exactly one
-    consumer, named here, and the rest of the product still untouched.
-
-    secretary-1467 wired that backend into the dispatcher, so the dispatcher now names the module
-    `local_pty_head` — and a substring search for `local_pty` cannot tell that from reaching into
-    this package. The property is unchanged and is asked of the imports instead: nothing outside
-    the backend imports this package. `OnlyTheResolverWiresThisBackendIn` in
-    `test_local_pty_head_runtime` is what says which half of that card's own guard survived.
+    The dispatcher reaches it through `runtime.local_pty_head`; the PO service reaches it through
+    `po.runner`. Both use the scoped lifecycle's supervisor, journal and cgroup contract. An import
+    anywhere else creates a third lifecycle entry path, which this guard refuses.
     """
 
-    def test_only_the_one_backend_built_on_it_reaches_for_it(self) -> None:
+    def test_only_the_scoped_head_consumers_reach_for_it(self) -> None:
         package = REPO / "src" / "secretary" / "runtime" / "head" / "local_pty"
         backend = REPO / "src" / "secretary" / "runtime" / "local_pty_head.py"
+        po_runner = REPO / "src" / "secretary" / "po" / "runner.py"
         substrate = "secretary.runtime.head.local_pty"
         offenders = []
         for path in (REPO / "src").rglob("*.py"):
-            if package in path.parents or path == backend:
+            if package in path.parents or path in (backend, po_runner):
                 continue
             for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
                 names = []
@@ -1420,7 +1414,7 @@ class SubstrateIsNotWiredInTests(unittest.TestCase):
                     names = [node.module]
                 if any(name == substrate or name.startswith(substrate + ".") for name in names):
                     offenders.append(str(path.relative_to(REPO)))
-        self.assertEqual(offenders, [], "the substrate is reached from outside its one backend")
+        self.assertEqual(offenders, [], "the substrate is reached outside its runtime and PO consumers")
 
     def test_the_substrate_implements_none_of_the_six_verbs_as_a_boundary(self) -> None:
         """Prose about `HeadRuntime` is fine; an implementation of it is what this card excludes."""

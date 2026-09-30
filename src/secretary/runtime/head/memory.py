@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,7 +35,10 @@ def scope_unit(run_id: str) -> str:
     return f"secretary-head-{hashlib.sha256(run_id.encode()).hexdigest()[:24]}.scope"
 
 
-def scope_argv(run_id: str, limit_mib: int, command: list[str], *, pythonpath: str = "") -> list[str]:
+def scope_argv(
+    run_id: str, limit_mib: int, command: list[str], *, pythonpath: str = "",
+    owner_unit: str = "",
+) -> list[str]:
     """Register a system scope, then run its payload as the original runtime user."""
     groups = os.getgroups()
     group_option = f"--groups={','.join(str(group) for group in groups)}" if groups else "--clear-groups"
@@ -42,9 +46,12 @@ def scope_argv(run_id: str, limit_mib: int, command: list[str], *, pythonpath: s
         "sudo", "-n", "-E", "systemd-run", "--system", "--scope", "--quiet",
         "--unit", scope_unit(run_id),
         f"--property=MemoryMax={limit_mib * 1024 * 1024}",
-        "--property=MemorySwapMax=0", "--",
-        "setpriv", f"--reuid={os.getuid()}", f"--regid={os.getgid()}", group_option,
+        "--property=MemorySwapMax=0", "--property=Delegate=yes",
+        *([f"--property=BindsTo={owner_unit}", f"--property=After={owner_unit}"] if owner_unit else []),
+        "--",
         *(["env", f"PYTHONPATH={pythonpath}"] if pythonpath else []),
+        sys.executable, "-P", "-m", "secretary.runtime.head.local_pty.scope_bootstrap",
+        f"--reuid={os.getuid()}", f"--regid={os.getgid()}", group_option, "--",
         *command,
     ]
 
@@ -69,9 +76,16 @@ def memory_events(cgroup: Path | None) -> dict[str, int] | None:
     try:
         fields = (cgroup / "memory.events.local").read_text(encoding="ascii").splitlines()
         parsed = {parts[0]: int(parts[1]) for line in fields if len(parts := line.split()) == 2}
-        return {key: parsed[key] for key in ("max", "oom_kill")}
+        return {key: parsed[key] for key in ("max", "oom_kill", "oom_group_kill")}
     except (OSError, KeyError, ValueError):
         return None
+
+
+def supervisor_oom_protected() -> bool:
+    try:
+        return Path("/proc/self/oom_score_adj").read_text(encoding="ascii").strip() == "-1000"
+    except OSError:
+        return False
 
 
 def head_loss_reason(
@@ -80,7 +94,8 @@ def head_loss_reason(
     """A signal alone is never evidence of the cgroup's memory-limit kill."""
     if (
         signal_number == 9 and before is not None and after is not None
-        and after["max"] > before["max"] and after["oom_kill"] > before["oom_kill"]
+        and after.get("max", 0) > before.get("max", 0)
+        and after.get("oom_group_kill", 0) > before.get("oom_group_kill", 0)
     ):
         return MEMORY_LIMIT_REASON
     return None

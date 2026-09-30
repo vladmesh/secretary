@@ -112,6 +112,7 @@ def spawn_head(
     timeout: float = SPAWN_TIMEOUT_SECONDS,
     pid_file: str | os.PathLike[str] = "",
     memory_limit_mib: int | None = None,
+    owner_unit: str = "",
 ) -> HeadHandle:
     """Bring one head up under a supervisor that outlives this process, and wait until it answers.
 
@@ -168,7 +169,7 @@ def spawn_head(
         argv += ["--memory-limit-mib", str(memory_limit_mib)]
     log_path = run_dir / protocol.SUPERVISOR_LOG_NAME
     launch_env = _supervisor_environment(env)
-    lifecycle = ScopedHeadLifecycle(run_id, memory_limit_mib) if memory_limit_mib is not None else None
+    lifecycle = ScopedHeadLifecycle(run_id, memory_limit_mib, owner_unit) if memory_limit_mib is not None else None
     if lifecycle is not None:
         argv = lifecycle.launcher_argv(
             argv, run_dir=run_dir, log_path=log_path, timeout=timeout,

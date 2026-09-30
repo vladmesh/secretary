@@ -39,6 +39,7 @@ import json
 import os
 import pty
 import re
+import select
 import selectors
 import signal
 import socket
@@ -353,9 +354,17 @@ class Supervisor:
         environment["TERM"] = self.term
         master, slave = pty.openpty()
         self._prepare_terminal(slave)
+        ready_read, ready_write = os.pipe2(os.O_CLOEXEC) if self._memory_lifecycle is not None else (-1, -1)
         pid = os.fork()
         if pid == 0:  # pragma: no cover - the child never returns to the test process
             try:
+                if self._memory_lifecycle is not None:
+                    os.close(ready_read)
+                    # The scope bootstrap protected only the supervisor. Every head descendant
+                    # inherits this ordinary score and is included in a group OOM kill.
+                    Path("/proc/self/oom_score_adj").write_text("0\n", encoding="ascii")
+                    os.write(ready_write, b"1")
+                    os.close(ready_write)
                 os.close(master)
                 os.setsid()
                 fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
@@ -374,6 +383,16 @@ class Supervisor:
         self._master = master
         os.set_blocking(master, False)
         os.set_inheritable(master, False)
+        if ready_read >= 0:
+            os.close(ready_write)
+            try:
+                readable, _, _ = select.select([ready_read], [], [], 5.0)
+                if not readable or os.read(ready_read, 1) != b"1":
+                    raise SupervisorStartupError(
+                        "memory_scope_unavailable", "the head could not clear inherited OOM protection"
+                    )
+            finally:
+                os.close(ready_read)
         return pid
 
     def _prepare_terminal(self, slave: int) -> None:
@@ -1178,7 +1197,7 @@ class Supervisor:
             "stopping": self._stopping,
         }
         if self._memory_lifecycle is not None and self._memory_evidence is not None:
-            exited.update(self._memory_lifecycle.exit_fields(status, self._memory_evidence))
+            exited.update(self._memory_lifecycle.exit_fields(status, self._memory_evidence, stopping=self._stopping))
         else:
             exited["signal"] = os.WTERMSIG(status) if os.WIFSIGNALED(status) else None
             exited["exit_code"] = os.WEXITSTATUS(status) if os.WIFEXITED(status) else None
