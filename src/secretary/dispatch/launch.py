@@ -411,6 +411,8 @@ def _merge_launch_head_runs(current: head_ops.HeadRun, later: head_ops.HeadRun) 
         or current.task_ref != later.task_ref
         or current.role != later.role
         or current.pid_file != later.pid_file
+        or (current.scope_generation and later.scope_generation
+            and current.scope_generation != later.scope_generation)
     ):
         raise HostError("launch HeadRun identity mismatch")
     policy = _newer_provider_policy(current.fanout_policy, later.fanout_policy)
@@ -429,6 +431,7 @@ def _merge_launch_head_runs(current: head_ops.HeadRun, later: head_ops.HeadRun) 
         lifecycle=lifecycle,
         stopped_by=stopped_by,
         fanout_policy=policy,
+        scope_generation=later.scope_generation or current.scope_generation,
     )
 
 

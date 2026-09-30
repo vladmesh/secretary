@@ -38,6 +38,18 @@ therefore settle after cleanup succeeds. Missing head records alone cannot settl
 a run; missing/malformed owners, generation mismatches and foreign/reused process
 identities still refuse. Genuinely unscoped runs keep their identity-based check.
 
+Product runs assign and save that generation in their write-ahead HeadRun before
+calling start. The runtime and launcher preserve it, so a crash before saving the
+returned handle still leaves a record that can stop the matching scope. A start
+carrying a write-ahead generation cannot replace an existing scope owner. Product
+recovery treats a scope owner as a launch trace even before any heartbeat or journal
+exists; failed cleanup retains the unresolved run until matching proof succeeds.
+Dispatcher observer/worker/reviewer intents use their newly allocated launch ID
+as the generation, so both preflight calls preserve the original durable binding.
+Provider/lifecycle handoff merges preserve it and refuse conflicting generations.
+An ordinary runtime replacement that has no new write-ahead admission still gets
+a fresh generation after proof of the previous owner's empty scope.
+
 PO turns keep a symlink to the canonical supervisor run directory, not another
 copy of the owner. Failed launch, failed waiter start, completion and owner stop
 all reach the same terminal operation. It verifies the row is still running,

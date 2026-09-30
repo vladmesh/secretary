@@ -656,6 +656,7 @@ class LocalPtyHeadRuntime:
         delivery_seconds: float | None = None,
         env: Mapping[str, str] | None = None,
         pid_file: str = "",
+        scope_generation: str = "",
         transport: Any = None,
         **ignored: Any,
     ) -> StartReceipt:
@@ -681,6 +682,10 @@ class LocalPtyHeadRuntime:
         the head existed. The head writes its launch identity there, once, through the supervisor;
         the command it is handed is the bare head command.
 
+        `scope_generation` names a caller's durable write-ahead admission. That launch preserves
+        it and cannot replace an existing scope owner. Ordinary replacement starts omit it and
+        acquire a fresh generation after proving the previous owner empty.
+
         A `pointer` handed over with a `transport` is an agent's prompt, and it is delivered the
         way `deliver` delivers one (see there): once the head has settled, typed, then submitted,
         with a turn seen to start. That wait happens outside this runtime's lock, after the spawn.
@@ -702,6 +707,7 @@ class LocalPtyHeadRuntime:
             delivery_seconds=delivery_seconds,
             env=env,
             pid_file=pid_file,
+            scope_generation=scope_generation,
         )
         live = receipt.run
         if pointer is None or transport is None or live is None or not receipt.ok:
@@ -748,6 +754,7 @@ class LocalPtyHeadRuntime:
         delivery_seconds: float | None,
         env: Mapping[str, str] | None,
         pid_file: str,
+        scope_generation: str,
     ) -> StartReceipt:
         """`start` under the lock: the refusals, the spawn and a bare pointer's one delivery.
 
@@ -800,6 +807,7 @@ class LocalPtyHeadRuntime:
                     delivery_seconds=delivery_seconds,
                     env=env,
                     **({"memory_limit_mib": spec.memory_limit_mib} if spec.memory_limit_mib is not None else {}),
+                    **({"scope_generation": scope_generation} if scope_generation else {}),
                     **designated,
                 )
             except local_pty.LocalPtySpawnError as exc:

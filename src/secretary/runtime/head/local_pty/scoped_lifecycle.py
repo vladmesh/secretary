@@ -78,12 +78,15 @@ class ScopedHeadLifecycle:
     directory: Path | None = None
     generation: str = field(default_factory=lambda: uuid.uuid4().hex)
 
-    def persist(self, run_dir: Path, *, role: str = "", task: str = "", workspace: str = "") -> None:
+    def persist(self, run_dir: Path, *, role: str = "", task: str = "", workspace: str = "", replace_existing: bool = True) -> None:
         """Leave the scope name on disk before any process can create the unit."""
         with self.owner_lock(run_dir):
             path = run_dir / "scope-owner.json"
-            if path.exists() and not self.read_owner(run_dir)["cleanup_complete"]:
-                raise MemoryScopeError("an unsettled scope owner cannot be replaced")
+            if path.exists():
+                if not replace_existing:
+                    raise MemoryScopeError("a write-ahead scope generation cannot replace an existing owner")
+                if not self.read_owner(run_dir)["cleanup_complete"]:
+                    raise MemoryScopeError("an unsettled scope owner cannot be replaced")
             self.update_owner(run_dir, {
                 "run_id": self.run_id, "unit": scope_unit(self.run_id),
                 "generation": self.generation, "launch_allowed": True, "cleanup_complete": False,

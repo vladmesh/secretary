@@ -7,21 +7,204 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from secretary.po import store as po_store
+from secretary.dispatch.host import CommandHostRuntime, HostError
+from secretary.dispatch.launch import merge_launch_head_run
 from secretary.po.runner import PoRunner
 from secretary.runtime.head.identity import head_process_status, publish_heartbeat
 from secretary.runtime.head.local_pty import protocol
+from secretary.runtime.head.local_pty.client import LocalPtySpawnError, spawn_head
+from secretary.runtime.head.local_pty.journal import JournalWriter, RUN_STARTED, RUN_EXITED
 from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from secretary.runtime.head.memory import MemoryScopeError, scope_unit
 from secretary.runtime.head.run import HeadRun, StopInitiator
 from secretary.runtime.head.spec import HeadSpec
 from secretary.runtime.head.task_ref import TaskRef
 from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
+from secretary.runtime.head.command import HeadCommand
+from secretary.webproto.errors import RuntimeUnavailable
+from secretary.webproto.lifecycle import RunLifecycle
+from secretary.webproto.runs import ProductRun, RunStore, RAISING, RAISED, SETTLED, UNRESOLVED
 from tests.po_fake_store import FakeBoard, FakePoStore
+
+
+class ProductOwnershipTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.cgroups = self.root / "cgroups"
+        self.enterContext(mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", self.cgroups))
+        self.spec = HeadSpec.from_profile("fixture", {"adapter": "claude", "memory_limit_mib": 96})
+        self.store = RunStore(self.root)
+        self.runtime = LocalPtyHeadRuntime(self.root / "heads", head_process_status=head_process_status, stop_timeout=0)
+        self.lifecycle = RunLifecycle(self.store, self.runtime)
+        self.enterContext(mock.patch.object(self.lifecycle, "_preflight"))
+        self.enterContext(mock.patch("secretary.webproto.lifecycle.render_head_command", return_value=HeadCommand(command="true", adapter="claude")))
+        self.document = self.root / "task.md"
+        self.document.write_text("fixture")
+        directory = self.root / "heads" / "product"
+        run = ProductRun(run_id="product", request_id="fixture", ref="card:fixture", project="fixture",
+                         role="worker", profile="fixture", workspace=str(self.root), run_dir=str(directory),
+                         pid_file=str(directory / "head.pid"), journal_path=str(directory / "journal.jsonl"))
+        self.store.save(run)
+        self.ahead = self.lifecycle.advance(run, RAISING, now=1, spec=self.spec, profile={}, document=self.document)
+
+    def raise_head(self) -> None:
+        self.lifecycle.advance(self.ahead, RAISED, now=1, spec=self.spec, profile={},
+                               document=self.document, note="fixture", env={})
+
+    def test_prestart_failure_retains_write_ahead_generation_until_scope_proof(self) -> None:
+        # Exercise the actual product -> runtime -> launcher path without creating a process.
+        membership = self.cgroups / "system.slice" / scope_unit(self.ahead.run_id) / "cgroup.events"
+        membership.parent.mkdir(parents=True)
+        membership.write_text("populated 1\n")
+        saved_head = HeadRun.from_json(self.store.get(self.ahead.run_id).head_run)
+        self.assertTrue(saved_head.scope_generation)
+        self.assertFalse(saved_head.handle)
+        with mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen", return_value=SimpleNamespace(wait=lambda: 7)), mock.patch(
+            "secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 1, stderr=b"transient refusal"),
+        ):
+            with self.assertRaises(RuntimeUnavailable):
+                self.raise_head()
+        retained = self.store.get(self.ahead.run_id)
+        self.assertEqual(retained.phase, UNRESOLVED)
+        self.assertFalse(retained.ended)
+        directory = Path(self.ahead.run_dir)
+        owner = ScopedHeadLifecycle.read_owner(directory)
+        self.assertEqual(owner["generation"], saved_head.scope_generation)
+        self.assertFalse(owner["cleanup_complete"])
+        self.assertFalse(Path(retained.pid_file).exists())
+        self.assertFalse(Path(retained.journal_path).exists())
+        membership.write_text("populated 0\n")
+        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stderr=b"")):
+            # A fresh service and runtime use only the original durable record.
+            recovered = RunLifecycle(self.store, LocalPtyHeadRuntime(self.root / "heads", head_process_status=head_process_status, stop_timeout=0))
+            settled = recovered.advance(retained, SETTLED, now=2)
+        self.assertTrue(settled.ended)
+        self.assertTrue(ScopedHeadLifecycle.read_owner(directory)["cleanup_complete"])
+        self.assertEqual(HeadRun.from_json(settled.head_run).scope_generation, saved_head.scope_generation)
+
+    def test_failed_handle_save_stops_scope_using_original_write_ahead_record(self) -> None:
+        saved_head = HeadRun.from_json(self.ahead.head_run)
+        def spawn(**options):
+            self.assertEqual(options["scope_generation"], saved_head.scope_generation)
+            owner = ScopedHeadLifecycle(options["run_id"], 96, generation=options["scope_generation"])
+            owner.persist(Path(self.ahead.run_dir))
+            return SimpleNamespace(socket_path=Path(self.ahead.run_dir) / "head.sock", pid_file=Path(self.ahead.pid_file),
+                                   scope_generation=owner.generation)
+        real_save = self.store.save
+        def save(run):
+            if run.phase == RAISED:
+                raise OSError("handle save interrupted")
+            return real_save(run)
+        with mock.patch.object(self.runtime, "_spawn", side_effect=spawn), mock.patch.object(
+            self.lifecycle, "_point_at_the_task", side_effect=lambda live, *_: live,
+        ), mock.patch.object(self.store, "save", side_effect=save):
+            with self.assertRaisesRegex(OSError, "handle save interrupted"):
+                self.raise_head()
+        settled = self.store.get(self.ahead.run_id)
+        self.assertTrue(settled.ended)
+        self.assertEqual(settled.phase, SETTLED)
+        self.assertEqual(HeadRun.from_json(settled.head_run), saved_head)
+        self.assertTrue(ScopedHeadLifecycle.read_owner(Path(self.ahead.run_dir))["cleanup_complete"])
+
+    def test_write_ahead_start_cannot_replace_or_stop_an_existing_generation(self) -> None:
+        directory = Path(self.ahead.run_dir)
+        for generation in (HeadRun.from_json(self.ahead.head_run).scope_generation, "replacement"):
+            with self.subTest(generation=generation):
+                owner = ScopedHeadLifecycle(self.ahead.run_id, 96, generation=generation)
+                owner.persist(directory)
+                before = ScopedHeadLifecycle.read_owner(directory)
+                with mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen") as launch, mock.patch(
+                    "secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
+                ) as stop:
+                    with self.assertRaisesRegex(LocalPtySpawnError, "cannot replace") as refused:
+                        spawn_head(root=self.root / "heads", run_id=self.ahead.run_id, role="worker", task="card:fixture",
+                                   command="true", memory_limit_mib=96,
+                                   scope_generation=HeadRun.from_json(self.ahead.head_run).scope_generation)
+                self.assertEqual(refused.exception.scope_generation, HeadRun.from_json(self.ahead.head_run).scope_generation)
+                self.assertEqual(ScopedHeadLifecycle.read_owner(directory), before)
+                launch.assert_not_called()
+                stop.assert_not_called()
+                owner.stop_and_prove_empty()
+
+    def test_write_ahead_admission_checks_for_competing_owner_under_the_lock(self) -> None:
+        directory = Path(self.ahead.run_dir)
+        owner = ScopedHeadLifecycle(self.ahead.run_id, 96)
+        owner.persist(directory)
+        owner.stop_and_prove_empty()
+        before = ScopedHeadLifecycle.read_owner(directory)
+        # The unlocked first read precedes another caller's registration and cleanup.
+        with mock.patch("secretary.runtime.head.local_pty.client.ScopedHeadLifecycle.from_run_dir", return_value=None), mock.patch(
+            "secretary.runtime.head.local_pty.client.subprocess.Popen",
+        ) as launch:
+            with self.assertRaisesRegex(LocalPtySpawnError, "cannot replace"):
+                spawn_head(root=self.root / "heads", run_id=self.ahead.run_id, role="worker", task="card:fixture",
+                           command="true", memory_limit_mib=96,
+                           scope_generation=HeadRun.from_json(self.ahead.head_run).scope_generation)
+        self.assertEqual(ScopedHeadLifecycle.read_owner(directory), before)
+        launch.assert_not_called()
+
+    def test_dispatcher_intent_generation_survives_repeated_preflight_and_host_restart(self) -> None:
+        catalog = SimpleNamespace(head_profile=lambda _head: {"adapter": "claude"})
+        for role in ("observer", "worker", "reviewer"):
+            with self.subTest(role=role), mock.patch(
+                "secretary.dispatch.host._prepare_claude_provider_progress_source", side_effect=lambda run: run,
+            ):
+                host = CommandHostRuntime(catalog, self.root, production_runtime=SimpleNamespace())
+                identity = dict(role=role, workspace=str(self.root), task_ref=TaskRef.card("card:fixture"),
+                                pid_file=str(self.root / f"{role}.pid"), run_id=f"fresh-{role}")
+                with mock.patch.object(host, "_head_spec", return_value=self.spec):
+                    ahead = host.preflight_codex_run("fixture", **identity)
+                    again = host.preflight_codex_run("fixture", **identity)
+                    replacement = host.preflight_codex_run("fixture", **{**identity, "run_id": f"new-{role}"})
+                self.assertTrue(ahead.scope_generation)
+                self.assertEqual(again.scope_generation, ahead.scope_generation)
+                self.assertNotEqual(replacement.scope_generation, ahead.scope_generation)
+                # The next host has no prepared-source cache and reads the saved intent.
+                next_host = CommandHostRuntime(catalog, self.root, production_runtime=SimpleNamespace())
+                restored = HeadRun.from_json(ahead.to_json())
+                with mock.patch.object(next_host, "_head_spec", return_value=self.spec):
+                    self.assertEqual(next_host.preflight_codex_run("fixture", **identity).scope_generation, restored.scope_generation)
+                substrate = SimpleNamespace(start=mock.Mock(return_value=SimpleNamespace(ok=True, run=restored)))
+                with mock.patch.object(next_host, "head_runtime_for", return_value=substrate):
+                    self.assertEqual(next_host._open_head_pane(restored, "fixture", "true"), restored)
+                self.assertEqual(substrate.start.call_args.kwargs["scope_generation"], restored.scope_generation)
+
+    def test_dispatcher_handoff_retains_generation_and_refuses_conflicting_incarnations(self) -> None:
+        ahead = HeadRun.from_json(self.ahead.head_run)
+        late = replace(ahead, handle="fixture.sock", scope_generation="")
+        merged = HeadRun.from_json(merge_launch_head_run(ahead.to_json(), late.to_json()))
+        self.assertEqual(merged.scope_generation, ahead.scope_generation)
+        self.assertEqual(merged.handle, late.handle)
+        with self.assertRaisesRegex(HostError, "identity mismatch"):
+            merge_launch_head_run(ahead.to_json(), replace(late, scope_generation="replacement").to_json())
+
+    def test_ordinary_runtime_replacement_gets_fresh_generation_after_old_scope_proof(self) -> None:
+        original = HeadRun.from_json(self.ahead.head_run)
+        directory = Path(self.ahead.run_dir)
+        owner = ScopedHeadLifecycle(original.run_id, 96, generation=original.scope_generation)
+        owner.persist(directory)
+        def launched(*_args, **_kwargs):
+            with JournalWriter(directory / protocol.JOURNAL_NAME, original.run_id) as journal:
+                journal.append(RUN_STARTED, head_pid=222, supervisor_pid=333)
+                journal.append(RUN_EXITED, head_pid=222, exit_code=0)
+            return SimpleNamespace(wait=lambda: 0)
+        with mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen", side_effect=launched), mock.patch(
+            "secretary.runtime.head.local_pty.client._identity_written", return_value=True,
+        ):
+            receipt = self.runtime.start(self.spec, str(self.root), original.task_ref, command="true",
+                                         title="fixture", run=original, role="worker")
+        self.assertTrue(receipt.ok, receipt.reason)
+        current = ScopedHeadLifecycle.read_owner(directory)
+        self.assertNotEqual(current["generation"], original.scope_generation)
+        self.assertEqual(receipt.run.scope_generation, current["generation"])
+        self.assertFalse(current["cleanup_complete"])
+        self.assertTrue(self.runtime.stop(receipt.run, StopInitiator(actor="fixture")).ok)
 
 
 class OwnershipTests(unittest.TestCase):

@@ -913,6 +913,8 @@ class CommandHostRuntime:
             task_ref=task_ref,
             role=role,
             pid_file=pid_file,
+            # The launch intent allocates a fresh run ID before either preflight call.
+            scope_generation=run_id if spec.memory_limit_mib is not None else "",
         )
         if spec.adapter == "claude":
             prepared = _prepare_claude_provider_progress_source(run)
@@ -1287,6 +1289,8 @@ class CommandHostRuntime:
             role=OBSERVER_ROLE,
             pid_file=pid_file,
         )
+        if lifecycle_run.spec.memory_limit_mib is not None:
+            lifecycle_run = replace(lifecycle_run, scope_generation=lifecycle_run.run_id)
         if lifecycle_run.spec.adapter in {"codex", "claude"}:
             try:
                 attested = self.preflight_codex_run(
@@ -3310,6 +3314,7 @@ class CommandHostRuntime:
             run_id=run_id,
             role=role,
             run=preflight_run,
+            scope_generation=preflight_run.scope_generation,
             commit=ingress.commit_run if ingress is not None else None,
         )
         if not receipt.ok:
@@ -3584,6 +3589,7 @@ class CommandHostRuntime:
             run_id=run.run_id,
             role=run.role,
             run=run,
+            scope_generation=run.scope_generation,
         )
         if not receipt.ok:
             raise HostError(receipt.reason)

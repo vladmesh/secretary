@@ -83,6 +83,7 @@ import contextlib
 import json
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -234,6 +235,7 @@ class RunLifecycle:
             task_ref=self._task_ref(run, document),
             role=run.role,
             pid_file=run.pid_file,
+            scope_generation=uuid.uuid4().hex if spec.memory_limit_mib is not None else "",
         )
         return self._save(run.with_head(ahead.to_json(), phase=RAISING))
 
@@ -275,6 +277,7 @@ class RunLifecycle:
                 raise ValidationRefused(
                     f"this run's head command could not be rendered: {exc}"
                 ) from None
+            ahead = HeadRun.from_json(run.head_run)
             receipt = self.runtime.start(
                 spec,
                 run.workspace,
@@ -282,6 +285,8 @@ class RunLifecycle:
                 command=rendered.command,
                 title=f"product-run:{run.run_id}",
                 run_id=run.run_id,
+                run=ahead,
+                scope_generation=ahead.scope_generation,
                 role=run.role,
                 env=env,
                 subject=f"product-run:{run.run_id}",
@@ -419,13 +424,12 @@ class RunLifecycle:
           The one fact no later reader could reconstruct, and the reason the caller passes it down;
         * the **phase** -- `raised` or `unresolved` on disk is the durable form of the same fact,
           for a run some other process raised;
-        * the **trace** -- a pid file or a supervisor journal in the run directory. This is what
-          answers for a start that failed in a way the backend did not classify: by the time such
-          an exception is raised, a supervisor that got as far as running has written at least one
-          of them.
+        * the **trace** -- a scope owner, pid file or supervisor journal in the run directory.
+          An owner precedes launch work; cleanup can fail before the head publishes either of
+          the other records. Its presence alone requires the matching scope's empty proof.
 
-        A start the backend itself reported as failed, over a run directory holding neither
-        artefact, is the one case answered "no", and it is answered from two independent witnesses
+        A start the backend itself reported as failed, over a run directory holding none of these
+        artefacts, is the one case answered "no", and it is answered from two independent witnesses
         rather than from control flow alone.
         """
         if not run.addressable:
@@ -435,7 +439,7 @@ class RunLifecycle:
         return self._left_a_trace(run)
 
     def _left_a_trace(self, run: ProductRun) -> bool:
-        for candidate in (run.pid_file, run.journal_path):
+        for candidate in (str(Path(run.run_dir) / "scope-owner.json"), run.pid_file, run.journal_path):
             if candidate and Path(candidate).exists():
                 return True
         return False

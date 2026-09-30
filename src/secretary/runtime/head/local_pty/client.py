@@ -117,6 +117,7 @@ def spawn_head(
     pid_file: str | os.PathLike[str] = "",
     memory_limit_mib: int | None = None,
     owner_unit: str = "",
+    scope_generation: str = "",
 ) -> HeadHandle:
     """Bring one head up under a supervisor that outlives this process, and wait until it answers.
 
@@ -175,12 +176,16 @@ def spawn_head(
     launch_env = _supervisor_environment(env)
     lifecycle = ScopedHeadLifecycle(run_id, memory_limit_mib, owner_unit, run_dir) if memory_limit_mib is not None else None
     if lifecycle is not None:
+        if scope_generation:
+            lifecycle.generation = scope_generation
         previous = None
         try:
             previous = ScopedHeadLifecycle.from_run_dir(run_dir)
             if previous is not None:
+                if scope_generation:
+                    raise MemoryScopeError("a write-ahead scope generation cannot replace an existing owner")
                 previous.stop_and_prove_empty()
-            lifecycle.persist(run_dir, role=role, task=task, workspace=str(cwd))
+            lifecycle.persist(run_dir, role=role, task=task, workspace=str(cwd), replace_existing=not bool(scope_generation))
             descriptor = os.open(run_dir.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
                 os.fsync(descriptor)
@@ -188,7 +193,7 @@ def spawn_head(
                 os.close(descriptor)
         except MemoryScopeError as exc:
             raise LocalPtySpawnError("cleanup_failed", str(exc), cleanup_complete=False,
-                                     scope_generation=previous.generation if previous is not None else lifecycle.generation) from exc
+                                     scope_generation=scope_generation or (previous.generation if previous is not None else lifecycle.generation)) from exc
         argv = lifecycle.launcher_argv(
             argv, run_dir=run_dir, log_path=log_path, timeout=timeout,
             pythonpath=launch_env["PYTHONPATH"],
