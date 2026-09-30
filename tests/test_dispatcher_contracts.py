@@ -32,6 +32,7 @@ import textwrap
 import tomllib
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from typing import ClassVar
 from unittest import mock
 
@@ -385,40 +386,36 @@ class HostBehaviourContractTests(unittest.TestCase):
         ).to_json()
         return record
 
-    def test_teardown_stops_the_heads_first(self) -> None:
-        """Real teardown is the heads' stop, then the git worktree's removal; the fake must record
-        the stop too, or a runtime that forgot to stop the heads before removing the worktree would
-        look correct."""
-        steps: list[str] = []
-        real = CommandHostRuntime(  # type: ignore[arg-type]
+    def test_teardown_requires_a_durable_cleanup_owner(self) -> None:
+        real = CommandHostRuntime(
             FakeCatalog(), self.root / "data", mode="real", production_runtime=registered_production_runtime(self.root)
         )
         backend = _RecordingBackend(LOCAL_PTY_RUNTIME)
         real._head_runtimes[LOCAL_PTY_RUNTIME] = backend
         record = self._supervised_record()
-        with (
-            mock.patch.object(real, "_confirm_head_process_gone", side_effect=lambda *a, **k: steps.append("gone")),
-            mock.patch.object(GitWorkspaceManager, "teardown", side_effect=lambda ws: steps.append("remove")),
-        ):
-            real.teardown(record)
-        self.assertEqual(backend.calls, [("stop", "run-w")])
-        self.assertEqual(steps, ["gone", "gone", "remove"])
-
+        with mock.patch.object(GitWorkspaceManager, "teardown") as removal:
+            with self.assertRaisesRegex(HostError, "no durable cleanup owner"):
+                real.teardown(record)
+        self.assertEqual(backend.calls, [])
+        removal.assert_not_called()
         self.fake.teardown(record)
         self.assertEqual(self.fake.stopped, [record.worker])
         self.assertEqual(self.fake.torn_down, [record.worker])
 
-    def test_stop_and_teardown_swallow_host_errors(self) -> None:
-        """Both are best-effort cleanups on paths that must still reach the board move. A raising
-        stop() would abort `_finish_green` before the card ever moves to Done."""
-        real = CommandHostRuntime(  # type: ignore[arg-type]
+    def test_teardown_returns_the_owners_actual_pending_receipt(self) -> None:
+        real = CommandHostRuntime(
             FakeCatalog(), self.root / "data", mode="real", production_runtime=registered_production_runtime(self.root)
         )
-        real._head_runtimes[LOCAL_PTY_RUNTIME] = _RecordingBackend(LOCAL_PTY_RUNTIME, raises=True)
         record = self._supervised_record()
+        task = {"ref": "secretary-635"}
+        cleanup = mock.Mock(return_value={"status": "pending", "reason": "scope stop failed", "progress": {}})
+        real.cleanup_owner = SimpleNamespace(runtime=SimpleNamespace(reader=SimpleNamespace(show=lambda ref: task)),
+                                             cleanup=cleanup)
         with mock.patch.object(GitWorkspaceManager, "teardown") as removal:
-            self.assertIsNone(real.stop(record))
-            self.assertIsNone(real.teardown(record))
+            result = real.teardown(record)
+        cleanup.assert_called_once_with(task, record, "done")
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(result["reason"], "scope stop failed")
         removal.assert_not_called()
 
 
@@ -1750,16 +1747,17 @@ class WorkspaceCleanupChoosesTheBackendTheHeadIsHeldByTests(unittest.TestCase):
         self.supervised.refuses = True
         record = self._record(worker_head_run=self._run("worker", LOCAL_PTY_RUNTIME, "run-w"))
 
-        self.assertIsNone(self.host.teardown(record), "a green card must still reach Done")
+        with self.assertRaisesRegex(HostError, "no durable cleanup owner"):
+            self.host.teardown(record)
 
         self.assertEqual(self.removed, [], "the worktree was pulled out from under a live head")
 
-    def test_a_teardown_removes_the_worktree_once_the_heads_are_confirmed_gone(self) -> None:
+    def test_confirmed_heads_alone_do_not_authorize_path_only_teardown(self) -> None:
         record = self._record(worker_head_run=self._run("worker", LOCAL_PTY_RUNTIME, "run-w"))
 
-        self.host.teardown(record)
-
-        self.assertEqual(self.removed, [str(self.workspace)])
+        with self.assertRaisesRegex(HostError, "no durable cleanup owner"):
+            self.host.teardown(record)
+        self.assertEqual(self.removed, [])
 
 
 if __name__ == "__main__":

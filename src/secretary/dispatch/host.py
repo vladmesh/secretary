@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from secretary.dispatch.cleanup import CleanupJournal, serialized
+
 import contextlib
 import hashlib
 import json
@@ -1011,6 +1013,7 @@ class CommandHostRuntime:
         except HeadSpecError as exc:
             raise HostError(f"cannot resolve the prompt adapter for head {head!r}: {exc}") from None
 
+    @serialized
     def prepare_worker(
         self,
         task: dict[str, Any],
@@ -1025,6 +1028,7 @@ class CommandHostRuntime:
         local_run_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._require_production_runtime("worker-prepare")
+        self._require_cleanup_admission(task["ref"])
         project = task["project"]
         self._require_project_available(project)
         base = self.catalog.integration_base(project, task.get("workspace", {}).get("base_branch"))
@@ -1086,10 +1090,12 @@ class CommandHostRuntime:
             "head_run": dict(launched.head_run),
         }
 
+    @serialized
     def restart_worker(
         self, task: dict[str, Any], record: DispatcherRecord, *, heartbeat_run_id: str = ""
     ) -> LaunchedHead:
         """Launch rework in the existing workspace without recreating its branch."""
+        self._require_cleanup_admission(task["ref"])
         self._require_project_available(str(task.get("project") or ""))
         self._refuse_legacy_record(record, "relaunch the worker of")
         workspace = Path(record.workspace)
@@ -1224,21 +1230,13 @@ class CommandHostRuntime:
         if self._git_observer_worktree_listed(str(workspace)):
             return workspace
         repo = self._observer_repo()
-        if workspace.exists():
-            shutil.rmtree(workspace, ignore_errors=True)
-        # A directory removed without git's knowledge leaves a registration `add` would refuse.
-        self._observer_git(["worktree", "prune"], repo)
+        if workspace.exists() or workspace.is_symlink():
+            raise HostError("observer placement is occupied without matching registration")
         result = git_worktree.add(self._observer_git, repo, workspace, OBSERVER_REPO_BRANCH)
         if result.returncode != 0:
             detail = _tail((result.stderr or result.stdout or "").strip())
-            git_worktree.remove(self._observer_git, repo, workspace)
-            raise HostError(f"git worktree add failed for the observer workspace: {detail}")
+            raise HostError(f"git worktree add failed for the observer workspace: {detail}; residue preserved")
         return workspace
-
-    def _remove_git_observer_workspace(self, workspace: str) -> None:
-        """Take a stopped observer's git worktree back: `worktree remove --force`, then `prune`."""
-        if not git_worktree.remove(self._observer_git, observer_root_repo(self.data_dir), Path(workspace)):
-            raise HostError(f"the observer workspace at {workspace} could not be removed")
 
     def _observer_git(self, argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         return self.run_capture(["git", "-C", str(cwd), *argv], "observer git workspace")
@@ -1247,6 +1245,7 @@ class CommandHostRuntime:
         """Where this sprint's observer heartbeat writes its pid."""
         return _observer_pid_file(reference)
 
+    @serialized
     def prepare_observer(
         self,
         sprint: dict[str, Any],
@@ -1266,6 +1265,7 @@ class CommandHostRuntime:
         `git worktree`. A recorded path this host did not make is a legacy record and is refused.
         """
         reference = str(sprint.get("ref") or "")
+        self._require_cleanup_admission(reference)
         placed = recorded_workspace or self.observer_workspace(reference)
         if self.mode == "noop":
             workspace = Path(self.observer_workspace(reference))
@@ -1439,6 +1439,7 @@ class CommandHostRuntime:
             "head_run": lifecycle_run.to_json(),
         }
 
+    @serialized
     def stop_observer(self, record: Any) -> None:
         """End one observer head and give back what its bring-up took.
 
@@ -1452,57 +1453,14 @@ class CommandHostRuntime:
         if self.mode == "noop":
             return
         self._refuse_legacy_observer(record, "stop")
-        self._stop_observer_head(record)
+        owner = getattr(self, "cleanup_owner", None)
+        if owner is None:
+            raise HostError("observer stop has no durable cleanup owner")
+        result = owner.cleanup_observer(record)
+        if result["status"] == "pending":
+            raise HostError("observer cleanup pending: " + result["reason"])
         observer_run = self._observer_lifecycle_run(record)
         self.head_runtime_for(observer_run).forget_head(observer_run.run_id)
-
-    def _stop_observer_head(self, record: Any) -> None:
-        """Give back the process and the git worktree one observer bring-up took.
-
-        The worktree is checked, and removed through `git worktree` only after the head's stop was
-        confirmed.
-        """
-        observer_run = getattr(record, "head_run", {})
-        observer_leaf = str(getattr(record, "leaf", "") or "")
-        pid_file = str(getattr(record, "pid_file", "") or "")
-        self._guard_head_run(
-            observer_run,
-            OBSERVER_ROLE,
-            pid_file=pid_file,
-            task=sprint_task(getattr(record, "sprint", "")),
-            leaf=observer_leaf,
-        )
-        workspace = str(getattr(record, "workspace", "") or "")
-        if not workspace:
-            # No bring-up got as far as naming a workspace, and a supervised head is raised only
-            # into one: there is no head to stop.
-            return
-        if not self._git_observer_worktree_listed(workspace):
-            self._confirm_head_process_gone(
-                pid_file,
-                run=observer_run,
-                role=OBSERVER_ROLE,
-                task=sprint_task(getattr(record, "sprint", "")),
-                leaf=observer_leaf,
-            )
-            return
-        self._stop_observer_terminals(
-            workspace,
-            pid_file=pid_file,
-            run=observer_run,
-            role=OBSERVER_ROLE,
-            task=sprint_task(getattr(record, "sprint", "")),
-            leaf=observer_leaf,
-        )
-        # Terminal stop alone cannot prove a heartbeat-wrapped head died: confirm before removing it.
-        self._confirm_head_process_gone(
-            pid_file,
-            run=observer_run,
-            role=OBSERVER_ROLE,
-            task=sprint_task(getattr(record, "sprint", "")),
-            leaf=observer_leaf,
-        )
-        self._remove_git_observer_workspace(workspace)
 
     def _refuse_legacy_observer(self, record: Any, verb: str) -> None:
         """Raise `LegacyDispatcherRecord` when this observer record was written on Orca.
@@ -1547,6 +1505,7 @@ class CommandHostRuntime:
             return int(durable(observer_run))
         return runtime.activity.epoch(observer_run.run_id)
 
+    @serialized
     def stop_observer_if_quiescent(
         self, record: Any, expected_activity_epoch: int, head_process_alive: bool
     ) -> bool:
@@ -1851,6 +1810,7 @@ class CommandHostRuntime:
             "reason": "no provider/terminal-safe continuation recovery capability is available",
         }
 
+    @serialized
     def start_review(self, task: dict[str, Any], record: DispatcherRecord) -> ReviewLaunch:
         """Bring the reviewer up as a second head inside the worker's own worktree.
 
@@ -2891,32 +2851,32 @@ class CommandHostRuntime:
         """Shut this card's worker head down and confirm it. Raises when it cannot be confirmed."""
         self._freeze_worker(record)
 
-    def teardown(self, record: DispatcherRecord) -> None:
-        """Done-path cleanup after a green merge: stop the worktree's heads (killing the
-        worker and reviewer plus their child shells and subagents) and remove the git worktree.
-        Never used on rework, which reuses the workspace.
+    @serialized
+    def teardown(self, record: DispatcherRecord) -> dict[str, Any] | None:
+        """Request owned Done cleanup and return its actual durable disposition.
 
-        The stop is the confirmed twin, not the best-effort one, because this is the path that
-        removes the worktree next: `stop` absorbs a refusal, and a removal made on the strength of
-        an absorbed refusal takes the checkout out from under a head that is still running — after
-        which the card's next attempt raises a second head beside the first. The teardown itself
-        still does not escape, so a green card reaches Done either way; what a refusal costs is the
-        removal, and the worktree is left standing for whoever looks at the head that would not go.
-        A legacy record is the exception: it is refused before anything is stopped or removed, and
-        the release blocks on that refusal rather than tearing an Orca worktree down.
+        Code delivery and cleanup settlement are separate facts. Pending stop or
+        Git failures retain every owner in the journal for dispatcher retry.
         """
         if self.mode == "noop" or not record.workspace:
             return
         self._refuse_legacy_record(record, "tear down")
         self._require_production_runtime("cleanup-before-stop")
-        self._decide_workspace_environment_ownership(record.workspace)
-        try:
-            self.stop_workspace(record)
-        except HostError:
-            return
-        self._require_production_runtime("cleanup-before-worktree-remove")
-        if self._is_git_workspace(record.workspace):
-            self._git_workspaces.teardown(record.workspace)
+        owner = getattr(self, "cleanup_owner", None)
+        if owner is None:
+            raise HostError("teardown has no durable cleanup owner")
+        # Release owns the subsequent Done transition and claim settlement. A
+        # failed cleanup remains replayable even after that record is discarded.
+        task_ref = next((raw.get("task_ref", {}).get("ref") for raw in
+                        (record.worker_head_run, record.review_head_run)
+                        if raw.get("task_ref", {}).get("ref")), "")
+        if not task_ref:
+            task_ref = next((ref for ref, raw in owner._state().get("records", {}).items()
+                             if raw.get("attempt_id") == record.attempt_id and raw.get("worker") == record.worker), "")
+        if not task_ref:
+            raise HostError("cleanup cannot identify the exact card")
+        result = owner.cleanup(owner.runtime.reader.show(task_ref), record, "done")
+        return {"status": result["status"], "reason": result["reason"], "progress": result["progress"]}
 
     def _fetch_seed(self, repo: Path, seed: str, *, project: str) -> str:
         """Bring `seed` into the project checkout and return the start point a worktree is cut at.
@@ -3904,6 +3864,15 @@ class CommandHostRuntime:
 
     def _write_prompt(self, path: Path, body: str) -> None:
         write_text_atomic(path, body)
+        if self.mode == "real" and path.name in {"TASK.md", OBSERVER_PROMPT_FILE}:
+            from secretary.dispatch.cleanup import CleanupJournal
+            CleanupJournal(self.data_dir).generated(path, body)
+
+    def _require_cleanup_admission(self, reference: str) -> None:
+        if self.mode == "real":
+            refusal = CleanupJournal(self.data_dir).admission_refusal(reference)
+            if refusal:
+                raise HostError(refusal)
 
     def _review_document(
         self,

@@ -1313,6 +1313,11 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertEqual(event["kind"], "archived")
         self.assertEqual(event["payload"].keys(), {"reason_sha256"})
         self.assertNotIn("secretary-468", [task["ref"] for task in self.writer.reader.list()])
+        from secretary.dispatch.cleanup import CleanupJournal
+        retained = CleanupJournal(self.writer.data_dir).summary()
+        self.assertEqual(retained[0]["ref"], "secretary-468")
+        self.assertEqual(retained[0]["disposition"], "archive")
+        self.assertEqual(retained[0]["status"], "pending")
 
     def test_archive_refuses_dispatcher_record_after_claim_was_cleared(self) -> None:
         self.clear_card_metadata("secretary-468", "claim")

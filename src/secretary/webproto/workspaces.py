@@ -79,8 +79,6 @@ def release(repo: str | os.PathLike[str], workspace: Path) -> bool:
     paths in the run record either way.
     """
     target = Path(workspace)
-    if not target.exists():
-        return True
     return git_worktree.remove(_git, Path(repo), target)
 
 

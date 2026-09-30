@@ -14,6 +14,9 @@ from unittest import mock
 
 from secretary.broad_check import load_receipt, receipt_path, run_broad_check
 from secretary.dispatch.host import CommandHostRuntime
+from secretary.dispatch.cleanup import CleanupOwner
+from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
+from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from secretary.dispatch.runtime_provenance import RuntimeProvenance
 from secretary.dispatch.gate import GateResult
 from secretary.dispatch.state import DispatcherRecord
@@ -106,8 +109,15 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             runtime = _Runtime([_observation(), _observation("workspace_targeted_editable")])
             host = _Host(Path(tmp), runtime)
             record = _record(str(Path(tmp) / "task"))
+            run = HeadRun(run_id="fixture-run", spec=HeadSpec(profile_id="fixture", adapter="unknown", runtime=LOCAL_PTY_RUNTIME),
+                          workspace=record.workspace, task_ref=TaskRef.card("secretary-1"))
+            backend = SimpleNamespace(stop=lambda *a: (host.effects.append("stop") or SimpleNamespace(ok=True)))
+            host.head_runtime_for = lambda run: backend
+            owner = CleanupOwner(SimpleNamespace(data_dir=Path(tmp), host=host))
+            intent = {"task": {"ref": "secretary-1"}, "record": {"workspace": record.workspace}, "heads": [run.to_json()]}
+            owner._stop(intent)
             with self.assertRaisesRegex(HostError, "workspace_targeted_editable"):
-                host.teardown(record)
+                owner._remove_workspace(intent, Path(tmp))
         self.assertEqual(host.effects, ["stop"])
         self.assertEqual(host.environment_checks, [str(Path(tmp) / "task")])
 

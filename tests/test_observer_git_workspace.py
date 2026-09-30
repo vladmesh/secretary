@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
+from secretary.dispatch.cleanup import CleanupOwner
 from secretary.dispatch.host import OBSERVER_REPO_BRANCH, CommandHostRuntime
 from secretary.dispatch.observer import ObserverRecord, _write_launch_intent
 from secretary.dispatch.types import HostError, LegacyDispatcherRecord
@@ -129,6 +130,9 @@ class ObserverGitWorkspaceTests(unittest.TestCase):
         self.host = _RecordingHost(self.data_dir, self.root)
         self.git_path = self.data_dir / "workspaces" / "observers" / TOKEN
         self.orca_path = self.orca_root / "observers" / TOKEN
+        runtime = SimpleNamespace(data_dir=self.data_dir, host=self.host,
+                                  sprints=SimpleNamespace(show=lambda *a, **k: {"id": "sprint-test", "ref": REF, "status": "open"}))
+        self.host.cleanup_owner = CleanupOwner(runtime)
 
     def prepare(self, head: str, recorded: str = "") -> dict[str, Any]:
         return self.host.prepare_observer({"ref": REF}, head, prompt="# Sprint\n", recorded_workspace=recorded)
@@ -177,7 +181,7 @@ class ObserverGitWorkspaceTests(unittest.TestCase):
         self.assertNotIn(str(self.git_path), git(repo, "worktree", "list", "--porcelain"))
         self.assertEqual(self.orca_argvs(), [])
 
-    def test_the_stop_confirms_the_head_gone_before_git_removes_and_prunes_its_worktree(self) -> None:
+    def test_the_durable_stop_receipt_precedes_git_removal_without_force_or_prune(self) -> None:
         launched = self.prepare(SUPERVISED_HEAD, self.host.observer_workspace(REF))
         del self.host.events[:]
 
@@ -190,10 +194,11 @@ class ObserverGitWorkspaceTests(unittest.TestCase):
         ]
         self.assertEqual(
             steps,
-            [f"head-stop:{LOCAL_PTY_RUNTIME}", "head-confirmed-gone", ["worktree", "remove"], ["worktree", "prune"]],
+            [f"head-stop:{LOCAL_PTY_RUNTIME}", ["worktree", "remove"]],
         )
         remove = next(event for event in self.host.events if isinstance(event, list) and event[3:5] == ["worktree", "remove"])
-        self.assertIn("--force", remove)
+        self.assertNotIn("--force", remove)
+        self.assertFalse(any("prune" in event for event in self.host.events if isinstance(event, list)))
 
     def test_a_respawn_reuses_a_live_worktree_and_recuts_a_removed_one(self) -> None:
         workspace = self.host.observer_workspace(REF)
@@ -205,6 +210,8 @@ class ObserverGitWorkspaceTests(unittest.TestCase):
         self.assertEqual([argv[:2] for argv in self.worktree_argvs()].count(["worktree", "add"]), 1)
 
         self.stop(self.record(launched, SUPERVISED_HEAD))
+        self.assertEqual((self.git_path / "notes.txt").read_text(), "kept\n")
+        self.assertTrue(self.git_path.exists(), "observer user work must be preserved")
         again = self.prepare(SUPERVISED_HEAD, workspace)
 
         self.assertEqual(again["workspace"], workspace)
@@ -242,7 +249,6 @@ class ObserverGitWorkspaceTests(unittest.TestCase):
                 "secretary.dispatch.host.git_worktree.add",
                 return_value=subprocess.CompletedProcess([], 128, "", "fatal: invalid reference"),
             ),
-            mock.patch("secretary.dispatch.host.git_worktree.remove", return_value=True),
             self.assertRaisesRegex(HostError, "git worktree add failed for the observer workspace"),
         ):
             self.prepare(SUPERVISED_HEAD, self.host.observer_workspace(REF))

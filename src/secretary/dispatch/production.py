@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from secretary.dispatch.cleanup import serialized
+
 import contextlib
 import copy
 import contextvars
@@ -336,6 +338,7 @@ def production_observe(runtime: Any) -> dict[str, Any]:
     }
 
 
+@serialized
 def production_tick(runtime: Any) -> dict[str, Any]:
     with tick_clock(), try_file_lock(runtime.production_state.tick_lock) as acquired:
         if not acquired:
@@ -415,6 +418,11 @@ def _production_tick_work(
     # Outcome recovery is journal-only and reports its own degradation.  It
     # cannot delay the fence or any lifecycle work below.
     outcome_outcomes = attempt_accounting.publish_pending_attempt_outcomes(runtime)
+    cleanup_outcomes = []
+    if getattr(runtime.host, "mode", "noop") == "real":
+        cleanup_outcomes = [{"step": "owned-cleanup", "ref": item["task"]["ref"],
+                             "status": item["status"], "reason": item["reason"]}
+                            for item in runtime.cleanup.replay(limit=20)]
 
     observer_errors: list[dict[str, str]] = []
     # Fence unhealthy sprint observers before advancing any reserved cards.
@@ -441,7 +449,7 @@ def _production_tick_work(
     # on the strength of a field that predates the reconciliation pass itself.
     payload["last_reconciled_at"] = now_rfc3339()
     outcomes, errors, blocked_scopes = _advance_active(runtime, records, payload, active_tasks)
-    outcomes = usage_outcomes + outcome_outcomes + fence_outcomes + reconcile_outcomes + outcomes
+    outcomes = cleanup_outcomes + usage_outcomes + outcome_outcomes + fence_outcomes + reconcile_outcomes + outcomes
     # After the releases of this tick, before the observers: a merge whose base has no CI resolves
     # `absent` in the tick that merged it, and a result written here is delivered below.
     try:
@@ -979,6 +987,20 @@ class _ProbeState:
         return getattr(self._inner, name)
 
 
+class _ProbeCleanup:
+    """The durable owner is an effect even after its active record disappeared."""
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        if name in {"cleanup", "cleanup_observer", "remember", "replay", "replay_one"}:
+            def effect(*args: Any, **kwargs: Any) -> Any:
+                raise ProbeAbort("owned-cleanup", {})
+            return effect
+        return getattr(self._inner, name)
+
+
 def _probe_runtime(runtime: Any) -> Any:
     """The real runtime with only its writers swapped out.
 
@@ -991,9 +1013,12 @@ def _probe_runtime(runtime: Any) -> Any:
     probe.host = _ProbeHost(runtime.host)
     probe.production_state = _ProbeState(runtime.production_state)
     probe.po = _ProbePo(runtime.po)
+    if hasattr(runtime, "cleanup"):
+        probe.cleanup = _ProbeCleanup(runtime.cleanup)
     return probe
 
 
+@serialized
 def production_probe(runtime: Any) -> dict[str, Any]:
     """Run a real tick with every write replaced by an abort.
 
@@ -1316,7 +1341,21 @@ def _reconcile_production(
             # instruction to relaunch only the reviewer impossible to follow.
             continue
         intent_action = str(launch_intent(record).get("action") or "")
-        stopped = _stop_record_heads(runtime, record, ref, state)
+        if state != "ready" and getattr(runtime.host, "mode", "noop") == "real":
+            closed = card(ref)
+            if closed is None:
+                continue
+            cleanup = runtime.cleanup.cleanup(closed, record, "inactive")
+            outcomes.append({"step": "owned-cleanup", "ref": ref, "status": cleanup["status"],
+                             "reason": cleanup["reason"], "progress": cleanup["progress"]})
+            if not cleanup["progress"].get("heads_stopped"):
+                continue
+            forget_role_head(record, WORKER_ROLE)
+            forget_role_head(record, REVIEW_ROLE)
+            record.workspace_settled = True
+            stopped = None
+        else:
+            stopped = _stop_record_heads(runtime, record, ref, state)
         if stopped is not None:
             outcomes.append(stopped)
             continue

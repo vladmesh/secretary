@@ -1,13 +1,8 @@
-"""Every card's workspace, on plain `git worktree`.
+"""Place and validate Git-managed card workspaces.
 
-Cut with `git worktree add -b <card branch>` from the card's seed into
-`<data_dir>/workspaces/<project id>/<worker>`, accepted by the same resumable-workspace check a
-resumed card already passes, and taken back with `git worktree remove --force` and `prune`. It is
-the only placement: which runtime a card's heads are on is not asked (secretary-1722).
-
-Whether a recorded workspace is one of these is read from its path alone (`owns`). A record whose
-workspace is an Orca worktree under the Orca workspaces root was written before this was the only
-placement; the dispatcher host refuses it as a legacy record rather than tearing it down.
+Path shape selects this manager rather than legacy Orca handling. Destructive
+ownership is proved and settled only by dispatch.cleanup, whose durable intent
+survives the card, its claim and the active dispatcher record.
 """
 
 from __future__ import annotations
@@ -39,7 +34,7 @@ def orca_workspaces_root() -> Path:
 def workspace_roots_overlap(orca_root: Path, data_dir: Path) -> str | None:
     """Why the Orca root and `<data_dir>/workspaces` cannot both be served, or None when disjoint.
 
-    Ownership of a workspace is read from its path alone (`owns`, `_is_git_observer_workspace`),
+    Workspace routing is read from its path shape (`owns`, `_is_git_observer_workspace`),
     so two roots that are equal or nest would make one path both a git workspace and a legacy Orca
     one. The dispatcher refuses to start on that rather than let one reading silently win.
     """
@@ -77,9 +72,11 @@ class GitWorkspaceManager:
         return self.root / project / worker
 
     def owns(self, workspace: str | Path) -> bool:
-        """Whether this workspace path is one this manager made: exactly `<root>/<project>/<worker>`,
-        the one shape it cuts. The dispatcher refuses to start when the Orca root and this one
-        overlap (`workspace_roots_overlap`), so no such path is also an Orca one."""
+        """Select this manager's placement namespace; this is not deletion authority.
+
+        The exact root/project/worker shape is disjoint from legacy Orca routing.
+        Cleanup separately proves registration, attempt, identity and ownership.
+        """
         if not workspace:
             return False
         path = _resolved(Path(workspace))
@@ -89,8 +86,8 @@ class GitWorkspaceManager:
     def create(self, task: dict[str, Any], worker_id: str, seed: str, *, expected: str = "") -> str:
         """Cut this card's branch from `seed` into its worktree and accept it only as that.
 
-        A worktree git made but the resumable-workspace check refuses is removed, branch included,
-        before the refusal is raised, so the next attempt finds neither.
+        A refused registration or adoption is preserved for explicit inventory;
+        failure of the creation contract never authorizes destructive cleanup.
         """
         project = str(task["project"])
         repo = Path(str(self._host.catalog.binding(project)["repo"])).expanduser()
@@ -105,7 +102,7 @@ class GitWorkspaceManager:
         result = git_worktree.add(self._git, repo, target, start, branch=branch)
         if result.returncode != 0:
             detail = _tail((result.stderr or result.stdout or "").strip())
-            leftover = "" if existed else self._remove(repo, target)
+            leftover = "" if existed else f"; any residue at {target} is preserved for owned inventory"
             raise HostError(f"git worktree add failed: {detail}{leftover}")
         try:
             self.verify(task, str(target))
@@ -121,41 +118,12 @@ class GitWorkspaceManager:
         self._host._validate_resumable_workspace(task, workspace)
 
     def discard(self, workspace: str, *, branch: str = "") -> str:
-        """Remove a worktree that must not be adopted, and say what is left of it.
-
-        `branch` is named only by the create that just cut it, and is deleted with the worktree;
-        nothing else ever deletes a branch here.
-        """
-        try:
-            repo = self._repo_of(workspace)
-        except (HostError, KeyError, ValueError) as exc:
-            return f"; the rejected worktree at {workspace} could not be removed either: {exc}"
-        left = self._remove(repo, Path(workspace))
-        if branch and not left:
-            self._git(["branch", "-D", branch], repo)
-        return left
+        """A rejected workspace has no admitted destructive ownership proof."""
+        return f"; rejected workspace {workspace} and candidate {branch or '(unknown)'} preserved"
 
     def teardown(self, workspace: str) -> None:
-        """Take a stopped card's worktree back. Best-effort: a removal that fails leaves it standing."""
-        try:
-            repo = self._repo_of(workspace)
-        except (HostError, KeyError, ValueError):
-            return
-        self._remove(repo, Path(workspace))
-
-    def _repo_of(self, workspace: str) -> Path:
-        """The project checkout a worktree under `<root>/<project>/<worker>` was cut from."""
-        parts = _resolved(Path(workspace)).relative_to(_resolved(self.root)).parts
-        if len(parts) != 2:
-            raise HostError(f"{workspace} is not a card workspace under {self.root}")
-        return Path(str(self._host.catalog.binding(parts[0])["repo"])).expanduser()
-
-    def _remove(self, repo: Path, workspace: Path) -> str:
-        try:
-            gone = git_worktree.remove(self._git, repo, workspace)
-        except HostError as exc:
-            return f"; the rejected worktree at {workspace} could not be removed either: {exc}"
-        return "" if gone else f"; the rejected worktree at {workspace} could not be removed either"
+        """Require the durable owner; a path alone is not destructive authority."""
+        raise HostError("workspace teardown requires an exact durable cleanup intent")
 
     def _git(self, argv: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
         return self._host.run_capture(["git", "-C", str(cwd), *argv], "git workspace")

@@ -18,6 +18,9 @@ import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from types import SimpleNamespace
+
+from secretary.dispatch.cleanup import CleanupOwner
 from unittest import mock
 
 from secretary.dispatch.host import CommandHostRuntime, LaunchedHead
@@ -196,6 +199,10 @@ class GitWorkspaceManagerTests(unittest.TestCase):
         self.host = _RecordingHost(self.catalog, self.data_dir, self.root)
         self.git_path = self.data_dir / "workspaces" / PROJECT / WORKER
         self.orca_path = self.orca_root / ORCA_BINDING / WORKER
+        cleanup_task = {**_task(), "id": "task-sample-7", "state": "done", "claim": {"worker": None}}
+        runtime = SimpleNamespace(data_dir=self.data_dir, catalog=self.catalog, host=self.host,
+                                  reader=SimpleNamespace(show=lambda ref: cleanup_task))
+        self.host.cleanup_owner = CleanupOwner(runtime)
 
     def _prepare(self, task: dict[str, Any], **kwargs: Any) -> Path:
         prepared = self.host.prepare_worker(task, WORKER, WORKER_HEAD, attempt_id="attempt-1", **kwargs)
@@ -276,7 +283,7 @@ class GitWorkspaceManagerTests(unittest.TestCase):
         self.assertIn(["git", "-C", str(first), "branch", "--show-current"], self.host.argvs)
         self._no_orca()
 
-    def test_a_worktree_the_check_rejects_is_removed_branch_included_before_the_error(self) -> None:
+    def test_a_worktree_the_check_rejects_preserves_the_unadmitted_workspace_and_ref(self) -> None:
         refusal = HostError(
             "resume workspace is on the wrong branch", bring_up_cause=CAUSE_WORKSPACE_CONTRACT
         )
@@ -288,9 +295,9 @@ class GitWorkspaceManagerTests(unittest.TestCase):
 
         self.assertIn("wrong branch", str(refused.exception))
         self.assertEqual(refused.exception.bring_up_cause, CAUSE_WORKSPACE_CONTRACT)
-        self.assertFalse(self.git_path.exists())
-        self.assertNotIn(self.git_path.resolve(), self._registered())
-        self.assertEqual(git(self.fixture.repo, "branch", "--list", BRANCH), "")
+        self.assertTrue(self.git_path.exists())
+        self.assertIn(self.git_path.resolve(), self._registered())
+        self.assertIn(BRANCH, git(self.fixture.repo, "branch", "--list", BRANCH))
         self._no_orca()
 
     def test_a_workspace_the_launch_intent_names_elsewhere_is_refused_before_anything_is_cut(self) -> None:
@@ -309,11 +316,15 @@ class GitWorkspaceManagerTests(unittest.TestCase):
         self.host.argvs.clear()
 
         self.host.stop(_record(str(workspace)))
-        self.host.teardown(_record(str(workspace)))
+        record = _record(str(workspace))
+        self.host.cleanup_owner._state = lambda: {"records": {REF: record.to_json()}}
+        receipt = self.host.teardown(record)
+        self.assertIsNotNone(receipt)
 
         self.assertFalse(workspace.exists())
         self.assertNotIn(workspace.resolve(), self._registered())
-        self.assertIn(["git", "-C", str(self.fixture.repo), "worktree", "prune"], self.host.argvs)
+        self.assertEqual(receipt["status"], "completed")
+        self.assertFalse(any("prune" in argv or "--force" in argv for argv in self.host.argvs))
         self._no_orca()
 
     def test_a_refused_stop_leaves_the_git_worktree_in_place(self) -> None:
@@ -321,9 +332,11 @@ class GitWorkspaceManagerTests(unittest.TestCase):
         self.host.argvs.clear()
 
         with mock.patch.object(
-            _RecordingHost, "stop_workspace", side_effect=HostError("the worker head was not stopped")
+            self.host.cleanup_owner, "_stop", side_effect=HostError("the worker head was not stopped")
         ):
-            self.host.teardown(_record(str(workspace)))
+            record = _record(str(workspace))
+            self.host.cleanup_owner._state = lambda: {"records": {REF: record.to_json()}}
+            self.assertEqual(self.host.teardown(record)["status"], "pending")
 
         self.assertTrue(workspace.is_dir())
         self.assertIn(workspace.resolve(), self._registered())
