@@ -1008,11 +1008,13 @@ class RecoveryProgressTests(ServiceFixture):
         service.runner._turn_launcher = launch
         clean = threading.Event()
         attempts = []
-        def cleanup(owner):
+        def cleanup(owner, _record):
             attempts.append(owner.run_id)
             if not clean.is_set():
                 raise MemoryScopeError("temporary cleanup failure")
-        with mock.patch.object(ScopedHeadLifecycle, "stop_and_prove_empty", cleanup):
+            _record["launch_allowed"] = False
+            owner._record_empty(_record)
+        with mock.patch.object(ScopedHeadLifecycle, "stop_owned", cleanup):
             self.assertTrue(service._recovered)
             service.submit(session_id=session_id, text="first", request_id="first")
             service.submit(session_id=session_id, text="second", request_id="second")
@@ -1043,12 +1045,14 @@ class RecoveryProgressTests(ServiceFixture):
             return process
         service.runner._turn_launcher = launch
         clean = threading.Event()
-        def cleanup(_owner):
+        def cleanup(_owner, _record):
             if not clean.is_set():
                 raise MemoryScopeError("temporary cleanup failure")
             for process in processes:
                 po_runner._kill_group(process.pid)
-        with mock.patch.object(ScopedHeadLifecycle, "stop_and_prove_empty", cleanup):
+            _record["launch_allowed"] = False
+            _owner._record_empty(_record)
+        with mock.patch.object(ScopedHeadLifecycle, "stop_owned", cleanup):
             with mock.patch("secretary.po.runner.threading.Thread.start", side_effect=RuntimeError("waiter refused")):
                 service.submit(session_id=session_id, text="GATE waiter", request_id="waiter")
             self.assertFalse(service._recovered)
@@ -1079,13 +1083,15 @@ class RecoveryProgressTests(ServiceFixture):
                 service.runner._turn_launcher = launch
                 clean = threading.Event()
                 attempted = threading.Event()
-                def cleanup(_owner):
+                def cleanup(_owner, _record):
                     attempted.set()
                     if not clean.is_set():
                         raise MemoryScopeError("temporary cleanup failure")
                     for process in processes:
                         po_runner._kill_group(process.pid)
-                with mock.patch.object(ScopedHeadLifecycle, "stop_and_prove_empty", cleanup):
+                    _record["launch_allowed"] = False
+                    _owner._record_empty(_record)
+                with mock.patch.object(ScopedHeadLifecycle, "stop_owned", cleanup):
                     text = "complete" if action == "completion" else "GATE stop"
                     service.submit(session_id=session_id, text=text, request_id=f"input-{action}")
                     if action == "stop":

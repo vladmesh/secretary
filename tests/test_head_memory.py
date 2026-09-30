@@ -100,6 +100,7 @@ class HeadMemoryTests(unittest.TestCase):
                 directory.mkdir()
                 owner = ScopedHeadLifecycle(run.run_id, 96)
                 owner.persist(directory)
+                run = HeadRun.from_json({**run.to_json(), "scope_generation": owner.generation})
                 cgroup = root / "system.slice" / scope_unit(run.run_id)
                 cgroup.mkdir(parents=True)
                 (cgroup / "cgroup.events").write_text("populated 1\n")

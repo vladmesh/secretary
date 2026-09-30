@@ -109,10 +109,14 @@ class HeadRun:
     stopped_by: StopInitiator | None = None
     # Round-trip policy state so malformed or historic values remain unknown.
     fanout_policy: dict[str, Any] = field(default_factory=dict)
+    # Scoped incarnations can reuse a run directory; stop must name the one it owns.
+    scope_generation: str = ""
 
     def __post_init__(self) -> None:
         if not self.run_id:
             raise HeadRunError("a head run has an identity of its own")
+        if not isinstance(self.scope_generation, str):
+            raise HeadRunError("a scope generation is a string")
         if self.lifecycle not in LIFECYCLE:
             raise HeadRunError(
                 f"a head run's lifecycle is one of {', '.join(LIFECYCLE)}, not {self.lifecycle!r}"
@@ -222,6 +226,7 @@ class HeadRun:
             "lifecycle": self.lifecycle,
             "stopped_by": self.stopped_by.to_json() if self.stopped_by else {},
             "fanout_policy": _fanout_policy_json(self.fanout_policy),
+            **({"scope_generation": self.scope_generation} if self.scope_generation else {}),
         }
 
     @classmethod
@@ -240,6 +245,7 @@ class HeadRun:
             lifecycle=str(payload.get("lifecycle") or SPAWNED),
             stopped_by=StopInitiator.from_json(payload.get("stopped_by")),
             fanout_policy=_fanout_policy_json(payload.get("fanout_policy")),
+            scope_generation=payload.get("scope_generation", ""),
         )
 
 

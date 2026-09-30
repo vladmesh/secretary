@@ -70,7 +70,7 @@ class ScopeBackendTests(unittest.TestCase):
         self.assertNotEqual(os.getpgid(child), os.getpgid(handle.head_pid))
         run = HeadRun(run_id=handle.run_id, spec=HeadSpec.from_profile("fixture", {"adapter": "codex"}),
                       workspace=str(self.root), task_ref=TaskRef.card("ci:owned-fixture"), role="worker",
-                      pid_file=str(handle.pid_file))
+                      pid_file=str(handle.pid_file), scope_generation=handle.scope_generation)
         runtime = LocalPtyHeadRuntime(self.root, head_process_status=head_process_status, stop_timeout=3)
         real_run = subprocess.run
         def refuse_stop(argv, **kwargs):
@@ -165,16 +165,16 @@ class PoScopeBackendTests(unittest.TestCase):
         service = self.service
         session_id = self.session("scope-session")
         other = self.session("other-scope-session")
-        original_cleanup = ScopedHeadLifecycle.stop_and_prove_empty
+        original_cleanup = ScopedHeadLifecycle.stop_owned
         released = False
         failed_runs = []
         attempts = []
         child_file = self.root / "po-detached.pid"
-        def stop(owner):
+        def stop(owner, record):
             if owner.run_id in failed_runs and not released:
                 attempts.append(owner.run_id)
                 raise MemoryScopeError("injected transient cleanup failure")
-            original_cleanup(owner)
+            original_cleanup(owner, record)
         def launch(session, seq, argv, files, environment, _spec):
             spec = HeadSpec.from_profile("ci-po", {"adapter": session.cli, "memory_limit_mib": 96})
             if session.session_id == session_id and not failed_runs:
@@ -192,7 +192,7 @@ class PoScopeBackendTests(unittest.TestCase):
                 raise LocalPtySpawnError("cleanup_failed", "fixture launch lost its waiter", cleanup_complete=False)
             return process
         service.runner._turn_launcher = launch
-        with mock.patch.object(ScopedHeadLifecycle, "stop_and_prove_empty", stop):
+        with mock.patch.object(ScopedHeadLifecycle, "stop_owned", stop):
             service.submit(session_id=session_id, text="GATE orphan", request_id="scope-orphan")
             service.submit(session_id=session_id, text="after cleanup", request_id="scope-after")
             self.assertEqual(self.store.turn(session_id, 1).state, po_store.RUNNING)

@@ -46,11 +46,12 @@ class LocalPtyError(RuntimeError):
 class LocalPtySpawnError(LocalPtyError):
     """A head did not come up, and the reason the run directory gave for it."""
 
-    def __init__(self, reason: str, detail: str, *, cleanup_complete: bool = True) -> None:
+    def __init__(self, reason: str, detail: str, *, cleanup_complete: bool = True, scope_generation: str = "") -> None:
         super().__init__(detail)
         self.reason = reason
         self.detail = detail
         self.cleanup_complete = cleanup_complete
+        self.scope_generation = scope_generation
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ class HeadHandle:
     pid_file: Path
     supervisor_pid: int
     head_pid: int
+    scope_generation: str = ""
 
     def connect(self, timeout: float = 5.0) -> SupervisorClient:
         return SupervisorClient.connect(self.socket_path, timeout=timeout)
@@ -173,6 +175,7 @@ def spawn_head(
     launch_env = _supervisor_environment(env)
     lifecycle = ScopedHeadLifecycle(run_id, memory_limit_mib, owner_unit, run_dir) if memory_limit_mib is not None else None
     if lifecycle is not None:
+        previous = None
         try:
             previous = ScopedHeadLifecycle.from_run_dir(run_dir)
             if previous is not None:
@@ -184,7 +187,8 @@ def spawn_head(
             finally:
                 os.close(descriptor)
         except MemoryScopeError as exc:
-            raise LocalPtySpawnError("cleanup_failed", str(exc), cleanup_complete=False) from exc
+            raise LocalPtySpawnError("cleanup_failed", str(exc), cleanup_complete=False,
+                                     scope_generation=previous.generation if previous is not None else lifecycle.generation) from exc
         argv = lifecycle.launcher_argv(
             argv, run_dir=run_dir, log_path=log_path, timeout=timeout,
             pythonpath=launch_env["PYTHONPATH"],
@@ -241,6 +245,7 @@ def spawn_head(
                 pid_file=identity_file,
                 supervisor_pid=int(record.get("supervisor_pid") or 0),
                 head_pid=int(record.get("head_pid") or 0),
+                scope_generation=lifecycle.generation if lifecycle is not None else "",
             )
         if time.monotonic() >= deadline:
             tail = ""
@@ -275,6 +280,7 @@ def _after_failed_launch(
     except MemoryScopeError as exc:
         return LocalPtySpawnError(
             "cleanup_failed", f"{error.detail}; {exc}", cleanup_complete=False,
+            scope_generation=lifecycle.generation,
         )
     return error
 

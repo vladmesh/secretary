@@ -804,6 +804,9 @@ class LocalPtyHeadRuntime:
                 )
             except local_pty.LocalPtySpawnError as exc:
                 retained = candidate if not exc.cleanup_complete else run
+                if retained is not None and exc.scope_generation:
+                    retained = replace(retained, scope_generation=exc.scope_generation)
+                    retained = _with_pid_file(retained, pid_file)
                 return StartReceipt(
                     status=_spawn_status(exc),
                     run=retained,
@@ -823,6 +826,7 @@ class LocalPtyHeadRuntime:
                 )
             ).rebound(str(handle.socket_path), leaf=identity)
             live = _with_pid_file(live, str(handle.pid_file))
+            live = replace(live, scope_generation=getattr(handle, "scope_generation", ""))
             # A new supervisor incarnation drops prior terminal state and reuses its journal scale.
             self.activity.forget(identity)
             self._fatal.pop(identity, None)
@@ -1311,17 +1315,29 @@ class LocalPtyHeadRuntime:
             try:
                 owner = ScopedHeadLifecycle.from_run_dir(address.run_dir)
                 if owner is not None:
-                    if owner.run_id != run.run_id:
+                    if owner.run_id != run.run_id or owner.generation != run.scope_generation:
                         raise MemoryScopeError("scope owner does not match the stop's run")
-                    with owner.owner_lock(address.run_dir):
-                        record = json.loads((address.run_dir / "scope-owner.json").read_text())
-                        if record["generation"] != owner.generation:
-                            raise MemoryScopeError("scope owner changed before stop")
+                    with owner.ownership() as record:
+                        if address.pid_file.exists():
+                            status = self._identity(str(address.pid_file), expected={
+                                "run_id": run.run_id, "role": run.role, "task": _task_of(run),
+                            })
+                            if status.get("state") not in ("dead", "live-match") or (status.get("record") or {}).get("run_id") != run.run_id:
+                                raise MemoryScopeError("head identity does not match the scoped stop")
                         record["stop_initiator"] = initiator.to_json()
                         owner.update_owner(address.run_dir, record)
-                asked = self._ask_to_stop(address, initiator, signal_name)
-                if owner is not None:
-                    owner.stop_and_prove_empty()
+                        asked = self._ask_to_stop(address, initiator, signal_name)
+                        owner.stop_owned(record)
+                        # A launch can fail before any head identity or journal exists.
+                        # Only this generation's durable recursive proof settles that case.
+                        gone = record["cleanup_complete"] and (
+                            not address.pid_file.exists() or self._await_head_gone(address, run)
+                        )
+                else:
+                    if run.scope_generation:
+                        raise MemoryScopeError("the scoped run has lost its owner")
+                    asked = self._ask_to_stop(address, initiator, signal_name)
+                    gone = self._await_head_gone(address, run)
             except (MemoryScopeError, OSError, ValueError) as exc:
                 return StopReceipt(
                     status=HEAD_ALIVE, run=finishing, reason=str(exc),
@@ -1329,7 +1345,6 @@ class LocalPtyHeadRuntime:
                     epoch=self.activity.epoch(run.run_id),
                     lease=self.activity.lease(run.run_id), rotation_ready=False,
                 )
-            gone = self._await_head_gone(address, run)
             if not gone:
                 return StopReceipt(
                     status=HEAD_ALIVE,
@@ -1352,7 +1367,7 @@ class LocalPtyHeadRuntime:
             self.activity.forget(run.run_id)
             self._fatal.pop(run.run_id, None)
             self._admission_notes.pop(run.run_id, None)
-            return StopReceipt(status=HEAD_OK, run=finishing.exited(), evidence=asked, epoch=epoch)
+            return StopReceipt(status=HEAD_OK, run=finishing if finishing.settled else finishing.exited(), evidence=asked, epoch=epoch)
 
     def attach(self, run: HeadRun) -> AttachReceipt:
         """Join a caller to this head's live stream, through the substrate's own bounded attach.

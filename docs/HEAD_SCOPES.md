@@ -13,6 +13,11 @@ process start ticks to the owner, then releases it to exec sudo/systemd-run.
 Death before release closes the pipe and creates no scope work. Cleanup closes
 admission under the same owner lock, terminates the recorded launch group with
 identity fences, stops the unit and reads recursive `cgroup.events` membership.
+The same nonblocking owner lock remains held from generation verification through
+backend termination and durable empty proof. Admission and replacement use that
+lock too, so a delayed old stop cannot target a same-run replacement. Contention
+refuses without changing ownership and can be retried. Recording the proof does
+not reacquire the lock.
 An absent cgroup after admission closes and launch work ends, or `populated 0`,
 is the empty proof. A missing membership file in an existing cgroup is an error.
 Unreadable state, a failed command or interrupted cleanup leaves the owner for
@@ -26,11 +31,24 @@ they create another process group. The dispatcher also checks settled HeadRuns
 before removing their workspace: historical PID-based settlement is insufficient
 for a scope owner.
 
+Scoped HeadHandles and HeadRuns carry the launch generation, including retained
+pre-start failures. Runtime stop consumes that matching owner's proof while its
+lock is held. A failed launch that never published a heartbeat or journal can
+therefore settle after cleanup succeeds. Missing head records alone cannot settle
+a run; missing/malformed owners, generation mismatches and foreign/reused process
+identities still refuse. Genuinely unscoped runs keep their identity-based check.
+
 PO turns keep a symlink to the canonical supervisor run directory, not another
 copy of the owner. Failed launch, failed waiter start, completion and owner stop
-persist terminal intent there before cleanup. Recovery consumes that intent
-after empty proof, retaining a successful answer or owner interruption rather
-than rerunning the input. The service schedules its existing bounded recovery
+all reach the same terminal operation. It verifies the row is still running,
+records/selects terminal intent, proves empty, and commits the selected outcome
+to the store with the owner lock held throughout. Owner interruption overrides
+uncommitted completion or failure. A stop after committed completion sees no
+running turn and changes nothing. Recovery consumes that same intent and operation,
+retaining a successful answer or interruption rather than rerunning the input.
+The store's conditional running-row transition makes feed publication and failure
+callbacks idempotent. Waiter exit retains its existing wake callback for bounded
+recovery even when cleanup fails. The service schedules its existing bounded recovery
 backoff after newly orphaned claims and waiter completion. A pending owner stop
 is revisited even while its waiter remains blocked. Running rows fence their
 session's next input and restart admission; other sessions can continue.

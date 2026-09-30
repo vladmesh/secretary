@@ -85,6 +85,7 @@ class PoScopedLaunchTests(unittest.TestCase):
             store = SimpleNamespace(
                 turn_request_id=lambda *_: None,
                 finish_turn=lambda *_args, **_kwargs: settled.append(bool(cancelled)) or True,
+                turn=lambda *_: SimpleNamespace(state="running"),
             )
             spec = HeadSpec.from_profile("po-codex", {"adapter": "codex", "memory_limit_mib": 96})
             runner = PoRunner(store, root, head_specs={spec.profile_id: spec})
@@ -155,7 +156,7 @@ class PoScopedLaunchTests(unittest.TestCase):
     def test_po_failure_stops_detached_descendants_before_settling(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            store = SimpleNamespace(finish_turn=mock.Mock(return_value=True))
+            store = SimpleNamespace(finish_turn=mock.Mock(return_value=True), turn=lambda *_: SimpleNamespace(state="running"))
             runner = PoRunner(store, root)
             files = runner.files("session", 1)
             files.directory.mkdir(parents=True)
@@ -197,7 +198,7 @@ class PoScopedLaunchTests(unittest.TestCase):
     def test_po_cleanup_failure_leaves_turn_running_for_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            store = SimpleNamespace(finish_turn=mock.Mock())
+            store = SimpleNamespace(finish_turn=mock.Mock(), turn=lambda *_: SimpleNamespace(state="running"))
             runner = PoRunner(store, root)
             files = runner.files("session", 1)
             files.directory.mkdir(parents=True)
@@ -225,6 +226,7 @@ class PoScopedLaunchTests(unittest.TestCase):
                 turn = SimpleNamespace(
                     session_id="session", seq=1, pid=None, process_identity=None,
                     stdout_path=str(root / "stdout"), reason=None,
+                    state="running",
                 )
                 store = SimpleNamespace(
                     session=lambda *_: SimpleNamespace(cli="claude"),

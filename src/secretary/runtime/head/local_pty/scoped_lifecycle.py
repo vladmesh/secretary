@@ -82,7 +82,7 @@ class ScopedHeadLifecycle:
         """Leave the scope name on disk before any process can create the unit."""
         with self.owner_lock(run_dir):
             path = run_dir / "scope-owner.json"
-            if path.exists() and not json.loads(path.read_text()).get("cleanup_complete"):
+            if path.exists() and not self.read_owner(run_dir)["cleanup_complete"]:
                 raise MemoryScopeError("an unsettled scope owner cannot be replaced")
             self.update_owner(run_dir, {
                 "run_id": self.run_id, "unit": scope_unit(self.run_id),
@@ -93,15 +93,24 @@ class ScopedHeadLifecycle:
 
     @staticmethod
     def from_run_dir(run_dir: Path) -> ScopedHeadLifecycle | None:
+        run_dir = run_dir.resolve()
+        try:
+            record = ScopedHeadLifecycle.read_owner(run_dir)
+        except FileNotFoundError:
+            return None
+        return ScopedHeadLifecycle(record["run_id"], 1, directory=run_dir, generation=record["generation"])
+
+    @staticmethod
+    def read_owner(run_dir: Path) -> dict[str, Any]:
         try:
             record = json.loads((run_dir / "scope-owner.json").read_text(encoding="utf-8"))
         except FileNotFoundError:
-            return None
+            raise
         except (OSError, ValueError) as exc:
             raise MemoryScopeError(f"could not read scope owner in {run_dir}: {exc}") from exc
         try:
             run_id = record["run_id"]
-            if not isinstance(run_id, str) or record["unit"] != scope_unit(run_id):
+            if not isinstance(run_id, str) or not run_id or record["unit"] != scope_unit(run_id):
                 raise ValueError("invalid scope identity")
         except (KeyError, TypeError, ValueError) as exc:
             raise MemoryScopeError(f"invalid scope owner in {run_dir}: {exc}") from exc
@@ -109,7 +118,36 @@ class ScopedHeadLifecycle:
             raise MemoryScopeError("scope owner has no launch generation")
         if type(record.get("launch_allowed")) is not bool or type(record.get("cleanup_complete")) is not bool:
             raise MemoryScopeError("scope owner has invalid launch or cleanup state")
-        return ScopedHeadLifecycle(run_id, 1, directory=run_dir, generation=record["generation"])
+        if record["cleanup_complete"] and record["launch_allowed"]:
+            raise MemoryScopeError("an empty scope owner cannot admit launch work")
+        if "launch_pid" in record or "launch_identity" in record:
+            identity = record.get("launch_identity")
+            if (
+                type(record.get("launch_pid")) is not int or record["launch_pid"] <= 0
+                or not isinstance(identity, str) or ":" not in identity
+                or not identity.rsplit(":", 1)[0] or not identity.rsplit(":", 1)[1].isdecimal()
+            ):
+                raise MemoryScopeError("scope owner has invalid launcher identity")
+        return record
+
+    @contextmanager
+    def ownership(self) -> Iterator[dict[str, Any]]:
+        """Serialize admission, termination, proof and its consumer for this generation.
+
+        Callers already inside this operation use stop_owned; it never reacquires the
+        flock. Lock contention is a retryable refusal, including across processes.
+        """
+        try:
+            if self.directory is None:
+                yield {"generation": self.generation, "run_id": self.run_id}
+                return
+            with self.owner_lock(self.directory):
+                record = self.read_owner(self.directory)
+                if record["run_id"] != self.run_id or record["generation"] != self.generation:
+                    raise MemoryScopeError("scope owner changed; refusing a stale cleanup")
+                yield record
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+            raise MemoryScopeError(f"could not settle head scope {scope_unit(self.run_id)}: {exc}") from exc
 
     @staticmethod
     @contextmanager
@@ -160,7 +198,7 @@ class ScopedHeadLifecycle:
         # The child cannot invoke systemd until its launch identity is durable. EOF on
         # the barrier (launcher death before release) makes it exit without creating work.
         with ScopedHeadLifecycle.owner_lock(run_dir):
-            record = json.loads((run_dir / "scope-owner.json").read_text())
+            record = ScopedHeadLifecycle.read_owner(run_dir)
             if not record["launch_allowed"] or record["generation"] != arguments[3]:
                 return 1
             read_fd, write_fd = os.pipe()
@@ -240,62 +278,58 @@ class ScopedHeadLifecycle:
                 for event in read_events(journal_path).events
             )
 
-        requested = False
-        try:
-            with SupervisorClient.connect(socket_path, timeout=1.0) as client:
-                client.stop(initiator="startup_failed", signal_name="KILL")
-                requested = True
-        except (OSError, RuntimeError):
-            pass
-        deadline = time.monotonic() + (10.0 if requested else 0.0)
-        while time.monotonic() < deadline:
-            if reaped():
-                break
-            time.sleep(0.05)
-        self.stop_and_prove_empty()
+        with self.ownership() as record:
+            requested = False
+            try:
+                with SupervisorClient.connect(socket_path, timeout=1.0) as client:
+                    client.stop(initiator="startup_failed", signal_name="KILL")
+                    requested = True
+            except (OSError, RuntimeError):
+                pass
+            deadline = time.monotonic() + (10.0 if requested else 0.0)
+            while time.monotonic() < deadline:
+                if reaped():
+                    break
+                time.sleep(0.05)
+            self.stop_owned(record)
 
     def stop_and_prove_empty(self) -> None:
         """Stop the entire cgroup and keep ownership if empty membership cannot be proved."""
-        try:
-            self._stop_and_prove_empty()
-        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
-            raise MemoryScopeError(f"could not settle head scope {scope_unit(self.run_id)}: {exc}") from exc
+        with self.ownership() as record:
+            self.stop_owned(record)
 
-    def _stop_and_prove_empty(self) -> None:
+    def stop_owned(self, record: dict[str, Any]) -> None:
+        """Terminate and durably prove empty while ownership() remains held."""
         if self.directory is not None:
-            with self.owner_lock(self.directory):
-                record = json.loads((self.directory / "scope-owner.json").read_text())
-                if record["generation"] != self.generation:
-                    raise MemoryScopeError("scope owner changed; refusing a stale cleanup")
-                record["launch_allowed"] = False
-                record["cleanup_complete"] = False
-                self.update_owner(self.directory, record)
-                pid = record.get("launch_pid")
-                if pid and launch_group_present(pid, record["launch_identity"]):
-                    # This is the gated launch process, before systemd can create the scope.
-                    # Its group also covers sudo/systemd-run until registration. Scope
-                    # membership below covers the payload once systemd has moved it.
-                    try:
-                        os.killpg(pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    except PermissionError:
-                        result = subprocess.run(
-                            ["sudo", "-n", "kill", "-KILL", "--", f"-{pid}"],
-                            capture_output=True, timeout=5, check=False,
-                        )
-                        if result.returncode:
-                            raise MemoryScopeError("could not terminate the scope launch group")
-                    deadline = time.monotonic() + 5
-                    while launch_group_present(pid, record["launch_identity"]):
-                        if time.monotonic() >= deadline:
-                            raise MemoryScopeError("scope launch process has not exited")
-                        time.sleep(0.05)
+            record["launch_allowed"] = False
+            record["cleanup_complete"] = False
+            self.update_owner(self.directory, record)
+            pid = record.get("launch_pid")
+            if pid and launch_group_present(pid, record["launch_identity"]):
+                # This is the gated launch process, before systemd can create the scope.
+                # Its group also covers sudo/systemd-run until registration. Scope
+                # membership below covers the payload once systemd has moved it.
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    result = subprocess.run(
+                        ["sudo", "-n", "kill", "-KILL", "--", f"-{pid}"],
+                        capture_output=True, timeout=5, check=False,
+                    )
+                    if result.returncode:
+                        raise MemoryScopeError("could not terminate the scope launch group")
+                deadline = time.monotonic() + 5
+                while launch_group_present(pid, record["launch_identity"]):
+                    if time.monotonic() >= deadline:
+                        raise MemoryScopeError("scope launch process has not exited")
+                    time.sleep(0.05)
         cgroup = CGROUP_ROOT / "system.slice" / scope_unit(self.run_id)
         try:
             cgroup.stat()
         except FileNotFoundError:
-            self._record_empty()
+            self._record_empty(record)
             return
         except OSError as exc:
             raise MemoryScopeError(f"could not inspect head scope: {exc}") from exc
@@ -318,27 +352,23 @@ class ScopedHeadLifecycle:
                 try:
                     cgroup.stat()
                 except FileNotFoundError:
-                    self._record_empty()
+                    self._record_empty(record)
                     return  # systemd removed the cgroup after its final member left.
                 raise MemoryScopeError(f"head scope {scope_unit(self.run_id)} has no membership evidence")
             except OSError as exc:
                 raise MemoryScopeError(f"could not verify empty head scope {scope_unit(self.run_id)}: {exc}") from exc
             if "populated 0" in fields:
-                self._record_empty()
+                self._record_empty(record)
                 return  # cgroup.events counts descendants, including separate process groups.
             if time.monotonic() >= deadline:
                 raise MemoryScopeError(f"head scope {scope_unit(self.run_id)} still has members")
             time.sleep(0.05)
 
-    def _record_empty(self) -> None:
+    def _record_empty(self, record: dict[str, Any]) -> None:
         if self.directory is None:
             return
-        with self.owner_lock(self.directory):
-            record = json.loads((self.directory / "scope-owner.json").read_text())
-            if record["generation"] != self.generation:
-                raise MemoryScopeError("scope owner changed during cleanup")
-            record["cleanup_complete"] = True
-            self.update_owner(self.directory, record)
+        record["cleanup_complete"] = True
+        self.update_owner(self.directory, record)
 
     def verify_self(self) -> ScopeEvidence:
         """Run before `run.started`; a supervisor outside its configured scope refuses launch."""

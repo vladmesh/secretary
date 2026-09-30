@@ -26,13 +26,14 @@ head a cgroup with `MemoryMax` set before its turn runs. It needs no unit file o
 The launcher registers the scope through the system manager and drops back to the runtime user
 before starting the supervisor. The supervisor still owns the pty, socket, stop sequence and
 `run.exited` journal record. The scope enables group OOM kills while the supervisor alone is
-protected, then the supervisor requires a local `oom_group_kill` event and the head's `SIGKILL`
-at head reap before recording `memory_limit`. This uses the group-kill event captured at the
-head's exit, so later child OOM activity cannot change the head's reason. A child OOM event on
-its own cannot name the head as the victim, and children or threads do not disqualify a group
-kill. The launch writes the scope name to its run directory before starting systemd-run; failed
-starts stop the scope and prove `cgroup.events` reports no members. PO turns keep the same owner
-name beside their turn files, including across service recovery.
+protected. Before recording `memory_limit`, the supervisor requires SIGKILL and a kernel victim
+record naming this head, read from its private /dev/kmsg stream before waitpid releases the PID.
+The fork barrier excludes historical PID records; waitid(WNOWAIT) keeps an exited head's PID
+reserved during delayed observation. A later child OOM names the child, not this head. Operator
+stop and ambiguous evidence remain untyped. See docs/HEAD_SCOPES.md for the producer ordering.
+The launch persists its generation and owner before starting systemd-run. That owner's lock
+covers admission, termination, recursive empty proof and its durable consumer. PO turns keep a
+pointer to this same canonical owner, including across service recovery.
 The scope supplies a resource boundary; it does not
 replace the supervisor's process ownership or exit record.
 
