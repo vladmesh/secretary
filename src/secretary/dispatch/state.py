@@ -829,6 +829,10 @@ class DispatcherRecord:
     # SHA-bound result of the last green mechanical gate.  It is an evidence receipt, not a
     # cache key: release still re-runs the gate immediately before merge.
     gate_attestation: PersistedGateReceipt = field(default_factory=PersistedGateReceipt)
+    # Comment effects are frozen independently of the latest observation receipt. Keyed by
+    # full receipt semantics and delivery context, with original bytes saved before the write.
+    gate_attestation_effects: dict[str, Any] = field(default_factory=dict)
+    gate_attestation_failure: dict[str, Any] = field(default_factory=dict)
     # Consecutive times the gate backend failed to answer at all (secretary-1164), and the last
     # such failure. A transport failure decides nothing about the card, so it is counted here and
     # retried on the next tick; only the exhausted count blocks the card, naming the transport.
@@ -1059,6 +1063,8 @@ class DispatcherRecord:
             "gate_pending_since": self.gate_pending_since,
             "gate_state": self.gate_state,
             "gate_attestation": self.gate_attestation.to_json(),
+            "gate_attestation_effects": copy.deepcopy(self.gate_attestation_effects),
+            "gate_attestation_failure": dict(self.gate_attestation_failure),
             "gate_transport_failures": self.gate_transport_failures,
             "gate_transport_error": self.gate_transport_error,
             "gate_rerun_transport_failures": self.gate_rerun_transport_failures,
@@ -1210,6 +1216,8 @@ class DispatcherRecord:
             gate_state=str(payload.get("gate_state") or ""),
             gate_pending_since=float(payload.get("gate_pending_since") or 0.0),
             gate_attestation=PersistedGateReceipt.from_value(payload.get("gate_attestation")),
+            gate_attestation_effects=copy.deepcopy(payload.get("gate_attestation_effects") or {}),
+            gate_attestation_failure=dict(payload.get("gate_attestation_failure") or {}),
             gate_transport_failures=int(payload.get("gate_transport_failures") or 0),
             gate_transport_error=str(payload.get("gate_transport_error") or ""),
             gate_rerun_transport_failures=int(payload.get("gate_rerun_transport_failures") or 0),
