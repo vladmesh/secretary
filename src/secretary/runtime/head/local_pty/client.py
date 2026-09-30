@@ -32,6 +32,7 @@ from . import protocol
 from .journal import RUN_STARTED, JournalReadResult, read_events
 
 SUPERVISOR_MODULE = "secretary.runtime.head.local_pty.supervisor"
+SCOPE_LAUNCHER_MODULE = "secretary.runtime.head.local_pty.scope_launcher"
 #: How long `spawn_head` waits for the run directory to say the head is up.
 SPAWN_TIMEOUT_SECONDS = 20.0
 _POLL_SECONDS = 0.02
@@ -151,8 +152,9 @@ def spawn_head(
         str(cols),
         "--term",
         term,
-        "--daemonize",
     ]
+    if memory_limit_mib is None:
+        argv.append("--daemonize")
     if cwd:
         argv += ["--cwd", str(cwd)]
     if quiet_seconds is not None:
@@ -167,7 +169,11 @@ def spawn_head(
     log_path = run_dir / protocol.SUPERVISOR_LOG_NAME
     launch_env = _supervisor_environment(env)
     if memory_limit_mib is not None:
-        argv = scope_argv(run_id, memory_limit_mib, argv, pythonpath=launch_env["PYTHONPATH"])
+        scoped = scope_argv(run_id, memory_limit_mib, argv, pythonpath=launch_env["PYTHONPATH"])
+        argv = [
+            sys.executable, "-P", "-m", SCOPE_LAUNCHER_MODULE,
+            str(run_dir), str(log_path), str(timeout), *scoped,
+        ]
     with open(log_path, "ab", buffering=0) as log:
         intermediate = subprocess.Popen(
             argv,
@@ -179,8 +185,8 @@ def spawn_head(
             start_new_session=True,
             close_fds=True,
         )
-    # The intermediate has already forked the supervisor and is on its way out; reaping it here is
-    # what guarantees this process leaves no child behind, whatever it does next.
+    # An unscoped intermediate forks the supervisor; a scoped launcher detaches systemd-run
+    # while its non-daemonizing supervisor stays in the live scope. Reap either intermediary.
     status = intermediate.wait()
     if memory_limit_mib is not None and status != 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace")[-2048:]

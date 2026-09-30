@@ -163,7 +163,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
             message="the over-limit head did not exit",
         )
         exited = handle.events().of_kind(RUN_EXITED)[-1]
-        self.assertEqual(exited.get("signal"), signal.SIGKILL)
+        self.assertEqual(exited.get("signal"), signal.SIGKILL, exited)
         self.assertEqual(exited.get("head_loss_reason"), "memory_limit")
         self.assertTrue(scope_unit(handle.run_id).startswith("secretary-head-"))
 

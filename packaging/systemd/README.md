@@ -32,7 +32,9 @@ steward and deep-sweep ticks) sets `KillMode=process`: the head's supervisor out
 systemd's default control-group kill would SIGTERM it the moment the tick exits. A new one-shot unit
 either sets it too or is listed in `tests/test_board_boot_race.py` as one that launches no head.
 Profile-backed heads enter a unique transient system scope through noninteractive sudo, then return
-to the unit's runtime UID before the supervisor starts. `MemoryMax` is 8192 MiB by default; a
+to the unit's runtime UID before the supervisor starts. The supervisor stays as the scope's
+synchronous command after the dispatcher tick exits, so the memory ceiling remains active for the
+whole head run. `MemoryMax` is 8192 MiB by default; a
 profile can set `memory_limit_mib`, and the shipped high tiers use 12288 MiB. A scope registration
 failure refuses the launch. The supervisor records `head_loss_reason=memory_limit` only when its
 head exits on `SIGKILL` and that scope's `memory.events.local` increments both `max` and `oom_kill`.

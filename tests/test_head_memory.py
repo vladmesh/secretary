@@ -11,9 +11,9 @@ from unittest import mock
 
 from secretary.dispatch import review, wait_vitality
 from secretary.dispatch.head_vitality_episode import VitalityVerdict
-from secretary.runtime.head.local_pty import protocol
+from secretary.runtime.head.local_pty import protocol, scope_launcher
 from secretary.runtime.head.local_pty.client import spawn_head
-from secretary.runtime.head.local_pty.journal import RUN_EXITED, JournalWriter, read_events
+from secretary.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, JournalWriter, read_events
 from secretary.runtime.head.local_pty.supervisor import Supervisor, SupervisorStartupError
 from secretary.runtime.head.memory import (
     DEFAULT_MEMORY_LIMIT_MIB,
@@ -130,10 +130,32 @@ class HeadMemoryTests(unittest.TestCase):
                 handle = spawn_head(root=temp, run_id=run_id, role="worker", task="card:1",
                                     command="true", memory_limit_mib=1)
             argv = popen.call_args.args[0]
+            self.assertIn("secretary.runtime.head.local_pty.scope_launcher", argv)
             self.assertIn("--property=MemoryMax=1048576", argv)
             self.assertEqual(argv[argv.index("--memory-limit-mib") + 1], "1")
             self.assertIn("--reuid=", " ".join(argv))
+            self.assertNotIn("--daemonize", argv)
             self.assertEqual(handle.head_pid, 12)
+
+    def test_scope_launcher_releases_its_caller_only_after_the_scope_starts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            scope = SimpleNamespace(poll=mock.Mock(side_effect=AssertionError("started scope was polled")))
+            started = SimpleNamespace(events=({"kind": RUN_STARTED},))
+            with (
+                mock.patch.object(scope_launcher.subprocess, "Popen", return_value=scope) as popen,
+                mock.patch.object(scope_launcher, "read_events", return_value=started),
+            ):
+                result = scope_launcher.main([temp, str(Path(temp) / "scope.log"), "1", "systemd-run"])
+            self.assertEqual(result, 0)
+            self.assertTrue(popen.call_args.kwargs["start_new_session"])
+            self.assertEqual(popen.call_args.args[0], ["systemd-run"])
+
+    def test_scope_launcher_propagates_registration_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            scope = SimpleNamespace(poll=lambda: 7)
+            with mock.patch.object(scope_launcher.subprocess, "Popen", return_value=scope):
+                result = scope_launcher.main([temp, str(Path(temp) / "scope.log"), "1", "systemd-run"])
+            self.assertEqual(result, 7)
 
     def test_dead_status_admits_typed_journal_reason_for_both_card_roles(self) -> None:
         for kind in ("worker", "review"):
