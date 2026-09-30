@@ -52,7 +52,8 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..command import with_pid_heartbeat
-from ..memory import head_loss_reason, memory_events, own_cgroup, scope_unit
+from ..memory import MemoryScopeError, ScopeEvidence
+from .scoped_lifecycle import ScopedHeadLifecycle
 from . import protocol
 from .journal import (
     DRAIN_REQUESTED,
@@ -220,8 +221,8 @@ class Supervisor:
         self._master = -1
         self._head_pid = 0
         self._head_status: int | None = None
-        self._memory_cgroup: Path | None = None
-        self._memory_events_before: dict[str, int] | None = None
+        self._memory_lifecycle = ScopedHeadLifecycle(run_id, memory_limit_mib) if memory_limit_mib is not None else None
+        self._memory_evidence: ScopeEvidence | None = None
 
         self._output = bytearray()
         self._output_dropped = 0
@@ -486,28 +487,13 @@ class Supervisor:
 
     def _prepare_memory_scope(self) -> None:
         """Refuse a scoped launch until the limit is observable on this supervisor itself."""
-        if self.memory_limit_mib is None:
+        if self._memory_lifecycle is None:
             return
-        cgroup = own_cgroup()
-        expected = str(self.memory_limit_mib * 1024 * 1024)
+        self._memory_evidence = None
         try:
-            actual = (cgroup / "memory.max").read_text(encoding="ascii").strip() if cgroup else ""
-            swap_max = (cgroup / "memory.swap.max").read_text(encoding="ascii").strip() if cgroup else ""
-        except OSError:
-            actual = ""
-            swap_max = ""
-        events = memory_events(cgroup)
-        if (
-            cgroup is None or cgroup.name != scope_unit(self.run_id)
-            or actual != expected or swap_max != "0" or events is None
-        ):
-            raise SupervisorStartupError(
-                "memory_scope_unavailable",
-                f"head scope {scope_unit(self.run_id)} did not materialize "
-                f"MemoryMax={expected} and MemorySwapMax=0",
-            )
-        self._memory_cgroup = cgroup
-        self._memory_events_before = events
+            self._memory_evidence = self._memory_lifecycle.verify_self()
+        except MemoryScopeError as exc:
+            raise SupervisorStartupError("memory_scope_unavailable", str(exc)) from exc
 
     def _abandon_head(self) -> None:
         """End a head this supervisor forked and then failed to take ownership of.
@@ -1191,19 +1177,11 @@ class Supervisor:
             "dropped_bytes": self._output_dropped,
             "stopping": self._stopping,
         }
-        if os.WIFSIGNALED(status):
-            exited["signal"] = os.WTERMSIG(status)
-            exited["exit_code"] = None
+        if self._memory_lifecycle is not None and self._memory_evidence is not None:
+            exited.update(self._memory_lifecycle.exit_fields(status, self._memory_evidence))
         else:
-            exited["signal"] = None
+            exited["signal"] = os.WTERMSIG(status) if os.WIFSIGNALED(status) else None
             exited["exit_code"] = os.WEXITSTATUS(status) if os.WIFEXITED(status) else None
-        loss_reason = head_loss_reason(
-            signal_number=exited["signal"],
-            before=self._memory_events_before,
-            after=memory_events(self._memory_cgroup),
-        )
-        if loss_reason is not None:
-            exited["head_loss_reason"] = loss_reason
         record = self._append(RUN_EXITED, **exited)
         for client in list(self._clients.values()):
             if client.attached:

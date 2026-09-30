@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..memory import scope_argv
+from .scoped_lifecycle import ScopedHeadLifecycle
 from . import protocol
 from .journal import RUN_STARTED, JournalReadResult, read_events
 
@@ -168,12 +168,12 @@ def spawn_head(
         argv += ["--memory-limit-mib", str(memory_limit_mib)]
     log_path = run_dir / protocol.SUPERVISOR_LOG_NAME
     launch_env = _supervisor_environment(env)
-    if memory_limit_mib is not None:
-        scoped = scope_argv(run_id, memory_limit_mib, argv, pythonpath=launch_env["PYTHONPATH"])
-        argv = [
-            sys.executable, "-P", "-m", SCOPE_LAUNCHER_MODULE,
-            str(run_dir), str(log_path), str(timeout), *scoped,
-        ]
+    lifecycle = ScopedHeadLifecycle(run_id, memory_limit_mib) if memory_limit_mib is not None else None
+    if lifecycle is not None:
+        argv = lifecycle.launcher_argv(
+            argv, run_dir=run_dir, log_path=log_path, timeout=timeout,
+            pythonpath=launch_env["PYTHONPATH"],
+        )
     with open(log_path, "ab", buffering=0) as log:
         intermediate = subprocess.Popen(
             argv,
@@ -202,14 +202,15 @@ def spawn_head(
                     str(failure.get("detail") or ""),
                 )
         result = read_events(journal_path)
+        observed = lifecycle.started_or_exited(result.events, already) if lifecycle else None
         started = [event for event in result.events[already:] if event.get("kind") == RUN_STARTED]
+        record = observed[0] if observed else (started[-1] if started else None)
+        exited = observed[1] if observed else False
         if (
-            started
-            and socket_path.exists()
+            record is not None
             and _identity_written(identity_file, run_id)
-            and _answers(socket_path)
+            and (exited or (socket_path.exists() and _answers(socket_path)))
         ):
-            record = started[-1]
             return HeadHandle(
                 run_dir=run_dir,
                 run_id=run_id,

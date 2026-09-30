@@ -4,11 +4,22 @@ from __future__ import annotations
 
 import hashlib
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_MEMORY_LIMIT_MIB = 8192
 MEMORY_LIMIT_REASON = "memory_limit"
 CGROUP_ROOT = Path("/sys/fs/cgroup")
+
+
+class MemoryScopeError(RuntimeError):
+    """A head's own system scope did not materialize its memory ceiling."""
+
+
+@dataclass(frozen=True)
+class ScopeEvidence:
+    cgroup: Path
+    before: dict[str, int]
 
 
 def memory_limit_mib(value: object, profile_id: str) -> int:

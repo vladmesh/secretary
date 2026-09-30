@@ -14,9 +14,11 @@ from secretary.dispatch.head_vitality_episode import VitalityVerdict
 from secretary.runtime.head.local_pty import protocol, scope_launcher
 from secretary.runtime.head.local_pty.client import spawn_head
 from secretary.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, JournalWriter, read_events
+from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from secretary.runtime.head.local_pty.supervisor import Supervisor, SupervisorStartupError
 from secretary.runtime.head.memory import (
     DEFAULT_MEMORY_LIMIT_MIB,
+    ScopeEvidence,
     head_loss_reason,
     memory_events,
     scope_argv,
@@ -60,9 +62,9 @@ class HeadMemoryTests(unittest.TestCase):
             (cgroup / "memory.events.local").write_text("max 0\noom_kill 0\n", encoding="ascii")
             supervisor = Supervisor(run_dir=Path(temp), run_id=run_id, role="worker",
                                     task="card:1", command="true", memory_limit_mib=1)
-            with mock.patch("secretary.runtime.head.local_pty.supervisor.own_cgroup", return_value=cgroup):
+            with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.own_cgroup", return_value=cgroup):
                 supervisor._prepare_memory_scope()
-                self.assertEqual(supervisor._memory_events_before, {"max": 0, "oom_kill": 0})
+                self.assertEqual(supervisor._memory_evidence, ScopeEvidence(cgroup, {"max": 0, "oom_kill": 0}))
                 (cgroup / "memory.max").write_text("2097152\n", encoding="ascii")
                 with self.assertRaisesRegex(SupervisorStartupError, "MemoryMax=1048576"):
                     supervisor._prepare_memory_scope()
@@ -82,21 +84,18 @@ class HeadMemoryTests(unittest.TestCase):
                 run_dir = protocol.run_dir_for(temp, run_id)
                 run_dir.mkdir(parents=True)
                 supervisor = Supervisor(
-                    run_dir=run_dir, run_id=run_id, role=role, task="synthetic", command="true"
+                    run_dir=run_dir, run_id=run_id, role=role, task="synthetic", command="true",
+                    memory_limit_mib=1,
                 )
                 supervisor._head_pid = 12345
                 supervisor._head_status = signal.SIGKILL
-                supervisor._memory_cgroup = Path(temp)
-                supervisor._memory_events_before = {"max": 0, "oom_kill": 0}
+                supervisor._memory_evidence = ScopeEvidence(Path(temp), {"max": 0, "oom_kill": 0})
+                (Path(temp) / "memory.events.local").write_text("max 1\noom_kill 1\n", encoding="ascii")
                 supervisor._journal = JournalWriter(run_dir / "journal.jsonl", run_id).open()
                 try:
                     with (
                         mock.patch.object(supervisor, "_finish_delivery"),
                         mock.patch.object(supervisor, "_flush_progress"),
-                        mock.patch(
-                            "secretary.runtime.head.local_pty.supervisor.memory_events",
-                            return_value={"max": 1, "oom_kill": 1},
-                        ),
                     ):
                         supervisor._finish()
                 finally:
@@ -119,39 +118,40 @@ class HeadMemoryTests(unittest.TestCase):
         },)))
 
     def test_spawn_materializes_scope_before_supervisor_starts(self) -> None:
-        with tempfile.TemporaryDirectory() as temp:
-            run_id = "launch-materialization"
-            run_dir = protocol.run_dir_for(temp, run_id)
-            run_dir.mkdir(parents=True)
-            protocol.socket_path_for(run_dir).touch()
-            started = {"kind": "run.started", "head_pid": 12, "supervisor_pid": 11}
-            fake_process = SimpleNamespace(wait=lambda: 0)
-            with (
-                mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen", return_value=fake_process) as popen,
-                mock.patch("secretary.runtime.head.local_pty.client.read_events", side_effect=[
-                    SimpleNamespace(events=()), SimpleNamespace(events=(started,))
-                ]),
-                mock.patch("secretary.runtime.head.local_pty.client._identity_written", return_value=True),
-                mock.patch("secretary.runtime.head.local_pty.client._answers", return_value=True),
-            ):
-                handle = spawn_head(root=temp, run_id=run_id, role="worker", task="card:1",
-                                    command="true", memory_limit_mib=1)
-            argv = popen.call_args.args[0]
-            self.assertIn("secretary.runtime.head.local_pty.scope_launcher", argv)
-            self.assertIn("--property=MemoryMax=1048576", argv)
-            self.assertIn("--property=MemorySwapMax=0", argv)
-            self.assertEqual(argv[argv.index("--memory-limit-mib") + 1], "1")
-            self.assertIn("--reuid=", " ".join(argv))
-            self.assertNotIn("--daemonize", argv)
-            self.assertEqual(handle.head_pid, 12)
+        for role in ("observer", "worker", "review", "po"):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as temp:
+                run_id = f"launch-materialization-{role}"
+                run_dir = protocol.run_dir_for(temp, run_id)
+                run_dir.mkdir(parents=True)
+                protocol.socket_path_for(run_dir).touch()
+                started = {"kind": "run.started", "head_pid": 12, "supervisor_pid": 11}
+                fake_process = SimpleNamespace(wait=lambda: 0)
+                with (
+                    mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen", return_value=fake_process) as popen,
+                    mock.patch("secretary.runtime.head.local_pty.client.read_events", side_effect=[
+                        SimpleNamespace(events=()), SimpleNamespace(events=(started,))
+                    ]),
+                    mock.patch("secretary.runtime.head.local_pty.client._identity_written", return_value=True),
+                    mock.patch("secretary.runtime.head.local_pty.client._answers", return_value=True),
+                ):
+                    handle = spawn_head(root=temp, run_id=run_id, role=role, task="card:1",
+                                        command="true", memory_limit_mib=1)
+                argv = popen.call_args.args[0]
+                self.assertIn("secretary.runtime.head.local_pty.scope_launcher", argv)
+                self.assertIn("--property=MemoryMax=1048576", argv)
+                self.assertIn("--property=MemorySwapMax=0", argv)
+                self.assertEqual(argv[argv.index("--memory-limit-mib") + 1], "1")
+                self.assertIn("--reuid=", " ".join(argv))
+                self.assertNotIn("--daemonize", argv)
+                self.assertEqual(handle.head_pid, 12)
 
     def test_scope_launcher_releases_its_caller_only_after_the_scope_starts(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             scope = SimpleNamespace(poll=mock.Mock(side_effect=AssertionError("started scope was polled")))
             started = SimpleNamespace(events=({"kind": RUN_STARTED},))
             with (
-                mock.patch.object(scope_launcher.subprocess, "Popen", return_value=scope) as popen,
-                mock.patch.object(scope_launcher, "read_events", return_value=started),
+                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen", return_value=scope) as popen,
+                mock.patch("secretary.runtime.head.local_pty.journal.read_events", return_value=started),
             ):
                 result = scope_launcher.main([temp, str(Path(temp) / "scope.log"), "1", "systemd-run"])
             self.assertEqual(result, 0)
@@ -161,9 +161,27 @@ class HeadMemoryTests(unittest.TestCase):
     def test_scope_launcher_propagates_registration_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             scope = SimpleNamespace(poll=lambda: 7)
-            with mock.patch.object(scope_launcher.subprocess, "Popen", return_value=scope):
+            with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen", return_value=scope):
                 result = scope_launcher.main([temp, str(Path(temp) / "scope.log"), "1", "systemd-run"])
             self.assertEqual(result, 7)
+
+    def test_immediate_scoped_exit_returns_durable_head_handle(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run_id = "immediate-exit"
+            started = {"kind": RUN_STARTED, "seq": 1, "head_pid": 12, "supervisor_pid": 11}
+            exited = {"kind": RUN_EXITED, "seq": 2, "head_pid": 12, "exit_code": 7}
+            with (
+                mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen", return_value=SimpleNamespace(wait=lambda: 0)),
+                mock.patch("secretary.runtime.head.local_pty.client.read_events", side_effect=[
+                    SimpleNamespace(events=()), SimpleNamespace(events=(started, exited)),
+                ]),
+                mock.patch("secretary.runtime.head.local_pty.client._identity_written", return_value=True),
+                mock.patch("secretary.runtime.head.local_pty.client._answers", side_effect=AssertionError("dead socket probed")),
+            ):
+                handle = spawn_head(root=temp, run_id=run_id, role="worker", task="card:1",
+                                    command="exit 7", memory_limit_mib=1)
+            self.assertEqual(handle.head_pid, 12)
+            self.assertEqual(ScopedHeadLifecycle.started_or_exited((started, exited), 0), (started, True))
 
     def test_dead_status_admits_typed_journal_reason_for_both_card_roles(self) -> None:
         for kind in ("worker", "review"):
