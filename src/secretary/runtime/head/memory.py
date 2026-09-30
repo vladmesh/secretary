@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -88,16 +89,50 @@ def supervisor_oom_protected() -> bool:
         return False
 
 
-def head_loss_reason(
-    *, signal_number: int | None, before: dict[str, int] | None, after: dict[str, int] | None,
-    group_kill_at_head_exit: bool = False,
-) -> str | None:
-    """Attribute OOM only when the group kill was observed at the head's exit."""
-    if (
-        signal_number == 9 and group_kill_at_head_exit and before is not None and after is not None
-        and after.get("max", 0) > before.get("max", 0)
-        and after.get("oom_kill", 0) > before.get("oom_kill", 0)
-        and after.get("oom_group_kill", 0) > before.get("oom_group_kill", 0)
-    ):
-        return MEMORY_LIMIT_REASON
+OOM_STREAM_ENV = "SECRETARY_OOM_STREAM_FD"
+
+
+def open_oom_stream() -> int:
+    """Bootstrap opens the kernel producer before fork, with no historical records.
+
+    Only the trusted supervisor receives this read-only descriptor. It is closed in the
+    head child before exec. Failure is a launch refusal, not a silently unobservable OOM.
+    """
+    fd = os.open("/dev/kmsg", os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        os.lseek(fd, 0, os.SEEK_END)
+        os.set_inheritable(fd, True)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def read_oom_victim(fd: int, head_pid: int) -> dict[str, int] | None:
+    """Consume kernel kill records while waitid(WNOWAIT) reserves this child's PID.
+
+    Linux prints this record under the victim's task lock after sending the OOM kill
+    and before exit_mm can finish. Consequently it is already readable at waitid exit,
+    even after delayed supervision. A later child OOM names the child, never this zombie.
+    Counter growth, victim selection summaries and oom_reaper records are not evidence.
+    Overflow or an unreadable stream invalidates the entire observation.
+    """
+    victim = None
+    for _ in range(16384):  # bounded even if the kernel is continuously logging
+        try:
+            record = os.read(fd, 8192).decode("utf-8", errors="replace")
+        except BlockingIOError:
+            return victim
+        except OSError:
+            return None
+        header, separator, message = record.partition(";")
+        match = re.match(r"Memory cgroup out of memory: Killed process (\d+) ", message)
+        if separator and match and int(match[1]) == head_pid:
+            try:
+                priority, sequence, timestamp, *_ = header.split(",")
+                if int(priority) >= 8:  # userspace kmsg injection has a non-kernel facility
+                    continue
+                victim = {"pid": head_pid, "kernel_seq": int(sequence), "kernel_usec": int(timestamp)}
+            except ValueError:
+                return None
     return None

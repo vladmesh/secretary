@@ -10,7 +10,7 @@ import os
 import sys
 from pathlib import Path
 
-from ..memory import own_cgroup
+from ..memory import OOM_STREAM_ENV, open_oom_stream, own_cgroup
 
 
 def install_oom_contract(cgroup: Path, protection: Path = Path("/proc/self/oom_score_adj")) -> None:
@@ -26,6 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     if cgroup is None or not cgroup.name.startswith("secretary-head-"):
         raise RuntimeError("scope bootstrap is outside a secretary head scope")
     install_oom_contract(cgroup)
+    os.environ[OOM_STREAM_ENV] = str(open_oom_stream())
     os.execvp("setpriv", ["setpriv", *privileges, *command])
     return 127
 

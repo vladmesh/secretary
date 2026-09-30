@@ -53,7 +53,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..command import with_pid_heartbeat
-from ..memory import MemoryScopeError, ScopeEvidence, memory_events
+from ..memory import MemoryScopeError, ScopeEvidence, OOM_STREAM_ENV, read_oom_victim
 from .scoped_lifecycle import ScopedHeadLifecycle
 from . import protocol
 from .journal import (
@@ -224,7 +224,8 @@ class Supervisor:
         self._head_status: int | None = None
         self._memory_lifecycle = ScopedHeadLifecycle(run_id, memory_limit_mib) if memory_limit_mib is not None else None
         self._memory_evidence: ScopeEvidence | None = None
-        self._events_at_head_exit: dict[str, int] | None = None
+        self._oom_victim: dict[str, int] | None = None
+        self._oom_stream = -1
 
         self._output = bytearray()
         self._output_dropped = 0
@@ -359,11 +360,21 @@ class Supervisor:
         master, slave = pty.openpty()
         self._prepare_terminal(slave)
         ready_read, ready_write = os.pipe2(os.O_CLOEXEC) if self._memory_lifecycle is not None else (-1, -1)
+        go_read, go_write = os.pipe2(os.O_CLOEXEC) if self._memory_lifecycle is not None else (-1, -1)
         pid = os.fork()
         if pid == 0:  # pragma: no cover - the child never returns to the test process
             try:
                 if self._memory_lifecycle is not None:
+                    os.close(self._oom_stream)
+                    environment.pop(OOM_STREAM_ENV, None)
                     os.close(ready_read)
+                    os.close(go_write)
+                    # Reserve the new PID while still OOM-protected. The parent drops
+                    # earlier kernel records before allowing this incarnation to execute.
+                    os.write(ready_write, b"R")
+                    if os.read(go_read, 1) != b"1":
+                        os._exit(127)
+                    os.close(go_read)
                     # The scope bootstrap protected only the supervisor. Every head descendant
                     # inherits this ordinary score and is included in a group OOM kill.
                     Path("/proc/self/oom_score_adj").write_text("0\n", encoding="ascii")
@@ -389,7 +400,13 @@ class Supervisor:
         os.set_inheritable(master, False)
         if ready_read >= 0:
             os.close(ready_write)
+            os.close(go_read)
             try:
+                readable, _, _ = select.select([ready_read], [], [], 5.0)
+                if not readable or os.read(ready_read, 1) != b"R":
+                    raise SupervisorStartupError("memory_scope_unavailable", "head launch barrier failed")
+                os.lseek(self._oom_stream, 0, os.SEEK_END)
+                os.write(go_write, b"1")
                 readable, _, _ = select.select([ready_read], [], [], 5.0)
                 if not readable or os.read(ready_read, 1) != b"1":
                     raise SupervisorStartupError(
@@ -397,6 +414,7 @@ class Supervisor:
                     )
             finally:
                 os.close(ready_read)
+                os.close(go_write)
         return pid
 
     def _prepare_terminal(self, slave: int) -> None:
@@ -515,6 +533,12 @@ class Supervisor:
         self._memory_evidence = None
         try:
             self._memory_evidence = self._memory_lifecycle.verify_self()
+            try:
+                self._oom_stream = int(os.environ.pop(OOM_STREAM_ENV))
+                os.fstat(self._oom_stream)
+                os.set_inheritable(self._oom_stream, False)
+            except (KeyError, ValueError, OSError) as exc:
+                raise MemoryScopeError("kernel OOM victim stream is unavailable") from exc
         except MemoryScopeError as exc:
             raise SupervisorStartupError("memory_scope_unavailable", str(exc)) from exc
 
@@ -600,14 +624,17 @@ class Supervisor:
         if self._head_pid <= 0 or self._head_status is not None:
             return
         try:
+            if self._memory_evidence is not None:
+                exited = os.waitid(os.P_PID, self._head_pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                if exited is None:
+                    return
+                # Reserve the zombie's PID until the kernel kill evidence is consumed.
+                self._oom_victim = read_oom_victim(self._oom_stream, self._head_pid)
             pid, status = os.waitpid(self._head_pid, os.WNOHANG)
         except ChildProcessError:
             self._head_status = 0
             return
         if pid == self._head_pid:
-            if self._memory_evidence is not None:
-                # Snapshot at reap, before descendants can later change the scope counters.
-                self._events_at_head_exit = memory_events(self._memory_evidence.cgroup)
             self._head_status = status
 
     # -- the head's pty --------------------------------------------------------------------
@@ -1206,7 +1233,7 @@ class Supervisor:
         if self._memory_lifecycle is not None and self._memory_evidence is not None:
             exited.update(self._memory_lifecycle.exit_fields(
                 status, self._memory_evidence, stopping=self._stopping,
-                events_at_head_exit=self._events_at_head_exit,
+                oom_victim=self._oom_victim,
             ))
         else:
             exited["signal"] = os.WTERMSIG(status) if os.WIFSIGNALED(status) else None
@@ -1227,6 +1254,9 @@ class Supervisor:
 
     def _shutdown(self) -> None:
         """Let go of everything, in the order that leaves nothing addressable behind."""
+        if self._oom_stream >= 0:
+            os.close(self._oom_stream)
+            self._oom_stream = -1
         if self._listener is not None:
             try:
                 self._selector.unregister(self._listener)

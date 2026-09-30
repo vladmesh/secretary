@@ -73,6 +73,9 @@ from tests.fakes.upgrade import FakeUnitInstaller
 from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, eventually, unscoped_test_launch
 from tests.po_fake_store import FakeBoard, FakePoStore, FakeSprints
 from tests.web_fakes import Recording
+from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+from secretary.runtime.head.local_pty.client import LocalPtySpawnError
+from secretary.runtime.head.memory import MemoryScopeError
 
 ROOT = Path(__file__).resolve().parents[1]
 MODELS = {"claude": ("opus",), "codex": ("gpt-5.6-sol",)}
@@ -988,6 +991,114 @@ class KeptRequestIdTests(ServiceFixture):
 class RecoveryProgressTests(ServiceFixture):
     """Review 5: recovery is complete only when no `running` row is left without a process."""
 
+    def test_new_cleanup_incomplete_launch_recovers_without_restart_and_other_session_continues(self) -> None:
+        service = self.service()
+        session_id = self.session(service)
+        other = self.session(service, request_id="other-session")
+        original = service.runner._turn_launcher
+        failed = []
+        def launch(session, seq, *args):
+            if session.session_id == session_id and not failed:
+                failed.append(seq)
+                directory = service.runner._scope_dir(session_id, seq)
+                directory.mkdir(parents=True)
+                ScopedHeadLifecycle("new-orphan", 96).persist(directory)
+                raise LocalPtySpawnError("cleanup_failed", "scope still populated", cleanup_complete=False)
+            return original(session, seq, *args)
+        service.runner._turn_launcher = launch
+        clean = threading.Event()
+        attempts = []
+        def cleanup(owner):
+            attempts.append(owner.run_id)
+            if not clean.is_set():
+                raise MemoryScopeError("temporary cleanup failure")
+        with mock.patch.object(ScopedHeadLifecycle, "stop_and_prove_empty", cleanup):
+            self.assertTrue(service._recovered)
+            service.submit(session_id=session_id, text="first", request_id="first")
+            service.submit(session_id=session_id, text="second", request_id="second")
+            self.assertFalse(service._recovered)
+            self.assertEqual(self.turns(session_id)[0].state, po_store.RUNNING)
+            self.assertEqual(self.queued(), ["second"])
+            service.submit(session_id=other, text="independent", request_id="independent")
+            self.assertEqual(self.settled(other, 1).state, po_store.COMPLETED)
+            eventually(lambda: bool(attempts), "steady-state recovery did not retry cleanup")
+            clean.set()
+            self.assertEqual(self.settled(session_id, 1).state, po_store.FAILED)
+            self.assertEqual(self.settled(session_id, 2).state, po_store.COMPLETED)
+        self.assertEqual(failed, [1])
+        self.assertEqual(self.queued(), [])
+
+    def test_waiter_start_failure_rearms_recovery_after_startup(self) -> None:
+        service = self.service()
+        session_id = self.session(service)
+        original = service.runner._turn_launcher
+        processes = []
+        def launch(session, seq, *args):
+            process = original(session, seq, *args)
+            if seq == 1:
+                processes.append(process)
+                directory = service.runner._scope_dir(session_id, seq)
+                directory.mkdir()
+                ScopedHeadLifecycle("waiter-orphan", 96).persist(directory)
+            return process
+        service.runner._turn_launcher = launch
+        clean = threading.Event()
+        def cleanup(_owner):
+            if not clean.is_set():
+                raise MemoryScopeError("temporary cleanup failure")
+            for process in processes:
+                po_runner._kill_group(process.pid)
+        with mock.patch.object(ScopedHeadLifecycle, "stop_and_prove_empty", cleanup):
+            with mock.patch("secretary.po.runner.threading.Thread.start", side_effect=RuntimeError("waiter refused")):
+                service.submit(session_id=session_id, text="GATE waiter", request_id="waiter")
+            self.assertFalse(service._recovered)
+            self.assertEqual(self.turns(session_id)[0].state, po_store.RUNNING)
+            service.submit(session_id=session_id, text="after waiter", request_id="after-waiter")
+            self.assertEqual(self.queued(), ["after waiter"])
+            clean.set()
+            self.assertEqual(self.settled(session_id, 1).state, po_store.FAILED)
+            self.assertEqual(self.settled(session_id, 2).state, po_store.COMPLETED)
+            for process in processes:
+                process.wait(timeout=5)
+
+    def test_completion_and_owner_stop_cleanup_failures_keep_their_outcome_until_recovery(self) -> None:
+        for action in ("completion", "stop"):
+            with self.subTest(action=action):
+                service = self.service()
+                session_id = self.session(service, request_id=f"session-{action}")
+                original = service.runner._turn_launcher
+                processes = []
+                def launch(session, seq, *args):
+                    process = original(session, seq, *args)
+                    if seq == 1:
+                        processes.append(process)
+                        directory = service.runner._scope_dir(session_id, seq)
+                        directory.mkdir()
+                        ScopedHeadLifecycle(f"pending-{action}", 96).persist(directory)
+                    return process
+                service.runner._turn_launcher = launch
+                clean = threading.Event()
+                attempted = threading.Event()
+                def cleanup(_owner):
+                    attempted.set()
+                    if not clean.is_set():
+                        raise MemoryScopeError("temporary cleanup failure")
+                    for process in processes:
+                        po_runner._kill_group(process.pid)
+                with mock.patch.object(ScopedHeadLifecycle, "stop_and_prove_empty", cleanup):
+                    text = "complete" if action == "completion" else "GATE stop"
+                    service.submit(session_id=session_id, text=text, request_id=f"input-{action}")
+                    if action == "stop":
+                        with self.assertRaises(MemoryScopeError):
+                            service.stop_turn(session_id=session_id, seq=1)
+                    eventually(attempted.is_set, "cleanup was not attempted")
+                    eventually(lambda: not service._recovered, "cleanup failure did not schedule recovery")
+                    service.submit(session_id=session_id, text="next", request_id=f"next-{action}")
+                    self.assertEqual(self.turns(session_id)[0].state, po_store.RUNNING)
+                    clean.set()
+                    expected = po_store.COMPLETED if action == "completion" else po_store.INTERRUPTED
+                    self.assertEqual(self.settled(session_id, 1).state, expected)
+                    self.assertEqual(self.settled(session_id, 2).state, po_store.COMPLETED)
     def interrupted(self, *, queued: str = "waiting") -> str:
         first = self.service(run=False)
         session_id = self.session(first)

@@ -171,9 +171,20 @@ def spawn_head(
         argv += ["--memory-limit-mib", str(memory_limit_mib)]
     log_path = run_dir / protocol.SUPERVISOR_LOG_NAME
     launch_env = _supervisor_environment(env)
-    lifecycle = ScopedHeadLifecycle(run_id, memory_limit_mib, owner_unit) if memory_limit_mib is not None else None
+    lifecycle = ScopedHeadLifecycle(run_id, memory_limit_mib, owner_unit, run_dir) if memory_limit_mib is not None else None
     if lifecycle is not None:
-        lifecycle.persist(run_dir)
+        try:
+            previous = ScopedHeadLifecycle.from_run_dir(run_dir)
+            if previous is not None:
+                previous.stop_and_prove_empty()
+            lifecycle.persist(run_dir, role=role, task=task, workspace=str(cwd))
+            descriptor = os.open(run_dir.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except MemoryScopeError as exc:
+            raise LocalPtySpawnError("cleanup_failed", str(exc), cleanup_complete=False) from exc
         argv = lifecycle.launcher_argv(
             argv, run_dir=run_dir, log_path=log_path, timeout=timeout,
             pythonpath=launch_env["PYTHONPATH"],

@@ -2538,10 +2538,9 @@ class CommandHostRuntime:
         run has no head to stop: a bring-up that never got as far as a durable run raised nothing.
         """
         for run, role in ((_durable_head_run(run), role) for run, role in runs):
-            if run is None or run.settled:
-                # A settled run's own stop already ran and was committed, so its run directory may
-                # be gone; asking a supervisor that no longer exists would only wait out the
-                # confirmation bound to learn what the record already says.
+            if run is None:
+                # Head exit and scope cleanup are separate. Even a settled HeadRun can
+                # still have a durable scope owner that must be checked before removal.
                 continue
             receipt = self.head_runtime_for(run).stop(
                 run,

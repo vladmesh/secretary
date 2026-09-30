@@ -58,6 +58,7 @@ from secretary.runtime.head.local_pty.journal import (
     read_tail,
 )
 from secretary.runtime.head.memory import scope_unit
+from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 
 REPO = Path(__file__).resolve().parents[1]
 CHILD = REPO / "tests" / "fixtures" / "local_pty_child.py"
@@ -129,6 +130,9 @@ class LocalPtySubstrateTests(unittest.TestCase):
 
     def _reap_everything(self) -> None:
         for handle in self._started:
+            owner = ScopedHeadLifecycle.from_run_dir(handle.run_dir)
+            if owner is not None:
+                owner.stop_and_prove_empty()
             _kill(handle.head_pid, group=True)
             _kill(handle.head_pid)
             _kill(handle.supervisor_pid)

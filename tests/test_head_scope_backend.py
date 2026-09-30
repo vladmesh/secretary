@@ -1,0 +1,209 @@
+"""Required CI evidence from disposable system scopes, never installation heads."""
+
+from __future__ import annotations
+
+import os
+import shlex
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import uuid
+from pathlib import Path
+from unittest import mock
+
+from secretary.runtime.head.local_pty.client import LocalPtySpawnError, spawn_head
+from secretary.runtime.head.local_pty.journal import RUN_EXITED
+from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+from secretary.runtime.head.memory import MemoryScopeError, scope_unit
+from secretary.runtime.head.run import HeadRun, StopInitiator
+from secretary.runtime.head.spec import HeadSpec
+from secretary.runtime.head.task_ref import TaskRef
+from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
+from secretary.dispatch.watchdog import head_process_status
+from secretary.po import store as po_store
+from secretary.po.runner import PoRunner
+from secretary.po.service import PoService
+from tests.po_cli_fakes import FAKE_CLAUDE, eventually
+from tests.po_fake_store import FakeBoard, FakePoStore
+
+
+def await_fact(predicate, message: str, seconds: float = 15) -> None:
+    deadline = time.monotonic() + seconds
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError(message)
+        time.sleep(0.05)
+
+
+@unittest.skipUnless(os.environ.get("GITHUB_ACTIONS") == "true", "real scope evidence is required in CI")
+class ScopeBackendTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="scope-ci-")))
+
+    def start(self, program: str):
+        run_id = "ci-" + uuid.uuid4().hex[:16]
+        directory = self.root / run_id
+        def cleanup():
+            owner = ScopedHeadLifecycle.from_run_dir(directory)
+            if owner is not None:
+                owner.stop_and_prove_empty()
+        # Register cleanup before even attempting launch. Missing systemd, cgroup v2,
+        # sudo or kernel victim records fail this required job instead of skipping it.
+        self.addCleanup(cleanup)
+        return spawn_head(root=self.root, run_id=run_id, role="worker", task="ci:owned-fixture",
+                          command=shlex.join([sys.executable, "-u", "-c", program]),
+                          memory_limit_mib=96)
+
+    def test_detached_descendant_stop_failure_retains_owner_and_real_retry_empties_scope(self) -> None:
+        child_file = self.root / "detached.pid"
+        handle = self.start(
+            "import subprocess,sys,time,pathlib; "
+            "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],start_new_session=True); "
+            f"pathlib.Path({str(child_file)!r}).write_text(str(p.pid));time.sleep(30)"
+        )
+        await_fact(child_file.exists, "detached child was not created")
+        child = int(child_file.read_text())
+        self.assertNotEqual(os.getpgid(child), os.getpgid(handle.head_pid))
+        run = HeadRun(run_id=handle.run_id, spec=HeadSpec.from_profile("fixture", {"adapter": "codex"}),
+                      workspace=str(self.root), task_ref=TaskRef.card("ci:owned-fixture"), role="worker",
+                      pid_file=str(handle.pid_file))
+        runtime = LocalPtyHeadRuntime(self.root, head_process_status=head_process_status, stop_timeout=3)
+        real_run = subprocess.run
+        def refuse_stop(argv, **kwargs):
+            if argv[:4] == ["sudo", "-n", "systemctl", "stop"]:
+                return subprocess.CompletedProcess(argv, 1, stderr=b"injected transient stop failure")
+            return real_run(argv, **kwargs)
+        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=refuse_stop):
+            self.assertFalse(runtime.stop(run, StopInitiator(actor="ci-owner"), signal_name="KILL").ok)
+        os.kill(child, 0)
+        owner = ScopedHeadLifecycle.from_run_dir(handle.run_dir)
+        self.assertIsNotNone(owner)
+        self.assertTrue(runtime.stop(run, StopInitiator(actor="ci-owner"), signal_name="KILL").ok)
+        cgroup = Path("/sys/fs/cgroup/system.slice") / scope_unit(handle.run_id)
+        self.assertTrue(not cgroup.exists() or "populated 0" in (cgroup / "cgroup.events").read_text().splitlines())
+
+    def test_head_sigkill_then_child_group_oom_before_any_supervisor_observation_is_untyped(self) -> None:
+        ready, pressure = self.root / "ready", self.root / "pressure"
+        program = f'''import os,pathlib,time
+pid=os.fork()
+if pid:
+    pathlib.Path({str(ready)!r}).write_text(str(pid))
+    time.sleep(30)
+else:
+    os.setsid()
+    deadline=time.monotonic()+15
+    while not pathlib.Path({str(pressure)!r}).exists() and time.monotonic()<deadline:
+        time.sleep(.02)
+    data=bytearray(192*1024*1024)
+    data[::4096]=b'x'*(len(data)//4096)
+    time.sleep(5)
+'''
+        handle = self.start(program)
+        await_fact(ready.exists, "child pressure fixture was not ready")
+        os.kill(handle.supervisor_pid, signal.SIGSTOP)
+        await_fact(lambda: Path(f"/proc/{handle.supervisor_pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "T",
+                   "supervisor observation was not paused")
+        os.kill(handle.head_pid, signal.SIGKILL)
+        await_fact(lambda: Path(f"/proc/{handle.head_pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z",
+                   "unrelated head SIGKILL was not complete")
+        pressure.touch()
+        cgroup = Path("/sys/fs/cgroup/system.slice") / scope_unit(handle.run_id)
+        await_fact(lambda: int(dict(line.split() for line in (cgroup / "memory.events.local").read_text().splitlines())["oom_group_kill"]) > 0,
+                   "surviving child did not cause a real group OOM")
+        self.assertFalse(handle.events().of_kind(RUN_EXITED))
+        os.kill(handle.supervisor_pid, signal.SIGCONT)
+        await_fact(lambda: bool(handle.events().of_kind(RUN_EXITED)), "delayed supervisor did not journal exit")
+        exited = handle.events().of_kind(RUN_EXITED)[-1]
+        self.assertEqual(exited["signal"], signal.SIGKILL)
+        self.assertNotIn("head_loss_reason", exited)
+
+
+@unittest.skipUnless(os.environ.get("GITHUB_ACTIONS") == "true", "real PO scope recovery is required in CI")
+class PoScopeBackendTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory(prefix="po-scope-ci-")))
+        self.data = self.root / "data"
+        executable = self.root / "claude-fixture"
+        executable.write_text(FAKE_CLAUDE)
+        executable.chmod(0o700)
+        self.store = FakePoStore(FakeBoard())
+        self.runner = PoRunner(
+            self.store, self.data, executables={"claude": str(executable)},
+            env={**os.environ, "FAKE_LOG": str(self.root / "fake.log")}, scope_owner_unit="",
+        )
+        self.runner.workspace.mkdir(parents=True)
+        self.service = PoService(self.runner, data_dir=self.data, models={"claude": ("opus",)})
+        self.service.start()
+        thread = threading.Thread(target=self.service.run, kwargs={"tick": .05, "say": lambda _: None})
+        thread.start()
+        self.addCleanup(self.cleanup_scopes)
+        self.addCleanup(thread.join, 10)
+        self.addCleanup(self.service.stop)
+
+    def cleanup_scopes(self) -> None:
+        for directory in (self.data / "po-heads").glob("*"):
+            owner = ScopedHeadLifecycle.from_run_dir(directory)
+            if owner is not None:
+                owner.stop_and_prove_empty()
+        with self.runner._lock:
+            waiters = list(self.runner._live.values())
+        for live in waiters:
+            live.thread.join(5)
+
+    def session(self, request_id: str) -> str:
+        return self.service.create_session(cli="claude", model="opus", effort="high", request_id=request_id)["session_id"]
+
+    def settled(self, session_id: str, seq: int):
+        await_fact(lambda: self.store.turn(session_id, seq).state != po_store.RUNNING, "scoped turn did not settle")
+        return self.store.turn(session_id, seq)
+
+    def test_new_orphan_retries_real_scope_cleanup_and_releases_session_without_restart(self) -> None:
+        service = self.service
+        session_id = self.session("scope-session")
+        other = self.session("other-scope-session")
+        original_cleanup = ScopedHeadLifecycle.stop_and_prove_empty
+        released = False
+        failed_runs = []
+        attempts = []
+        child_file = self.root / "po-detached.pid"
+        def stop(owner):
+            if owner.run_id in failed_runs and not released:
+                attempts.append(owner.run_id)
+                raise MemoryScopeError("injected transient cleanup failure")
+            original_cleanup(owner)
+        def launch(session, seq, argv, files, environment, _spec):
+            spec = HeadSpec.from_profile("ci-po", {"adapter": session.cli, "memory_limit_mib": 96})
+            if session.session_id == session_id and not failed_runs:
+                wrapper = (
+                    "import subprocess,sys,os,pathlib; "
+                    "p=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'], "
+                    "start_new_session=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
+                    f"pathlib.Path({str(child_file)!r}).write_text(str(p.pid)); "
+                    "os.execvp(sys.argv[1],sys.argv[1:])"
+                )
+                argv = [sys.executable, "-c", wrapper, *argv]
+            process = service.runner._scoped_launch(session, seq, argv, files, environment, spec)
+            if session.session_id == session_id and not failed_runs:
+                failed_runs.append(process.handle.run_id)
+                raise LocalPtySpawnError("cleanup_failed", "fixture launch lost its waiter", cleanup_complete=False)
+            return process
+        service.runner._turn_launcher = launch
+        with mock.patch.object(ScopedHeadLifecycle, "stop_and_prove_empty", stop):
+            service.submit(session_id=session_id, text="GATE orphan", request_id="scope-orphan")
+            service.submit(session_id=session_id, text="after cleanup", request_id="scope-after")
+            self.assertEqual(self.store.turn(session_id, 1).state, po_store.RUNNING)
+            service.submit(session_id=other, text="independent", request_id="scope-independent")
+            self.assertEqual(self.settled(other, 1).state, po_store.COMPLETED)
+            eventually(lambda: bool(attempts), "new orphan was not automatically revisited")
+            await_fact(child_file.exists, "PO detached child was not created")
+            os.kill(int(child_file.read_text()), 0)
+            released = True
+            self.assertEqual(self.settled(session_id, 1).state, po_store.FAILED)
+            self.assertEqual(self.settled(session_id, 2).state, po_store.COMPLETED)
+        self.assertFalse(service.runner.orphaned_turns())
+        cgroup = Path("/sys/fs/cgroup/system.slice") / scope_unit(failed_runs[0])
+        self.assertTrue(not cgroup.exists() or "populated 0" in (cgroup / "cgroup.events").read_text().splitlines())

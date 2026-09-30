@@ -37,8 +37,10 @@ synchronous command after the dispatcher tick exits, so the memory ceiling remai
 whole head run. `MemoryMax` is 8192 MiB by default; `MemorySwapMax=0` keeps swapping from
 evading that per-head ceiling. A
 profile can set `memory_limit_mib`, and the shipped high tiers use 12288 MiB. A scope registration
-failure refuses the launch. The supervisor records `head_loss_reason=memory_limit` only when its
-head exits on `SIGKILL` and that scope's `memory.events.local` increments both `max` and `oom_kill`.
+failure refuses the launch. The supervisor records `head_loss_reason=memory_limit` only from a
+kernel OOM kill record naming its reserved head PID, together with SIGKILL and no operator stop.
+The durable owner must prove recursive scope membership empty before stop or settlement succeeds.
+See [Head scopes](../../docs/HEAD_SCOPES.md) for launch, cleanup, causal evidence and upgrade boundaries.
 `secretary-instance-maintenance.timer` fires daily (`Persistent=true`) a one-shot
 `secretary instance-maintenance` at idle CPU and I/O priority: Git's own `gc --auto` heuristic run
 outside any tick, because the lifecycle sets `gc.auto=0` in the instance repository so that no

@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import fcntl
 import os
+import signal
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
-from dataclasses import dataclass
+import uuid
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, field
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +20,7 @@ from ..memory import (
     CGROUP_ROOT,
     MemoryScopeError,
     ScopeEvidence,
-    head_loss_reason,
+    MEMORY_LIMIT_REASON,
     memory_events,
     own_cgroup,
     scope_argv,
@@ -25,28 +29,67 @@ from ..memory import (
 )
 
 
-@dataclass(frozen=True)
+def launch_identity(pid: int) -> str | None:
+    try:
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    except FileNotFoundError:
+        return None
+    except (OSError, IndexError) as exc:
+        raise MemoryScopeError(f"could not inspect scope launcher {pid}: {exc}") from exc
+    return None if fields[0] in ("Z", "X") else f"{boot}:{fields[19]}"
+
+
+def launch_group_present(pid: int, identity: str) -> bool:
+    """The launch group cannot be reused without a new leader of its PGID.
+
+    When the leader has died, surviving group members still hold its group number.
+    A reboot or a new leader proves that original group ended. Inspect every member
+    because a dead leader does not prove its sudo/systemd-run descendants ended.
+    """
+    boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    if not identity.startswith(boot + ":"):
+        return False
+    try:
+        leader = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    except FileNotFoundError:
+        leader = None
+    if leader is not None and identity != f"{boot}:{leader[19]}":
+        return False
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+        except FileNotFoundError:
+            continue
+        if fields[2] == str(pid) and fields[0] not in ("Z", "X"):
+            return True
+    return False
+
+
+@dataclass
 class ScopedHeadLifecycle:
     """The scoped head's launch, cgroup proof, and exit classification across processes."""
 
     run_id: str
     limit_mib: int
     owner_unit: str = ""
+    directory: Path | None = None
+    generation: str = field(default_factory=lambda: uuid.uuid4().hex)
 
-    def persist(self, run_dir: Path) -> None:
+    def persist(self, run_dir: Path, *, role: str = "", task: str = "", workspace: str = "") -> None:
         """Leave the scope name on disk before any process can create the unit."""
-        path = run_dir / "scope-owner.json"
-        temporary = path.with_suffix(".tmp")
-        with temporary.open("w", encoding="utf-8") as stream:
-            json.dump({"run_id": self.run_id, "unit": scope_unit(self.run_id)}, stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-        temporary.replace(path)
-        descriptor = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        with self.owner_lock(run_dir):
+            path = run_dir / "scope-owner.json"
+            if path.exists() and not json.loads(path.read_text()).get("cleanup_complete"):
+                raise MemoryScopeError("an unsettled scope owner cannot be replaced")
+            self.update_owner(run_dir, {
+                "run_id": self.run_id, "unit": scope_unit(self.run_id),
+                "generation": self.generation, "launch_allowed": True, "cleanup_complete": False,
+                "role": role, "task": task, "workspace": workspace,
+            })
+        self.directory = run_dir
 
     @staticmethod
     def from_run_dir(run_dir: Path) -> ScopedHeadLifecycle | None:
@@ -62,7 +105,36 @@ class ScopedHeadLifecycle:
                 raise ValueError("invalid scope identity")
         except (KeyError, TypeError, ValueError) as exc:
             raise MemoryScopeError(f"invalid scope owner in {run_dir}: {exc}") from exc
-        return ScopedHeadLifecycle(run_id, 1)
+        if not isinstance(record.get("generation"), str) or not record["generation"]:
+            raise MemoryScopeError("scope owner has no launch generation")
+        if type(record.get("launch_allowed")) is not bool or type(record.get("cleanup_complete")) is not bool:
+            raise MemoryScopeError("scope owner has invalid launch or cleanup state")
+        return ScopedHeadLifecycle(run_id, 1, directory=run_dir, generation=record["generation"])
+
+    @staticmethod
+    @contextmanager
+    def owner_lock(run_dir: Path) -> Iterator[None]:
+        with (run_dir / "scope-owner.lock").open("a") as stream:
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise MemoryScopeError("scope ownership is being changed; retry cleanup") from exc
+            yield
+
+    @staticmethod
+    def update_owner(run_dir: Path, record: dict[str, Any]) -> None:
+        path = run_dir / "scope-owner.json"
+        temporary = path.with_suffix(".tmp")
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump(record, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+        fd = os.open(run_dir, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def launcher_argv(
         self, supervisor: list[str], *, run_dir: Path, log_path: Path, timeout: float,
@@ -72,7 +144,7 @@ class ScopedHeadLifecycle:
             raise ValueError("a scoped supervisor must remain attached until its head exits")
         return [
             sys.executable, "-P", "-m", "secretary.runtime.head.local_pty.scope_launcher",
-            str(run_dir), str(log_path), str(timeout),
+            str(run_dir), str(log_path), str(timeout), self.generation,
             *scope_argv(self.run_id, self.limit_mib, supervisor,
                         pythonpath=pythonpath, owner_unit=self.owner_unit),
         ]
@@ -84,14 +156,34 @@ class ScopedHeadLifecycle:
         from .journal import RUN_STARTED, read_events
 
         run_dir, log_path, timeout = Path(arguments[0]), Path(arguments[1]), float(arguments[2])
-        with log_path.open("ab", buffering=0) as log:
-            scope = subprocess.Popen(
-                arguments[3:], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                start_new_session=True, close_fds=True,
-            )
+        since = len(read_events(run_dir / protocol.JOURNAL_NAME).events)
+        # The child cannot invoke systemd until its launch identity is durable. EOF on
+        # the barrier (launcher death before release) makes it exit without creating work.
+        with ScopedHeadLifecycle.owner_lock(run_dir):
+            record = json.loads((run_dir / "scope-owner.json").read_text())
+            if not record["launch_allowed"] or record["generation"] != arguments[3]:
+                return 1
+            read_fd, write_fd = os.pipe()
+            try:
+                with log_path.open("ab", buffering=0) as log:
+                    scope = subprocess.Popen(
+                        [sys.executable, "-P", "-m", "secretary.runtime.head.local_pty.scope_launcher",
+                         "--exec-gated", str(read_fd), *arguments[4:]],
+                        stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                        start_new_session=True, close_fds=True, pass_fds=(read_fd,),
+                    )
+                record["launch_pid"] = scope.pid
+                record["launch_identity"] = launch_identity(scope.pid)
+                if record["launch_identity"] is None:
+                    raise MemoryScopeError("could not establish the scope launch identity")
+                ScopedHeadLifecycle.update_owner(run_dir, record)
+                os.write(write_fd, b"1")
+            finally:
+                os.close(read_fd)
+                os.close(write_fd)
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if any(event.get("kind") == RUN_STARTED for event in read_events(run_dir / protocol.JOURNAL_NAME).events):
+            if any(event.get("kind") == RUN_STARTED for event in read_events(run_dir / protocol.JOURNAL_NAME).events[since:]):
                 return 0
             if (run_dir / protocol.STARTUP_ERROR_NAME).exists():
                 try:
@@ -164,9 +256,49 @@ class ScopedHeadLifecycle:
 
     def stop_and_prove_empty(self) -> None:
         """Stop the entire cgroup and keep ownership if empty membership cannot be proved."""
+        try:
+            self._stop_and_prove_empty()
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as exc:
+            raise MemoryScopeError(f"could not settle head scope {scope_unit(self.run_id)}: {exc}") from exc
+
+    def _stop_and_prove_empty(self) -> None:
+        if self.directory is not None:
+            with self.owner_lock(self.directory):
+                record = json.loads((self.directory / "scope-owner.json").read_text())
+                if record["generation"] != self.generation:
+                    raise MemoryScopeError("scope owner changed; refusing a stale cleanup")
+                record["launch_allowed"] = False
+                record["cleanup_complete"] = False
+                self.update_owner(self.directory, record)
+                pid = record.get("launch_pid")
+                if pid and launch_group_present(pid, record["launch_identity"]):
+                    # This is the gated launch process, before systemd can create the scope.
+                    # Its group also covers sudo/systemd-run until registration. Scope
+                    # membership below covers the payload once systemd has moved it.
+                    try:
+                        os.killpg(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    except PermissionError:
+                        result = subprocess.run(
+                            ["sudo", "-n", "kill", "-KILL", "--", f"-{pid}"],
+                            capture_output=True, timeout=5, check=False,
+                        )
+                        if result.returncode:
+                            raise MemoryScopeError("could not terminate the scope launch group")
+                    deadline = time.monotonic() + 5
+                    while launch_group_present(pid, record["launch_identity"]):
+                        if time.monotonic() >= deadline:
+                            raise MemoryScopeError("scope launch process has not exited")
+                        time.sleep(0.05)
         cgroup = CGROUP_ROOT / "system.slice" / scope_unit(self.run_id)
-        if not cgroup.exists():
+        try:
+            cgroup.stat()
+        except FileNotFoundError:
+            self._record_empty()
             return
+        except OSError as exc:
+            raise MemoryScopeError(f"could not inspect head scope: {exc}") from exc
         try:
             stopped = subprocess.run(
                 ["sudo", "-n", "systemctl", "stop", scope_unit(self.run_id)],
@@ -183,14 +315,30 @@ class ScopedHeadLifecycle:
             try:
                 fields = (cgroup / "cgroup.events").read_text(encoding="ascii").splitlines()
             except FileNotFoundError:
-                return  # systemd removed the cgroup after its final member left.
+                try:
+                    cgroup.stat()
+                except FileNotFoundError:
+                    self._record_empty()
+                    return  # systemd removed the cgroup after its final member left.
+                raise MemoryScopeError(f"head scope {scope_unit(self.run_id)} has no membership evidence")
             except OSError as exc:
                 raise MemoryScopeError(f"could not verify empty head scope {scope_unit(self.run_id)}: {exc}") from exc
             if "populated 0" in fields:
+                self._record_empty()
                 return  # cgroup.events counts descendants, including separate process groups.
             if time.monotonic() >= deadline:
                 raise MemoryScopeError(f"head scope {scope_unit(self.run_id)} still has members")
             time.sleep(0.05)
+
+    def _record_empty(self) -> None:
+        if self.directory is None:
+            return
+        with self.owner_lock(self.directory):
+            record = json.loads((self.directory / "scope-owner.json").read_text())
+            if record["generation"] != self.generation:
+                raise MemoryScopeError("scope owner changed during cleanup")
+            record["cleanup_complete"] = True
+            self.update_owner(self.directory, record)
 
     def verify_self(self) -> ScopeEvidence:
         """Run before `run.started`; a supervisor outside its configured scope refuses launch."""
@@ -219,18 +367,15 @@ class ScopedHeadLifecycle:
     @staticmethod
     def exit_fields(
         status: int, evidence: ScopeEvidence, *, stopping: bool = False,
-        events_at_head_exit: dict[str, int] | None = None,
+        oom_victim: dict[str, int] | None = None,
     ) -> dict[str, Any]:
-        """A group OOM event kills the unprotected head; a stop never claims that event."""
+        """Only a kernel kill record for the reserved head PID establishes an OOM."""
         signal_number = os.WTERMSIG(status) if os.WIFSIGNALED(status) else None
         fields: dict[str, Any] = {
             "signal": signal_number,
             "exit_code": os.WEXITSTATUS(status) if os.WIFEXITED(status) else None,
         }
-        reason = None if stopping else head_loss_reason(
-            signal_number=signal_number, before=evidence.before, after=events_at_head_exit,
-            group_kill_at_head_exit=events_at_head_exit is not None,
-        )
-        if reason is not None:
-            fields["head_loss_reason"] = reason
+        if not stopping and signal_number == 9 and oom_victim is not None:
+            fields["head_loss_reason"] = MEMORY_LIMIT_REASON
+            fields["oom_victim"] = oom_victim
         return fields

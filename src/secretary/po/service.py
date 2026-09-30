@@ -258,6 +258,20 @@ class PoService:
         return self._exit.is_set()
 
     def _settled(self, _session_id: str, _seq: int) -> None:
+        # A waiter finishing can leave an orphan when scope cleanup did not complete.
+        self._schedule_recovery()
+        self._wake.set()
+
+    def _schedule_recovery(self) -> None:
+        with self._lock:
+            try:
+                if not self.runner.orphaned_turns():
+                    return
+            except Exception:  # noqa: BLE001 - an unreadable store also needs bounded recovery
+                pass
+            self._recovered = False
+            if self._next_recovery <= time.monotonic():
+                self._next_recovery = time.monotonic() + TICK_SECONDS
         self._wake.set()
 
     def _turn_failed(self, session_id: str, seq: int, reason: str) -> None:
@@ -308,6 +322,7 @@ class PoService:
             self._refuse(item, str(exc))
             return
         except Exception as exc:  # noqa: BLE001 - the claim may have committed before the launch failed
+            self._schedule_recovery()
             try:
                 known = self.store.request(item.request_id)
             except PoStoreError:
@@ -681,7 +696,10 @@ class PoService:
         """Stop turn `seq` only if it is the one running; queued inputs of the session then go on."""
         if not isinstance(seq, int) or isinstance(seq, bool):
             raise Refused("validation", "seq names the running turn to stop, as a whole number")
-        turn = self.runner.stop_turn(_required(session_id, "session_id"), seq)
+        try:
+            turn = self.runner.stop_turn(_required(session_id, "session_id"), seq)
+        finally:
+            self._schedule_recovery()
         self._wake.set()
         return {"session_id": session_id, "seq": seq, "stopped": turn is not None}
 
@@ -728,7 +746,7 @@ class PoService:
                 from secretary.po.client import write_restart_marker
 
                 write_restart_marker(self.data_dir, reason or "restart requested")
-            running = self.runner.live_count()
+            running = max(self.runner.live_count(), len(self.store.running_turns()))
             if running:
                 return {
                     "restart": "deferred",
@@ -740,7 +758,7 @@ class PoService:
             return {"restart": "now", "running": 0, "detail": "PO service is idle and exits for the restart"}
 
     def restart_due(self) -> bool:
-        return self.marker.exists() and self.runner.live_count() == 0
+        return self.marker.exists() and self.runner.live_count() == 0 and not self.store.running_turns()
 
     # --- the wire ---------------------------------------------------------------------------
 

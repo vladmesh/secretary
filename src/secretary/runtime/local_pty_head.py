@@ -175,6 +175,8 @@ from typing import Any
 from secretary.runtime.head import local_pty
 from secretary.runtime.head.identity import task_binding
 from secretary.runtime.head.local_pty import protocol
+from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+from secretary.runtime.head.memory import MemoryScopeError
 from secretary.runtime.head.operations import (
     HeadNudgeFailed,
     HeadOperationError,
@@ -781,6 +783,8 @@ class LocalPtyHeadRuntime:
                 if already_up is not None:
                     return already_up
             identity = claimed or new_run_id()
+            candidate = run or HeadRun(run_id=identity, spec=spec, workspace=workspace,
+                                       task_ref=task_ref, role=role)
             designated = {"pid_file": pid_file} if pid_file else {}
             try:
                 handle = self._spawn(
@@ -799,11 +803,12 @@ class LocalPtyHeadRuntime:
                     **designated,
                 )
             except local_pty.LocalPtySpawnError as exc:
+                retained = candidate if not exc.cleanup_complete else run
                 return StartReceipt(
                     status=_spawn_status(exc),
-                    run=run,
+                    run=retained,
                     reason=str(exc),
-                    failure=_spawn_failure(exc, run),
+                    failure=_spawn_failure(exc, retained),
                     evidence={"reason": exc.reason, "detail": exc.detail},
                     epoch=self.activity.epoch(identity),
                 )
@@ -1281,13 +1286,17 @@ class LocalPtyHeadRuntime:
         for that by name, through `stop_if_quiescent`.
 
         The initiator is recorded on the run before the signal is sent, so a stop that outlives
-        this process still names who began it. The confirmation is the launch identity going dead —
-        not the socket disappearing, which says the supervisor let go and says nothing about the
-        head.
+        this process still names who began it. A scoped head also requires the durable owner's
+        recursive empty proof; the launch identity going dead only confirms the head's exit.
         """
-        del ignored
         with self._lock:
+            preflight = ignored.get("preflight")
+            if callable(preflight):
+                preflight(run)
             finishing = run.finishing(initiator)
+            commit = ignored.get("commit")
+            if callable(commit):
+                commit(finishing)
             address = self._address(run)
             if address is None:
                 return StopReceipt(
@@ -1298,7 +1307,28 @@ class LocalPtyHeadRuntime:
                     epoch=self.activity.epoch(run.run_id),
                     lease=self.activity.lease(run.run_id),
                 )
-            asked = self._ask_to_stop(address, initiator, signal_name)
+            asked = None
+            try:
+                owner = ScopedHeadLifecycle.from_run_dir(address.run_dir)
+                if owner is not None:
+                    if owner.run_id != run.run_id:
+                        raise MemoryScopeError("scope owner does not match the stop's run")
+                    with owner.owner_lock(address.run_dir):
+                        record = json.loads((address.run_dir / "scope-owner.json").read_text())
+                        if record["generation"] != owner.generation:
+                            raise MemoryScopeError("scope owner changed before stop")
+                        record["stop_initiator"] = initiator.to_json()
+                        owner.update_owner(address.run_dir, record)
+                asked = self._ask_to_stop(address, initiator, signal_name)
+                if owner is not None:
+                    owner.stop_and_prove_empty()
+            except (MemoryScopeError, OSError, ValueError) as exc:
+                return StopReceipt(
+                    status=HEAD_ALIVE, run=finishing, reason=str(exc),
+                    failure=HeadStopFailed(str(exc), run=finishing), evidence=asked,
+                    epoch=self.activity.epoch(run.run_id),
+                    lease=self.activity.lease(run.run_id), rotation_ready=False,
+                )
             gone = self._await_head_gone(address, run)
             if not gone:
                 return StopReceipt(
@@ -1511,6 +1541,9 @@ class LocalPtyHeadRuntime:
         if not run_id:
             return
         with self._lock:
+            owner = ScopedHeadLifecycle.from_run_dir(protocol.run_dir_for(self.root, run_id))
+            if owner is not None:
+                owner.stop_and_prove_empty()
             self.activity.forget(run_id)
             self._fatal.pop(run_id, None)
             self._admission_notes.pop(run_id, None)
@@ -3038,7 +3071,7 @@ def _spawn_status(exc: local_pty.LocalPtySpawnError) -> str:
     draws on the legacy path, and for the same reason: treating it as a failure is how live heads
     get a second head opened beside them.
     """
-    if exc.reason in ("timeout", "already_running"):
+    if not exc.cleanup_complete or exc.reason in ("timeout", "already_running"):
         return HEAD_ALIVE
     return HEAD_GONE
 
@@ -3237,7 +3270,11 @@ def head_run_loss_reason(root: str | os.PathLike[str], run_id: str) -> str | Non
     except (OSError, ValueError):
         return None
     for event in reversed(events):
-        if event.get("run_id") != run_id or event.get("kind") != local_pty.RUN_EXITED:
+        if event.get("run_id") != run_id:
+            continue
+        if event.get("kind") == local_pty.RUN_STARTED:
+            return None
+        if event.get("kind") != local_pty.RUN_EXITED:
             continue
         if event.get("head_loss_reason") == MEMORY_LIMIT_REASON and event.get("signal") == 9:
             return MEMORY_LIMIT_REASON
