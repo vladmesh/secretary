@@ -14,6 +14,7 @@ import json
 import os
 import re
 import select
+import shlex
 import shutil
 import signal
 import socket
@@ -56,6 +57,7 @@ from secretary.runtime.head.local_pty.journal import (
     read_events,
     read_tail,
 )
+from secretary.runtime.head.memory import scope_unit
 
 REPO = Path(__file__).resolve().parents[1]
 CHILD = REPO / "tests" / "fixtures" / "local_pty_child.py"
@@ -145,6 +147,22 @@ class LocalPtySubstrateTests(unittest.TestCase):
         )
         self._started.append(handle)
         return handle
+
+    @unittest.skipUnless(os.environ.get("GITHUB_ACTIONS") == "true", "transient system scope proof runs in CI")
+    def test_tiny_scope_records_a_real_memory_limit_kill(self) -> None:
+        command = (
+            f"{shlex.quote(sys.executable)} -u -c "
+            + shlex.quote("import time; data = bytearray(192 * 1024 * 1024); time.sleep(5)")
+        )
+        handle = self._start(run_id="tiny-memory-limit", command=command, memory_limit_mib=96)
+        self._await(
+            lambda: bool(handle.events().of_kind(RUN_EXITED)), timeout=20.0,
+            message="the over-limit head did not exit",
+        )
+        exited = handle.events().of_kind(RUN_EXITED)[-1]
+        self.assertEqual(exited.get("signal"), signal.SIGKILL)
+        self.assertEqual(exited.get("head_loss_reason"), "memory_limit")
+        self.assertTrue(scope_unit(handle.run_id).startswith("secretary-head-"))
 
     def _client(self, handle: HeadHandle) -> SupervisorClient:
         client = handle.connect()

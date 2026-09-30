@@ -71,6 +71,7 @@ integration-dispatcher tests/test_dispatcher_tui.py
 integration-dispatcher tests/test_dispatcher_provider_failure.py
 integration-dispatcher tests/test_gate.py
 unit tests/test_head_command.py
+unit tests/test_head_memory.py
 unit tests/test_legacy_head_records.py
 unit tests/test_head_health.py
 unit tests/test_provider_failure.py

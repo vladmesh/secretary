@@ -282,12 +282,22 @@ def command_terminal_status(
     if _heartbeat_is_dead(pid_status):
         # The heartbeat names a gone process: the reclaim is evidence-backed, so the
         # classification rides along and the reduction sees Dead.
-        return {
+        death = {
             "known": True,
             "live": False,
             "reason": "missing-terminal",
             "pid_status": dict(pid_status),
         }
+        if _supervised(run):
+            loss_reader = getattr(host, "head_loss_reason", None)
+            if callable(loss_reader):
+                try:
+                    loss_reason = loss_reader(run)
+                except Exception:  # noqa: BLE001 - a journal read cannot override the heartbeat
+                    loss_reason = None
+                if loss_reason == "memory_limit":
+                    death["head_loss_reason"] = loss_reason
+        return death
     if not pid_status.get("known"):
         # `pid_file_path`'s own contract: the dispatcher clears the pid file before every fresh
         # launch and the new head writes it "the moment it starts", so a respawn opens a window in

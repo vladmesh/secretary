@@ -1823,6 +1823,13 @@ class CommandHostRuntime:
         run = record.review_head_run if kind == "review" else record.worker_head_run
         return head_run_turn_reading(self._local_pty_root(), str((run or {}).get("run_id") or ""))
 
+    def head_loss_reason(self, run: Any) -> str | None:
+        """Typed loss recorded by this run's own supervisor, with no process inference."""
+        from secretary.runtime.local_pty_head import head_run_loss_reason
+
+        run_id = str((run or {}).get("run_id") or "") if isinstance(run, dict) else ""
+        return head_run_loss_reason(self._local_pty_root(), run_id) if run_id else None
+
     def safe_recover_worker_continuation(
         self,
         _task: dict[str, Any],
@@ -3352,7 +3359,12 @@ class CommandHostRuntime:
         try:
             return HeadSpec.from_profile(head, self.catalog.head_profile(head))
         except (HeadSpecError, HostError, AttributeError, KeyError, TypeError):
-            return HeadSpec(profile_id=head, adapter=adapter or "unknown", runtime=LOCAL_PTY_RUNTIME)
+            from secretary.runtime.head.memory import DEFAULT_MEMORY_LIMIT_MIB
+
+            return HeadSpec(
+                profile_id=head, adapter=adapter or "unknown", runtime=LOCAL_PTY_RUNTIME,
+                memory_limit_mib=DEFAULT_MEMORY_LIMIT_MIB,
+            )
 
     @staticmethod
     def _task_ref(task: dict[str, Any] | None, role: str, document: str) -> head_ops.TaskRef:

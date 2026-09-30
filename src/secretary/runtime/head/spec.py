@@ -25,6 +25,7 @@ from .command import (
     HeadCommandError,
     validate_launch_shape,
 )
+from .memory import DEFAULT_MEMORY_LIMIT_MIB
 
 if TYPE_CHECKING:  # pragma: no cover - the registry is data this module is handed
     from ..heads import Registry
@@ -78,6 +79,8 @@ class HeadSpec:
     #: (`head_runtime_backends.is_legacy_record`). A caller that builds a spec by hand for a head it
     #: holds itself names `local-pty` explicitly.
     runtime: str = RECORD_RUNTIME_WHEN_ABSENT
+    # Hand-built legacy/test specs have no profile to derive this from. Registry specs always do.
+    memory_limit_mib: int | None = None
 
     @property
     def prompt_after_start(self) -> bool:
@@ -111,6 +114,7 @@ class HeadSpec:
             codex_mode=(str(profile.get("codex_mode", CODEX_TUI_MODE)) if adapter == "codex" else None),
             fallback=tuple(str(fb) for fb in fallback) if isinstance(fallback, list) else (),
             runtime=str(profile.get("runtime", DEFAULT_HEAD_RUNTIME)),
+            memory_limit_mib=int(profile.get("memory_limit_mib", DEFAULT_MEMORY_LIMIT_MIB)),
         )
 
 

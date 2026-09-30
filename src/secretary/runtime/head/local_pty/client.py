@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..memory import scope_argv
 from . import protocol
 from .journal import RUN_STARTED, JournalReadResult, read_events
 
@@ -109,6 +110,7 @@ def spawn_head(
     env: Mapping[str, str] | None = None,
     timeout: float = SPAWN_TIMEOUT_SECONDS,
     pid_file: str | os.PathLike[str] = "",
+    memory_limit_mib: int | None = None,
 ) -> HeadHandle:
     """Bring one head up under a supervisor that outlives this process, and wait until it answers.
 
@@ -160,12 +162,17 @@ def spawn_head(
     identity_file = Path(pid_file).absolute() if pid_file else run_dir / protocol.PID_FILE_NAME
     if pid_file:
         argv += ["--pid-file", str(identity_file)]
+    if memory_limit_mib is not None:
+        argv += ["--memory-limit-mib", str(memory_limit_mib)]
     log_path = run_dir / protocol.SUPERVISOR_LOG_NAME
+    launch_env = _supervisor_environment(env)
+    if memory_limit_mib is not None:
+        argv = scope_argv(run_id, memory_limit_mib, argv, pythonpath=launch_env["PYTHONPATH"])
     with open(log_path, "ab", buffering=0) as log:
         intermediate = subprocess.Popen(
             argv,
             cwd=str(cwd) if cwd else None,
-            env=_supervisor_environment(env),
+            env=launch_env,
             stdin=subprocess.DEVNULL,
             stdout=log,
             stderr=log,
@@ -175,6 +182,9 @@ def spawn_head(
     # The intermediate has already forked the supervisor and is on its way out; reaping it here is
     # what guarantees this process leaves no child behind, whatever it does next.
     status = intermediate.wait()
+    if memory_limit_mib is not None and status != 0:
+        tail = log_path.read_text(encoding="utf-8", errors="replace")[-2048:]
+        raise LocalPtySpawnError("scope_failed", f"head scope did not start (exit {status}): {tail}")
 
     deadline = time.monotonic() + timeout
     while True:

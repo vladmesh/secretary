@@ -795,6 +795,7 @@ class LocalPtyHeadRuntime:
                     quiet_seconds=quiet_seconds,
                     delivery_seconds=delivery_seconds,
                     env=env,
+                    **({"memory_limit_mib": spec.memory_limit_mib} if spec.memory_limit_mib is not None else {}),
                     **designated,
                 )
             except local_pty.LocalPtySpawnError as exc:
@@ -3225,6 +3226,23 @@ def head_run_journal_tail(run_dir: str | os.PathLike[str]) -> local_pty.JournalR
     its end and nothing else. `OSError` propagates for the reason it does there.
     """
     return local_pty.read_tail(Path(run_dir) / protocol.JOURNAL_NAME)
+
+
+def head_run_loss_reason(root: str | os.PathLike[str], run_id: str) -> str | None:
+    """Read a supervisor's typed death record for this exact run, if one exists."""
+    from secretary.runtime.head.memory import MEMORY_LIMIT_REASON
+
+    try:
+        events = head_run_journal_tail(protocol.run_dir_for(root, run_id)).events
+    except (OSError, ValueError):
+        return None
+    for event in reversed(events):
+        if event.get("run_id") != run_id or event.get("kind") != local_pty.RUN_EXITED:
+            continue
+        if event.get("head_loss_reason") == MEMORY_LIMIT_REASON and event.get("signal") == 9:
+            return MEMORY_LIMIT_REASON
+        return None
+    return None
 
 
 def _flock_holders(info: os.stat_result) -> list[int]:

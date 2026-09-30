@@ -21,16 +21,13 @@ head's whole life, bound what it keeps of the head's output, refuse an oversized
 the limit, reap the head and write down how it ended. All of that is a process that is alive
 between dispatcher ticks; none of it is a thing a file or a signal can do.
 
-**Then why not a systemd unit per head?** The product already manages host units through
-`secretary.host_apply`, so this is the route with the most existing machinery behind it. It is
-refused on one hard constraint: `host_apply`'s real host writes unit files into
-`SYSTEM_UNIT_DIR` (`/etc/systemd/system`) through `sudo` and then reconciles. Bringing a head up
-would then require a host reconcile and a root-owned file write, and rolling the canary back would
-stop being a change of one profile value — which is a Definition of Done item of the sprint that
-this substrate is being built for. A user unit (`systemd --user`) escapes the root-owned file but
-not the second lifecycle authority: the head's life would then be owned by a unit manager the
-dispatcher does not control, and `run.exited` would have to be recovered from journald rather than
-written by whoever actually reaped the process.
+**Why a supervisor as well as a systemd scope?** A transient system scope gives each profile-backed
+head a cgroup with `MemoryMax` set before its turn runs. It needs no unit file or host reconcile.
+The launcher registers the scope through the system manager and drops back to the runtime user
+before starting the supervisor. The supervisor still owns the pty, socket, stop sequence and
+`run.exited` journal record. It reads that scope's `memory.events.local` to distinguish a
+memory-limit kill from another `SIGKILL`. The scope supplies a resource boundary; it does not
+replace the supervisor's process ownership or exit record.
 
 **Then why not bare `setsid` plus a double fork, with no supervisor at all?** Because a detached
 process is not an owned one. Double-forking a head under `setsid` gives it its own session

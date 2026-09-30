@@ -257,7 +257,7 @@ def _spec_json(spec: HeadSpec) -> dict[str, Any]:
     whole — so a field is added here only when it really identifies the head. `spec.runtime` does
     not; `HeadRun.to_json` records it beside this block and says why.
     """
-    return {
+    result = {
         "profile_id": spec.profile_id,
         "adapter": spec.adapter,
         "model": spec.model or "",
@@ -266,6 +266,9 @@ def _spec_json(spec: HeadSpec) -> dict[str, Any]:
         "codex_mode": spec.codex_mode or "",
         "fallback": list(spec.fallback),
     }
+    if spec.memory_limit_mib is not None:
+        result["memory_limit_mib"] = spec.memory_limit_mib
+    return result
 
 
 def _spec_from_json(payload: Any, runtime: str = "") -> HeadSpec:
@@ -286,6 +289,14 @@ def _spec_from_json(payload: Any, runtime: str = "") -> HeadSpec:
         # Never infer a missing adapter from a damaged record.
         raise HeadRunError("a recorded head run names its profile and its adapter")
     fallback = payload.get("fallback")
+    raw_memory_limit = payload.get("memory_limit_mib")
+    if raw_memory_limit is not None:
+        from .memory import memory_limit_mib
+
+        try:
+            raw_memory_limit = memory_limit_mib(raw_memory_limit, profile_id)
+        except ValueError as exc:
+            raise HeadRunError(str(exc)) from None
     return HeadSpec(
         profile_id=profile_id,
         adapter=adapter,
@@ -295,6 +306,7 @@ def _spec_from_json(payload: Any, runtime: str = "") -> HeadSpec:
         codex_mode=str(payload.get("codex_mode") or "") or None,
         fallback=tuple(str(entry) for entry in fallback) if isinstance(fallback, list) else (),
         runtime=runtime or RECORD_RUNTIME_WHEN_ABSENT,
+        memory_limit_mib=raw_memory_limit,
     )
 
 

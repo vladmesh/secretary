@@ -129,6 +129,12 @@ def validate_launch_shape(profile_id: str, profile: Mapping[str, Any]) -> None:
             f"profile {profile_id!r} has unknown runtime {runtime!r} (known: {known}); "
             f'set `runtime = "{DEFAULT_HEAD_RUNTIME}"` or drop the key'
         )
+    from .memory import DEFAULT_MEMORY_LIMIT_MIB, memory_limit_mib
+
+    try:
+        memory_limit_mib(profile.get("memory_limit_mib", DEFAULT_MEMORY_LIMIT_MIB), profile_id)
+    except ValueError as exc:
+        raise HeadCommandError(str(exc)) from None
 
 
 def _named(value: object, what: str) -> str:

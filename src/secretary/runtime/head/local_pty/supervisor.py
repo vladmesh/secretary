@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from ..command import with_pid_heartbeat
+from ..memory import head_loss_reason, memory_events, own_cgroup, scope_unit
 from . import protocol
 from .journal import (
     DRAIN_REQUESTED,
@@ -192,6 +193,7 @@ class Supervisor:
         quiet_seconds: float = TURN_QUIET_SECONDS,
         delivery_seconds: float = protocol.INPUT_DELIVERY_SECONDS,
         pid_file: str | os.PathLike[str] = "",
+        memory_limit_mib: int | None = None,
     ) -> None:
         self.run_dir = Path(run_dir)
         self.run_id = run_id
@@ -207,6 +209,7 @@ class Supervisor:
         self.socket_path = protocol.socket_path_for(self.run_dir)
         self.journal_path = self.run_dir / protocol.JOURNAL_NAME
         self.pid_file = Path(pid_file) if pid_file else self.run_dir / protocol.PID_FILE_NAME
+        self.memory_limit_mib = memory_limit_mib
 
         self._lock_fd = -1
         self._listener: socket.socket | None = None
@@ -217,6 +220,8 @@ class Supervisor:
         self._master = -1
         self._head_pid = 0
         self._head_status: int | None = None
+        self._memory_cgroup: Path | None = None
+        self._memory_events_before: dict[str, int] | None = None
 
         self._output = bytearray()
         self._output_dropped = 0
@@ -455,6 +460,7 @@ class Supervisor:
         """Bring the head up and say so, in the order a reader of the run directory needs."""
         self._journal = JournalWriter(self.journal_path, self.run_id).open()
         self._install_signals()
+        self._prepare_memory_scope()
         self.start_head()
         (self.run_dir / protocol.SUPERVISOR_PID_NAME).write_text(f"{os.getpid()}\n", "utf-8")
         self._append(
@@ -477,6 +483,25 @@ class Supervisor:
         self._selector.register(self._listener, selectors.EVENT_READ, "listener")
         self._selector.register(self._master, selectors.EVENT_READ, "master")
         self._selector.register(self._wakeup_read, selectors.EVENT_READ, "wakeup")
+
+    def _prepare_memory_scope(self) -> None:
+        """Refuse a scoped launch until the limit is observable on this supervisor itself."""
+        if self.memory_limit_mib is None:
+            return
+        cgroup = own_cgroup()
+        expected = str(self.memory_limit_mib * 1024 * 1024)
+        try:
+            actual = (cgroup / "memory.max").read_text(encoding="ascii").strip() if cgroup else ""
+        except OSError:
+            actual = ""
+        events = memory_events(cgroup)
+        if cgroup is None or cgroup.name != scope_unit(self.run_id) or actual != expected or events is None:
+            raise SupervisorStartupError(
+                "memory_scope_unavailable",
+                f"head scope {scope_unit(self.run_id)} did not materialize MemoryMax={expected}",
+            )
+        self._memory_cgroup = cgroup
+        self._memory_events_before = events
 
     def _abandon_head(self) -> None:
         """End a head this supervisor forked and then failed to take ownership of.
@@ -1166,6 +1191,13 @@ class Supervisor:
         else:
             exited["signal"] = None
             exited["exit_code"] = os.WEXITSTATUS(status) if os.WIFEXITED(status) else None
+        loss_reason = head_loss_reason(
+            signal_number=exited["signal"],
+            before=self._memory_events_before,
+            after=memory_events(self._memory_cgroup),
+        )
+        if loss_reason is not None:
+            exited["head_loss_reason"] = loss_reason
         record = self._append(RUN_EXITED, **exited)
         for client in list(self._clients.values()):
             if client.attached:
@@ -1301,6 +1333,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--term", default="xterm-256color")
     parser.add_argument("--quiet-seconds", type=float, default=TURN_QUIET_SECONDS)
     parser.add_argument("--delivery-seconds", type=float, default=protocol.INPUT_DELIVERY_SECONDS)
+    parser.add_argument("--memory-limit-mib", type=int, default=None)
     parser.add_argument(
         "--pid-file",
         default="",
@@ -1341,6 +1374,7 @@ def main(argv: list[str] | None = None) -> int:
         quiet_seconds=args.quiet_seconds,
         delivery_seconds=args.delivery_seconds,
         pid_file=args.pid_file,
+        memory_limit_mib=args.memory_limit_mib,
     )
     try:
         supervisor.claim()
@@ -1353,6 +1387,8 @@ def main(argv: list[str] | None = None) -> int:
         return supervisor.run()
     except Exception as exc:  # noqa: BLE001 - the launcher is owed the reason, whatever it is
         name, reason, code = failure_of(supervisor.started)
+        if isinstance(exc, SupervisorStartupError):
+            reason = exc.reason
         where = "after the run was up" if supervisor.started else "on the way up"
         _write_failure(run_dir, name, reason, f"the supervisor failed {where}: {exc!r}")
         traceback.print_exc()
