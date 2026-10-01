@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import runpy
 import sys
 import tempfile
@@ -25,12 +26,20 @@ from secretary.host_apply import ApplyInputs, apply_host
 from secretary.infra.systemd import CommandResult
 from secretary.runtime.head.local_pty import protocol
 from secretary.runtime.head.local_pty import scope_inventory as reader
-from secretary.runtime.head.local_pty.journal import RUN_STARTED, JournalWriter
-from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
-from secretary.runtime.head.memory import scope_unit
+from secretary.runtime.head.local_pty import scope_environment, scope_launcher
+from secretary.runtime.head.local_pty.journal import RUN_STARTED, SCOPE_BOUND, JournalWriter
+from secretary.runtime.head.local_pty.scoped_lifecycle import (
+    LAUNCH_BINDING_ENV,
+    ScopedHeadLifecycle,
+    binding_description,
+    launch_binding,
+)
+from secretary.runtime.head.local_pty.supervisor import Supervisor, SupervisorStartupError
+from secretary.runtime.head.memory import MemoryScopeError, scope_unit
 from secretary.runtime.local_pty_head import runtime_scope_inventory
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.runtime_scope_fixtures import host_fixture
+from tests.scoped_environment_fixtures import deployed_scope_argv
 
 
 class RuntimeScopeConsumerTests(unittest.TestCase):
@@ -47,7 +56,6 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         self.native = {}
         self.boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
         self.enterContext(mock.patch.object(reader, "CGROUP_ROOT", self.root / "cgroups"))
-        self.enterContext(mock.patch.object(reader, "launch_identity", return_value=None))
         self.enterContext(mock.patch.object(reader, "_unit_state", side_effect=lambda unit: dict(
             self.native.get(unit, dict(Id=unit, LoadState="loaded", ActiveState="active", SubState="running",
                                        ControlGroup=f"/system.slice/{unit}", InvocationID="unowned-invocation",
@@ -66,10 +74,6 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         heartbeat.write_text(json.dumps(dict(version=1, pid=99999998, boot_id=self.boot,
                                             proc_starttime_ticks="200", run_id=run_id,
                                             role=role, task=record["task"])))
-        with JournalWriter(directory / protocol.JOURNAL_NAME, run_id).open() as writer:
-            writer.append(RUN_STARTED, head_pid=99999998, supervisor_pid=99999997,
-                          role=role, task=record["task"], pid_file=str(heartbeat),
-                          socket_path=str(directory / protocol.SOCKET_NAME))
         unit = scope_unit(run_id)
         group = reader.CGROUP_ROOT / "system.slice" / unit
         group.mkdir(parents=True)
@@ -81,6 +85,15 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         self.native[unit] = dict(Id=unit, LoadState="loaded", ActiveState="active", SubState="running",
                                  ControlGroup=f"/system.slice/{unit}", InvocationID="original-invocation",
                                  ActiveEnterTimestampMonotonic="1500000", Transient="yes")
+        admitted = launch_binding(record, directory)
+        self.native[unit]["Description"] = binding_description(admitted)
+        with JournalWriter(directory / protocol.JOURNAL_NAME, run_id).open() as writer:
+            info = group.stat()
+            writer.append(SCOPE_BOUND, binding=dict(admitted=admitted, invocation_id="original-invocation",
+                          activation="1500000", cgroup=[info.st_dev, info.st_ino]))
+            writer.append(RUN_STARTED, head_pid=99999998, supervisor_pid=99999997,
+                          role=role, task=record["task"], pid_file=str(heartbeat),
+                          socket_path=str(directory / protocol.SOCKET_NAME))
         return owner, directory, unit
 
     def collect(self, *units):
@@ -269,6 +282,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
 
     def test_generation_and_invocation_changes_between_inventory_and_apply_abort_effects(self):
         owner, directory, unit = self.owner()
+        original = owner.read_owner(directory)
         for field in ("generation", "InvocationID"):
             collected = self.collect(unit)
             self.assertFalse(collected.errors)
@@ -283,6 +297,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
                 result = apply_host(self.inputs(collected.inventory), units=installer, dry_run=dry)
                 self.assertTrue(result.errors)
                 self.assertEqual(installer.calls, [])
+            owner.update_owner(directory, original)
 
     def test_observed_disappearance_does_not_claim_missing_packaged_scope(self):
         _, _, unit = self.owner()
@@ -357,19 +372,203 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
                     self.assertEqual(installer.calls, [])
         owner.update_owner(directory, original)
 
+    def test_released_evidence_poor_roles_refuse_then_normal_lifecycle_settlement_recovers(self):
+        for role in ("po", "worker", "reviewer", "observer"):
+            owner, directory, unit = self.owner(role, "old-" + role, "heads")
+            journal = directory / protocol.JOURNAL_NAME
+            journal.write_bytes(b"\n".join(journal.read_bytes().splitlines()[1:]) + b"\n")
+            self.native[unit]["Description"] = "released native command description"
+            for live in (False, True):
+                with self.subTest(role=role, launcher_live=live), mock.patch(
+                    "secretary.runtime.head.local_pty.scoped_lifecycle.launch_identity",
+                    return_value=owner.read_owner(directory)["launch_identity"] if live else None,
+                ):
+                    collected = self.collect(unit)
+                    self.assertIn("lacks launch-time", collected.errors["units"])
+                    doctor, _, snapshot = self.doctor_and_status()
+                    self.assertTrue(doctor.errors and snapshot["host"]["inventory_errors"])
+                    for dry in (True, False):
+                        installer = FakeUnitInstaller()
+                        self.assertTrue(apply_host(self.inputs(collected.inventory), units=installer, dry_run=dry).errors)
+                        self.assertEqual(installer.calls, [])
+            # The runtime owner still settles its old generation. Host inspection
+            # writes no receipt and never adds missing historical evidence.
+            with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", self.root / "absent-cgroups"), mock.patch(
+                "secretary.runtime.head.local_pty.scoped_lifecycle.launch_group_present", return_value=False,
+            ):
+                owner.stop_and_prove_empty()
+            self.assertTrue(owner.read_owner(directory)["cleanup_complete"])
+            self.native[unit].update(LoadState="not-found", ActiveState="inactive", ControlGroup="")
+            fresh = self.collect(unit)
+            self.assertFalse(fresh.errors)
+            self.assertIn(unit, fresh.inventory.runtime_scopes.disappeared)
+            self.assertNotIn(SCOPE_BOUND.encode(), journal.read_bytes())
+
+    def test_attested_prehead_crash_and_retained_descendants_need_no_live_launcher(self):
+        _, directory, unit = self.owner(pending=True)
+        journal = directory / protocol.JOURNAL_NAME
+        # A crash between fsynced scope.bound and head fork has no heartbeat.
+        journal.write_bytes(journal.read_bytes().splitlines()[0] + b"\n")
+        (directory / protocol.PID_FILE_NAME).unlink()
+        collected = self.collect(unit)
+        self.assertFalse(collected.errors)
+        for dry in (True, False):
+            installer = FakeUnitInstaller()
+            result = apply_host(self.inputs(collected.inventory), units=installer, dry_run=dry)
+            self.assertFalse(result.errors)
+            self.assertEqual(result.preserved_runtime_scopes, [unit])
+            self.assertEqual(installer.calls, [])
+
+    def test_native_digest_refuses_forged_journal_even_with_matching_substituted_owner(self):
+        owner, directory, unit = self.owner()
+        original = owner.read_owner(directory)
+        journal = directory / protocol.JOURNAL_NAME
+        saved = journal.read_text()
+        for field, value in (("generation", "forged-generation"),
+                             ("workspace", str(self.root / "forged-workspace"))):
+            with self.subTest(field=field):
+                changed = {**original, field: value}
+                owner.update_owner(directory, changed)
+                lines = [json.loads(line) for line in saved.splitlines()]
+                lines[0]["binding"]["admitted"] = launch_binding(changed, directory)
+                journal.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+                self.assertTrue(self.collect(unit).errors)
+        owner.update_owner(directory, original)
+        journal.write_text(saved)
+        for damaged in (saved.replace('"binding":', '"binding": {}, "binding":', 1), saved[:-1]):
+            journal.write_text(damaged)
+            self.assertTrue(self.collect(unit).errors)
+        journal.write_text(saved)
+        with JournalWriter(journal, owner.run_id).open() as writer:
+            writer.append(SCOPE_BOUND, binding=json.loads(saved.splitlines()[0])["binding"])
+        self.assertTrue(self.collect(unit).errors)
+
+    def test_released_caller_new_executable_seals_generation_before_native_work(self):
+        directory = self.data / "po-heads" / "old-caller-new-launch"
+        directory.mkdir(parents=True)
+        owner = ScopedHeadLifecycle(directory.name, 96)
+        workspace = str(Path.cwd())
+        owner.persist(directory, role="po", task="po:released:operation", workspace=workspace)
+        supervisor = [sys.executable, "-P", "-m", "secretary.runtime.head.local_pty.supervisor",
+                      "--run-dir", str(directory), "--run-id", owner.run_id, "--role", "po",
+                      "--task", "po:released:operation", "--cwd", workspace]
+        arguments = [str(directory), str(directory / "supervisor.log"), "1", owner.generation,
+                     *deployed_scope_argv()(owner.run_id, 96, supervisor, pythonpath="released-path")]
+        child = []
+        def launched(argv, **kwargs):
+            copied = list(argv)
+            copied[5] = str(os.dup(kwargs["pass_fds"][0]))
+            child.extend(copied)
+            self.assertNotIn("launch_pid", owner.read_owner(directory))
+            return SimpleNamespace(pid=os.getpid(), poll=lambda: 0)
+        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen", side_effect=launched):
+            self.assertEqual(ScopedHeadLifecycle.launch_until_started(arguments), 0)
+        record = owner.read_owner(directory)
+        self.assertEqual(record["generation"], arguments[3])
+        captured = {}
+        class Executed(Exception):
+            pass
+        def native_exec(path, argv, environment):
+            captured["argv"] = argv
+            captured["environment"] = scope_environment.read_environment()
+            self.assertEqual(environment, scope_environment.BOOTSTRAP_ENVIRONMENT)
+            raise Executed()
+        saved_stdin = os.dup(0)
+        try:
+            with mock.patch("os.execve", side_effect=native_exec), mock.patch.dict(os.environ, {LAUNCH_BINDING_ENV: "forged inherited proof"}):
+                with self.assertRaises(Executed):
+                    scope_launcher.main(child[4:])
+        finally:
+            os.dup2(saved_stdin, 0)
+            os.close(saved_stdin)
+        binding = json.loads(captured["environment"][LAUNCH_BINDING_ENV])
+        self.assertEqual(binding, launch_binding(record, directory))
+        self.assertIn("--description=" + binding_description(binding), captured["argv"])
+        group = reader.CGROUP_ROOT / "system.slice" / record["unit"]
+        group.mkdir(parents=True)
+        (group / "cgroup.events").write_text("populated 1\n")
+        state = dict(Id=record["unit"], LoadState="loaded", Transient="yes", InvocationID="new-incarnation",
+                     ControlGroup=f"/system.slice/{record['unit']}", Description=binding_description(binding),
+                     ActiveState="active", SubState="running", ActiveEnterTimestampMonotonic=str(
+                         int(record["launch_identity"].rsplit(":", 1)[1]) * 1_000_000 // os.sysconf("SC_CLK_TCK")))
+        self.native[record["unit"]] = state
+        with (mock.patch.dict(os.environ, {LAUNCH_BINDING_ENV: json.dumps(binding)}),
+              mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.own_cgroup", return_value=group),
+              mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", reader.CGROUP_ROOT),
+              mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.native_scope_state", return_value=state)):
+            with owner.attest_launch(directory=directory, role="po", task=record["task"], workspace=workspace) as proof:
+                with self.assertRaises(MemoryScopeError):
+                    with owner.ownership():
+                        self.fail("attestation released admission before journal durability")
+                with JournalWriter(directory / protocol.JOURNAL_NAME, owner.run_id).open() as writer:
+                    writer.append(SCOPE_BOUND, binding=proof)
+        self.assertNotIn(LAUNCH_BINDING_ENV, captured["argv"])
+        self.assertFalse(self.collect(record["unit"]).errors)
+        # A prospective launch requires the original caller's generation.
+        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen") as launch:
+            arguments[3] = "wrong-caller-generation"
+            self.assertEqual(ScopedHeadLifecycle.launch_until_started(arguments), 1)
+            launch.assert_not_called()
+
+    def test_supervisor_publishes_binding_under_admission_before_head_and_refuses_uncertainty(self):
+        owner, directory, unit = self.owner()
+        record = owner.read_owner(directory)
+        admitted = launch_binding(record, directory)
+        # Reproduce pre-head startup, including absence of an old journal.
+        (directory / protocol.JOURNAL_NAME).unlink()
+        supervisor = Supervisor(run_dir=directory, run_id=owner.run_id, role=record["role"],
+                                task=record["task"], command="true", memory_limit_mib=96)
+        self.addCleanup(supervisor._selector.close)
+        self.addCleanup(lambda: supervisor._journal.close() if supervisor._journal else None)
+        class HeadBoundary(Exception):
+            pass
+        def head_boundary():
+            events = supervisor._journal.path.read_text()
+            self.assertEqual(json.loads(events)["kind"], SCOPE_BOUND)
+            with self.assertRaises(MemoryScopeError):
+                with owner.ownership():
+                    self.fail("head work escaped admission serialization")
+            raise HeadBoundary()
+        group = reader.CGROUP_ROOT / "system.slice" / unit
+        with (mock.patch.dict(os.environ, {LAUNCH_BINDING_ENV: json.dumps(admitted)}),
+              mock.patch.object(supervisor, "_install_signals"),
+              mock.patch.object(supervisor, "_prepare_memory_scope"),
+              mock.patch.object(supervisor, "start_head", side_effect=head_boundary),
+              mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", reader.CGROUP_ROOT),
+              mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.own_cgroup", return_value=group),
+              mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.native_scope_state", return_value=self.native[unit]),
+              mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.launch_identity", return_value=record["launch_identity"]),
+              mock.patch("os.getcwd", return_value=record["workspace"])):
+            with self.assertRaises(HeadBoundary):
+                supervisor._begin()
+        # The binding survived a pre-head process failure and still proves this
+        # native scope. Missing/substituted admission never forks a head.
+        self.assertFalse(self.collect(unit).errors)
+        supervisor._journal.close()
+        for sealed in ("", json.dumps({**admitted, "generation": "substituted"})):
+            with (mock.patch.dict(os.environ, {LAUNCH_BINDING_ENV: sealed}),
+                  mock.patch.object(supervisor, "_install_signals"),
+                  mock.patch.object(supervisor, "_prepare_memory_scope"),
+                  mock.patch.object(supervisor, "start_head") as start):
+                with self.assertRaises(SupervisorStartupError):
+                    supervisor._begin()
+                start.assert_not_called()
+                supervisor._journal.close()
+
     def test_released_live_scope_arguments_have_no_independent_po_generation(self):
         owner, directory, _ = self.owner()
         supervisor = ["python", "-P", "-m", "secretary.runtime.head.local_pty.supervisor",
                       "--run-dir", str(directory), "--run-id", owner.run_id, "--role", "po",
                       "--task", "po:other-project:operation", "--cwd", str(self.workspace)]
-        original = owner.launcher_argv(supervisor, run_dir=directory, log_path=directory / "supervisor.log",
-                                       timeout=5, pythonpath="")
         other = ScopedHeadLifecycle(owner.run_id, owner.limit_mib, generation="different-generation")
-        changed = other.launcher_argv(supervisor, run_dir=directory, log_path=directory / "supervisor.log",
-                                      timeout=5, pythonpath="")
+        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.scope_argv", deployed_scope_argv()):
+            original = owner.launcher_argv(supervisor, run_dir=directory, log_path=directory / "supervisor.log",
+                                           timeout=5, pythonpath="")
+            changed = other.launcher_argv(supervisor, run_dir=directory, log_path=directory / "supervisor.log",
+                                          timeout=5, pythonpath="")
         self.assertNotEqual(original[7], changed[7])
-        # launch_until_started gives its --exec-gated child arguments[4:],
-        # dropping the outer control process's generation at argv[7].
+        # The released native command payload alone omits argv[7]. New launch
+        # binding transports that outer generation through the existing gate.
         self.assertEqual(original[8:], changed[8:])
         self.assertNotIn(owner.generation, original[8:])
 
@@ -386,7 +585,8 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         cmdline = Path(f"/proc/{original['launch_pid']}/cmdline")
         original_read = Path.read_bytes
         with (
-            mock.patch.object(reader, "launch_identity", return_value=original["launch_identity"]),
+            mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.launch_identity",
+                       return_value=original["launch_identity"]),
             mock.patch.object(Path, "read_bytes", autospec=True,
                               side_effect=lambda path: native_argv if path == cmdline else original_read(path)),
         ):

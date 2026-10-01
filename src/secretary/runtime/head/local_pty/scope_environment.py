@@ -15,6 +15,7 @@ import stat
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 MAX_ENVIRONMENT_BYTES = 1024 * 1024
 BOOTSTRAP = Path(__file__).resolve().with_name("scope_bootstrap.py")
@@ -119,9 +120,19 @@ def privileged_argv(arguments: list[str]) -> list[str]:
         raise EnvironmentTransferError() from None
 
 
-def exec_scope(arguments: list[str]) -> None:
+def exec_scope(arguments: list[str], *, binding: dict[str, Any] | None = None) -> None:
+    from .scoped_lifecycle import LAUNCH_BINDING_ENV, binding_description
+
     argv = privileged_argv(arguments)
-    fd = environment_descriptor(os.environ)
+    environment = dict(os.environ)
+    environment.pop(LAUNCH_BINDING_ENV, None)
+    if binding is not None:
+        divider = argv.index("--")
+        if any("Description=" in arg or arg.startswith("--description") for arg in argv[:divider]):
+            raise EnvironmentTransferError()
+        argv.insert(divider, "--description=" + binding_description(binding))
+        environment[LAUNCH_BINDING_ENV] = json.dumps(binding)
+    fd = environment_descriptor(environment)
     try:
         os.dup2(fd, 0, inheritable=True)
     finally:

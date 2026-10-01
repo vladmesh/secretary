@@ -19,8 +19,8 @@ from typing import Any
 
 from ..memory import CGROUP_ROOT, MemoryScopeError
 from . import protocol
-from .journal import RUN_STARTED, read_events
-from .scoped_lifecycle import ScopedHeadLifecycle, launch_identity
+from .journal import RUN_STARTED, SCOPE_BOUND, read_events
+from .scoped_lifecycle import ScopedHeadLifecycle, binding_description, launch_binding, native_scope_state
 
 
 @dataclass(frozen=True)
@@ -76,32 +76,22 @@ def _directory(stack: ExitStack, path: Path) -> int:
     return fd
 
 
-def _json(fd: int) -> Any:
-    def unique(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise MemoryScopeError("runtime ownership JSON has duplicate fields")
-            result[key] = value
-        return result
+def _unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise MemoryScopeError("runtime ownership JSON has duplicate fields")
+        result[key] = value
+    return result
 
+
+def _json(fd: int) -> Any:
     with os.fdopen(os.dup(fd), "r", encoding="utf-8") as stream:
-        return json.load(stream, object_pairs_hook=unique)
+        return json.load(stream, object_pairs_hook=_unique)
 
 
 def _unit_state(unit: str) -> dict[str, str]:
-    properties = ("Id", "LoadState", "ActiveState", "SubState", "ControlGroup",
-                  "InvocationID", "ActiveEnterTimestampMonotonic", "Transient", "BindsTo")
-    result = subprocess.run(
-        ["systemctl", "--system", "show", unit, "--property=" + ",".join(properties)],
-        capture_output=True, text=True, timeout=10, check=False,
-    )
-    if result.returncode or result.stderr.strip():
-        raise MemoryScopeError("native runtime scope observation failed; retry systemctl show")
-    fields = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
-    if any(name not in fields for name in properties):
-        raise MemoryScopeError("native runtime scope observation is incomplete")
-    return fields
+    return native_scope_state(unit)
 
 
 def _absent(state: dict[str, str]) -> bool:
@@ -119,59 +109,52 @@ def _membership(group: Path) -> tuple[tuple[int, int], bool]:
     return _identity(info), fields["populated"] == "1"
 
 
-def _live_launch(record: dict[str, Any], group: Path, directory: Path) -> bool:
-    """A currently verified launcher and its scoped payload bind pre-start work."""
-    pid = record["launch_pid"]
-    if launch_identity(pid) != record["launch_identity"]:
-        return False
-    # The gated process execs sudo/systemd-run. Check its native argv, not its PID
-    # alone, and demand the exact run directory and unit passed to that launcher.
-    args = Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0")
-    words = [word.decode() for word in args if word]
-    if record["unit"] not in words or str(directory) not in words:
-        raise MemoryScopeError("live scope launcher does not match canonical unit or data root")
-    for option, value in (("--run-id", record["run_id"]), ("--role", record["role"]),
-                          ("--task", record["task"]), ("--cwd", record["workspace"])):
-        if option not in words or words[words.index(option) + 1] != value:
-            raise MemoryScopeError("live scope launcher does not match canonical role/task/workspace")
-    for child in (group, *group.rglob("*")):
-        if not child.is_dir():
-            continue
-        for token in (child / "cgroup.procs").read_text().split():
-            current = int(token)
-            seen: set[int] = set()
-            while current > 1 and current not in seen:
-                if current == pid:
-                    return launch_identity(pid) == record["launch_identity"]
-                seen.add(current)
-                try:
-                    fields = Path(f"/proc/{current}/stat").read_text().rsplit(")", 1)[1].split()
-                except FileNotFoundError:
-                    break
-                current = int(fields[1])
-    return False
-
-
 def _journal_proof(stack: ExitStack, fd: int, uid: int, record: dict[str, Any],
-                   state: dict[str, str], directory: Path) -> None:
-    """Retained heartbeat bounds the native incarnation even after head death.
-
-    systemd's monotonic activation must lie between the generation's launcher
-    birth and its journaled head birth on the same boot. A reused unit activates
-    after that head's birth and cannot borrow its journal or heartbeat. No wall
-    clock, PID liveness or role-name inference supplies this proof.
-    """
+                   state: dict[str, str], directory: Path, native: tuple[int, int]) -> None:
+    """One launch-time attestation, independent of the mutable owner or live PIDs."""
     journal = _open(stack, protocol.JOURNAL_NAME, parent=fd, uid=uid)
+    with os.fdopen(os.dup(journal), "r", encoding="utf-8") as stream:
+        for line in stream:
+            if line.strip():
+                raw = json.loads(line, object_pairs_hook=_unique)
+                if (not isinstance(raw, dict) or type(raw.get("schema_version")) is not int
+                        or type(raw.get("seq")) is not int):
+                    raise MemoryScopeError("runtime journal ownership evidence has invalid field types")
     events = read_events(Path(f"/proc/self/fd/{journal}"))
     if events.malformed or not events.ordered or events.truncated_tail:
         raise MemoryScopeError("runtime journal ownership evidence is damaged")
-    starts = events.of_kind(RUN_STARTED)
+    bindings = events.of_kind(SCOPE_BOUND)
+    if not bindings:
+        raise MemoryScopeError("runtime scope lacks launch-time generation/workspace attestation; "
+                               "retry after normal lifecycle settlement or supported handoff; do not adopt or backfill")
+    current = bindings[-1]
+    proof = current.get("binding")
+    admitted = launch_binding(record, directory)
+    if (current.get("run_id") != record["run_id"] or not isinstance(proof, dict)
+            or set(proof) != {"admitted", "invocation_id", "activation", "cgroup"}
+            or not isinstance(proof.get("admitted"), dict)
+            or proof.get("admitted") != admitted
+            or proof.get("invocation_id") != state["InvocationID"]
+            or proof.get("activation") != state["ActiveEnterTimestampMonotonic"]
+            or proof.get("cgroup") != list(native)
+            or not all(type(value) is int for value in proof["cgroup"])
+            or state.get("Description") != binding_description(admitted)
+            or state.get("Description") != binding_description(proof["admitted"])
+            or sum(event.get("binding", {}).get("invocation_id") == state["InvocationID"]
+                   for event in bindings if isinstance(event.get("binding"), dict)) != 1):
+        raise MemoryScopeError("runtime launch attestation does not match canonical ownership or native incarnation")
+    boot, ticks = record["launch_identity"].rsplit(":", 1)
+    hz = os.sysconf("SC_CLK_TCK")
+    activation = int(state["ActiveEnterTimestampMonotonic"])
+    launch_time = int(ticks) * 1_000_000 // hz
+    if (boot != Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+            or activation < launch_time):
+        raise MemoryScopeError("runtime launch attestation belongs to a different boot or activation")
+    starts = tuple(event for event in events.of_kind(RUN_STARTED) if event["seq"] > current["seq"])
     if not starts:
-        raise MemoryScopeError("runtime scope has no journaled launch proof")
+        return  # The fsynced pre-head binding also covers crash before run.started.
     if len(starts) != 1:
-        # The deployed journal does not carry a generation. Without a live
-        # generation-bound launcher, multiple incarnations are ambiguous.
-        raise MemoryScopeError("multiple journaled launches lack a live generation-bound launcher; retry lifecycle recovery")
+        raise MemoryScopeError("multiple starts borrow one scope launch attestation; retry lifecycle recovery")
     started = starts[-1]
     if started.get("socket_path") != str(directory / protocol.SOCKET_NAME):
         raise MemoryScopeError("runtime journal belongs to a different canonical data root")
@@ -188,18 +171,16 @@ def _journal_proof(stack: ExitStack, fd: int, uid: int, record: dict[str, Any],
     for key in ("run_id", "role", "task"):
         if heartbeat.get(key) != record[key]:
             raise MemoryScopeError("runtime heartbeat does not match canonical ownership")
-    boot, ticks = record["launch_identity"].rsplit(":", 1)
     current_boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     if (type(heartbeat.get("version")) is not int or heartbeat.get("version") != 1
             or type(heartbeat.get("pid")) is not int or heartbeat["pid"] <= 0
             or heartbeat.get("pid") != started.get("head_pid")
             or boot != current_boot or heartbeat.get("boot_id") != boot):
         raise MemoryScopeError("runtime launch belongs to a different native identity or boot")
-    activation = int(state["ActiveEnterTimestampMonotonic"])
-    hz = os.sysconf("SC_CLK_TCK")
-    launch_time = int(ticks) * 1_000_000 // hz
     head_time = int(heartbeat["proc_starttime_ticks"]) * 1_000_000 // hz
-    if not launch_time <= activation <= head_time:
+    # /proc birth time is rounded down to a kernel tick. The exact native
+    # incarnation is already independently fenced by InvocationID and inode.
+    if not launch_time <= activation < head_time + (1_000_000 + hz - 1) // hz:
         raise MemoryScopeError("native scope incarnation is outside the recorded launch; possible unit reuse")
 
 
@@ -258,6 +239,8 @@ def read_runtime_scopes(data_dir: Path, observed: set[str]) -> RuntimeScopeInven
                             raise MemoryScopeError("runtime owner changed before its observation lock")
                         state = _unit_state(unit)
                         if _absent(state):
+                            if _unit_state(unit) != state or ScopedHeadLifecycle.read_owner(directory) != record:
+                                raise MemoryScopeError("runtime scope changed during disappearance observation; retry inspection")
                             disappeared.add(unit)
                             continue
                         if (state["Id"] != unit or state["LoadState"] != "loaded"
@@ -273,8 +256,7 @@ def read_runtime_scopes(data_dir: Path, observed: set[str]) -> RuntimeScopeInven
                         native, populated = _membership(group)
                         if record["cleanup_complete"] and populated:
                             raise MemoryScopeError("a populated runtime scope falsely claims completed cleanup")
-                        if not _live_launch(record, group, directory):
-                            _journal_proof(owner_stack, fd, uid, record, state, directory)
+                        _journal_proof(owner_stack, fd, uid, record, state, directory, native)
                         after = _unit_state(unit)
                         if _absent(after):
                             disappeared.add(unit)
@@ -282,6 +264,7 @@ def read_runtime_scopes(data_dir: Path, observed: set[str]) -> RuntimeScopeInven
                         native_after, populated = _membership(group)
                         if record["cleanup_complete"] and populated:
                             raise MemoryScopeError("a completed runtime scope gained members during inspection")
+                        _journal_proof(owner_stack, fd, uid, record, after, directory, native_after)
                         if (after != state or native_after != native
                                 or ScopedHeadLifecycle.read_owner(directory) != record
                                 or _identity(os.fstat(_directory(owner_stack, directory))) != _identity(os.fstat(fd))

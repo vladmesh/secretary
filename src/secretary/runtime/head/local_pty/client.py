@@ -162,7 +162,7 @@ def spawn_head(
     if memory_limit_mib is None:
         argv.append("--daemonize")
     if cwd:
-        argv += ["--cwd", str(cwd)]
+        argv += ["--cwd", str(Path(cwd).resolve())]
     if quiet_seconds is not None:
         argv += ["--quiet-seconds", str(quiet_seconds)]
     if delivery_seconds is not None:
@@ -185,7 +185,8 @@ def spawn_head(
                 if scope_generation:
                     raise MemoryScopeError("a write-ahead scope generation cannot replace an existing owner")
                 previous.stop_and_prove_empty()
-            lifecycle.persist(run_dir, role=role, task=task, workspace=str(cwd), replace_existing=not bool(scope_generation))
+            lifecycle.persist(run_dir, role=role, task=task, workspace=str(Path(cwd or os.getcwd()).resolve()),
+                              replace_existing=not bool(scope_generation))
             descriptor = os.open(run_dir.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
                 os.fsync(descriptor)

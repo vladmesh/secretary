@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import json
 import fcntl
+import hashlib
+import json
 import os
 import signal
 import subprocess
@@ -11,22 +12,54 @@ import sys
 import time
 import uuid
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass, field
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from ..memory import (
     CGROUP_ROOT,
+    MEMORY_LIMIT_REASON,
     MemoryScopeError,
     ScopeEvidence,
-    MEMORY_LIMIT_REASON,
     memory_events,
     own_cgroup,
     scope_argv,
     scope_unit,
     supervisor_oom_protected,
 )
+
+LAUNCH_BINDING_ENV = "SECRETARY_SCOPE_LAUNCH_BINDING"
+LAUNCH_FIELDS = ("run_id", "unit", "generation", "role", "task", "workspace",
+                 "launch_pid", "launch_identity")
+
+
+def binding_description(binding: dict[str, Any]) -> str:
+    payload = json.dumps(binding, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return "secretary-launch-v1:" + hashlib.sha256(payload.encode("ascii")).hexdigest()
+
+
+def launch_binding(record: dict[str, Any], directory: Path) -> dict[str, Any]:
+    directory = directory.absolute()
+    # The caller selected this actual launch root. The reader anchors it under
+    # its selected data root; no installation root is guessed from basename.
+    return {"version": 1, "directory": str(directory), "root": str(directory.parent),
+            **{key: record[key] for key in LAUNCH_FIELDS}}
+
+
+def native_scope_state(unit: str) -> dict[str, str]:
+    properties = ("Id", "LoadState", "ActiveState", "SubState", "ControlGroup",
+                  "InvocationID", "ActiveEnterTimestampMonotonic", "Transient", "BindsTo", "Description")
+    result = subprocess.run(
+        ["systemctl", "--system", "show", unit, "--property=" + ",".join(properties)],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    if result.returncode or result.stderr.strip():
+        raise MemoryScopeError("native runtime scope observation failed; retry systemctl show")
+    fields = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    if any(name not in fields for name in properties):
+        raise MemoryScopeError("native runtime scope observation is incomplete")
+    return fields
 
 
 def launch_identity(pid: int) -> str | None:
@@ -209,12 +242,18 @@ class ScopedHeadLifecycle:
             record = ScopedHeadLifecycle.read_owner(run_dir)
             if not record["launch_allowed"] or record["generation"] != arguments[3]:
                 return 1
+            if run_dir.absolute() != run_dir.resolve():
+                raise MemoryScopeError("scope admission directory is not canonical")
+            # The admitted snapshot crosses the gate, rather than being assembled
+            # later from a mutable owner. The released caller already supplies [3].
+            admitted = {key: record[key] for key in ("run_id", "unit", "generation", "role", "task", "workspace")}
+            admitted["directory"] = str(run_dir.absolute())
             read_fd, write_fd = os.pipe()
             try:
                 with log_path.open("ab", buffering=0) as log:
                     scope = subprocess.Popen(
                         [sys.executable, "-P", "-m", "secretary.runtime.head.local_pty.scope_launcher",
-                         "--exec-gated", str(read_fd), *arguments[4:]],
+                         "--exec-gated", str(read_fd), json.dumps(admitted), *arguments[4:]],
                         stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                         start_new_session=True, close_fds=True, pass_fds=(read_fd,),
                     )
@@ -253,6 +292,40 @@ class ScopedHeadLifecycle:
             scope.kill()
             scope.wait()
         return 1
+
+    @contextmanager
+    def attest_launch(self, *, directory: Path, role: str, task: str, workspace: str) -> Iterator[dict[str, Any]]:
+        """Bind the sealed admission to this native incarnation before head work."""
+        raw = os.environ.pop(LAUNCH_BINDING_ENV, "")
+        try:
+            binding = json.loads(raw)
+            if binding["directory"] != str(directory.absolute()):
+                raise MemoryScopeError("sealed launch belongs to a different run directory")
+            with self.owner_lock(directory):
+                record = self.read_owner(directory)
+                if (not record["launch_allowed"] or record["cleanup_complete"]
+                        or binding != launch_binding(record, directory)
+                        or binding["run_id"] != self.run_id or binding["role"] != role
+                        or binding["task"] != task or binding["workspace"] != workspace):
+                    raise MemoryScopeError("sealed launch admission does not match the actual supervisor")
+                group = own_cgroup()
+                state = native_scope_state(record["unit"])
+                if (group is None or group != CGROUP_ROOT / "system.slice" / record["unit"]
+                        or state["Id"] != record["unit"] or state["LoadState"] != "loaded"
+                        or state["Transient"] != "yes" or not state["InvocationID"]
+                        or state["ControlGroup"] != f"/system.slice/{record['unit']}"
+                        or state["Description"] != binding_description(binding)
+                        or launch_identity(record["launch_pid"]) != record["launch_identity"]):
+                    raise MemoryScopeError("native scope does not match sealed launch admission")
+                ticks = int(record["launch_identity"].rsplit(":", 1)[1])
+                if int(state["ActiveEnterTimestampMonotonic"]) < ticks * 1_000_000 // os.sysconf("SC_CLK_TCK"):
+                    raise MemoryScopeError("native scope predates the admitted launcher")
+                info = group.stat()
+                yield {"admitted": binding, "invocation_id": state["InvocationID"],
+                       "activation": state["ActiveEnterTimestampMonotonic"],
+                       "cgroup": [info.st_dev, info.st_ino]}
+        except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError) as exc:
+            raise MemoryScopeError("scope launch attestation is unavailable") from exc
 
     @staticmethod
     def started_or_exited(events: Sequence[dict[str, Any]], since: int) -> tuple[dict[str, Any], bool] | None:

@@ -88,6 +88,11 @@ with mock.patch.object(cli, "resolve_installed_packaged", return_value=[]):
 if (native_collected.errors or unit in native_diffs["units"].unmanaged_on_host
         or unit in native_diffs["units"].missing_on_host):
     raise RuntimeError("native doctor inventory did not preserve its active runtime scope")
+with mock.patch.object(status, "resolve_installed_packaged", return_value=[]):
+    native_snapshot = status.collect_status(native_report, sprints=False, recovery={"fixture": True})
+if (native_snapshot["host"]["inventory_errors"]
+        or run_id not in [row["run_id"] for row in native_snapshot["host"]["runtime_scopes"]]):
+    raise RuntimeError("native status did not preserve its active runtime scope")
 
 (root / "proof.json").write_text(json.dumps({"unit": unit, "results": results, "effects": effects,
                                              "runtime_scopes": snapshot["host"]["runtime_scopes"],
