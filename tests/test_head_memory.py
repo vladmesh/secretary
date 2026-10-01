@@ -187,7 +187,7 @@ class HeadMemoryTests(unittest.TestCase):
                 self.assertEqual(explicit.memory_limit_mib, 12288)
                 run_id = f"{role}-run"
                 argv = scope_argv(run_id, explicit.memory_limit_mib, ["/bin/true"])
-                self.assertEqual(argv[:6], ["sudo", "-n", "-E", "systemd-run", "--system", "--scope"])
+                self.assertEqual(argv[:5], ["sudo", "-n", "systemd-run", "--system", "--scope"])
                 self.assertIn(f"--property=MemoryMax={12288 * 1024 * 1024}", argv)
                 self.assertIn("--property=MemorySwapMax=0", argv)
                 self.assertIn(scope_unit(run_id), argv)
@@ -206,7 +206,8 @@ class HeadMemoryTests(unittest.TestCase):
             self.assertEqual((cgroup / "memory.oom.group").read_text(), "1\n")
             self.assertEqual(protection.read_text(), "-1000\n")
             argv = scope_argv("run", 96, ["/bin/true"])
-            self.assertIn("secretary.runtime.head.local_pty.scope_bootstrap", argv)
+            self.assertIn(str(Path(scope_bootstrap.__file__).resolve()), argv)
+            self.assertIn("-I", argv)
             self.assertIn("--property=Delegate=yes", argv)
             owned = scope_argv("po-run", 96, ["/bin/true"], owner_unit="secretary-po.service")
             self.assertIn("--property=BindsTo=secretary-po.service", owned)

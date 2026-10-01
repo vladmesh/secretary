@@ -44,14 +44,13 @@ def scope_argv(
     groups = os.getgroups()
     group_option = f"--groups={','.join(str(group) for group in groups)}" if groups else "--clear-groups"
     return [
-        "sudo", "-n", "-E", "systemd-run", "--system", "--scope", "--quiet",
+        "sudo", "-n", "systemd-run", "--system", "--scope", "--quiet",
         "--unit", scope_unit(run_id),
         f"--property=MemoryMax={limit_mib * 1024 * 1024}",
         "--property=MemorySwapMax=0", "--property=Delegate=yes",
         *([f"--property=BindsTo={owner_unit}", f"--property=After={owner_unit}"] if owner_unit else []),
         "--",
-        *(["env", f"PYTHONPATH={pythonpath}"] if pythonpath else []),
-        sys.executable, "-P", "-m", "secretary.runtime.head.local_pty.scope_bootstrap",
+        sys.executable, "-I", str(Path(__file__).resolve().parent / "local_pty" / "scope_bootstrap.py"),
         f"--reuid={os.getuid()}", f"--regid={os.getgid()}", group_option, "--",
         *command,
     ]

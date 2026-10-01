@@ -72,6 +72,7 @@ integration-dispatcher tests/test_dispatcher_provider_failure.py
 integration-dispatcher tests/test_gate.py
 unit tests/test_head_command.py
 unit tests/test_head_memory.py
+component tests/test_scoped_environment.py
 unit tests/test_head_scope_ownership.py
 integration-heads tests/test_head_scope_backend.py
 unit tests/test_po_scoped_launch.py

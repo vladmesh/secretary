@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shlex
 import signal
 import subprocess
@@ -13,6 +14,7 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from secretary.runtime.head.local_pty.client import LocalPtySpawnError, spawn_head
@@ -25,10 +27,12 @@ from secretary.runtime.head.task_ref import TaskRef
 from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
 from secretary.dispatch.watchdog import head_process_status
 from secretary.po import store as po_store
-from secretary.po.runner import PoRunner
+from secretary.po.runner import PoRunner, turn_environment
+from secretary.po import PO_REQUEST_ENV, PO_SESSION_ENV
 from secretary.po.service import PoService
 from tests.po_cli_fakes import FAKE_CLAUDE, eventually
 from tests.po_fake_store import FakeBoard, FakePoStore
+from tests.scoped_environment_fixtures import deployed_scope_argv
 
 
 def await_fact(predicate, message: str, seconds: float = 15) -> None:
@@ -57,6 +61,78 @@ class ScopeBackendTests(unittest.TestCase):
         return spawn_head(root=self.root, run_id=run_id, role="worker", task="ci:owned-fixture",
                           command=shlex.join([sys.executable, "-u", "-c", program]),
                           memory_limit_mib=96)
+
+    def test_deployed_po_producer_new_launcher_preserves_path_and_runtime_bindings(self) -> None:
+        bin_dir = self.root / "prepared cli tools"
+        bin_dir.mkdir()
+        result = self.root / "environment.json"
+        fake = bin_dir / "prepared-only-cli"
+        keys = ["PATH", "PYTHONPATH", "HOME", "CODEX_HOME", "BOARD_ACTOR",
+                "SCOPED_CONFIG_SENTINEL", "SUPPLIED_EMPTY", PO_SESSION_ENV, PO_REQUEST_ENV]
+        fake.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json,os,pathlib,subprocess,sys,secretary\n"
+            "control=subprocess.run(['python3','-P','-m','secretary','--help'],capture_output=True)\n"
+            "pathlib.Path(sys.argv[1]).write_text(json.dumps({"
+            f"'environment':{{k:os.environ[k] for k in {keys!r} if k in os.environ}},"
+            "'python':sys.executable,'source':secretary.__file__,"
+            "'uid':os.getuid(),'gid':os.getgid(),'groups':os.getgroups(),"
+            "'control_exit':control.returncode,'args':sys.argv[2:]}))\n"
+        )
+        fake.chmod(0o700)
+        environment = turn_environment({
+            "PATH": str(bin_dir) + ":/usr/bin:/bin",
+            "HOME": str(self.root / "runtime home"),
+            "CODEX_HOME": str(self.root / "codex home"),
+            "SCOPED_CONFIG_SENTINEL": "safe spaces ' ; $(touch NEVER) `touch NEVER`",
+            "SUPPLIED_EMPTY": "",
+        })
+        store = SimpleNamespace(turn_request_id=lambda *_: "disposable-request")
+        runner = PoRunner(store, self.root / "data", env=environment, scope_owner_unit="")
+        session = SimpleNamespace(session_id="disposable-session", cli="codex", model=None,
+                                  effort="high", cwd=str(self.root))
+        files = runner.files(session.session_id, 1)
+        files.directory.mkdir(parents=True)
+        files.prompt.write_text("harmless input")
+        def cleanup():
+            owner = ScopedHeadLifecycle.from_run_dir(runner._scope_dir(session.session_id, 1))
+            if owner is not None:
+                owner.stop_and_prove_empty()
+        self.addCleanup(cleanup)
+        # This is the deployed producer's actual function from the 64c42d7 Git
+        # object. The launcher process imports only the candidate source. No live
+        # PO process/receipt, provider, credential or installed state is touched.
+        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.scope_argv",
+                        deployed_scope_argv()):
+            process = runner._scoped_launch(
+                session, 1, [fake.name, str(result), "argument ; $(touch NEVER)", ""], files,
+                runner.session_environment(session, 1),
+                HeadSpec.from_profile("ci-po", {"adapter": "codex", "memory_limit_mib": 256}),
+            )
+        self.assertEqual(process.wait(timeout=15), 0)
+        actual = json.loads(result.read_text())
+        for key, value in environment.items():
+            self.assertEqual(actual["environment"][key], value, key)
+        self.assertEqual(actual["environment"][PO_SESSION_ENV], session.session_id)
+        self.assertEqual(actual["environment"][PO_REQUEST_ENV], "disposable-request")
+        self.assertNotIn("FOREIGN_INSTALLATION", actual["environment"])
+        self.assertEqual(actual["control_exit"], 0)
+        self.assertEqual(actual["args"], ["argument ; $(touch NEVER)", ""])
+        self.assertEqual(Path(actual["python"]).parent, Path(sys.executable).parent)
+        self.assertTrue(actual["source"].startswith(environment["PYTHONPATH"].split(":")[0]))
+        self.assertEqual((actual["uid"], actual["gid"], sorted(actual["groups"])),
+                         (os.getuid(), os.getgid(), sorted(os.getgroups())))
+        self.assertFalse((self.root / "NEVER").exists())
+        owner = ScopedHeadLifecycle.from_run_dir(process.handle.run_dir)
+        self.assertTrue(owner.read_owner(process.handle.run_dir)["launch_allowed"])
+        owner.stop_and_prove_empty()
+        self.assertTrue(owner.read_owner(process.handle.run_dir)["cleanup_complete"])
+        # No prepared values are allowed into bootstrap argv, scope properties or
+        # persistent diagnostics. The result is private disposable test evidence.
+        for name in ("scope-owner.json", "supervisor.log", "journal.jsonl"):
+            path = process.handle.run_dir / name
+            if path.exists():
+                self.assertNotIn(environment["SCOPED_CONFIG_SENTINEL"], path.read_text())
 
     def test_detached_descendant_stop_failure_retains_owner_and_real_retry_empties_scope(self) -> None:
         child_file = self.root / "detached.pid"
