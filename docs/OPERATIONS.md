@@ -1165,6 +1165,48 @@ default 61) and concludes as its `outcome` input says. An adapter would declare 
 `validation.e2e: {workflow: e2e-synthetic.yml, inputs: {minutes: "61", outcome: success}, candidate_input: candidate, deadline: 3h}`.
 Declaring it makes every code card of that project wait about an hour and spend one budgeted run.
 
+### Gate attestation replay
+
+Assessment delivery and release audit share `dispatch/gate_lifecycle.py:accept_green_gate`.
+Each delivery first admits a fresh `AcceptedGreenGate` against current HEAD and the declared
+gate mode. The latest observation remains in `gate_attestation`; reviewer packets, candidate
+selection and sprint gate reads consume that receipt. Comment effects in
+`gate_attestation_effects` preserve their original receipt, delivery context, request and body.
+Their SHA-256 identity covers candidate, base, mode, every check name/result/URL, the complete
+check-set digest, attempt/ref/actor/stage, report and review baselines, reviewed commit and
+review/e2e reconciliation facts. Observation time alone does not select another effect.
+
+The dispatcher saves the frozen effect before `TaskWriter.comment`, whose global audit claim
+remains strict. After the Assessment attestation commits, the normal exact-generation reviewer
+stop must succeed before the write-ahead park intent and its Assessment move. Stop refusal keeps
+Validate and the retained worker. A crash before the park intent re-admits the gate and replays
+the saved comment bytes. A crash after park intent, or after the move before state save, finishes
+the existing park and move identity. Release similarly replays its comment before the separate
+merge effect. A frozen comment never supplies current gate admission.
+
+Released old-format comments, including secretary-1883's overwritten observation timestamp,
+are supported through authoritative `audit.committed_event` and `TaskReader.show` reads. Adoption
+requires successful commented kind, exact request/ref/dispatcher actor/marker, event id, one
+original board body with the immutable audit digest, the canonical receipt/reconciliation
+grammar and matching delivery context and fresh receipt semantics. The old Assessment key binds
+the review baseline; a legacy release comment predating the current review baseline cannot be
+adopted for that delivery. An independently admitted new receipt or reconciliation selects a
+distinct v2 semantic request. Missing, unreadable, ambiguous, staged or unrelated legacy evidence
+refuses delivery. Recovery does not rewrite audit facts or infer bytes from a current timestamp.
+New additive dispatcher fields default empty when an older record is loaded; the body grammar
+and latest receipt remain compatible with existing reviewers and observer consumers. Refresh
+the secretary dispatcher through its supported upgrade route before continuation; an older
+dispatcher does not understand the v2 effect fence and must not resume its mutable writer path.
+
+The caller uses the existing durable refusal/escalation convention: every failure records ref,
+attestation stage, exact request, committed kind/ref/event and an operator-action reason in the
+card record and degraded tick outcome. Three consecutive identical failures, persisted across
+restarts, produce one idempotent operator comment and `gate-attestation-stalled`. The count caps
+at three; later ticks create no additional comments or moves. Successful strict replay clears the
+episode. Payload bodies, credentials and transcripts are excluded from diagnostics. Restore
+authoritative evidence or investigate the conflicting ownership through supported audit reads;
+changing a request's persisted audit identity is never a recovery action.
+
 ### When the e2e run budget is spent
 
 Every e2e run pays for stands, so each sprint has an e2e run budget: 3 runs unless `sprint create

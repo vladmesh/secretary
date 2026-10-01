@@ -8,10 +8,11 @@ head vitality remains owned by dispatch.wait_vitality.
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
-from secretary.dispatch import attempt_accounting, release_lifecycle
+from secretary.dispatch import attempt_accounting, gate_attestation, release_lifecycle
 from secretary.dispatch.gate import (
     GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS,
     GATE_PENDING_STALL_SECONDS,
@@ -38,6 +39,7 @@ from secretary.dispatch.wait_vitality import (
     reduce_and_store_vitality_episode as _reduce_and_store_vitality_episode,
 )
 from secretary.dispatch.worker_continuation import begin_red_transition as _begin_red_transition
+from secretary.tasks import TaskError
 
 
 def run_gate(
@@ -160,53 +162,75 @@ def accept_green_gate(
     records[ref] = record
     runtime.save_records(payload, records)
     if accepted.receipt is not None and stage in {"assessment", "release"}:
-        label = "Assessment delivery" if stage == "assessment" else "release audit"
-        audit_key = accepted.receipt.command_or_check_set_digest[:12]
-        if stage == "assessment":
-            audit_key = f"{record.review_baseline}-{audit_key}"
-        closing = (
-            "The observer consumes this fresh receipt, the worker report and the reviewer "
-            "verdict before opening code or running any check."
-            if stage == "assessment"
-            else "Exact-SHA pre-merge gate receipt is valid; merge follows as a separate effect."
+        context = gate_attestation.delivery_context(
+            record, ref=ref, owner=runtime.owner, attempt_id=attempt_id, stage=stage,
+            e2e_reconciliation=e2e_reconciliation,
         )
-        runtime.writer.comment(
-            role="dispatcher",
-            actor=runtime.owner,
-            reference=ref,
-            body=(
-                f"## Mechanical gate attestation — {label}\n\n"
-                + accepted.receipt.render()
-                + (
-                    "\n\nReview/base reconciliation: "
-                    f"reviewed SHA `{record.review_reconciliation['reviewed_sha']}`; "
-                    f"HEAD `{record.review_reconciliation['head_sha']}`; "
-                    f"base SHA `{record.review_reconciliation['base_sha']}`; "
-                    f"{record.review_reconciliation['reviewed_paths']} reviewed paths; "
-                    "reviewed paths unchanged."
-                    if stage == "release" and record.review_reconciliation is not None
-                    else ""
+        try:
+            identity, effect = gate_attestation.select_effect(
+                runtime, record, accepted.receipt, context
+            )
+            record.gate_attestation_effects[identity] = effect
+            # Write ahead of the strict comment effect, including legacy adoption. A crash
+            # after commit can only replay these bytes; admission above remains mandatory.
+            runtime.save_records(payload, records)
+            try:
+                runtime.writer.comment(
+                    role="dispatcher", actor=runtime.owner, reference=ref,
+                    body=effect["body"], request_id=effect["request_id"],
                 )
-                + (
-                    "\n\nE2E/base reconciliation: "
-                    f"e2e-green SHA `{e2e_reconciliation['reviewed_sha']}`; "
-                    f"HEAD `{e2e_reconciliation['head_sha']}`; "
-                    f"base SHA `{e2e_reconciliation['base_sha']}`; "
-                    f"{e2e_reconciliation['reviewed_paths']} card paths; "
-                    "card paths unchanged, so the e2e result carries to this SHA."
-                    if e2e_reconciliation is not None
-                    else ""
-                )
-                + f"\n\n{closing}"
-            ),
-            request_id=_attempt_request_id(
-                record.attempt_id or attempt_id,
-                f"gate-attestation-{stage}",
-                ref,
-                audit_key,
-            ),
-        )
+            except TaskError as exc:
+                committed = gate_attestation.read_committed(runtime, effect["request_id"])
+                raise gate_attestation.AttestationRefusal(
+                    effect["request_id"],
+                    f"strict attestation writer refused ({exc.code}); inspect request ownership and supported audit recovery",
+                    committed,
+                ) from None
+        except gate_attestation.AttestationRefusal as exc:
+            return _attestation_failed(runtime, record, records, payload, attempt_id, ref, stage, exc)
+        if record.gate_attestation_failure:
+            record.gate_attestation_failure = {}
+            runtime.save_records(payload, records)
     return None
+
+
+def _attestation_failed(
+    runtime: Any, record: DispatcherRecord, records: dict[str, DispatcherRecord],
+    payload: dict[str, Any], attempt_id: str, ref: str, stage: str,
+    refusal: gate_attestation.AttestationRefusal,
+) -> dict[str, Any]:
+    """The existing stuck-effect convention: persist, escalate once, keep heads and board.
+
+    Three identical refusals across persisted ticks earn one idempotent operator comment.
+    No blocked move, stop, resume or replacement is authorized by a payload conflict.
+    """
+    detail = {"ref": ref, "stage": f"gate-attestation-{stage}",
+              "request_id": refusal.request_id, "committed": refusal.committed,
+              "operator_action": refusal.reason}
+    token = gate_attestation.digest(json.dumps(detail, sort_keys=True))
+    old = record.gate_attestation_failure
+    count = min(gate_attestation.ATTESTATION_FAILURE_LIMIT,
+                int(old.get("count", 0)) + 1 if old.get("identity") == token else 1)
+    record.gate_attestation_failure = {"identity": token, "count": count, **detail}
+    records[ref] = record
+    runtime.save_records(payload, records)
+    escalated = count >= gate_attestation.ATTESTATION_FAILURE_LIMIT
+    message = (f"ref {ref}; stage {detail['stage']}; request {refusal.request_id}; "
+               f"committed kind {refusal.committed['kind']}; ref {refusal.committed['ref']}; "
+               f"event {refusal.committed['event_id']}. Operator action: {refusal.reason}")
+    if escalated:
+        runtime.writer.comment(
+            role="dispatcher", actor=runtime.owner, reference=ref,
+            body=(f"Attestation delivery stalled after {gate_attestation.ATTESTATION_FAILURE_LIMIT} "
+                  f"identical refusals: {message}. "
+                  "The card and retained heads await supported recovery."),
+            request_id=_attempt_request_id(record.attempt_id or attempt_id,
+                                           "gate-attestation-stuck", ref, token),
+        )
+    return {"status": "degraded", "step": "assessment" if stage == "release" else "review",
+            "pilot_ref": ref, "attempt_id": attempt_id,
+            "action": "gate-attestation-stalled" if escalated else "gate-attestation-refused",
+            "reason": message, "attestation_failure": record.gate_attestation_failure}
 
 
 def _block_missing_gate_receipt(
