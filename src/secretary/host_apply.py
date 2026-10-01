@@ -422,7 +422,8 @@ def apply_host(
             return ApplyResult(errors=["runtime ownership unavailable: " + "; ".join(fresh.errors.values())],
                                dry_run=dry_run)
         inputs = replace(inputs, inventory=replace(
-            inputs.inventory, units=inputs.inventory.units - fresh.disappeared, runtime_scopes=fresh))
+            inputs.inventory, units=(inputs.inventory.units | set(fresh.observed)) - fresh.disappeared,
+            runtime_scopes=fresh))
     host = inputs.instance.get("host", {}) if isinstance(inputs.instance, dict) else {}
     prefix = host.get("unit_prefix", "") if isinstance(host, dict) else ""
     errors = plan_input_errors(inputs.instance, inputs.bindings, packaged=inputs.packaged)

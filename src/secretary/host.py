@@ -480,6 +480,7 @@ def plan_changes(
     known_units.update(declared_foreign)
     if actual.runtime_scopes is not None and not actual.runtime_scopes.errors:
         known_units.update(actual.runtime_scopes.scopes)
+        known_units.update(actual.runtime_scopes.disappeared)
     if unit_prefix:
         for name in actual.units:
             if name.startswith(unit_prefix) and name not in known_units:
@@ -682,7 +683,8 @@ def _diff(expected: set[str], actual: set[str]) -> KindDiff:
 
 def inventory(expected: Expectations, actual: HostInventory) -> dict[str, KindDiff]:
     """Compare expectations against a host inventory, one KindDiff per kind."""
-    transient = set(actual.runtime_scopes.scopes) if actual.runtime_scopes is not None else set()
+    transient = (set(actual.runtime_scopes.scopes) | set(actual.runtime_scopes.disappeared)
+                 if actual.runtime_scopes is not None and not actual.runtime_scopes.errors else set())
     return {
         "projects": _diff(expected.projects, actual.projects),
         "units": _diff(expected.units, actual.units - expected.foreign_units - transient),
@@ -706,9 +708,9 @@ def _with_runtime_scopes(expected: Expectations, collected: CollectResult) -> Co
     errors = dict(collected.errors)
     if projected.errors:
         errors["units"] = "runtime ownership unavailable: " + "; ".join(projected.errors.values())
-    actual = replace(collected.inventory,
-                     units=collected.inventory.units - projected.disappeared,
-                     runtime_scopes=projected)
+    # Preserve the raw observation for refresh. Absence is a current projection,
+    # never a permanent removal from the authority's input names.
+    actual = replace(collected.inventory, runtime_scopes=projected)
     return CollectResult(actual, errors)
 
 

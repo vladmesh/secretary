@@ -48,7 +48,10 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         self.boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
         self.enterContext(mock.patch.object(reader, "CGROUP_ROOT", self.root / "cgroups"))
         self.enterContext(mock.patch.object(reader, "launch_identity", return_value=None))
-        self.enterContext(mock.patch.object(reader, "_unit_state", side_effect=lambda unit: dict(self.native[unit])))
+        self.enterContext(mock.patch.object(reader, "_unit_state", side_effect=lambda unit: dict(
+            self.native.get(unit, dict(Id=unit, LoadState="loaded", ActiveState="active", SubState="running",
+                                       ControlGroup=f"/system.slice/{unit}", InvocationID="unowned-invocation",
+                                       ActiveEnterTimestampMonotonic="1500000", Transient="yes")))))
 
     def owner(self, role="po", run_id="po-self", directory_root="po-heads", pending=False):
         directory = self.data / directory_root / run_id
@@ -88,6 +91,19 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
 
     def inputs(self, actual):
         return ApplyInputs(self.instance, [], actual, self.desired, self.data / "host-managed.json", self.packaged)
+
+    def doctor_and_status(self):
+        report = SimpleNamespace(instance=self.instance, bindings=[], host=self.instance["host"],
+                                 data_dir=self.data, instance_path=self.root / "instance" / "instance.yaml",
+                                 name="disposable", projects=[])
+        with (
+            mock.patch.object(cli, "resolve_installed_packaged", return_value=self.packaged),
+            mock.patch.object(status, "resolve_installed_packaged", return_value=self.packaged),
+        ):
+            _, collected, diffs = cli.collect_host_inventory(report, SimpleNamespace(host_fixture=str(self.fixture)))
+            snapshot = status.collect_status(report, host_fixture=str(self.fixture), sprints=False,
+                                             recovery={"fixture": True})
+        return collected, diffs, snapshot
 
     def test_all_roles_other_project_and_pending_descendants_preserved_by_both_consumers(self):
         units = [self.owner(role, role, "heads", pending=role == "reviewer")[2]
@@ -277,6 +293,117 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         self.assertFalse(result.errors)
         self.assertFalse(result.conflicts)
         self.assertEqual(installer.calls, [])
+
+    def test_review14_disappeared_scope_reappears_without_owner_must_refuse(self):
+        _, directory, unit = self.owner()
+        self.native[unit].update(LoadState="not-found", ActiveState="inactive", ControlGroup="")
+        collected = self.collect(unit)
+        self.assertFalse(collected.errors)
+        self.assertIn(unit, collected.inventory.runtime_scopes.disappeared)
+        # The observer requires the raw originally observed set to survive filtering.
+        self.assertIn(unit, collected.inventory.units)
+        self.assertEqual(collected.inventory.runtime_scopes.observed, frozenset(collected.inventory.units))
+        self.assertNotIn(unit, inventory(self.expected, collected.inventory)["units"].unmanaged_on_host)
+        (directory / "scope-owner.json").unlink()
+        self.native[unit].update(LoadState="loaded", ActiveState="active",
+                                ControlGroup=f"/system.slice/{unit}", InvocationID="foreign-replacement")
+        for dry in (True, False):
+            with self.subTest(dry_run=dry):
+                installer = FakeUnitInstaller()
+                result = apply_host(self.inputs(collected.inventory), units=installer, dry_run=dry)
+                self.assertTrue(result.errors or result.conflicts, f"accepted unowned replacement: {result}")
+                self.assertEqual(installer.calls, [])
+        fresh = self.collect(unit)
+        self.assertIn(unit, inventory(self.expected, fresh.inventory)["units"].unmanaged_on_host)
+        doctor, diffs, snapshot = self.doctor_and_status()
+        self.assertIn(unit, diffs["units"].unmanaged_on_host)
+        self.assertFalse(doctor.inventory.runtime_scopes.scopes)
+        self.assertEqual(snapshot["host"]["runtime_scopes"], [])
+
+    def test_ownerless_genuine_disappearance_is_freshly_observed_before_apply(self):
+        _, directory, unit = self.owner()
+        self.native[unit].update(LoadState="not-found", ActiveState="inactive", ControlGroup="")
+        collected = self.collect(unit)
+        (directory / "scope-owner.json").unlink()
+        for dry in (True, False):
+            installer = FakeUnitInstaller()
+            result = apply_host(self.inputs(collected.inventory), units=installer, dry_run=dry)
+            self.assertFalse(result.errors)
+            self.assertFalse(result.conflicts)
+            self.assertEqual(installer.calls, [])
+        with mock.patch.object(reader, "_unit_state", side_effect=PermissionError):
+            result = apply_host(self.inputs(collected.inventory), units=FakeUnitInstaller())
+        self.assertTrue(result.errors)
+        doctor, diffs, snapshot = self.doctor_and_status()
+        self.assertFalse(doctor.errors)
+        self.assertNotIn(unit, diffs["units"].unmanaged_on_host)
+        self.assertEqual(snapshot["host"]["runtime_scopes"], [])
+
+    def test_review14_forged_nonempty_generation_or_absolute_workspace_must_refuse(self):
+        owner, directory, unit = self.owner()
+        original = owner.read_owner(directory)
+        for key, value in (("generation", "forged-generation"),
+                           ("workspace", str(self.root / "forged-workspace"))):
+            owner.update_owner(directory, {**original, key: value})
+            collected = self.collect(unit)
+            doctor, _, snapshot = self.doctor_and_status()
+            for dry in (True, False):
+                with self.subTest(field=key, dry_run=dry):
+                    installer = FakeUnitInstaller()
+                    result = apply_host(self.inputs(collected.inventory), units=installer, dry_run=dry)
+                    self.assertTrue(collected.errors and result.errors and doctor.errors
+                                    and snapshot["host"]["inventory_errors"],
+                                    f"accepted changed {key}: {collected.inventory.runtime_scopes}")
+                    self.assertEqual(installer.calls, [])
+        owner.update_owner(directory, original)
+
+    def test_released_live_scope_arguments_have_no_independent_po_generation(self):
+        owner, directory, _ = self.owner()
+        supervisor = ["python", "-P", "-m", "secretary.runtime.head.local_pty.supervisor",
+                      "--run-dir", str(directory), "--run-id", owner.run_id, "--role", "po",
+                      "--task", "po:other-project:operation", "--cwd", str(self.workspace)]
+        original = owner.launcher_argv(supervisor, run_dir=directory, log_path=directory / "supervisor.log",
+                                       timeout=5, pythonpath="")
+        other = ScopedHeadLifecycle(owner.run_id, owner.limit_mib, generation="different-generation")
+        changed = other.launcher_argv(supervisor, run_dir=directory, log_path=directory / "supervisor.log",
+                                      timeout=5, pythonpath="")
+        self.assertNotEqual(original[7], changed[7])
+        # launch_until_started gives its --exec-gated child arguments[4:],
+        # dropping the outer control process's generation at argv[7].
+        self.assertEqual(original[8:], changed[8:])
+        self.assertNotIn(owner.generation, original[8:])
+
+    def test_live_generation_substitution_must_refuse(self):
+        owner, directory, unit = self.owner()
+        original = owner.read_owner(directory)
+        supervisor = ["python", "-P", "-m", "secretary.runtime.head.local_pty.supervisor",
+                      "--run-dir", str(directory), "--run-id", owner.run_id, "--role", "po",
+                      "--task", original["task"], "--cwd", original["workspace"]]
+        launch = owner.launcher_argv(supervisor, run_dir=directory, log_path=directory / "supervisor.log",
+                                     timeout=5, pythonpath="")
+        native_argv = b"\0".join(word.encode() for word in launch[8:]) + b"\0"
+        (reader.CGROUP_ROOT / "system.slice" / unit / "cgroup.procs").write_text(str(original["launch_pid"]))
+        cmdline = Path(f"/proc/{original['launch_pid']}/cmdline")
+        original_read = Path.read_bytes
+        with (
+            mock.patch.object(reader, "launch_identity", return_value=original["launch_identity"]),
+            mock.patch.object(Path, "read_bytes", autospec=True,
+                              side_effect=lambda path: native_argv if path == cmdline else original_read(path)),
+        ):
+            # Native argv binds workspace, but the generation control argument
+            # was discarded by the deployed producer before this process began.
+            owner.update_owner(directory, {**original, "workspace": str(self.root / "forged-workspace")})
+            self.assertTrue(self.collect(unit).errors)
+            owner.update_owner(directory, {**original, "generation": "forged-live-generation"})
+            collected = self.collect(unit)
+            for dry in (True, False):
+                with self.subTest(dry_run=dry):
+                    installer = FakeUnitInstaller()
+                    result = apply_host(self.inputs(collected.inventory), units=installer, dry_run=dry)
+                    self.assertTrue(collected.errors and result.errors,
+                                    "live argv carries no independent original PO generation")
+                    self.assertEqual(installer.calls, [])
+        owner.update_owner(directory, original)
 
     def test_owner_lock_contention_during_cleanup_is_unavailable_and_read_only(self):
         owner, directory, unit = self.owner(pending=True)

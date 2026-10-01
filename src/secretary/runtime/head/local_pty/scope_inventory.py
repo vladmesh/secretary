@@ -205,13 +205,14 @@ def _journal_proof(stack: ExitStack, fd: int, uid: int, record: dict[str, Any],
 
 def read_runtime_scopes(data_dir: Path, observed: set[str]) -> RuntimeScopeInventory:
     """Project all runtime roots for this installation, without following PO pointers."""
-    wanted = frozenset(name for name in observed if name.endswith(".scope"))
+    original = frozenset(observed)
+    wanted = frozenset(name for name in original if name.endswith(".scope"))
     scopes: dict[str, dict[str, Any]] = {}
     errors: dict[str, str] = {}
     disappeared: set[str] = set()
     owners: dict[str, tuple[Path, dict[str, Any]]] = {}
     if not wanted:
-        return RuntimeScopeInventory(data_dir, wanted)
+        return RuntimeScopeInventory(data_dir, original)
     try:
         with ExitStack() as stack:
             data_fd = _directory(stack, data_dir)
@@ -298,6 +299,15 @@ def read_runtime_scopes(data_dir: Path, observed: set[str]) -> RuntimeScopeInven
                                          _identity(os.fstat(fd)), native, state["InvocationID"],
                                          tuple(state.get("BindsTo", "").split())),
                         }
+            # Missing ownership cannot establish absence. Refresh every observed
+            # ownerless name too, including a name omitted by an earlier snapshot.
+            for unit in wanted - owners.keys():
+                state = _unit_state(unit)
+                after = _unit_state(unit)
+                if after != state:
+                    raise MemoryScopeError("ownerless runtime unit changed during inspection; retry observation")
+                if _absent(after):
+                    disappeared.add(unit)
     except (OSError, ValueError, KeyError, IndexError, TypeError, RuntimeError, subprocess.SubprocessError) as exc:
         # No partial success from an ambiguous ownership inventory. Diagnostics
         # never include command lines, environment, journal payloads or outcomes.
@@ -305,4 +315,4 @@ def read_runtime_scopes(data_dir: Path, observed: set[str]) -> RuntimeScopeInven
         errors["runtime_scopes"] = str(exc) if isinstance(exc, MemoryScopeError) else (
             f"{type(exc).__name__} reading canonical runtime ownership or native membership; "
             "check selected data-root permissions and systemd access, then retry inspection")
-    return RuntimeScopeInventory(data_dir, wanted, scopes, frozenset(disappeared), errors)
+    return RuntimeScopeInventory(data_dir, original, scopes, frozenset(disappeared), errors)
