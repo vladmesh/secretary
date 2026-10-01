@@ -650,7 +650,7 @@ class CleanupOwner:
         or unknown process. Anything else is still a foreign head and keeps the refusal.
         """
         from secretary.runtime.head.identity import head_process_status
-        from secretary.runtime.head.local_pty.protocol import ProtocolError, run_dir_for
+        from secretary.runtime.local_pty_head import head_run_directory
         record = intent["record"]
         worker = str(record.get("worker") or "")
         if (run.scope_generation or run.role or run.task_ref.kind != "card" or not worker
@@ -659,8 +659,8 @@ class CleanupOwner:
             return False
         root = getattr(self.runtime.host, "_local_pty_root", None)
         try:
-            run_dir = run_dir_for(root() if callable(root) else self.data_dir / "heads", run.run_id)
-        except ProtocolError:
+            run_dir = head_run_directory(root() if callable(root) else self.data_dir / "heads", run.run_id)
+        except ValueError:
             return False
         if os.path.lexists(run_dir):
             return False
