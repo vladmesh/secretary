@@ -61,9 +61,15 @@ def serialized(method):
     return wrapped
 
 
+def _read_git(repo: Path | str, *args: str) -> subprocess.CompletedProcess[str]:
+    """Every Git read of the cleanup owner: with no optional locks, `status` never refreshes the
+    index, so inventory and manifest planning write nothing into a repository or worktree."""
+    return subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=30,
+                          env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"})
+
+
 def _git(repo: Path, *args: str, allow: bool = False) -> str:
-    result = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
-                            text=True, timeout=30)
+    result = _read_git(repo, *args)
     if result.returncode and not allow:
         raise HostError(f"cleanup Git {args[0]} failed: {result.stderr.strip()[:400]}")
     return result.stdout.strip() if not result.returncode else ""
@@ -77,8 +83,7 @@ def _canonical(value: str | Path) -> Path:
 
 
 def _ref_tip(repo: Path, ref: str) -> str:
-    result = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", ref],
-                            capture_output=True, text=True, timeout=30)
+    result = _read_git(repo, "rev-parse", "--verify", "--quiet", ref)
     if result.returncode == 0:
         return result.stdout.strip()
     if result.returncode == 1 and not result.stderr.strip():
@@ -87,8 +92,7 @@ def _ref_tip(repo: Path, ref: str) -> str:
 
 
 def _registered(repo: Path) -> list[dict[str, str]]:
-    result = subprocess.run(["git", "-C", str(repo), "worktree", "list", "--porcelain", "-z"],
-                            capture_output=True, text=True, timeout=30)
+    result = _read_git(repo, "worktree", "list", "--porcelain", "-z")
     if result.returncode:
         raise HostError("cleanup worktree registrations are unreadable")
     rows: list[dict[str, str]] = []
@@ -192,6 +196,7 @@ class CleanupJournal:
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
         self.path = self.data_dir / "dispatcher" / "cleanup.json"
+        self._targets: set[str] | None = None
 
     def read(self) -> dict[str, Any]:
         try:
@@ -206,16 +211,29 @@ class CleanupJournal:
             raise HostError("cleanup evidence has an unsupported shape")
         return value
 
+    @contextlib.contextmanager
+    def targeted(self, keys: set[str]) -> Iterator[None]:
+        """Saves inside write back only these intents; every other stored value stays as it was read."""
+        previous, self._targets = self._targets, set(keys)
+        try:
+            yield
+        finally:
+            self._targets = previous
+
     def save(self, value: dict[str, Any]) -> None:
         """Fsync both the intent and its publication before allowing effects."""
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        selected = value["intents"].keys() if self._targets is None else self._targets
+        document = value if self._targets is None else self.read()
         fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=".cleanup-")
         try:
-            for intent in value["intents"].values():
-                # Compacts lists that grew before heads were keyed by run and generation.
-                intent["heads"] = _compact_heads(intent["heads"])
+            for key in selected:
+                if key in value["intents"]:
+                    # Compacts lists that grew before heads were keyed by run and generation.
+                    value["intents"][key]["heads"] = _compact_heads(value["intents"][key]["heads"])
+                    document["intents"][key] = value["intents"][key]
             with os.fdopen(fd, "w") as handle:
-                json.dump(value, handle, sort_keys=True)
+                json.dump(document, handle, sort_keys=True)
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(name, self.path)
@@ -239,14 +257,23 @@ class CleanupJournal:
     def remember(self, task: dict[str, Any], record: dict[str, Any], *,
                  identity: dict[str, Any] | None = None, disposition: str = "owned") -> str:
         value = self.read()
-        attempt = str(record.get("attempt_id") or "")
-        key = hashlib.sha256((str(task["ref"]) + ":" + attempt).encode()).hexdigest()
+        key, changed = self.remember_into(value, task, record, identity=identity, disposition=disposition)
+        if changed:
+            self.save(value)
+        return key
+
+    @staticmethod
+    def remember_into(value: dict[str, Any], task: dict[str, Any], record: dict[str, Any], *,
+                      identity: dict[str, Any] | None = None,
+                      disposition: str = "owned") -> tuple[str, bool]:
+        """Stage the obligation in `value` only; the effect manifest plans against this same copy."""
+        key = _intent_key(str(task["ref"]), str(record.get("attempt_id") or ""))
         previous = value["intents"].get(key)
         if previous and previous.get("disposition") != "owned":
             if not previous.get("identity") and identity and not previous["progress"].get("removal_started"):
                 previous["identity"] = identity
-                self.save(value)
-            return key
+                return key, True
+            return key, False
         intent = previous or {"task": copy.deepcopy(task), "record": copy.deepcopy(record),
                               "identity": identity, "heads": [], "progress": {},
                               "status": "owned", "reason": "", "disposition": "owned"}
@@ -269,8 +296,7 @@ class CleanupJournal:
         if disposition != "owned":
             intent["status"] = "pending"
         value["intents"][key] = intent
-        self.save(value)
-        return key
+        return key, True
 
     @serialized
     def request(self, task: dict[str, Any], disposition: str,
@@ -325,13 +351,14 @@ class CleanupJournal:
                 "project": "observers", "kind": "observer", "claim": {}}
         return self.remember(task, raw, disposition="observer-close")
 
-    def summary(self, *, sprint: str = "") -> list[dict[str, Any]]:
+    def summary(self, *, sprint: str = "", project: str = "") -> list[dict[str, Any]]:
         return [{"id": key, "ref": intent["task"]["ref"], "status": intent["status"],
                  "disposition": intent["disposition"], "reason": intent["reason"],
                  "identity": intent.get("identity"), "commit_proof": intent.get("commit_proof"),
                  "progress": intent["progress"]}
                 for key, intent in sorted(self.read()["intents"].items())
-                if not sprint or intent["task"].get("sprint") == sprint]
+                if (not sprint or intent["task"].get("sprint") == sprint)
+                and (not project or _project_intent(intent, project))]
 
     def admission_refusal(self, reference: str) -> str:
         for intent in self.read()["intents"].values():
@@ -346,6 +373,11 @@ class CleanupOwner:
         self.runtime = runtime
         self.data_dir = Path(runtime.data_dir)
         self.journal = CleanupJournal(self.data_dir)
+        # While a manifest is planned, every effect site appends here instead of acting.
+        self._planned: list[dict[str, Any]] | None = None
+        self._plan_removed: set[str] = set()
+        # While a targeted replay runs, the manifest entry its operator reviewed.
+        self._reviewed: dict[str, Any] | None = None
 
     @serialized
     def remember(self, task: dict[str, Any], record: Any) -> str:
@@ -632,6 +664,10 @@ class CleanupOwner:
             # names its successor. A scoped run, and every run of a replaced observer, is addressed
             # by its own run directory instead; the runtime still proves its own identity and scope.
             target = run if workspace_owned and not run.scope_generation else replace(run, pid_file="")
+            if self._planned is not None:
+                self._planned.append({"effect": "stop-head", "run_id": run.run_id, "role": run.role,
+                                      "scope_generation": run.scope_generation})
+                continue
             receipt = self.runtime.host.head_runtime_for(target).stop(
                 target, StopInitiator(actor="secretary-dispatcher", reason="owned residue cleanup"))
             if not receipt.ok:
@@ -696,14 +732,17 @@ class CleanupOwner:
         if claim.get("worker"):
             if not current.get("closed") and current.get("state") != "done":
                 raise HostError("cleanup awaits terminal board claim settlement")
-            self.runtime.writer.settle_cleanup_claim(current, intent["record"].get("worker", ""))
+            if self._planned is None:
+                self.runtime.writer.settle_cleanup_claim(current, intent["record"].get("worker", ""))
+        if self._planned is not None:
+            self._planned.append({"effect": "settle-claim", "worker": claim.get("worker") or "",
+                                  "board_write": bool(claim.get("worker"))})
         intent["progress"]["claim_settled"] = True
 
     def _dirty(self, intent: dict[str, Any], path: Path) -> list[str]:
         # Include ignored files. Only bytes written by the prompt producer and
         # the existing exact environment namespace contract can be disposable.
-        result = subprocess.run(["git", "-C", str(path), "status", "--porcelain=v1", "--ignored",
-                                 "--untracked-files=all", "-z"], capture_output=True, text=True, timeout=30)
+        result = _read_git(path, "status", "--porcelain=v1", "--ignored", "--untracked-files=all", "-z")
         if result.returncode:
             raise HostError("cleanup workspace status is unreadable")
         status = result.stdout
@@ -739,8 +778,9 @@ class CleanupOwner:
             raise
 
     def _checkpoint_intent(self, intent: dict[str, Any]) -> None:
-        key = hashlib.sha256((intent["task"]["ref"] + ":" +
-                              str(intent["record"].get("attempt_id") or "")).encode()).hexdigest()
+        if self._planned is not None:
+            return
+        key = _intent_key(intent["task"]["ref"], str(intent["record"].get("attempt_id") or ""))
         value = self.journal.read()
         value["intents"][key] = copy.deepcopy(intent)
         self.journal.save(value)
@@ -843,6 +883,14 @@ class CleanupOwner:
             if dirty:
                 raise Preserved("dirty tracked, untracked or ignored work: " + "; ".join(dirty[:8]), verified=True)
             self._verify_commits(intent, repo)
+        if self._planned is not None:
+            self._planned.append({
+                "effect": "remove-worktree", "path": workspace, "identity": identity,
+                "dirty": "missing directory; admitted removal resumes" if missing else "clean",
+                "commit_proof": intent.get("commit_proof"),
+                "environment": "absent" if missing else self._environment_owner(intent, path)})
+            self._plan_removed.add(workspace)
+            return
         # No forced removal: first delete only exact generated bytes whose
         # ownership was validated above. Git independently refuses dirty work.
         generated = self.journal.read()["generated"]
@@ -897,24 +945,34 @@ class CleanupOwner:
                 return
             if self._shared_removal_proof(intent):
                 main = _git(repo, "rev-parse", "--verify", "refs/heads/" + base)
-                merged = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", tip, main],
-                                        capture_output=True, text=True, timeout=30)
+                merged = _read_git(repo, "merge-base", "--is-ancestor", tip, main)
                 if merged.returncode == 0 and self._published(repo, tip):
                     return
             raise Preserved("candidate ref missing without settlement evidence")
         if current != tip:
             raise Preserved("candidate ref changed; retained current tip " + current, verified=True)
-        if any(row.get("branch") == ref for row in _registered(repo)):
+        if any(row.get("branch") == ref and row.get("worktree") not in self._plan_removed
+               for row in _registered(repo)):
             raise Preserved("branch still used by a registered worktree")
         main = _git(repo, "rev-parse", "--verify", "refs/heads/" + base)
-        result = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", tip, main],
-                                capture_output=True, text=True, timeout=30)
+        if self._reviewed is not None and self._planned is None:
+            # A targeted replay deletes only the reviewed tip against the reviewed base tip.
+            reviewed = [effect for effect in self._reviewed["effects"] if effect["effect"] == "delete-ref"]
+            if [(e["ref"], e["tip"], e["base"], e["base_tip"]) for e in reviewed] != [
+                    (ref, tip, "refs/heads/" + base, main)]:
+                raise HostError("cleanup ref evidence differs from the reviewed manifest; nothing was deleted")
+        result = _read_git(repo, "merge-base", "--is-ancestor", tip, main)
         if result.returncode == 1:
             raise Preserved("unmerged candidate ref retained at " + tip, verified=True)
         if result.returncode:
             raise HostError("cleanup merge proof unavailable")
         if not self._published(repo, tip):
             raise Preserved("unpublished candidate commits retained at " + tip, verified=True)
+        if self._planned is not None:
+            self._planned.append({"effect": "delete-ref", "ref": ref, "tip": tip,
+                                  "base": "refs/heads/" + base, "base_tip": main,
+                                  "merged": True, "published": True})
+            return
         # The integration witness and candidate tip are locked and verified in
         # one native Git ref transaction. Never use branch -D after a stale probe.
         command = f"start\nverify refs/heads/{base} {main}\ndelete {ref} {tip}\nprepare\ncommit\n"
@@ -925,9 +983,15 @@ class CleanupOwner:
         if result.returncode:
             raise HostError("cleanup ref transaction refused a changed or locked tip")
 
+    def _save(self, value: dict[str, Any]) -> None:
+        if self._planned is None:
+            self.journal.save(value)
+
     @serialized
     def replay_one(self, key: str) -> dict[str, Any]:
-        value = self.journal.read()
+        return self._replay(self.journal.read(), key)
+
+    def _replay(self, value: dict[str, Any], key: str) -> dict[str, Any]:
         intent = value["intents"][key]
         if intent["status"] in {"owned", "completed"}:
             return intent
@@ -938,12 +1002,12 @@ class CleanupOwner:
         intent["progress"]["heads_stopped"] = False
         intent["progress"]["preservation_verified"] = False
         intent["progress"].pop("awaits_cards", None)
-        self.journal.save(value)
+        self._save(value)
         if _empty_attempt(intent):
             owners = self._attempt_owners(intent)
             if owners:
                 self._follow(intent, owners)
-                self.journal.save(value)
+                self._save(value)
                 return intent
         try:
             current = self._validate_owner(intent)
@@ -951,7 +1015,7 @@ class CleanupOwner:
             self._scope_fence(intent, replaced=bool(successor))
             self._stop(intent, workspace_owned=not successor)
             intent["progress"]["heads_stopped"] = True
-            self.journal.save(value)
+            self._save(value)
             if successor:
                 raise Preserved("observer " + str(intent["record"].get("attempt_id")) + " was replaced by "
                                 + successor + "; its own runs are settled and the workspace is handed "
@@ -971,10 +1035,10 @@ class CleanupOwner:
                     self._verify_commits(intent, repo)
                 self._remove_workspace(intent, repo)
                 intent["progress"]["workspace_removed"] = True
-                self.journal.save(value)
+                self._save(value)
                 self._validate_owner(intent)
                 intent["progress"]["ref_started"] = True
-                self.journal.save(value)
+                self._save(value)
                 self._delete_branch(intent, repo, base)
                 intent["progress"]["ref_removed"] = True
             self._settle_claim(intent)
@@ -992,7 +1056,7 @@ class CleanupOwner:
         except Exception as exc:
             intent["status"] = "pending"
             intent["reason"] = str(exc)[:1000]
-        self.journal.save(value)
+        self._save(value)
         return intent
 
     @serialized
@@ -1012,95 +1076,341 @@ class CleanupOwner:
             self.journal.save(fresh)
         return result
 
+    def _bindings(self, project: str | None = None) -> dict[str, dict[str, Any]]:
+        bindings = getattr(self.runtime.catalog, "registered_bindings", None)
+        if bindings is None:
+            bindings = self.runtime.catalog.bindings
+        if project is None:
+            return dict(bindings)
+        if project not in bindings:
+            raise UnknownProject("cleanup project is not registered: " + project)
+        return {project: bindings[project]}
+
+    def _settlement_request(self, task: dict[str, Any]) -> str:
+        """The disposition the inventory requests for an owned attempt of a terminal card."""
+        if task.get("state") != "done" and not task.get("closed"):
+            raise Preserved("card is still active")
+        return "archive" if task.get("closed") else "done"
+
     @serialized
-    def inventory(self, *, catch_up: bool = False) -> dict[str, Any]:
+    def inventory(self, *, catch_up: bool = False, project: str | None = None) -> dict[str, Any]:
         """Read actual registered Git residue, including archived cards with no record.
 
         Catch-up adopts only branch-only residue with a matching archived/Done
         card and audited dispatcher claim. Old workspaces lacking exact runtime
         identity remain visible and preserved, rather than guessed from a glob.
+
+        Without catch-up it writes nothing and carries the effect manifest: for every
+        row and journaled intent, its target id with the effects a replay would perform,
+        in order, or its refusal, and a digest the targeted replay must match. A named
+        project is read alone; an unregistered one is refused before any read.
         """
+        bindings = self._bindings(project)
         rows = []
-        recorded = self.journal.read()["intents"]
-        bindings = getattr(self.runtime.catalog, "registered_bindings", None)
-        if bindings is None:
-            bindings = self.runtime.catalog.bindings
-        for project, binding in sorted(bindings.items()):
+        value = self.journal.read()
+        recorded = value["intents"]
+        manifest = []
+        for name, binding in sorted(bindings.items()):
             try:
                 repo = _canonical(binding["repo"])
                 worktrees = _registered(repo)
                 refs = _git(repo, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/pipeline/")
                 for line in refs.splitlines():
                     ref, tip = line.split(" ", 1)
-                    card_ref = ref.removeprefix("refs/heads/pipeline/")
-                    row = {"project": project, "repo": str(repo), "ref": ref, "tip": tip,
-                           "status": "preserved", "reason": "ownership not proven",
-                           "worktrees": [w for w in worktrees if w.get("branch") == ref]}
-                    base = binding.get("default_branch") or "main"
-                    merge = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", tip,
-                                            "refs/heads/" + base], capture_output=True, text=True, timeout=30)
-                    row["merged"] = merge.returncode == 0 if merge.returncode in (0, 1) else None
-                    row["published"] = self._published(repo, tip)
-                    try:
-                        owners = {key: intent for key, intent in recorded.items()
-                                  if ((intent.get("identity") or {}).get("repo") == str(repo)
-                                      and (intent.get("identity") or {}).get("branch") == ref)
-                                  or (intent["task"]["ref"] == card_ref
-                                      and intent["task"].get("project") == project)}
-                        if owners:
-                            row["recorded_owners"] = [
-                                {"cleanup_id": key, "attempt_id": intent["record"].get("attempt_id"),
-                                 "identity": intent.get("identity"), "status": intent["status"]}
-                                for key, intent in owners.items()]
-                            if any(not intent.get("identity") or
-                                   intent["identity"]["repo"] != str(repo) or
-                                   intent["identity"]["branch"] != ref or
-                                   intent["identity"]["tip"] != tip or
-                                   intent["task"]["ref"] != card_ref or
-                                   intent["task"].get("project") != project
-                                   for intent in owners.values()):
-                                raise Preserved("recorded ownership conflicts with current ref; retained current tip " + tip)
-                            row["reason"] = "retained exact owner; replay existing cleanup obligations"
-                            row["cleanup_ids"] = list(owners)
-                            if catch_up:
-                                task = self.runtime.reader.show(card_ref)
-                                for intent in owners.values():
-                                    if intent["status"] == "owned":
-                                        if task.get("state") != "done" and not task.get("closed"):
-                                            raise Preserved("card is still active")
-                                        self.journal.request(task, "archive" if task.get("closed") else "done",
-                                                             intent["record"])
-                            if any(intent["status"] == "completed" for intent in owners.values()):
-                                row["reason"] = "ref present after completed cleanup; retained recorded provenance"
-                            rows.append(row)
-                            continue
-                        task = self.runtime.reader.show(card_ref)
-                        events = self.runtime.audit.events(card_ref)
-                        owned = any(e.get("kind") == "claimed" or (e.get("payload", {}).get("to") == "in_progress"
-                                    and e.get("actor", {}).get("role") == "dispatcher") for e in events)
-                        if task["project"] != project or not owned:
-                            raise Preserved("card/project or audited claim proof missing")
-                        if task.get("state") != "done" and not task.get("closed"):
-                            raise Preserved("card is still active")
-                        if row["worktrees"]:
-                            raise Preserved("historical worktree needs exact attempt and head ownership evidence")
-                        row["reason"] = "owned branch-only residue; eligible for exact-tip replay"
-                        if catch_up:
-                            identity = _identity(repo, "", ref.removeprefix("refs/heads/"))
-                            key = self.journal.remember(task, {"attempt_id": "archived-branch:" + tip,
-                                                       "worker": "", "workspace": ""}, identity=identity,
-                                                       disposition="catch-up")
-                            row["cleanup_id"] = key
-                    except Exception as exc:
-                        row["reason"] = str(exc)[:500]
+                    row, admitted = self._residue_row(name, binding, repo, worktrees, ref, tip, recorded,
+                                                      catch_up=catch_up)
+                    if not catch_up and "recorded_owners" not in row:
+                        row["target"] = ref + "@" + tip
+                        manifest.append(self._branch_manifest(name, row, admitted, value))
+                    elif not catch_up and "cleanup_ids" not in row:
+                        # Conflicting recorded owners: a scoped refusal, never an admitted target.
+                        row["target"] = ref + "@" + tip
+                        manifest.append(_conflict_entry(name, row))
                     rows.append(row)
                 for worktree in worktrees:
                     if not worktree.get("branch", "").startswith("refs/heads/pipeline/") and worktree.get("worktree") != str(repo):
-                        rows.append({"project": project, "repo": str(repo), "worktree": worktree,
-                                     "status": "preserved", "reason": "foreign, detached or legacy workspace"})
+                        row = {"project": name, "repo": str(repo), "worktree": worktree,
+                               "status": "preserved", "reason": "foreign, detached or legacy workspace"}
+                        if not catch_up:
+                            row["target"] = "worktree:" + str(worktree.get("worktree", ""))
+                            manifest.append(_manifest_entry(row["target"], name, "preserved", row["reason"],
+                                                            [], {"worktree": worktree}))
+                        rows.append(row)
             except Exception as exc:
-                rows.append({"project": project, "status": "pending", "reason": str(exc)[:500]})
-        return {"intents": self.journal.summary(), "residue": rows}
+                rows.append({"project": name, "status": "pending", "reason": str(exc)[:500]})
+        result: dict[str, Any] = {"intents": self.journal.summary(project=project or ""), "residue": rows}
+        if not catch_up:
+            for key in sorted(recorded):
+                if project is None or _project_intent(recorded[key], project):
+                    manifest.append(self._intent_manifest(key, value))
+            result["manifest"] = manifest
+        return result
+
+    def _residue_row(self, project: str, binding: dict[str, Any], repo: Path, worktrees: list[dict[str, str]],
+                     ref: str, tip: str, recorded: dict[str, Any], *,
+                     catch_up: bool) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """One branch row, and its card when catch-up admits branch-only ownership."""
+        card_ref = ref.removeprefix("refs/heads/pipeline/")
+        row = {"project": project, "repo": str(repo), "ref": ref, "tip": tip,
+               "status": "preserved", "reason": "ownership not proven",
+               "worktrees": [w for w in worktrees if w.get("branch") == ref]}
+        base = binding.get("default_branch") or "main"
+        merge = _read_git(repo, "merge-base", "--is-ancestor", tip, "refs/heads/" + base)
+        row["merged"] = merge.returncode == 0 if merge.returncode in (0, 1) else None
+        row["published"] = self._published(repo, tip)
+        try:
+            owners = {key: intent for key, intent in recorded.items()
+                      if ((intent.get("identity") or {}).get("repo") == str(repo)
+                          and (intent.get("identity") or {}).get("branch") == ref)
+                      or (intent["task"]["ref"] == card_ref
+                          and intent["task"].get("project") == project)}
+            if owners:
+                row["recorded_owners"] = [
+                    {"cleanup_id": key, "attempt_id": intent["record"].get("attempt_id"),
+                     "identity": intent.get("identity"), "status": intent["status"]}
+                    for key, intent in owners.items()]
+                # Recorded residue is targeted by this project's journaled intents, never by the ref.
+                row["targets"] = [key for key, intent in owners.items() if _project_intent(intent, project)]
+                if any(not intent.get("identity") or
+                       intent["identity"]["repo"] != str(repo) or
+                       intent["identity"]["branch"] != ref or
+                       intent["identity"]["tip"] != tip or
+                       intent["task"]["ref"] != card_ref or
+                       intent["task"].get("project") != project
+                       for intent in owners.values()):
+                    raise Preserved("recorded ownership conflicts with current ref; retained current tip " + tip)
+                row["reason"] = "retained exact owner; replay existing cleanup obligations"
+                row["cleanup_ids"] = list(owners)
+                if catch_up:
+                    task = self.runtime.reader.show(card_ref)
+                    for intent in owners.values():
+                        if intent["status"] == "owned":
+                            self.journal.request(task, self._settlement_request(task), intent["record"])
+                if any(intent["status"] == "completed" for intent in owners.values()):
+                    row["reason"] = "ref present after completed cleanup; retained recorded provenance"
+                return row, None
+            task = self.runtime.reader.show(card_ref)
+            if task["project"] != project:
+                # Another project's card: its audit is never read from this binding.
+                raise Preserved("foreign or project-mismatch residue: card " + card_ref
+                                + " belongs to project " + str(task["project"]))
+            if not _dispatcher_claimed(self.runtime.audit.events(card_ref)):
+                raise Preserved("card/project or audited claim proof missing")
+            if task.get("state") != "done" and not task.get("closed"):
+                raise Preserved("card is still active")
+            if row["worktrees"]:
+                raise Preserved("historical worktree needs exact attempt and head ownership evidence")
+            row["reason"] = "owned branch-only residue; eligible for exact-tip replay"
+            if catch_up:
+                row["cleanup_id"] = self._adopt_branch(task, repo, ref, tip)
+            return row, task
+        except Exception as exc:
+            row["reason"] = str(exc)[:500]
+        return row, None
+
+    def _adopt_branch(self, task: dict[str, Any], repo: Path, ref: str, tip: str,
+                      reviewed: dict[str, Any] | None = None) -> str:
+        """Journal branch-only residue; a targeted replay adopts exactly the reviewed manifest inputs."""
+        identity = _identity(repo, "", ref.removeprefix("refs/heads/"))
+        if reviewed is not None:
+            deletion = [effect for effect in reviewed["effects"] if effect["effect"] == "delete-ref"]
+            if (identity != reviewed["inputs"]["identity"] or len(deletion) != 1
+                    or _ref_tip(repo, deletion[0]["base"]) != deletion[0]["base_tip"]):
+                raise Refused("branch evidence changed since the manifest was read; nothing was adopted")
+            identity = reviewed["inputs"]["identity"]
+        return self.journal.remember(task, _archived_record(tip), identity=identity, disposition="catch-up")
+
+    def _plan(self, value: dict[str, Any], key: str) -> list[dict[str, Any]]:
+        """Run replay's own proofs against a private copy with every effect and save disabled."""
+        self._planned, self._plan_removed = [], set()
+        try:
+            self._replay(value, key)
+            return self._planned
+        finally:
+            self._planned, self._plan_removed = None, set()
+
+    def _branch_manifest(self, project: str, row: dict[str, Any], task: dict[str, Any] | None,
+                         value: dict[str, Any]) -> dict[str, Any]:
+        target = row["ref"] + "@" + row["tip"]
+        if task is None:
+            return _manifest_entry(target, project, "preserved", row["reason"], [],
+                                   {"ref": row["ref"], "tip": row["tip"]})
+        try:
+            identity = _identity(Path(row["repo"]), "", row["ref"].removeprefix("refs/heads/"))
+        except HostError as exc:
+            return _manifest_entry(target, project, "pending", str(exc)[:1000], [],
+                                   {"ref": row["ref"], "tip": row["tip"]})
+        value = copy.deepcopy(value)
+        key, _ = self.journal.remember_into(value, task, _archived_record(row["tip"]), identity=identity,
+                                            disposition="catch-up")
+        return self._intent_manifest(key, value, target=target)
+
+    def _intent_manifest(self, key: str, value: dict[str, Any], *, target: str = "") -> dict[str, Any]:
+        value = copy.deepcopy(value)
+        intent = value["intents"][key]
+        task = intent["task"]
+        inputs = {"task": {field: task.get(field) for field in ("id", "ref", "project", "kind")},
+                  "attempt_id": intent["record"].get("attempt_id"), "disposition": intent["disposition"],
+                  "status": intent["status"], "identity": intent.get("identity"), "heads": intent["heads"]}
+        effects: list[dict[str, Any]] = []
+        try:
+            if intent["status"] == "completed":
+                return _manifest_entry(target or key, task.get("project", ""), "completed",
+                                       intent["reason"] or "cleanup already completed", [], inputs)
+            if intent["status"] == "owned":
+                if task.get("kind") == "observer":
+                    raise Preserved("observer obligation was never requested")
+                disposition = self._settlement_request(self.runtime.reader.show(task["ref"]))
+                effects.append({"effect": "request-settlement", "disposition": disposition})
+                intent["disposition"], intent["status"] = disposition, "pending"
+            effects += self._plan(value, key)
+            outcome = "eligible" if intent["status"] == "completed" else intent["status"]
+            reason = intent["reason"]
+        except Exception as exc:  # noqa: BLE001 - any unreadable evidence is this target's refusal.
+            outcome = "preserved" if isinstance(exc, Preserved) else "pending"
+            reason = str(exc)[:1000]
+        return _manifest_entry(target or key, task.get("project", ""), outcome, reason, effects, inputs)
+
+    def _target(self, project: str, binding: dict[str, Any],
+                target: str) -> tuple[dict[str, Any], Any, str] | None:
+        """Recompute one target's manifest, with its admission and journal key, or None if unknown."""
+        value = self.journal.read()
+        intent = value["intents"].get(target)
+        if intent is not None:
+            if not _project_intent(intent, project):
+                return None
+            entry = self._intent_manifest(target, value)
+            if entry["outcome"] == "completed":
+                return entry, None, target
+            if intent["status"] == "owned":
+                if not entry["effects"] or entry["effects"][0]["effect"] != "request-settlement":
+                    return entry, None, target  # Still active: nothing is requested.
+                def admit() -> str:
+                    task = self.runtime.reader.show(intent["task"]["ref"])
+                    self.journal.request(task, self._settlement_request(task), intent["record"])
+                    return target
+                return entry, admit, target
+            return entry, lambda: target, target
+        ref, _, tip = target.rpartition("@")
+        if not ref.startswith("refs/heads/pipeline/") or not tip:
+            return None
+        repo = _canonical(binding["repo"])
+        if _ref_tip(repo, ref) != tip:
+            return None
+        row, task = self._residue_row(project, binding, repo, _registered(repo), ref, tip, value["intents"],
+                                      catch_up=False)
+        key = _intent_key(ref.removeprefix("refs/heads/pipeline/"), _archived_record(tip)["attempt_id"])
+        if "recorded_owners" in row:
+            return (_conflict_entry(project, row), None, key) if "cleanup_ids" not in row else None
+        entry = self._branch_manifest(project, row, task, value)
+        if task is None or entry["outcome"] != "eligible":
+            return entry, None, key  # Not admitted: nothing is adopted or written.
+        return entry, lambda: self._adopt_branch(task, repo, ref, tip, reviewed=entry), key
+
+    @serialized
+    def replay_targets(self, project: str, targets: list[tuple[str, str]]) -> list[dict[str, Any]]:
+        """Replay only the named targets of one registered project, each at the manifest read.
+
+        Before its effects, each target's manifest is recomputed; a differing digest, an
+        unknown target or another project's target is refused with nothing written. Other
+        intents and the replay cursor are never touched.
+        """
+        binding = self._bindings(project)[project]
+        names = [target for target, _ in targets]
+        if not 1 <= len(names) <= MAX_REPLAY_TARGETS:
+            raise HostError(f"cleanup replay takes 1..{MAX_REPLAY_TARGETS} explicit targets")
+        if len(set(names)) != len(names):
+            raise HostError("cleanup replay targets are not distinct")
+        results = []
+        for target, digest in targets:
+            outcome: dict[str, Any] = {"target": target, "replayed": False}
+            try:
+                planned = self._target(project, binding, target)
+            except Exception as exc:  # noqa: BLE001 - refused before any effect; other targets go on.
+                results.append({**outcome, "status": "pending", "reason": str(exc)[:500]})
+                continue
+            if planned is None:
+                results.append({**outcome, "status": "refused",
+                                "reason": "unknown target or not a cleanup target of project " + project})
+                continue
+            entry, admit, key = planned
+            if entry["digest"] != digest:
+                results.append({**outcome, "status": "refused", "digest": entry["digest"],
+                                "reason": "manifest digest differs; read the inventory again"})
+                continue
+            if admit is None:
+                results.append({**outcome, "status": entry["outcome"], "reason": entry["reason"]})
+                continue
+            # Saves write back only this target's intent; the rest of the journal stays as stored.
+            with self.journal.targeted({key}):
+                try:
+                    if admit() != key:
+                        raise HostError("cleanup target key differs from its admission")
+                except Refused as exc:
+                    results.append({**outcome, "status": "refused", "reason": str(exc)})
+                    continue
+                except HostError as exc:
+                    results.append({**outcome, "status": "pending", "reason": str(exc)[:500]})
+                    continue
+                self._reviewed = entry
+                try:
+                    intent = self.replay_one(key)
+                finally:
+                    self._reviewed = None
+            results.append({**outcome, "replayed": True, "cleanup_id": key, "status": intent["status"],
+                            "reason": intent["reason"], "progress": intent["progress"]})
+        return results
+
+
+MAX_REPLAY_TARGETS = 20
+
+
+class UnknownProject(HostError):
+    """A residue command named a project that is not registered; nothing was read."""
+
+
+class Refused(HostError):
+    """A replay target's evidence changed since its manifest was read; nothing was written."""
+
+
+def _intent_key(ref: str, attempt: str) -> str:
+    return hashlib.sha256((ref + ":" + attempt).encode()).hexdigest()
+
+
+def _conflict_entry(project: str, row: dict[str, Any]) -> dict[str, Any]:
+    return _manifest_entry(row["ref"] + "@" + row["tip"], project, "preserved", row["reason"], [],
+                           {"ref": row["ref"], "tip": row["tip"]})
+
+
+def _archived_record(tip: str) -> dict[str, Any]:
+    return {"attempt_id": "archived-branch:" + tip, "worker": "", "workspace": ""}
+
+
+def _project_intent(intent: dict[str, Any], project: str) -> bool:
+    return intent["task"].get("project") == project and intent["task"].get("kind") != "observer"
+
+
+def _dispatcher_claimed(events: list[dict[str, Any]]) -> bool:
+    """An audited dispatcher claim: the board's `card.started`, or an older form."""
+    from secretary.board.models import EventKind
+    from secretary.board.roles import Role
+    for event in events:
+        actor = event.get("actor") or {}
+        if event.get("kind") == "claimed":
+            return True
+        if actor.get("role") == Role.DISPATCHER.value and (
+                event.get("kind") == EventKind.CARD_STARTED.value
+                or (event.get("payload") or {}).get("to") == "in_progress"):
+            return True
+    return False
+
+
+def _manifest_entry(target: str, project: str, outcome: str, reason: str,
+                    effects: list[dict[str, Any]], inputs: dict[str, Any]) -> dict[str, Any]:
+    entry = {"target": target, "project": project, "outcome": outcome, "reason": reason,
+             "effects": effects, "inputs": inputs}
+    entry["digest"] = hashlib.sha256(json.dumps(entry, sort_keys=True, default=str).encode()).hexdigest()
+    return entry
 
 
 class Preserved(HostError):
