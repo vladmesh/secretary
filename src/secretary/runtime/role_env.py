@@ -169,6 +169,11 @@ WORKSPACE_TOOL_CACHES = {
     "RUFF_CACHE_DIR": "ruff-cache",
     "MYPY_CACHE_DIR": "mypy-cache",
 }
+# A startup file in the workspace venv's site-packages that sets the same bytecode prefix for every
+# interpreter of that venv, including a child a test starts with an environment built from scratch,
+# which drops PYTHONPYCACHEPREFIX. An explicit prefix still wins. The name sorts before the other
+# startup files, so the modules their import lines load are redirected too.
+WORKSPACE_PYCACHE_PTH = "00-secretary-task-pycache.pth"
 # Everything the pipeline itself writes into a candidate checkout, excluded through the repository's
 # local ``info/exclude`` on every bring-up so a project's committed ``.gitignore`` needs no pipeline
 # entries: the reserved namespace, the dispatcher's task document and the ``secretary check broad``
@@ -186,6 +191,12 @@ def workspace_tool_cache_env(workspace: Path | str) -> dict[str, str]:
     """The cache redirections a head launched into `workspace` runs with."""
     namespace = Path(workspace).expanduser() / WORKSPACE_NAMESPACE
     return {name: str(namespace / directory) for name, directory in WORKSPACE_TOOL_CACHES.items()}
+
+
+def workspace_pycache_pth(workspace: Path | str) -> str:
+    """The body of `WORKSPACE_PYCACHE_PTH` for `workspace`: one import line `site` executes."""
+    prefix = workspace_tool_cache_env(workspace)["PYTHONPYCACHEPREFIX"]
+    return f"import sys; sys.pycache_prefix = sys.pycache_prefix or {prefix!r}\n"
 
 
 def dispatcher_workspace_namespace(root: Path | str) -> Path | None:

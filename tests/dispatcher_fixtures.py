@@ -618,6 +618,10 @@ class RecordingReviewHost(CommandHostRuntime):
         """Transport fixtures do not execute candidate Python tooling."""
         return None
 
+    def _install_workspace_pycache_prefix(self, root: Path, environment: Path, *, required: bool) -> None:
+        """The stubbed `_run` creates no venv, so there is no site-packages to hold the startup file."""
+        return None
+
     def _transport_preflight(
         self,
         head: str,

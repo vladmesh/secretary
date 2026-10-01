@@ -206,6 +206,59 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             self.assertEqual(python.stat().st_ino, first)
             self.assertTrue(os.access(python, os.X_OK))
 
+    def test_clean_env_child_of_the_workspace_venv_writes_bytecode_only_into_the_namespace(self) -> None:
+        """secretary-1922: a child given a from-scratch env still caches bytecode inside the namespace."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "task"
+            _git_workspace(workspace)
+            source = workspace / "src"
+            for name in ("plain", "by_env", "by_option"):
+                (source / name).mkdir(parents=True)
+                (source / name / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+            host = _Host(Path(tmp), _Runtime([_observation()]))
+            host._prepare_workspace_environment(str(workspace))
+            environment = workspace / ".secretary-task-env" / "venv"
+            (startup,) = environment.glob("lib/python3*/site-packages/00-secretary-task-pycache.pth")
+            namespace_cache = workspace.resolve() / ".secretary-task-env" / "pycache"
+            python = str(environment / "bin" / "python3")
+            elsewhere = Path(tmp) / "elsewhere"
+
+            def child(module: str, env: dict[str, str], *options: str) -> None:
+                subprocess.run([python, *options, "-c", f"import {module}"], cwd=tmp, env=env, check=True)
+
+            child("plain", {"PYTHONPATH": str(source)})
+            # An explicit prefix, from the environment or the command line, still takes precedence.
+            child("by_env", {"PYTHONPATH": str(source), "PYTHONPYCACHEPREFIX": str(elsewhere / "env")})
+            child("by_option", {"PYTHONPATH": str(source)}, "-X", f"pycache_prefix={elsewhere / 'option'}")
+
+            self.assertIn("sys.pycache_prefix or", startup.read_text(encoding="utf-8"))
+            self.assertEqual(list(source.rglob("*.pyc")), [])
+            self.assertEqual([path.name for path in source.rglob("__pycache__")], [])
+            self.assertTrue(any((namespace_cache / source.resolve().relative_to("/") / "plain").glob("*.pyc")))
+            self.assertFalse(any(namespace_cache.rglob("by_*")))
+            self.assertTrue(any((elsewhere / "env").rglob("by_env/__init__*.pyc")))
+            self.assertTrue(any((elsewhere / "option").rglob("by_option/__init__*.pyc")))
+
+    def test_ready_environment_without_the_bytecode_redirect_is_accepted_and_gains_it(self) -> None:
+        """secretary-1922: a venv made ready before the startup file existed still brings up."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "task"
+            _git_workspace(workspace)
+            host = _Host(Path(tmp), _Runtime([_observation()]))
+            host._prepare_workspace_environment(str(workspace))
+            environment = workspace / ".secretary-task-env" / "venv"
+            (startup,) = environment.glob("lib/python3*/site-packages/00-secretary-task-pycache.pth")
+            body = startup.read_text(encoding="utf-8")
+            startup.unlink()
+            python = environment / "bin" / "python3"
+            first = python.stat().st_ino
+
+            host._require_workspace_environment(str(workspace))
+            host._prepare_workspace_environment(str(workspace))
+
+            self.assertEqual(python.stat().st_ino, first)
+            self.assertEqual(startup.read_text(encoding="utf-8"), body)
+
     def test_dispatcher_environment_is_disjoint_from_adapter_owned_dot_venv(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "task"

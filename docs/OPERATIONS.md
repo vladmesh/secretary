@@ -1535,6 +1535,11 @@ removable under the unchanged cleanup dirtiness rule. Worker and reviewer heads 
 broad receipt lands there; and files the editable install creates in the source tree (for example
 `src/*.egg-info/`) are recorded with their exact digests in the cleanup journal's `generated` map right
 after the install. A file that existed before the install, or that a head later rewrites, stays author work.
+Tests often start child interpreters with an environment built from scratch, which drops
+`PYTHONPYCACHEPREFIX`, so the venv's site-packages also holds `00-secretary-task-pycache.pth`: it sets
+`sys.pycache_prefix` to `.secretary-task-env/pycache` for every interpreter of that venv unless an explicit
+prefix is already set. A venv made ready before this file existed is still accepted and gains the file on
+its next bring-up. Children started with an interpreter outside the workspace venv are not covered.
 
 When the adapter declares `broad_check` without `broad_check.interpreter`, the candidate's `.[dev]` is
 installed into this environment, so worker and reviewer tools and the inner broad suite resolve there.

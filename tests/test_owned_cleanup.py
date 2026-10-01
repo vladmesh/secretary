@@ -627,14 +627,17 @@ class OwnedCleanupTests(unittest.TestCase):
         the prompt writer, a Python import and the broad-check writer under the head's cache env.
         """
         (self.workspace / "module.py").write_text("VALUE = 1\n")
-        git(self.workspace, "add", "module.py")
+        (self.workspace / "src" / "sample").mkdir(parents=True)
+        (self.workspace / "src" / "sample" / "__init__.py").write_text("VALUE = 1\n")
+        git(self.workspace, "add", "module.py", "src/sample/__init__.py")
         git(self.workspace, "commit", "--quiet", "-m", "work")
         tip = git(self.workspace, "rev-parse", "HEAD")
         git(self.repo, "update-ref", "refs/heads/main", tip)
         git(self.repo, "update-ref", "refs/remotes/origin/main", tip)
         host = CommandHostRuntime(SimpleNamespace(), self.data, mode="real",
                                   production_runtime=SimpleNamespace(interpreter=sys.executable))
-        namespace = host._claim_workspace_environment(str(self.workspace)).parent
+        host._prepare_workspace_environment(str(self.workspace))
+        namespace = host._workspace_environment(self.workspace).parent
         self.host._decide_workspace_environment_ownership = host._decide_workspace_environment_ownership
         before = host._workspace_extra_files(self.workspace)
         metadata = self.workspace / "src" / "sample.egg-info"
@@ -649,12 +652,19 @@ class OwnedCleanupTests(unittest.TestCase):
         code, _ = run_broad_check("true", root=self.workspace, stream=StringIO(),
                                   env={**os.environ, **caches})
         self.assertEqual(code, 0)
+        # secretary-1922: a test's child of the workspace venv, given an environment built from scratch.
+        subprocess.run([str(host._workspace_python(self.workspace)), "-c", "import sample"],
+                       cwd=self.workspace, check=True, env={"PYTHONPATH": str(self.workspace / "src")})
         self.assertTrue(any((namespace / "pycache").rglob("module*.pyc")))
+        self.assertTrue(any((namespace / "pycache").rglob("sample/__init__*.pyc")))
         self.assertTrue(any((namespace / "checks").glob("broad-*.json")))
         return namespace, metadata
 
     def test_pipeline_generated_artifacts_prove_a_done_workspace_clean(self):
-        """secretary-1920: owned caches, recorded install output and the prompt are not author work."""
+        """secretary-1920: owned caches, recorded install output and the prompt are not author work.
+
+        secretary-1922: that includes the bytecode of a clean-env child of the workspace venv.
+        """
         self.pipeline_generated_workspace()
         key = self.request()
         result = self.owner.replay_one(key)
