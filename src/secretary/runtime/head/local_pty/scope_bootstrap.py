@@ -14,9 +14,10 @@ from pathlib import Path
 # independently of caller PYTHONPATH/PYTHONHOME, cwd, user site or loader settings.
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[4]))
+    __package__ = "secretary.runtime.head.local_pty"
 
-from secretary.runtime.head.memory import OOM_STREAM_ENV, open_oom_stream, own_cgroup
-from secretary.runtime.head.local_pty.scope_environment import EnvironmentTransferError, read_environment
+from ..memory import OOM_STREAM_ENV, open_oom_stream, own_cgroup
+from .scope_environment import EnvironmentTransferError, read_environment
 
 
 def install_oom_contract(cgroup: Path, protection: Path = Path("/proc/self/oom_score_adj")) -> None:
