@@ -14,6 +14,11 @@ recovery retains that request. Sprint close keeps its existing transaction and
 step progress; it does not execute Git or stop its own observer inside a board
 transaction. Its cleanup result reads the journal's actual dispositions.
 
+Owner installation, record capture, tick replay and inactive settlement use the
+real-mode `CommandHostRuntime` contract. Recording host doubles exercise real
+gate/vitality policy while simulating their effects; declaring real policy mode
+alone does not make a host a Git cleanup owner.
+
 The installation ownership lock serializes task claims/transitions, dispatcher
 ticks/probes, record saves, worker/reviewer/observer launch and replacement, and
 cleanup proof/effects. Head settlement calls the runtime selected by each durable

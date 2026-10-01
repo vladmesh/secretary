@@ -17,12 +17,13 @@ from secretary.cli import run_residue_maintenance
 from secretary.dispatch.cleanup import CleanupJournal, CleanupOwner, ownership_lock
 from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.observer import ObserverRecord
+from secretary.dispatch.production import _reconcile_production
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.types import HostError
 from secretary.observer_root import observer_root_repo
 from secretary.runtime.head import HeadRun, HeadSpec, StopInitiator, TaskRef
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
-from tests.fakes.dispatcher import FakeCatalog
+from tests.fakes.dispatcher import FakeCatalog, FakeHost
 from tests.production_runtime_fixtures import registered_production_runtime
 
 
@@ -595,6 +596,44 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertEqual(self.owner.journal.summary()[0]["status"], "completed")
         self.assertEqual(len(self.stops), 2, "retry reuses the second attempt's settled receipt")
         self.backend.forget_head.assert_called_once_with(run.run_id)
+
+    def test_real_host_inactive_reconciliation_retains_failed_cleanup_and_retries(self):
+        host = CommandHostRuntime(
+            self.catalog, self.data, mode="real",
+            production_runtime=registered_production_runtime(self.root),
+        )
+        self.runtime.host = host
+        self.runtime.cleanup = self.owner
+        host.cleanup_owner = self.owner
+        self.head(generation="")
+        records = {self.task["ref"]: self.record}
+        with mock.patch.object(host, "head_runtime_for", return_value=self.backend):
+            self.stop_failure = True
+            refused = _reconcile_production(self.runtime, records, {}, set())
+            self.assertEqual(refused[0]["status"], "pending")
+            self.assertIn(self.task["ref"], records)
+            self.assertTrue(self.workspace.is_dir())
+            self.stop_failure = False
+            retried = _reconcile_production(self.runtime, records, {}, set())
+        self.assertEqual(retried[0]["status"], "completed")
+        self.assertEqual(retried[1]["action"], "record-removed")
+        self.assertEqual(records, {})
+        self.assertFalse(self.workspace.exists())
+        self.assertEqual(self.owner.journal.summary()[0]["status"], "completed")
+
+    def test_recording_host_uses_inactive_head_lifecycle_without_claiming_git_ownership(self):
+        host = FakeHost(self.data / "recording-workspaces")
+        self.runtime.host = host
+        self.runtime.cleanup = self.owner
+        records = {self.task["ref"]: self.record}
+        with mock.patch.object(self.owner, "cleanup") as cleanup:
+            outcome = _reconcile_production(self.runtime, records, {}, set())
+        cleanup.assert_not_called()
+        self.assertEqual(host.calls, ["stop_workspace", "stop"])
+        self.assertEqual(outcome[0]["action"], "record-removed")
+        self.assertEqual(records, {})
+        self.assertTrue(self.workspace.is_dir())
+        self.assertFalse(self.owner.journal.path.exists())
 
     def test_observer_closed_handoff_waits_for_cards_and_preserves_user_work(self):
         self.request("close")

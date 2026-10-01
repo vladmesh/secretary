@@ -25,6 +25,7 @@ from secretary.board.terminal_taxonomy import (
 from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatch import attempt_accounting
 from secretary.dispatch.claim import claim_ready_task
+from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.provider_failure import is_provider_unavailable_return
 from secretary.dispatch.launch import (
     FAILURE_CLASS_INFRASTRUCTURE,
@@ -419,7 +420,7 @@ def _production_tick_work(
     # cannot delay the fence or any lifecycle work below.
     outcome_outcomes = attempt_accounting.publish_pending_attempt_outcomes(runtime)
     cleanup_outcomes = []
-    if getattr(runtime.host, "mode", "noop") == "real":
+    if isinstance(runtime.host, CommandHostRuntime) and runtime.host.mode == "real":
         cleanup_outcomes = [{"step": "owned-cleanup", "ref": item["task"]["ref"],
                              "status": item["status"], "reason": item["reason"]}
                             for item in runtime.cleanup.replay(limit=20)]
@@ -1341,7 +1342,8 @@ def _reconcile_production(
             # instruction to relaunch only the reviewer impossible to follow.
             continue
         intent_action = str(launch_intent(record).get("action") or "")
-        if state != "ready" and getattr(runtime.host, "mode", "noop") == "real":
+        if (state != "ready" and isinstance(runtime.host, CommandHostRuntime)
+                and runtime.host.mode == "real"):
             closed = card(ref)
             if closed is None:
                 continue
