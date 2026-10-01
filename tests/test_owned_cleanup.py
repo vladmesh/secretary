@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -1527,18 +1528,53 @@ class OwnedCleanupTests(unittest.TestCase):
             process.kill()
             process.wait()
 
+    def native_scoped_heads(self, *runs):
+        """Each scoped run under a real local-PTY root, stopped by the real runtime and owner reader.
+
+        The worker's owner is live, the reviewers' terminal. Only the supervisor's stop request
+        and the scope's native termination are simulated; each asked stop lands in `self.stops`.
+        """
+        from secretary.runtime.head.identity import head_process_status
+        from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+        from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
+        root = self.data / "heads"
+        for run in runs:
+            directory = root / run.run_id
+            directory.mkdir(parents=True, exist_ok=True)
+            scope = ScopedHeadLifecycle(run.run_id, 128, generation=run.scope_generation)
+            scope.persist(directory, role=run.role, task="card:" + run.task_ref.ref, workspace=run.workspace)
+            if run.settled:
+                evidence = scope.read_owner(directory)
+                evidence.update(launch_allowed=False, cleanup_complete=True)
+                scope.update_owner(directory, evidence)
+        backend = LocalPtyHeadRuntime(root, head_process_status=head_process_status, stop_timeout=0)
+        def ask(address, initiator, signal_name):
+            self.stops.append(address.run_dir.name)
+            return {"ok": True}
+        for patcher in (mock.patch.object(backend, "_ask_to_stop", side_effect=ask),
+                        mock.patch.object(ScopedHeadLifecycle, "stop_owned", autospec=True,
+                                          side_effect=lambda owner, record: record.update(
+                                              launch_allowed=False, cleanup_complete=True))):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.host.head_runtime_for = lambda run: backend
+        self.host._local_pty_root = lambda: root
+        self.host._guard_head_run = lambda run, role, **kwargs: CommandHostRuntime._guard_head_run(
+            self.host, run, role, **kwargs)
+        self.host.fence_cleanup_scopes = lambda *args, **kwargs: CommandHostRuntime.fence_cleanup_scopes(
+            self.host, *args, **kwargs)
+        return root
+
     def placeholder_intent(self, placeholder=None):
-        """The secretary-1917 shape: a live worker, two reviewer receipts and the placeholder."""
-        def stop(run, initiator):
-            # Settled scoped reviewers still reach the runtime, which keeps their receipt.
-            self.stops.append((run.run_id, run.scope_generation))
-            finishing = run.finishing(initiator)
-            return SimpleNamespace(ok=True, reason="", run=finishing if finishing.settled else finishing.exited())
-        self.backend.stop = stop
+        """The live secretary-1917 shape: a live worker, two reviewer generations sharing one
+        review pid file that names the dead round 2, and the placeholder between them."""
         self.task["claim"]["worker"] = self.record.worker
+        self.record.worker_pid_file = str(self.root / "worker.pid")
         self.record.review_pid_file = str(self.root / "review.pid")
         self.record.review_handle = "review-handle"
-        self.head()
+        worker = replace(self.head(), pid_file=self.record.worker_pid_file)
+        self.record.worker_head_run = worker.to_json()
+        self.native_scoped_heads(worker, self.settled_reviewer(1), self.settled_reviewer(2))
         self.record.review_head_run = self.settled_reviewer(1).to_json()
         self.owner.remember(self.task, self.record)
         self.record.review_head_run = (placeholder or self.placeholder()).to_json()
@@ -1553,9 +1589,15 @@ class OwnedCleanupTests(unittest.TestCase):
         result = self.owner.replay_one(key)
         self.assertEqual(result["status"], "completed", result["reason"])
         self.assertTrue(result["progress"]["heads_stopped"])
-        self.assertEqual(sorted(self.stops), [("run-reviewer-1", "run-reviewer-1"),
-                                              ("run-reviewer-2", "run-reviewer-2"),
-                                              ("run-worker", "generation-1")])
+        # Both reviewer generations were addressed by their own run directories, though the shared
+        # review pid file names only round 2. The exited placeholder was skipped, never stopped.
+        self.assertEqual(sorted(self.stops), ["run-reviewer-1", "run-reviewer-2", "run-worker"])
+        heads = {h["run_id"]: h for h in result["heads"]}
+        self.assertEqual(heads["placeholder-run"]["lifecycle"], "exited")
+        self.assertEqual(heads["run-worker"]["lifecycle"], "exited")
+        self.assertEqual({heads[name]["pid_file"] for name in ("run-reviewer-1", "run-reviewer-2")},
+                         {self.record.review_pid_file})
+        self.assertEqual(heads["run-worker"]["pid_file"], self.record.worker_pid_file)
         self.assertFalse(self.workspace.exists())
         self.assertEqual(git(self.repo, "for-each-ref", "--format=%(refname)", "refs/heads/pipeline/"), "")
         self.assertIsNone(self.task["claim"]["worker"])
@@ -1603,6 +1645,42 @@ class OwnedCleanupTests(unittest.TestCase):
         key = self.placeholder_intent()
         self.review_heartbeat("placeholder-run", live=True)
         self.assert_placeholder_refused(key)
+
+    def test_exited_entry_with_a_scope_generation_still_refuses(self):
+        self.assert_placeholder_refused(self.placeholder_intent(self.placeholder(scope_generation="placeholder-run")))
+
+    def test_exited_entry_with_a_role_still_refuses(self):
+        self.assert_placeholder_refused(self.placeholder_intent(self.placeholder(role="reviewer")))
+
+    def test_scoped_generation_whose_own_heartbeat_names_another_run_still_refuses(self):
+        from secretary.runtime.head.identity import publish_heartbeat
+        key = self.placeholder_intent()
+        process = subprocess.Popen(["sleep", "30"])
+        try:
+            publish_heartbeat(str(self.data / "heads" / "run-reviewer-1" / "head.pid"),
+                              {"run_id": "someone-else", "role": "reviewer", "task": "card:sample-1"},
+                              pid=process.pid)
+        finally:
+            process.kill()
+            process.wait()
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending")
+        self.assertIn("does not match the scoped stop", result["reason"])
+        self.assertFalse(result["progress"]["heads_stopped"])
+        self.assertNotIn("run-reviewer-1", self.stops)
+        self.assertTrue(self.workspace.exists())
+
+    def test_scoped_generation_whose_own_heartbeat_is_live_and_foreign_refuses_before_any_stop(self):
+        from secretary.runtime.head.identity import publish_heartbeat
+        key = self.placeholder_intent()
+        publish_heartbeat(str(self.data / "heads" / "run-reviewer-1" / "head.pid"),
+                          {"run_id": "someone-else", "role": "reviewer", "task": "card:sample-1"})
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending")
+        self.assertIn("mismatching launch identity", result["reason"])
+        self.assertFalse(result["progress"]["heads_stopped"])
+        self.assertEqual(self.stops, [])
+        self.assertTrue(self.workspace.exists())
 
 
 class SettledHeadStopTests(unittest.TestCase):

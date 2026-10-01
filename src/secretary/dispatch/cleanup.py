@@ -587,6 +587,7 @@ class CleanupOwner:
 
     def _stop(self, intent: dict[str, Any], *, workspace_owned: bool = True) -> None:
         from secretary.runtime.head import HeadRun, StopInitiator
+        from secretary.runtime.local_pty_head import head_run_pid_file
         self._provenance("cleanup-before-stop")
         environment = getattr(self.runtime.host, "_decide_workspace_environment_ownership", None)
         if workspace_owned and intent["record"].get("workspace") and callable(environment):
@@ -613,9 +614,12 @@ class CleanupOwner:
                     or run.task_ref.kind != expected_kind):
                 raise HostError("cleanup head belongs to another workspace or card")
             guard = getattr(self.runtime.host, "_guard_head_run", None)
-            # A replaced observer's pid file now names its successor: never read it.
+            # A replaced observer's pid file now names its successor: never read it. A scoped run
+            # is fenced by its own run directory's heartbeat, as its stop below is addressed.
             if callable(guard) and workspace_owned:
-                guard(run, run.role, pid_file=run.pid_file, leaf=run.leaf,
+                pid_file = (str(head_run_pid_file(self._heads_root(), run.run_id)) if run.scope_generation
+                            else run.pid_file)
+                guard(run, run.role, pid_file=pid_file, leaf=run.leaf,
                       task=run.task_ref.ref if run.task_ref.kind == "sprint" else "card:" + run.task_ref.ref)
             if not run.scope_generation and run.settled:
                 continue  # Deployed unscoped runs retain their confirmed stop receipt.
@@ -623,9 +627,10 @@ class CleanupOwner:
         # Fence every recorded identity before stopping the first head. A
         # foreign reviewer must not cause us to stop a worker and only then refuse.
         for run in runs:
-            # A replaced observer shares its sprint pid file with the successor. Address
-            # its own run directory instead; the runtime still proves its own scope.
-            target = run if workspace_owned else replace(run, pid_file="")
+            # A role's shared pid file names only its latest generation, and a replaced observer's
+            # names its successor. A scoped run, and every run of a replaced observer, is addressed
+            # by its own run directory instead; the runtime still proves its own identity and scope.
+            target = run if workspace_owned and not run.scope_generation else replace(run, pid_file="")
             receipt = self.runtime.host.head_runtime_for(target).stop(
                 target, StopInitiator(actor="secretary-dispatcher", reason="owned residue cleanup"))
             if not receipt.ok:
@@ -642,12 +647,21 @@ class CleanupOwner:
                 _merge_head(intent["heads"], settled.to_json())
                 self._checkpoint_intent(intent)
 
+    def _heads_root(self) -> Path:
+        root = getattr(self.runtime.host, "_local_pty_root", None)
+        return Path(root()) if callable(root) else self.data_dir / "heads"
+
     def _unlaunched_placeholder(self, intent: dict[str, Any], run: Any) -> bool:
         """An identity a re-stop of a settled head once minted and never launched (secretary-1918).
 
-        It names this attempt's worker id rather than the card. It owes no stop only while nothing
-        could have launched it: no scope, no run directory, and no pid file naming it with a live
-        or unknown process. Anything else is still a foreign head and keeps the refusal.
+        The boundary is evidence that the run was never launched, and all of it must hold:
+        no scope_generation; role ''; a card task_ref naming this attempt's worker id, which is
+        not the card ref; the intent's workspace; no run directory (lexists) for the run_id; and
+        a pid file that is absent, dead or names another run.
+
+        The entry's own lifecycle is neither a qualifier nor a disqualifier: a stop that addressed
+        no run directory recorded `exited` without any head behind it. Anything else is still a
+        foreign head and keeps the refusal.
         """
         from secretary.runtime.head.identity import head_process_status
         from secretary.runtime.local_pty_head import head_run_directory
@@ -657,9 +671,8 @@ class CleanupOwner:
                 or run.task_ref.ref != worker or run.task_ref.ref == intent["task"]["ref"]
                 or not run.workspace or run.workspace != record.get("workspace")):
             return False
-        root = getattr(self.runtime.host, "_local_pty_root", None)
         try:
-            run_dir = head_run_directory(root() if callable(root) else self.data_dir / "heads", run.run_id)
+            run_dir = head_run_directory(self._heads_root(), run.run_id)
         except ValueError:
             return False
         if os.path.lexists(run_dir):
