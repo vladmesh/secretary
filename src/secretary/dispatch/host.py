@@ -1460,7 +1460,7 @@ class CommandHostRuntime:
         result = owner.cleanup_observer(record)
         # A stopped closeout head whose workspace removal waits only for card cleanup is down;
         # the journal replays the rest.
-        progress = result["progress"]
+        progress = result.get("progress") or {}
         if result["status"] == "pending" and not (progress.get("heads_stopped") and progress.get("awaits_cards")):
             raise HostError("observer cleanup pending: " + result["reason"])
         observer_run = self._observer_lifecycle_run(record)
