@@ -1280,6 +1280,10 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertFalse(result["progress"]["heads_stopped"])
         self.assertNotIn("awaits_cards", result["progress"])
 
+    def observer_key(self, record):
+        import hashlib
+        return hashlib.sha256(("sprint:1:" + record.generation + ":" + str(record.launches)).encode()).hexdigest()
+
     def replaced_observers(self):
         repo, path, first = self.observer()
         first.launches, first.launched_at = 1, 100.0
@@ -1293,7 +1297,8 @@ class OwnedCleanupTests(unittest.TestCase):
         state.write_text(json.dumps({"records": {}, "observers": {"sprint:1": second.to_json()}}))
         fenced = []
         guarded = []
-        self.host.fence_cleanup_scopes = lambda workspace, task, runs: fenced.append([r.run_id for r in runs])
+        self.host.fence_cleanup_scopes = lambda workspace, task, runs, recorded_only=False: fenced.append(
+            ([r.run_id for r in runs], recorded_only))
         self.host._guard_head_run = lambda run, role, **kwargs: guarded.append(run.run_id)
         return path, first, second, fenced, guarded
 
@@ -1305,7 +1310,8 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertTrue(result["progress"]["preservation_verified"])
         self.assertTrue(result["progress"]["heads_stopped"])
         self.assertEqual(self.stops, [("observer-run", "")])
-        self.assertEqual((fenced, guarded), ([], []))
+        self.assertEqual((fenced, guarded), ([(["observer-run"], True)], []))
+        self.assertIsNone(self.owner.journal.read()["intents"][self.observer_key(first)]["identity"])
         self.assertTrue(path.is_dir())
 
     def test_replacement_observer_intent_cannot_stop_the_predecessor(self):
@@ -1313,7 +1319,7 @@ class OwnedCleanupTests(unittest.TestCase):
         result = self.owner.cleanup_observer(second)
         self.assertEqual(result["status"], "completed", result["reason"])
         self.assertEqual(self.stops, [("observer-run-2", "")])
-        self.assertEqual(fenced, [["observer-run-2"]])
+        self.assertEqual(fenced, [(["observer-run-2"], False)])
         self.assertFalse(path.exists())
 
     def test_replaced_launch_with_settled_run_settles_without_touching_successor(self):
@@ -1333,7 +1339,7 @@ class OwnedCleanupTests(unittest.TestCase):
             self.assertEqual(result["status"], "preserved", result["reason"])
             self.assertIn("handed to the successor", result["reason"])
         self.assertEqual(self.stops, [])
-        self.assertEqual((fenced, guarded), ([], []))
+        self.assertEqual((fenced, guarded), ([(["observer-run"], True)] * 2, []))
         self.assertTrue(path.is_dir())
         # With the current record gone, the later recorded launch is still the successor.
         (self.data / "dispatcher" / "production-state.json").write_text(json.dumps({"records": {}}))
@@ -1405,6 +1411,90 @@ class OwnedCleanupTests(unittest.TestCase):
         before = self.owner.journal.path.read_bytes()
         self.owner.replay_one(key)
         self.assertEqual(self.owner.journal.path.read_bytes(), before)
+
+    def scoped_predecessor(self, *, role="observer", task="sprint:1", workspace=None, completed=True):
+        """Launch 1 as a scoped run under a real local-PTY runtime root, replaced by launch 2."""
+        from dataclasses import replace
+        from secretary.runtime.head.identity import head_process_status
+        from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+        from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
+        path, first, second, _, _ = self.replaced_observers()
+        heartbeat = self.root / "observer.pid"
+        old = replace(HeadRun.from_json(first.head_run), scope_generation="old-scope", pid_file=str(heartbeat))
+        first.head_run = old.finishing(StopInitiator(actor="test")).exited().to_json()
+        first.pid_file = str(heartbeat)
+        root = self.root / "heads"
+        directory = root / old.run_id
+        directory.mkdir(parents=True)
+        scope = ScopedHeadLifecycle(old.run_id, 128, generation=old.scope_generation)
+        scope.persist(directory, role=role, task=task, workspace=workspace or str(path))
+        if completed:
+            evidence = scope.read_owner(directory)
+            evidence.update(launch_allowed=False, cleanup_complete=True)
+            scope.update_owner(directory, evidence)
+        read = []
+        def identity(pid_file, **kwargs):
+            read.append(pid_file)
+            return head_process_status(pid_file, **kwargs)
+        backend = LocalPtyHeadRuntime(root, head_process_status=identity, stop_timeout=0)
+        self.host.head_runtime_for = lambda run: backend
+        self.host._local_pty_root = lambda: root
+        self.host.fence_cleanup_scopes = lambda *args, **kwargs: CommandHostRuntime.fence_cleanup_scopes(
+            self.host, *args, **kwargs)
+        return path, first, heartbeat, backend, read
+
+    def test_replaced_observer_conflicting_scope_owner_refuses_before_any_stop_effect(self):
+        from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+        path, first, _, backend, _ = self.scoped_predecessor(
+            role="worker", task="card:foreign", workspace="/foreign/workspace", completed=False)
+        with mock.patch.object(backend, "_ask_to_stop") as ask, \
+                mock.patch.object(ScopedHeadLifecycle, "stop_owned") as native:
+            result = self.owner.cleanup_observer(first)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertIn("binding differs from its recorded head", result["reason"])
+        self.assertFalse(result["progress"]["heads_stopped"])
+        self.assertEqual((ask.call_count, native.call_count), (0, 0))
+        self.assertTrue(path.is_dir())
+
+    def test_scoped_predecessor_settles_by_its_own_scope_not_the_shared_heartbeat(self):
+        from secretary.runtime.head.identity import head_process_status, publish_heartbeat
+        from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+        from secretary.runtime.local_pty_head import MemoryScopeError
+        path, first, heartbeat, _, read = self.scoped_predecessor()
+        publish_heartbeat(str(heartbeat), {"run_id": "observer-run-2", "role": "observer", "task": "sprint:1"})
+        with mock.patch.object(ScopedHeadLifecycle, "stop_owned",
+                               side_effect=MemoryScopeError("scope still has descendants")) as native:
+            result = self.owner.cleanup_observer(first)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertIn("scope still has descendants", result["reason"])
+        self.assertEqual(native.call_count, 1, "a retained exit receipt is not fresh scoped proof")
+        with mock.patch.object(ScopedHeadLifecycle, "stop_owned") as native:
+            result = self.owner.cleanup_observer(first)
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertIn("replaced by observer-gen:2", result["reason"])
+        self.assertTrue(result["progress"]["preservation_verified"])
+        self.assertEqual(native.call_count, 1)
+        self.assertNotIn(str(heartbeat), read)
+        self.assertEqual(head_process_status(str(heartbeat))["record"]["run_id"], "observer-run-2")
+        heads = result["heads"]
+        self.assertEqual([(h["run_id"], h["pid_file"]) for h in heads], [("observer-run", str(heartbeat))])
+        self.assertTrue(path.is_dir())
+
+    def test_predecessor_cleanup_observer_never_reads_the_successor_workspace(self):
+        from secretary.dispatch.cleanup import _identity
+        path, first, _, _, _ = self.replaced_observers()
+        exists = Path.exists
+        touched = []
+        def watched(self_path, *args, **kwargs):
+            touched.append(str(self_path))
+            return exists(self_path, *args, **kwargs)
+        with mock.patch("secretary.dispatch.cleanup._identity", wraps=_identity) as identity, \
+                mock.patch.object(Path, "exists", autospec=True, side_effect=watched):
+            result = self.owner.cleanup_observer(first)
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertEqual(identity.call_count, 0)
+        self.assertNotIn(str(path), touched)
+        self.assertIsNone(result["identity"])
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -390,10 +391,13 @@ class CleanupOwner:
         raw = record.to_json()
         raw.update(attempt_id=record.generation + ":" + str(record.launches), worker=record.generation)
         identity = None
+        # Classify replacement before any workspace read: a replaced launch's
+        # workspace pathname now names its successor's checkout.
+        replaced = self._observer_successor({"task": task, "record": raw})
         if record.workspace:
             if record.workspace != self.runtime.host.observer_workspace(record.sprint):
                 raise HostError("observer workspace is not the exact sprint workspace")
-            if Path(record.workspace).exists():
+            if not replaced and Path(record.workspace).exists():
                 try:
                     identity = _identity(observer_root_repo(self.data_dir), record.workspace, "")
                 except HostError:
@@ -535,7 +539,7 @@ class CleanupOwner:
         if tip:
             raise Preserved("attempt recorded no workspace but " + ref + " exists at " + tip, verified=True)
 
-    def _scope_fence(self, intent: dict[str, Any]) -> None:
+    def _scope_fence(self, intent: dict[str, Any], *, replaced: bool = False) -> None:
         if intent["disposition"] == "catch-up" or _empty_attempt(intent) or _no_workspace_attempt(intent):
             from secretary.dispatch.watchdog import pid_file_path
             from secretary.runtime.head.identity import head_process_status
@@ -553,8 +557,13 @@ class CleanupOwner:
             task = intent["task"]
             reference = (TaskRef.sprint(task["ref"]) if task.get("kind") == "observer"
                          else TaskRef.card(task["ref"]))
-            fence(intent["record"].get("workspace", ""), reference,
-                  [HeadRun.from_json(raw) for raw in intent["heads"]])
+            runs = [HeadRun.from_json(raw) for raw in intent["heads"]]
+            if replaced:
+                # Only the recorded runs' own scope owners and bindings; the
+                # workspace-wide inspection would reach the successor's scopes.
+                fence(intent["record"].get("workspace", ""), reference, runs, recorded_only=True)
+            else:
+                fence(intent["record"].get("workspace", ""), reference, runs)
 
     def _binding(self, intent: dict[str, Any]) -> tuple[Path, str]:
         if intent["task"].get("kind") == "observer":
@@ -612,8 +621,11 @@ class CleanupOwner:
         # Fence every recorded identity before stopping the first head. A
         # foreign reviewer must not cause us to stop a worker and only then refuse.
         for run in runs:
-            receipt = self.runtime.host.head_runtime_for(run).stop(
-                run, StopInitiator(actor="secretary-dispatcher", reason="owned residue cleanup"))
+            # A replaced observer shares its sprint pid file with the successor. Address
+            # its own run directory instead; the runtime still proves its own scope.
+            target = run if workspace_owned else replace(run, pid_file="")
+            receipt = self.runtime.host.head_runtime_for(target).stop(
+                target, StopInitiator(actor="secretary-dispatcher", reason="owned residue cleanup"))
             if not receipt.ok:
                 raise HostError("cleanup head stop pending: " + receipt.reason)
             settled = getattr(receipt, "run", None)
@@ -622,6 +634,8 @@ class CleanupOwner:
                     or settled.spec != run.spec or settled.workspace != run.workspace
                     or settled.task_ref != run.task_ref or settled.role != run.role):
                 raise HostError("cleanup stop receipt does not settle the recorded run")
+            # Retain the recorded identity, including the pid file the run was launched with.
+            settled = replace(settled, pid_file=run.pid_file)
             if settled.to_json() not in intent["heads"]:
                 _merge_head(intent["heads"], settled.to_json())
                 self._checkpoint_intent(intent)
@@ -886,8 +900,7 @@ class CleanupOwner:
         try:
             current = self._validate_owner(intent)
             successor = current.get("successor", "")
-            if not successor:
-                self._scope_fence(intent)
+            self._scope_fence(intent, replaced=bool(successor))
             self._stop(intent, workspace_owned=not successor)
             intent["progress"]["heads_stopped"] = True
             self.journal.save(value)

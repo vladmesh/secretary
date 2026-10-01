@@ -2518,11 +2518,12 @@ class CommandHostRuntime:
                 raise HostError(f"the {role} head of {workspace} was not stopped: {receipt.reason}")
 
     def fence_cleanup_scopes(self, workspace: str, task: head_ops.TaskRef,
-                             runs: Sequence[head_ops.HeadRun]) -> None:
+                             runs: Sequence[head_ops.HeadRun], *, recorded_only: bool = False) -> None:
         """Read scope ownership through the runtime's supported boundary."""
         from secretary.runtime.local_pty_head import fence_cleanup_scopes
         try:
-            fence_cleanup_scopes(Path(self._local_pty_root()), workspace, task, runs)
+            fence_cleanup_scopes(Path(self._local_pty_root()), workspace, task, runs,
+                                 recorded_only=recorded_only)
         except (OSError, ValueError, RuntimeError) as exc:
             raise HostError(f"cleanup scope evidence unavailable: {exc}") from exc
 
