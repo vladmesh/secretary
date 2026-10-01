@@ -310,6 +310,8 @@ from secretary.runtime.role_env import (
     WORKSPACE_ENV_DIR,
     WORKSPACE_EXCLUDES,
     WORKSPACE_NAMESPACE,
+    WORKSPACE_PYCACHE_PTH,
+    workspace_pycache_pth,
 )
 from secretary.tasks import (
     durability_dirt,
@@ -3059,12 +3061,16 @@ class CommandHostRuntime:
         environment = self._claim_workspace_environment(workspace)
         if self._workspace_environment_ready(workspace):
             self._require_workspace_environment(workspace)
+            # A venv made ready before the startup file existed stays acceptable; it gains the file
+            # here when its layout allows, and keeps working without it otherwise.
+            self._install_workspace_pycache_prefix(root, environment, required=False)
             return
         self._run(
             [self.production_runtime.interpreter, "-m", "venv", str(environment)],
             "workspace Python environment",
             cwd=root,
         )
+        self._install_workspace_pycache_prefix(root, environment, required=True)
         if self._candidate_environment_install_required(project) and (root / "pyproject.toml").is_file():
             before = self._workspace_extra_files(root)
             self._run(
@@ -3078,6 +3084,35 @@ class CommandHostRuntime:
         except RuntimeError as exc:
             raise HostError(f"workspace Python environment readiness could not be written: {exc}") from None
         self._require_workspace_environment(workspace)
+
+    def _install_workspace_pycache_prefix(self, root: Path, environment: Path, *, required: bool) -> None:
+        """Point every interpreter of the owned venv at the owned bytecode cache.
+
+        Tests start child interpreters with environments built from scratch, which drop the head's
+        PYTHONPYCACHEPREFIX; the startup file in site-packages applies to them all the same. It is
+        written only into the venv's single site-packages resolving inside the owned namespace.
+        """
+        try:
+            resolved = root.resolve(strict=True)
+            namespace = (resolved / WORKSPACE_NAMESPACE).resolve(strict=True)
+            found = [path for path in environment.glob("lib/python3*/site-packages") if path.is_dir()]
+            inside = len(found) == 1 and found[0].resolve(strict=True).is_relative_to(namespace)
+        except (OSError, RuntimeError, ValueError):
+            inside = False
+        if not inside:
+            if required:
+                raise HostError(f"workspace Python environment site-packages is unavailable at {environment}")
+            return
+        file = found[0] / WORKSPACE_PYCACHE_PTH
+        body = workspace_pycache_pth(resolved)
+        with contextlib.suppress(OSError, UnicodeError):
+            if not file.is_symlink() and file.read_text(encoding="utf-8") == body:
+                return
+        try:
+            write_text_atomic(file, body)
+        except RuntimeError as exc:
+            if required:
+                raise HostError(f"workspace bytecode redirect could not be written: {exc}") from None
 
     def _workspace_extra_files(self, root: Path) -> set[str]:
         """Every untracked or ignored path in `root`'s source tree, outside the owned namespace."""
