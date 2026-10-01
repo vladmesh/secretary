@@ -1458,7 +1458,10 @@ class CommandHostRuntime:
         if owner is None:
             raise HostError("observer stop has no durable cleanup owner")
         result = owner.cleanup_observer(record)
-        if result["status"] == "pending":
+        # A stopped closeout head whose workspace removal waits only for card cleanup is down;
+        # the journal replays the rest.
+        progress = result.get("progress") or {}
+        if result["status"] == "pending" and not (progress.get("heads_stopped") and progress.get("awaits_cards")):
             raise HostError("observer cleanup pending: " + result["reason"])
         observer_run = self._observer_lifecycle_run(record)
         self.head_runtime_for(observer_run).forget_head(observer_run.run_id)
@@ -2515,11 +2518,12 @@ class CommandHostRuntime:
                 raise HostError(f"the {role} head of {workspace} was not stopped: {receipt.reason}")
 
     def fence_cleanup_scopes(self, workspace: str, task: head_ops.TaskRef,
-                             runs: Sequence[head_ops.HeadRun]) -> None:
+                             runs: Sequence[head_ops.HeadRun], *, recorded_only: bool = False) -> None:
         """Read scope ownership through the runtime's supported boundary."""
         from secretary.runtime.local_pty_head import fence_cleanup_scopes
         try:
-            fence_cleanup_scopes(Path(self._local_pty_root()), workspace, task, runs)
+            fence_cleanup_scopes(Path(self._local_pty_root()), workspace, task, runs,
+                                 recorded_only=recorded_only)
         except (OSError, ValueError, RuntimeError) as exc:
             raise HostError(f"cleanup scope evidence unavailable: {exc}") from exc
 

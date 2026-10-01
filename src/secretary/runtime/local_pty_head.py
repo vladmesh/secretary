@@ -3254,12 +3254,15 @@ def head_run_directory(root: str | os.PathLike[str], run_id: str) -> Path:
 
 
 def fence_cleanup_scopes(root: Path, workspace: str, task: TaskRef,
-                         runs: Sequence[HeadRun]) -> None:
+                         runs: Sequence[HeadRun], *, recorded_only: bool = False) -> None:
     """Refuse Git settlement while an unrecorded generation owns its target.
 
     This read uses the same canonical owner as stop. The dispatcher serializes
     admission and Git effects; recorded generations still go through runtime.stop
     for native identity and recursive empty-scope proof, including on replay.
+
+    `recorded_only` reads nothing but the recorded runs' own canonical directories:
+    a replaced owner's workspace and task now belong to its successor.
     """
     if root.absolute() != root.resolve():
         raise ValueError("cleanup scope root is substituted")
@@ -3267,7 +3270,9 @@ def fence_cleanup_scopes(root: Path, workspace: str, task: TaskRef,
         return
     known = {(run.run_id, run.scope_generation): run for run in runs}
     task_identity = _binding_of(task)
-    for directory in root.iterdir():
+    directories = ([protocol.run_dir_for(root, run.run_id) for run in runs] if recorded_only
+                   else list(root.iterdir()))
+    for directory in directories:
         if directory.is_symlink():
             raise ValueError("cleanup scope directory is substituted")
         if not directory.is_dir():
@@ -3280,10 +3285,14 @@ def fence_cleanup_scopes(root: Path, workspace: str, task: TaskRef,
             raise ValueError("cleanup scope owner path differs from its canonical identity")
         record = ScopedHeadLifecycle.read_owner(directory)
         run = known.get((owner.run_id, owner.generation))
+        if recorded_only and run is None:
+            raise ValueError("cleanup scope owner run or generation differs from its recorded head")
         if run is not None and (record.get("workspace") != run.workspace
                                 or record.get("task") != _binding_of(run.task_ref)
                                 or record.get("role") != run.role):
             raise ValueError("cleanup scope owner binding differs from its recorded head")
+        if recorded_only:
+            continue
         if record.get("workspace") == workspace or record.get("task") == task_identity:
             if (owner.run_id, owner.generation) not in known:
                 if record.get("cleanup_complete") and not record.get("launch_allowed"):
