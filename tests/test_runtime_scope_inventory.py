@@ -165,6 +165,34 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         self.assertTrue(all(name != unit for _, name in proof["effects"]))
         self.assertEqual((directory / "scope-owner.json").read_bytes(), before)
 
+    def test_loaded_scope_enumeration_failure_refuses_upgrade_and_doctor(self):
+        _, directory, unit = self.owner()
+        report = SimpleNamespace(instance=self.instance, bindings=[], host=self.instance["host"],
+                                 data_dir=self.data, instance_path=self.root / "instance" / "instance.yaml")
+        before = (directory / "scope-owner.json").read_bytes()
+
+        def native_reply(command):
+            if command[1] == "list-unit-files":
+                return CommandResult(True, 0, "\n".join(f"{r.name} enabled enabled" for r in self.desired), "")
+            if command[1] == "list-units":
+                return CommandResult(True, 1, "", "Failed to connect to bus")
+            raise AssertionError(f"observation continued after loaded-unit enumeration failed: {command}")
+
+        with mock.patch.object(LiveHostSource, "_run", side_effect=native_reply):
+            for dry in (True, False):
+                installer = FakeUnitInstaller()
+                context = upgrade.UpgradeContext(instance_path=self.root / "instance", product_root=self.root,
+                                                  base_branch="main", dry_run=dry, units=installer, report=report)
+                result = upgrade.step_host(context)
+                self.assertEqual(result.status, "failed")
+                self.assertIn("system manager/bus unavailable", result.detail)
+                self.assertEqual(installer.calls, [])
+            with mock.patch.object(cli, "resolve_installed_packaged", return_value=self.packaged):
+                _, collected, _ = cli.collect_host_inventory(report, SimpleNamespace(host_fixture=None))
+            self.assertIn("system manager/bus unavailable", collected.errors["units"])
+            self.assertEqual(collected.inventory.units, set())
+        self.assertEqual((directory / "scope-owner.json").read_bytes(), before)
+
     def test_foreign_and_missing_owner_remain_conflicts_and_prevent_all_effects(self):
         _, _, owned = self.owner("worker", "previous-1896", "heads")
         unknown = "secretary-head-foreign.scope"

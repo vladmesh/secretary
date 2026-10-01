@@ -1455,9 +1455,12 @@ class LiveSourceErrorTests(unittest.TestCase):
                     listed = subprocess.CompletedProcess(
                         [], 0, stdout="secretary-steward.timer enabled enabled\n", stderr=""
                     )
+                    loaded = subprocess.CompletedProcess(
+                        [], 0, stdout="secretary-steward.timer loaded active waiting\n", stderr=""
+                    )
                     enabled = subprocess.CompletedProcess([], 0, stdout="enabled\n", stderr="")
                     patch = unittest.mock.patch(
-                        "secretary.infra.systemd._proc.run", side_effect=[listed, enabled, failure, failure]
+                        "secretary.infra.systemd._proc.run", side_effect=[listed, loaded, enabled, failure, failure]
                     )
                 with patch:
                     collected = LiveHostSource("operator").collect(expected)
