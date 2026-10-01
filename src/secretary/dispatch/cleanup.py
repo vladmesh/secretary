@@ -105,6 +105,50 @@ def _registered(repo: Path) -> list[dict[str, str]]:
     return rows
 
 
+# Any of these naming a value means a head may have run for the attempt.
+_HEAD_FIELDS = ("head", "review_head", "handle", "review_handle", "leaf", "worker_leaf", "review_leaf",
+                "pid_file", "worker_pid_file", "review_pid_file",
+                "head_run", "worker_head_run", "review_head_run")
+_LEGACY_REASON = ("no attempt ownership was recorded; nothing was admitted; "
+                 "Git residue is left to the inventory")
+
+
+def _merge_head(heads: list[dict[str, Any]], raw: dict[str, Any]) -> None:
+    """Keep one entry per (run_id, scope_generation): the latest view replaces it.
+
+    A confirmed exit is never replaced by an older, still-running view of that run.
+    """
+    key = (raw.get("run_id"), raw.get("scope_generation") or "")
+    for index, old in enumerate(heads):
+        if (old.get("run_id"), old.get("scope_generation") or "") == key:
+            if old.get("lifecycle") != "exited" or raw.get("lifecycle") == "exited":
+                heads[index] = copy.deepcopy(raw)
+            return
+    heads.append(copy.deepcopy(raw))
+
+
+def _compact_heads(heads: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    for raw in heads:
+        _merge_head(compact, raw)
+    return compact
+
+
+def _empty_attempt(intent: dict[str, Any]) -> bool:
+    """A legacy obligation staged with no attempt, identity or head of its own."""
+    return (intent["task"].get("kind") != "observer" and not intent["record"].get("attempt_id")
+            and not intent.get("identity") and not intent["heads"])
+
+
+def _no_workspace_attempt(intent: dict[str, Any]) -> bool:
+    """An exact attempt that recorded no workspace and never named a head (an operation card)."""
+    record = intent["record"]
+    return (intent["task"].get("kind") != "observer" and bool(record.get("attempt_id"))
+            and record.get("workspace", None) == "" and not intent.get("identity")
+            and not intent["heads"] and not any(record.get(field) for field in _HEAD_FIELDS)
+            and not (record.get("launch_intent") or {}).get("head_run"))
+
+
 def _identity(repo: Path, workspace: str, branch: str) -> dict[str, Any]:
     repo = _canonical(repo)
     if _git(repo, "rev-parse", "--show-toplevel") != str(repo):
@@ -166,6 +210,9 @@ class CleanupJournal:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, name = tempfile.mkstemp(dir=self.path.parent, prefix=".cleanup-")
         try:
+            for intent in value["intents"].values():
+                # Compacts lists that grew before heads were keyed by run and generation.
+                intent["heads"] = _compact_heads(intent["heads"])
             with os.fdopen(fd, "w") as handle:
                 json.dump(value, handle, sort_keys=True)
                 handle.flush()
@@ -210,15 +257,12 @@ class CleanupJournal:
                         raise HostError("cleanup ownership changed within the recorded attempt")
             intent["identity"] = identity
         intent["record"] = copy.deepcopy(record)
-        for field in ("worker_head_run", "review_head_run", "head_run"):
-            head = record.get(field)
-            if isinstance(head, dict) and head.get("run_id") and head not in intent["heads"]:
-                # Keep all generations, including heads replaced during this attempt.
-                intent["heads"].append(copy.deepcopy(head))
         launch = record.get("launch_intent") or {}
-        head = launch.get("head_run")
-        if isinstance(head, dict) and head.get("run_id") and head not in intent["heads"]:
-            intent["heads"].append(copy.deepcopy(head))
+        for head in (*(record.get(field) for field in ("worker_head_run", "review_head_run", "head_run")),
+                     launch.get("head_run")):
+            if isinstance(head, dict) and head.get("run_id"):
+                # Keep all generations, including heads replaced during this attempt.
+                _merge_head(intent["heads"], head)
         intent["disposition"] = disposition
         if disposition != "owned":
             intent["status"] = "pending"
@@ -242,15 +286,19 @@ class CleanupJournal:
             except (OSError, ValueError, AttributeError) as exc:
                 raise HostError("cleanup cannot read dispatcher ownership") from exc
         if not record:
+            # Attach to the retained obligation whatever its disposition: a completed or
+            # preserved intent keeps its settlement; only a live owned one is requested.
             value = self.read()
             matches = [key for key, intent in value["intents"].items()
-                       if intent["task"]["id"] == task["id"] and intent["disposition"] == "owned"]
-            if matches:
-                for key in matches:
-                    value["intents"][key]["disposition"] = disposition
-                    value["intents"][key]["status"] = "pending"
+                       if intent["task"]["id"] == task["id"] and intent["task"].get("kind") != "observer"]
+            owned = [key for key in matches if value["intents"][key]["disposition"] == "owned"]
+            for key in owned:
+                value["intents"][key]["disposition"] = disposition
+                value["intents"][key]["status"] = "pending"
+            if owned:
                 self.save(value)
-                return matches[-1]
+            if matches:
+                return (owned or matches)[-1]
         return self.remember(task, record or {}, disposition=disposition)
 
     @serialized
@@ -360,25 +408,11 @@ class CleanupOwner:
             current = self.runtime.sprints.show(task["ref"], include_cards=False)
             if current["id"] != task["id"]:
                 raise HostError("cleanup observer sprint identity changed")
-            if intent["disposition"] == "observer-close":
-                if current["status"] != "closed":
-                    raise HostError("observer closeout has no completed close handoff")
-                for other in self.journal.read()["intents"].values():
-                    if (other["task"].get("sprint") == task["ref"] and other["task"].get("kind") != "observer"
-                            and not (other["status"] == "completed" or
-                                     (other["status"] == "preserved"
-                                      and other["progress"].get("preservation_verified")
-                                      and other["progress"].get("heads_stopped")
-                                      and other["progress"].get("claim_settled")))):
-                        raise HostError("observer closeout waits for card cleanup before final external stop")
-            observers = self._state().get("observers", {})
-            if not isinstance(observers, dict):
-                raise HostError("observer ownership unreadable")
-            other = observers.get(task["ref"])
-            if other and (other.get("generation") != intent["record"]["generation"]
-                          or other.get("launches") != intent["record"]["launches"]):
-                raise HostError("cleanup observer was replaced")
-            return {**current, "claim": {}}
+            if intent["disposition"] == "observer-close" and current["status"] != "closed":
+                raise HostError("observer closeout has no completed close handoff")
+            # A replaced generation may settle only its own recorded runs; the
+            # workspace belongs to its successor from now on.
+            return {**current, "claim": {}, "successor": self._observer_successor(intent)}
         current = self.runtime.reader.show(task["ref"])
         if current["id"] != task["id"] or current["project"] != task["project"]:
             raise HostError("cleanup card identity changed")
@@ -414,8 +448,95 @@ class CleanupOwner:
                     raise HostError("cleanup target has a newer launch intent")
         return current
 
+    def _observer_successor(self, intent: dict[str, Any]) -> str:
+        """The generation:launch that replaced this observer intent, or "" while it is current."""
+        observers = self._state().get("observers", {})
+        if not isinstance(observers, dict):
+            raise HostError("observer ownership unreadable")
+        record = intent["record"]
+        current = observers.get(intent["task"]["ref"])
+        if current:
+            if (current.get("generation"), current.get("launches")) == (record.get("generation"),
+                                                                         record.get("launches")):
+                return ""
+            return str(current.get("generation", "")) + ":" + str(current.get("launches", 0))
+        # The current record is gone; a later recorded launch still owns the workspace.
+        mine = (float(record.get("launched_at") or 0), int(record.get("launches") or 0))
+        for other in self.journal.read()["intents"].values():
+            raw = other["record"]
+            if (other["task"].get("kind") == "observer" and other["task"]["id"] == intent["task"]["id"]
+                    and raw.get("attempt_id") != record.get("attempt_id")
+                    and (float(raw.get("launched_at") or 0), int(raw.get("launches") or 0)) > mine):
+                return str(raw.get("attempt_id"))
+        return ""
+
+    def _unsettled_cards(self, sprint: str) -> list[str]:
+        return sorted(key for key, other in self.journal.read()["intents"].items()
+                      if other["task"].get("sprint") == sprint and other["task"].get("kind") != "observer"
+                      and not (other["status"] == "completed" or
+                               (other["status"] == "preserved"
+                                and other["progress"].get("preservation_verified")
+                                and other["progress"].get("heads_stopped")
+                                and other["progress"].get("claim_settled"))))
+
+    def _attempt_owners(self, intent: dict[str, Any]) -> list[str]:
+        return sorted(key for key, other in self.journal.read()["intents"].items()
+                      if other["task"]["id"] == intent["task"]["id"] and other["task"].get("kind") != "observer"
+                      and other["record"].get("attempt_id"))
+
+    def _follow(self, intent: dict[str, Any], owners: list[str]) -> None:
+        """A duplicate empty-attempt obligation takes its attempt owner's settlement; no effects."""
+        intents = self.journal.read()["intents"]
+        states = [intents[key] for key in owners]
+        intent["progress"]["settled_by"] = owners
+        for flag in ("heads_stopped", "claim_settled", "preservation_verified"):
+            intent["progress"][flag] = all(bool(other["progress"].get(flag)) for other in states)
+        unsettled = [key for key, other in zip(owners, states) if other["status"] not in {"completed", "preserved"}]
+        if unsettled:
+            intent["status"] = "pending"
+            intent["reason"] = ("follows attempt owner " + ", ".join(unsettled) + ": "
+                                + "; ".join(intents[key]["reason"] for key in unsettled))[:1000]
+        elif all(other["status"] == "completed" for other in states):
+            intent["status"] = "completed"
+            intent["reason"] = "; ".join(other["reason"] for other in states if other["reason"])
+        else:
+            intent["status"] = "preserved"
+            intent["reason"] = "; ".join(other["reason"] for other in states if other["status"] == "preserved")
+
+    def _terminal_card(self, current: dict[str, Any]) -> None:
+        if not current.get("closed") and current.get("state") != "done":
+            raise HostError("cleanup without workspace ownership awaits a closed or Done card")
+
+    def _no_current_record(self, intent: dict[str, Any]) -> None:
+        """Neither the card nor its workspace has a current dispatcher record."""
+        task = intent["task"]
+        root = self.data_dir / "workspaces" / str(task.get("project", ""))
+        for ref, other in self._state().get("records", {}).items():
+            if not isinstance(other, dict):
+                raise HostError("current dispatcher record is unreadable")
+            workspace = Path(str(other.get("workspace") or ""))
+            if (ref == task["ref"] or str(other.get("worker") or "").startswith(task["ref"] + "-")
+                    or (workspace.parent == root and workspace.name.startswith(task["ref"] + "-"))):
+                raise HostError("cleanup without workspace ownership awaits release of current record " + ref)
+
+    def _settle_without_identity(self, intent: dict[str, Any], current: dict[str, Any]) -> None:
+        """Return only when an exact no-workspace attempt may complete; otherwise raise."""
+        if _empty_attempt(intent):
+            self._terminal_card(current)
+            self._no_current_record(intent)
+            raise Preserved(_LEGACY_REASON, verified=True)
+        if not _no_workspace_attempt(intent):
+            raise Preserved("missing exact workspace/attempt ownership proof")
+        self._terminal_card(current)
+        self._no_current_record(intent)
+        repo = _canonical(self.runtime.catalog.binding(intent["task"]["project"])["repo"])
+        ref = "refs/heads/pipeline/" + intent["task"]["ref"]
+        tip = _ref_tip(repo, ref)
+        if tip:
+            raise Preserved("attempt recorded no workspace but " + ref + " exists at " + tip, verified=True)
+
     def _scope_fence(self, intent: dict[str, Any]) -> None:
-        if intent["disposition"] == "catch-up":
+        if intent["disposition"] == "catch-up" or _empty_attempt(intent) or _no_workspace_attempt(intent):
             from secretary.dispatch.watchdog import pid_file_path
             from secretary.runtime.head.identity import head_process_status
             for role in ("worker", "review"):
@@ -423,7 +544,9 @@ class CleanupOwner:
                 if path.exists():
                     status = head_process_status(str(path))
                     if status.get("state") != "dead":
-                        raise HostError("archived branch still has live or unknown head identity")
+                        if intent["disposition"] == "catch-up":
+                            raise HostError("archived branch still has live or unknown head identity")
+                        raise HostError(f"{role} pid file {path} names a live or unknown process")
         fence = getattr(self.runtime.host, "fence_cleanup_scopes", None)
         if callable(fence):
             from secretary.runtime.head import HeadRun, TaskRef
@@ -453,11 +576,11 @@ class CleanupOwner:
             raise HostError("cleanup repository registration changed")
         return repo, base
 
-    def _stop(self, intent: dict[str, Any]) -> None:
+    def _stop(self, intent: dict[str, Any], *, workspace_owned: bool = True) -> None:
         from secretary.runtime.head import HeadRun, StopInitiator
         self._provenance("cleanup-before-stop")
         environment = getattr(self.runtime.host, "_decide_workspace_environment_ownership", None)
-        if intent["record"].get("workspace") and callable(environment):
+        if workspace_owned and intent["record"].get("workspace") and callable(environment):
             self._environment_owner(intent, Path(intent["record"]["workspace"]))
         # A malformed/unknown head is never absence evidence. Keep the original
         # identities after a stop; its receipt can be retried after a crash.
@@ -479,7 +602,8 @@ class CleanupOwner:
                     or run.task_ref.kind != expected_kind):
                 raise HostError("cleanup head belongs to another workspace or card")
             guard = getattr(self.runtime.host, "_guard_head_run", None)
-            if callable(guard):
+            # A replaced observer's pid file now names its successor: never read it.
+            if callable(guard) and workspace_owned:
                 guard(run, run.role, pid_file=run.pid_file, leaf=run.leaf,
                       task=run.task_ref.ref if run.task_ref.kind == "sprint" else "card:" + run.task_ref.ref)
             if not run.scope_generation and run.settled:
@@ -499,7 +623,7 @@ class CleanupOwner:
                     or settled.task_ref != run.task_ref or settled.role != run.role):
                 raise HostError("cleanup stop receipt does not settle the recorded run")
             if settled.to_json() not in intent["heads"]:
-                intent["heads"].append(settled.to_json())
+                _merge_head(intent["heads"], settled.to_json())
                 self._checkpoint_intent(intent)
 
     def _provenance(self, boundary: str) -> None:
@@ -751,26 +875,47 @@ class CleanupOwner:
         # settlement signal rather than exposing a prior successful observation.
         intent["progress"]["heads_stopped"] = False
         intent["progress"]["preservation_verified"] = False
+        intent["progress"].pop("awaits_cards", None)
         self.journal.save(value)
+        if _empty_attempt(intent):
+            owners = self._attempt_owners(intent)
+            if owners:
+                self._follow(intent, owners)
+                self.journal.save(value)
+                return intent
         try:
-            self._validate_owner(intent)
-            self._scope_fence(intent)
-            self._stop(intent)
+            current = self._validate_owner(intent)
+            successor = current.get("successor", "")
+            if not successor:
+                self._scope_fence(intent)
+            self._stop(intent, workspace_owned=not successor)
             intent["progress"]["heads_stopped"] = True
             self.journal.save(value)
+            if successor:
+                raise Preserved("observer " + str(intent["record"].get("attempt_id")) + " was replaced by "
+                                + successor + "; its own runs are settled and the workspace is handed "
+                                "to the successor", verified=True)
+            if intent["disposition"] == "observer-close":
+                # The head is down; only workspace removal and completion wait for the cards.
+                waiting = self._unsettled_cards(intent["task"]["ref"])
+                if waiting:
+                    intent["progress"]["awaits_cards"] = waiting
+                    raise HostError("observer closeout stopped its head; workspace removal waits for "
+                                    "card cleanup: " + ", ".join(waiting))
             if not intent.get("identity"):
-                raise Preserved("missing exact workspace/attempt ownership proof")
-            repo, base = self._binding(intent)
-            if not intent["identity"].get("workspace"):
-                self._verify_commits(intent, repo)
-            self._remove_workspace(intent, repo)
-            intent["progress"]["workspace_removed"] = True
-            self.journal.save(value)
-            self._validate_owner(intent)
-            intent["progress"]["ref_started"] = True
-            self.journal.save(value)
-            self._delete_branch(intent, repo, base)
-            intent["progress"]["ref_removed"] = True
+                self._settle_without_identity(intent, current)
+            else:
+                repo, base = self._binding(intent)
+                if not intent["identity"].get("workspace"):
+                    self._verify_commits(intent, repo)
+                self._remove_workspace(intent, repo)
+                intent["progress"]["workspace_removed"] = True
+                self.journal.save(value)
+                self._validate_owner(intent)
+                intent["progress"]["ref_started"] = True
+                self.journal.save(value)
+                self._delete_branch(intent, repo, base)
+                intent["progress"]["ref_removed"] = True
             self._settle_claim(intent)
             intent["status"] = "completed"
         except Preserved as exc:

@@ -285,7 +285,10 @@ class OwnedCleanupTests(unittest.TestCase):
         result = self.owner.cleanup_observer(observer)
         self.assertEqual(result["status"], "pending", result["reason"])
         self.assertTrue(path.exists())
-        self.assertNotIn(("observer-run", ""), self.stops)
+        # The exact observer head stops now; only its workspace and completion wait for the card.
+        self.assertIn(("observer-run", ""), self.stops)
+        self.assertTrue(result["progress"]["heads_stopped"])
+        self.assertEqual(result["progress"]["awaits_cards"], [key])
         self.owner.replay()
         card = self.owner.journal.read()["intents"][key]
         self.assertEqual(card["status"], "completed", card["reason"])
@@ -321,7 +324,8 @@ class OwnedCleanupTests(unittest.TestCase):
         result = self.owner.cleanup_observer(observer)
         self.assertEqual(result["status"], "pending")
         self.assertTrue(path.exists())
-        self.assertEqual(self.stops, [])
+        self.assertEqual(self.stops, [("observer-run", "")])
+        self.assertEqual(result["progress"]["awaits_cards"], [key])
 
     def test_observer_can_follow_verified_dirty_card_preservation(self):
         self.head()
@@ -1037,6 +1041,370 @@ class OwnedCleanupTests(unittest.TestCase):
         result = self.owner.cleanup_observer(observer)
         self.assertEqual(result["status"], "preserved", result["reason"])
         self.assertTrue((path / "NOTES.md").exists())
+
+    # Close ownership and observer exit (secretary-1917).
+
+    def preserved_done_intent(self):
+        """The 1904 shape: an exact done attempt verified-preserved for dirty work."""
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        (self.workspace / "notes").write_text("user notes")
+        result = self.owner.cleanup(self.task, self.record, "done")
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertTrue(result["progress"]["preservation_verified"])
+        self.task["closed"] = True
+        return next(iter(self.owner.journal.read()["intents"]))
+
+    def legacy_close_intent(self):
+        """The shape the old request staged with no record: no attempt, identity or head."""
+        return self.owner.journal.remember(self.task, {}, disposition="close")
+
+    def test_close_reuses_verified_preserved_done_intent(self):
+        key = self.preserved_done_intent()
+        before = copy.deepcopy(self.owner.journal.read()["intents"][key])
+        self.assertEqual(self.owner.journal.request(self.task, "close"), key)
+        intents = self.owner.journal.read()["intents"]
+        self.assertEqual(list(intents), [key])
+        self.assertEqual(intents[key], before)
+        _, path, observer = self.observer()
+        result = self.owner.cleanup_observer(observer)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertFalse(path.exists())
+
+    def test_close_and_archive_do_not_reopen_a_completed_intent(self):
+        result = self.owner.cleanup(self.task, self.record, "done")
+        self.assertEqual(result["status"], "completed", result["reason"])
+        key = next(iter(self.owner.journal.read()["intents"]))
+        self.task["closed"] = True
+        for disposition in ("close", "archive"):
+            self.assertEqual(self.owner.journal.request(self.task, disposition), key)
+        intents = self.owner.journal.read()["intents"]
+        self.assertEqual(list(intents), [key])
+        self.assertEqual((intents[key]["status"], intents[key]["disposition"]), ("completed", "done"))
+        self.assertEqual(self.owner.replay(), [])
+
+    def test_request_stages_new_intent_only_without_any_intent(self):
+        self.task["closed"] = True
+        key = self.owner.journal.request(self.task, "close")
+        self.assertEqual(list(self.owner.journal.read()["intents"]), [key])
+        self.assertEqual(self.owner.journal.request(self.task, "archive"), key)
+        self.assertEqual(list(self.owner.journal.read()["intents"]), [key])
+
+    def test_existing_empty_duplicate_converges_to_its_attempt_owner(self):
+        owner = self.preserved_done_intent()
+        duplicate = self.legacy_close_intent()
+        stops = list(self.stops)
+        for _ in range(2):
+            result = self.owner.replay_one(duplicate)
+            expected = self.owner.journal.read()["intents"][owner]
+            self.assertEqual((result["status"], result["reason"]), (expected["status"], expected["reason"]))
+            self.assertEqual(result["progress"]["settled_by"], [owner])
+            self.assertTrue(result["progress"]["preservation_verified"])
+            self.assertTrue(result["progress"]["heads_stopped"])
+            self.assertTrue(result["progress"]["claim_settled"])
+        self.assertEqual(self.stops, stops, "a follower performs no effect of its own")
+        self.assertEqual((self.workspace / "notes").read_text(), "user notes")
+        _, path, observer = self.observer()
+        self.assertEqual(self.owner.cleanup_observer(observer)["status"], "completed")
+        self.assertFalse(path.exists())
+
+    def test_empty_duplicate_follows_a_pending_owner_until_it_settles(self):
+        self.task["claim"]["worker"] = self.record.worker
+        owner = self.request("close")
+        self.task["closed"] = True
+        duplicate = self.legacy_close_intent()
+        with mock.patch("secretary.dispatch.cleanup.git_worktree.remove", return_value=False):
+            self.owner.replay_one(owner)
+        result = self.owner.replay_one(duplicate)
+        self.assertEqual(result["status"], "pending")
+        self.assertIn("follows attempt owner " + owner, result["reason"])
+        self.owner.replay_one(owner)
+        result = self.owner.replay_one(duplicate)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertEqual(self.owner.replay(), [])
+
+    def operation_record(self):
+        git(self.repo, "worktree", "remove", str(self.workspace))
+        git(self.repo, "branch", "-D", "pipeline/sample-1")
+        return DispatcherRecord(worker="sample-1-operation", workspace="", handle="", head="", review_head="",
+                                attempt_id="attempt-op", comment_baseline=0, review_baseline=0,
+                                state="assessment", claimed_at=1)
+
+    def test_operation_card_attempt_without_workspace_completes(self):
+        record = self.operation_record()
+        self.task.update(closed=True, claim={"worker": record.worker, "claimed_at": None})
+        self.state({self.task["ref"]: record.to_json()})
+        result = self.owner.cleanup(self.task, record, "inactive")
+        self.assertEqual(result["status"], "pending")
+        self.assertIn("awaits release of current record", result["reason"])
+        self.assertTrue(result["progress"]["heads_stopped"])
+        self.state({})
+        result = self.owner.replay()[0]
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertIsNone(self.task["claim"]["worker"])
+        self.assertEqual(self.stops, [])
+
+    def test_operation_card_attempt_with_pipeline_ref_is_preserved_naming_it(self):
+        record = self.operation_record()
+        git(self.repo, "branch", "pipeline/sample-1")
+        self.task["closed"] = True
+        result = self.owner.cleanup(self.task, record, "inactive")
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertIn("refs/heads/pipeline/sample-1 exists at " + self.base, result["reason"])
+        self.assertTrue(result["progress"]["preservation_verified"])
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+
+    def test_attempt_without_workspace_but_with_a_head_field_is_not_completed(self):
+        record = self.operation_record()
+        record.worker_pid_file = "/nonexistent/pid"
+        self.task["closed"] = True
+        result = self.owner.cleanup(self.task, record, "inactive")
+        self.assertEqual(result["status"], "pending")
+        self.assertIn("head ownership is missing", result["reason"])
+        record.worker_pid_file = ""
+        record.review_head = "reviewer-profile"
+        record.attempt_id = "attempt-op-2"
+        result = self.owner.cleanup(self.task, record, "inactive")
+        self.assertEqual(result["status"], "preserved")
+        self.assertIn("missing exact workspace/attempt ownership proof", result["reason"])
+        self.assertFalse(result["progress"]["preservation_verified"])
+
+    def test_legacy_empty_intent_is_verified_preserved_without_effects(self):
+        self.task["closed"] = True
+        key = self.legacy_close_intent()
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertIn("no attempt ownership was recorded", result["reason"])
+        self.assertIn("left to the inventory", result["reason"])
+        self.assertTrue(result["progress"]["preservation_verified"])
+        self.assertTrue(result["progress"]["heads_stopped"])
+        self.assertEqual(result["heads"], [])
+        self.assertEqual(self.stops, [])
+        self.assertTrue(self.workspace.is_dir())
+        self.assertIn(str(self.workspace), git(self.repo, "worktree", "list", "--porcelain"))
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+        before = self.owner.journal.path.read_bytes()
+        self.owner.replay_one(key)
+        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        _, path, observer = self.observer()
+        self.assertEqual(self.owner.cleanup_observer(observer)["status"], "completed")
+
+    def test_legacy_empty_intent_waits_for_a_terminal_card(self):
+        key = self.legacy_close_intent()
+        self.task["state"] = "blocked"
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending")
+        self.assertIn("closed or Done card", result["reason"])
+
+    def test_legacy_empty_intent_live_pid_file_keeps_it_pending(self):
+        self.task["closed"] = True
+        key = self.legacy_close_intent()
+        pid = self.root / "worker.pid"
+        pid.write_text("1")
+        with mock.patch("secretary.dispatch.watchdog.pid_file_path", return_value=str(pid)), \
+                mock.patch("secretary.runtime.head.identity.head_process_status", return_value={"state": "alive"}):
+            result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending")
+        self.assertIn("pid file " + str(pid) + " names a live or unknown process", result["reason"])
+        self.assertFalse(result["progress"]["heads_stopped"])
+
+    def test_legacy_empty_intent_current_record_keeps_it_pending(self):
+        self.task["closed"] = True
+        key = self.legacy_close_intent()
+        self.state({self.task["ref"]: self.record.to_json()})
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending")
+        self.assertIn("another active owner", result["reason"])
+        other = {**self.record.to_json(), "worker": "other-worker", "attempt_id": "other"}
+        self.state({"other-1": other})
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending")
+        self.assertIn("awaits release of current record other-1", result["reason"])
+        self.assertTrue(self.workspace.is_dir())
+
+    def test_legacy_empty_intent_foreign_claim_keeps_it_pending(self):
+        self.task.update(closed=True, claim={"worker": "foreign-worker", "claimed_at": None})
+        key = self.legacy_close_intent()
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending")
+        self.assertIn("claim is foreign", result["reason"])
+        self.assertEqual(self.task["claim"]["worker"], "foreign-worker")
+
+    def test_public_observer_stop_exits_while_card_cleanup_is_pending(self):
+        host = CommandHostRuntime(
+            FakeCatalog(), self.data, mode="real",
+            production_runtime=registered_production_runtime(self.root),
+        )
+        self.runtime.host = host
+        self.runtime.sprints = SimpleNamespace(show=lambda *a, **k: {
+            "id": "sprint-1", "ref": "sprint:1", "status": "closed"})
+        host.cleanup_owner = self.owner
+        self.task["claim"]["worker"] = self.record.worker
+        card = self.request("close")
+        self.task["closed"] = True
+        with mock.patch("secretary.dispatch.cleanup.git_worktree.remove", return_value=False):
+            self.assertEqual(self.owner.replay_one(card)["status"], "pending")
+        path = Path(host.observer_workspace("sprint:1"))
+        host._create_git_observer_workspace(path)
+        run = HeadRun(run_id="observer-run", spec=HeadSpec(
+            profile_id="test", adapter="unknown", runtime=LOCAL_PTY_RUNTIME),
+            workspace=str(path), task_ref=TaskRef.sprint("sprint:1"), role="observer")
+        observer = ObserverRecord(sprint="sprint:1", workspace=str(path), head_possible=True,
+                                  head_run=run.to_json())
+        self.backend.forget_head = mock.Mock()
+        with mock.patch.object(host, "head_runtime_for", return_value=self.backend):
+            host.stop_observer(observer)
+            self.backend.forget_head.assert_called_once_with(run.run_id)
+            self.assertIn(("observer-run", ""), self.stops)
+            key = next(k for k, i in self.owner.journal.read()["intents"].items() if i["task"].get("kind") == "observer")
+            intent = self.owner.journal.read()["intents"][key]
+            self.assertEqual(intent["status"], "pending", "completion is not published early")
+            self.assertEqual(intent["progress"]["awaits_cards"], [card])
+            self.assertIn(card, intent["reason"])
+            self.assertTrue(path.is_dir())
+            self.assertEqual(self.owner.replay_one(key)["status"], "pending")
+            self.assertTrue(path.is_dir())
+            self.assertEqual(self.owner.replay_one(card)["status"], "completed")
+            result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertNotIn("awaits_cards", result["progress"])
+        self.assertFalse(path.exists())
+
+    def test_observer_stop_failure_still_raises_while_cards_wait(self):
+        self.task["claim"]["worker"] = self.record.worker
+        self.request("close")
+        _, path, observer = self.observer()
+        self.stop_failure = True
+        result = self.owner.cleanup_observer(observer)
+        self.assertEqual(result["status"], "pending")
+        self.assertFalse(result["progress"]["heads_stopped"])
+        self.assertNotIn("awaits_cards", result["progress"])
+
+    def replaced_observers(self):
+        repo, path, first = self.observer()
+        first.launches, first.launched_at = 1, 100.0
+        second_run = HeadRun(run_id="observer-run-2", spec=HeadSpec(
+            profile_id="test", adapter="unknown", runtime=LOCAL_PTY_RUNTIME),
+            workspace=str(path), task_ref=TaskRef.sprint("sprint:1"), role="observer")
+        second = ObserverRecord(sprint="sprint:1", generation="observer-gen", launches=2, launched_at=200.0,
+                                workspace=str(path), head_possible=True, head_run=second_run.to_json())
+        state = self.data / "dispatcher" / "production-state.json"
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps({"records": {}, "observers": {"sprint:1": second.to_json()}}))
+        fenced = []
+        guarded = []
+        self.host.fence_cleanup_scopes = lambda workspace, task, runs: fenced.append([r.run_id for r in runs])
+        self.host._guard_head_run = lambda run, role, **kwargs: guarded.append(run.run_id)
+        return path, first, second, fenced, guarded
+
+    def test_predecessor_observer_intent_cannot_stop_the_replacement(self):
+        path, first, _, fenced, guarded = self.replaced_observers()
+        result = self.owner.cleanup_observer(first)
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertIn("replaced by observer-gen:2", result["reason"])
+        self.assertTrue(result["progress"]["preservation_verified"])
+        self.assertTrue(result["progress"]["heads_stopped"])
+        self.assertEqual(self.stops, [("observer-run", "")])
+        self.assertEqual((fenced, guarded), ([], []))
+        self.assertTrue(path.is_dir())
+
+    def test_replacement_observer_intent_cannot_stop_the_predecessor(self):
+        path, first, second, fenced, _ = self.replaced_observers()
+        result = self.owner.cleanup_observer(second)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertEqual(self.stops, [("observer-run-2", "")])
+        self.assertEqual(fenced, [["observer-run-2"]])
+        self.assertFalse(path.exists())
+
+    def test_replaced_launch_with_settled_run_settles_without_touching_successor(self):
+        """The de9a574d shape: launch 1 already stopped, launch 2 current and live."""
+        path, first, second, fenced, guarded = self.replaced_observers()
+        run = HeadRun.from_json(first.head_run)
+        first.head_run = run.finishing(StopInitiator(actor="test")).exited().to_json()
+        task = {"id": "sprint-1", "ref": "sprint:1", "sprint": "sprint:1", "project": "observers",
+                "kind": "observer", "claim": {}}
+        raw = first.to_json()
+        raw.update(attempt_id="observer-gen:1", worker="observer-gen")
+        key = self.owner.journal.remember(task, raw, disposition="observer-stop")
+        handoff = self.owner.journal.remember(task, {**second.to_json(), "attempt_id": "observer-gen:2",
+                                                     "worker": "observer-gen"}, disposition="observer-close")
+        for _ in range(2):
+            result = self.owner.replay_one(key)
+            self.assertEqual(result["status"], "preserved", result["reason"])
+            self.assertIn("handed to the successor", result["reason"])
+        self.assertEqual(self.stops, [])
+        self.assertEqual((fenced, guarded), ([], []))
+        self.assertTrue(path.is_dir())
+        # With the current record gone, the later recorded launch is still the successor.
+        (self.data / "dispatcher" / "production-state.json").write_text(json.dumps({"records": {}}))
+        result = self.owner.replay_one(key)
+        self.assertIn("replaced by observer-gen:2", result["reason"])
+        self.assertTrue(path.is_dir())
+        self.assertEqual(self.owner.journal.read()["intents"][handoff]["status"], "pending")
+
+    def test_heads_list_is_bounded_over_replays_and_remembers(self):
+        from dataclasses import replace
+        self.head()
+        (self.workspace / "notes").write_text("user notes")
+        counter = iter(range(1000))
+        def stop(run, initiator):
+            self.stops.append((run.run_id, run.scope_generation))
+            # The runtime re-proves a settled scoped run; each receipt differs in a non-key field.
+            settled = run if run.settled else run.finishing(initiator).exited()
+            return SimpleNamespace(ok=True, reason="", run=replace(settled, handle="h" + str(next(counter))))
+        self.backend.stop = stop
+        for index in range(5):
+            self.record.worker_head_run["handle"] = "view-" + str(index)
+            self.owner.remember(self.task, self.record)
+        key = self.request("done")
+        for _ in range(10):
+            self.assertEqual(self.owner.replay_one(key)["status"], "preserved")
+        heads = self.owner.journal.read()["intents"][key]["heads"]
+        self.assertEqual(len(heads), 1)
+        self.assertEqual(heads[0]["lifecycle"], "exited")
+        self.assertEqual(len(self.stops), 10)
+
+    def test_oversized_heads_list_compacts_on_next_checkpoint(self):
+        worker = self.head().to_json()
+        reviewer = self.head("reviewer", "review-generation").to_json()
+        key = self.request()
+        value = self.owner.journal.read()
+        exited = HeadRun.from_json(worker).finishing(StopInitiator(actor="test")).exited().to_json()
+        value["intents"][key]["heads"] = ([{**worker, "handle": str(n)} for n in range(200)] + [exited]
+                                          + [{**worker, "handle": "stale"}] + [reviewer] * 100)
+        self.owner.journal.save(value)
+        heads = self.owner.journal.read()["intents"][key]["heads"]
+        self.assertEqual([(h["run_id"], h["lifecycle"]) for h in heads],
+                         [("run-worker", "exited"), ("run-reviewer", reviewer["lifecycle"])])
+
+    def test_crash_after_stop_before_journal_save_retries_to_same_content(self):
+        self.head()
+        def stop(run, initiator):
+            self.stops.append((run.run_id, run.scope_generation))
+            return SimpleNamespace(ok=True, reason="", run=run if run.settled else run.finishing(initiator).exited())
+        self.backend.stop = stop
+        key = self.request()
+        stop = self.owner._stop
+        def interrupted(intent, **kwargs):
+            stop(intent, **kwargs)
+            raise KeyboardInterrupt("crash after stop before saving heads_stopped")
+        with mock.patch.object(self.owner, "_stop", side_effect=interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                self.owner.replay_one(key)
+        saved = self.owner.journal.read()["intents"][key]
+        self.assertFalse(saved["progress"]["heads_stopped"])
+        self.assertTrue(self.workspace.exists())
+        result = CleanupOwner(self.runtime).replay_one(key)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertEqual(len(result["heads"]), 1)
+        self.assertFalse(self.workspace.exists())
+
+    def test_replaying_a_preserved_intent_twice_keeps_the_journal_identical(self):
+        key = self.preserved_done_intent()
+        self.owner.replay_one(key)
+        before = self.owner.journal.path.read_bytes()
+        self.owner.replay_one(key)
+        self.assertEqual(self.owner.journal.path.read_bytes(), before)
 
 
 if __name__ == "__main__":
