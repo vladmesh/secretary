@@ -22,6 +22,7 @@ and derived runtime state lives in a local data directory. Install and recovery 
 - [Operations](docs/OPERATIONS.md) — runbooks for a running installation
 - [Recovery](docs/RECOVERY.md) — the checkpoint contract, fresh install and restore
 - [Testing](docs/TESTING.md) — CI suite taxonomy and local test boundaries
+- [Rename](docs/RENAME.md) — secretary → ummanu: inventory of the old name and the transition design
 
 ## Install
 
