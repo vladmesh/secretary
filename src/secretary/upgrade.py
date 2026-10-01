@@ -1204,7 +1204,8 @@ def step_host(context: UpgradeContext) -> StepResult:
         )
     except (DataDirError, HostCommandError, ValueError) as exc:
         return StepResult("host", "failed", str(exc))
-    canonical = build_doctor_expectations(report.instance, report.bindings, packaged=packaged)
+    canonical = build_doctor_expectations(report.instance, report.bindings, packaged=packaged,
+                                          data_dir=report.data_dir)
     # Upgrade retains its project availability policy; unit requirements come from the same
     # canonical desired state doctor assesses, using this upgrade's explicit target catalogue.
     projects = build_expectations(report.bindings, report.host, availability=context.project_availability)
@@ -1213,6 +1214,7 @@ def step_host(context: UpgradeContext) -> StepResult:
         units=canonical.units,
         unit_runtime=canonical.unit_runtime,
         foreign_units=canonical.foreign_units,
+        runtime_data_dir=report.data_dir,
     )
     source = (
         FixtureHostSource(context.host_fixture)
@@ -1260,11 +1262,14 @@ def step_host(context: UpgradeContext) -> StepResult:
         for change in pending
     )
     runtime_pending = result.runtime_changes
+    preserved = ("; preserved runtime scopes: " + ", ".join(result.preserved_runtime_scopes)
+                 if result.preserved_runtime_scopes else "")
     if not pending and not runtime_pending:
-        return StepResult("host", "unchanged", f"{len(result.changes)} resources reconciled")
+        return StepResult("host", "unchanged", f"{len(result.changes)} resources reconciled" + preserved)
     detail = ", ".join(f"{change.action} {change.name}" for change in [*pending, *runtime_pending])
     if result.runtime_findings:
         detail += "; " + "; ".join(result.runtime_findings)
+    detail += preserved
     return StepResult("host", "changed", detail)
 
 

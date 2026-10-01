@@ -3,6 +3,7 @@
 # test process.
 component tests/test_agent_prompt_transport.py
 unit tests/test_architecture.py
+component tests/test_runtime_scope_inventory.py
 unit tests/test_dead_pane_history.py
 unit tests/test_codex_home_launch_config.py
 unit tests/test_board_identity.py
@@ -73,6 +74,7 @@ integration-dispatcher tests/test_dispatcher_provider_failure.py
 integration-dispatcher tests/test_gate.py
 unit tests/test_head_command.py
 unit tests/test_head_memory.py
+component tests/test_scoped_environment.py
 unit tests/test_head_scope_ownership.py
 integration-heads tests/test_head_scope_backend.py
 unit tests/test_po_scoped_launch.py

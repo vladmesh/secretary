@@ -39,6 +39,8 @@ JOURNAL_TAIL_BYTES = 64 * 1024
 
 #: The head's process is up and the supervisor owns it.
 RUN_STARTED = "run.started"
+#: Sealed admitted identity bound to native scope, fsynced before any head exists.
+SCOPE_BOUND = "scope.bound"
 #: A delivery ended, and this is what of it reached the head's pty: `bytes` counts what the kernel
 #: took from the supervisor, `offered_bytes` what the caller handed over, and `complete` says
 #: whether those are the same number. Written when the bytes land, never when they are admitted, so
@@ -61,6 +63,7 @@ RUN_STOPPING = "run.stopping"
 RUN_EXITED = "run.exited"
 
 EVENT_KINDS = (
+    SCOPE_BOUND,
     RUN_STARTED,
     INPUT_ACCEPTED,
     TURN_STARTED,

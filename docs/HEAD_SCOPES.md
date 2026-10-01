@@ -65,6 +65,86 @@ backoff after newly orphaned claims and waiter completion. A pending owner stop
 is revisited even while its waiter remains blocked. Running rows fence their
 session's next input and restart admission; other sessions can continue.
 
+## Prepared environment across privilege acquisition
+
+Observer, worker and reviewer start through `LocalPtyHeadRuntime.start` and
+`spawn_head`; PO turns reach the same `spawn_head` through `PoRunner._scoped_launch`.
+`_supervisor_environment` retains its existing merge of inherited environment and
+explicit overrides, with the importing product source first on `PYTHONPATH`.
+PO's `turn_environment` puts its runtime interpreter directory first on `PATH`;
+`session_environment` supplies session/request bindings. The shared launcher
+transfers this complete prepared environment, including supplied empty strings
+and home/configuration/auth bindings, across sudo's environment reset.
+
+After the existing generation admission barrier releases, `scope_launcher` creates
+one sealed anonymous memfd containing the environment and installs it as stdin.
+The synchronous `sudo -n /usr/bin/systemd-run --system --scope` preserves stdin.
+No environment payload is written to argv, systemd properties, journals or disk.
+The gated process owns the descriptor until exec; kernel descriptor lifetime owns
+cleanup on refusal, cancellation and crashes. No durable payload or replay owner
+is added to the scope lifecycle.
+
+Privilege acquisition uses absolute native binaries and a minimal fixed environment.
+The privileged bootstrap uses the launcher's product interpreter with `-I` and an
+absolute product script that inserts only its own source root. Caller PATH,
+PYTHONPATH, PYTHONHOME, loader settings and home directories cannot select privileged
+code or tools. It still verifies cgroup membership, installs the OOM contract and
+opens the kernel stream, then uses absolute `setpriv` with the original native
+uid/gid/supplementary groups. After that drop, an isolated runtime reader requires
+a sealed regular descriptor owned by that uid, an initial offset of zero, and a
+valid environment of at most 1 MiB encoded JSON. It replaces stdin with `/dev/null`
+and execs the supervisor with the prepared snapshot. The OOM descriptor is the
+bootstrap's own binding; the supervisor consumes it before launching the head.
+Transfer failures emit fixed diagnostics and refuse the scoped launch. Existing
+generation locks, cleanup proof and terminal settlement still own recovery.
+
+The persistent PO deployed at `64c42d735bd99740bba94c65788d34f7f354bee0`
+already executes a separate launcher from current product source with this environment
+and the existing argv contract. The new launcher handles that actual emitter's
+`sudo -E`/`env PYTHONPATH` prefix by selecting its own trusted bootstrap and carrying
+the snapshot on stdin. The old prefix supplies no privileged code/environment
+authority. Native identity flags must match the launcher. This permits the next
+authorized PO refresh after delivery without an observer/PO restart, owner migration,
+receipt edit or parallel compatibility subsystem. Scope records do not change.
+Disposable tests load the emitter function directly from that delivered Git object;
+CI runs it through real sudo, system scope, bootstrap, privilege drop, supervisor
+and PO head with a fake executable found only on prepared PATH. It also verifies
+`python3 -P -m secretary --help` resolves through the prepared product runtime.
+Local broad tests instrument the privileged effects; the real system scope, OOM,
+descendant and PO recovery proofs remain dispatcher-owned CI evidence.
+
+## Provider identity and scope ownership
+
+`runtime.head_run_binding.head_run_binding` owns the provider/continuation digest.
+Codex v1 fixes the input to `run_id`, the original workspace spelling, complete
+serialized `task_ref`, role, and seven spec fields: `profile_id`, `adapter`,
+`model`, `effort`, `resource`, `codex_mode`, `fallback`. The encoding is ASCII
+JSON with sorted keys and compact separators, SHA-256 truncated to 32 hex digits.
+The source descriptor separately carries the resolved workspace path. Addresses,
+lifecycle, runtime, memory limit and scope generation do not enter this digest.
+Full spec equality and scope generation remain fences in launch handoff; scope
+admission and cleanup verify their canonical owner under its lock.
+
+Preflight's `codex_provider_source_descriptor` calls the runtime implementation;
+provider-event ingress verifies against that descriptor. The dispatch
+`worker_lifecycle.head_run_binding` import exposes that same implementation to
+provider cursor reads, retained-continuation liveness, observer/reviewer progress
+and recovery. The provider-error reader shares the cursor reader's
+`_codex_bound_source` verification of descriptor, journal root, session and initial
+range. No reader discovers a replacement journal or changes a persisted digest.
+Non-Codex sources retain their existing serialized-spec digest in the same runtime
+implementation, preserving deployed Claude descriptors and continuation episodes.
+
+Deployed Codex v1 descriptors retain their exact hash, including profile-derived
+8192/12288 MiB runs. Old and new preflight producers therefore agree with the
+corrected reader without migration. An old reader still rejects memory-bearing
+Codex descriptors until it is refreshed. A persisted Codex continuation episode
+carrying the divergent serialized-spec digest fails closed at episode admission;
+it is never rewritten or tried as an alternate identity. Supported external runtime
+refresh and settlement remain the observer's responsibility. Missing, malformed or
+unsupported descriptors still refuse; this repair grants no recovery or rebind
+capability.
+
 ## Causal OOM producer and consumer
 
 The privileged scope bootstrap opens a read-only, nonblocking `/dev/kmsg` stream

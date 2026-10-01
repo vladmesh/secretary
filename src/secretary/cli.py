@@ -1994,6 +1994,9 @@ def print_host_inventory(
 
     print()
     print("host inventory: read-only")
+    if collected.inventory.runtime_scopes is not None:
+        for unit, scope in sorted(collected.inventory.runtime_scopes.scopes.items()):
+            print(f"runtime scope: {unit} preserved by {scope['role']} lifecycle ({scope['generation']})")
     for kind in KINDS:
         reason = collected.errors.get(kind)
         if reason:
@@ -2023,6 +2026,7 @@ def collect_host_inventory(report, args: argparse.Namespace):
         report.instance,
         report.bindings,
         packaged=packaged,
+        data_dir=report.data_dir,
     )
     collected = source.collect(expected)
     return expected, collected, inventory(expected, collected.inventory)

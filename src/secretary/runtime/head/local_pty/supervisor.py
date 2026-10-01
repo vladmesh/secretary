@@ -63,6 +63,7 @@ from .journal import (
     RUN_EXITED,
     RUN_STARTED,
     RUN_STOPPING,
+    SCOPE_BOUND,
     TURN_FINISHED,
     TURN_STARTED,
     JournalWriter,
@@ -503,7 +504,21 @@ class Supervisor:
         self._journal = JournalWriter(self.journal_path, self.run_id).open()
         self._install_signals()
         self._prepare_memory_scope()
-        self.start_head()
+        if self._memory_lifecycle is not None:
+            try:
+                with self._memory_lifecycle.attest_launch(directory=self.run_dir, role=self.role,
+                                                         task=self.task, workspace=os.getcwd()) as binding:
+                    self._append(SCOPE_BOUND, binding=binding)
+                    descriptor = os.open(self.run_dir, os.O_RDONLY | os.O_DIRECTORY)
+                    try:
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                    self.start_head()
+            except MemoryScopeError as exc:
+                raise SupervisorStartupError("memory_scope_unavailable", str(exc)) from exc
+        else:
+            self.start_head()
         (self.run_dir / protocol.SUPERVISOR_PID_NAME).write_text(f"{os.getpid()}\n", "utf-8")
         self._append(
             RUN_STARTED,

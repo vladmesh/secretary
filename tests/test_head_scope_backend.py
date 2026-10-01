@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shlex
 import signal
 import subprocess
@@ -13,11 +14,12 @@ import time
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from secretary.runtime.head.local_pty.client import LocalPtySpawnError, spawn_head
-from secretary.runtime.head.local_pty.journal import RUN_EXITED
-from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+from secretary.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, SCOPE_BOUND
+from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle, launch_identity
 from secretary.runtime.head.memory import MemoryScopeError, scope_unit
 from secretary.runtime.head.run import HeadRun, StopInitiator
 from secretary.runtime.head.spec import HeadSpec
@@ -25,10 +27,12 @@ from secretary.runtime.head.task_ref import TaskRef
 from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
 from secretary.dispatch.watchdog import head_process_status
 from secretary.po import store as po_store
-from secretary.po.runner import PoRunner
+from secretary.po.runner import PoRunner, turn_environment
+from secretary.po import PO_REQUEST_ENV, PO_SESSION_ENV
 from secretary.po.service import PoService
 from tests.po_cli_fakes import FAKE_CLAUDE, eventually
 from tests.po_fake_store import FakeBoard, FakePoStore
+from tests.scoped_environment_fixtures import deployed_scope_argv
 
 
 def await_fact(predicate, message: str, seconds: float = 15) -> None:
@@ -57,6 +61,193 @@ class ScopeBackendTests(unittest.TestCase):
         return spawn_head(root=self.root, run_id=run_id, role="worker", task="ci:owned-fixture",
                           command=shlex.join([sys.executable, "-u", "-c", program]),
                           memory_limit_mib=96)
+
+    def test_active_po_self_upgrade_and_doctor_preserve_native_scope_then_lifecycle_settles(self) -> None:
+        from secretary.runtime.local_pty_head import runtime_scope_inventory
+
+        data = self.root / "data"
+        data.mkdir()
+        run_id = "ci-po-self-" + uuid.uuid4().hex[:12]
+        directory = data / "po-heads" / run_id
+        def cleanup():
+            owner = ScopedHeadLifecycle.from_run_dir(directory)
+            if owner is not None:
+                owner.stop_and_prove_empty()
+        self.addCleanup(cleanup)
+        repo = Path(__file__).resolve().parents[1]
+        output_path = self.root / "head-output.log"
+        command = shlex.join([sys.executable, "-u", str(repo / "tests/fixtures/scope_self_upgrade.py"),
+                             str(self.root), str(data), run_id])
+        # The persistent released PO emits this exact argv before it adopts new
+        # source. Only the new executable owns the prospective attestation.
+        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.scope_argv", deployed_scope_argv()):
+            handle = spawn_head(
+                root=data / "po-heads", run_id=run_id, role="po", task="po:ci:disposable-session:1",
+                command=command + " >" + shlex.quote(str(output_path)) + " 2>&1", cwd=self.root,
+                env={"PYTHONPATH": os.pathsep.join((str(repo / "src"), str(repo)))}, memory_limit_mib=256,
+            )
+        try:
+            await_fact(lambda: (self.root / "proof.json").exists(), "PO self-upgrade did not produce preservation proof")
+        except AssertionError:
+            output = output_path.read_text(errors="replace")[-8192:] if output_path.exists() else "no head output"
+            self.fail(f"PO self-upgrade did not produce preservation proof; head output:\n{output}")
+        proof = json.loads((self.root / "proof.json").read_text())
+        unit = scope_unit(run_id)
+        self.assertEqual(proof["unit"], unit)
+        self.assertTrue(all(value != "failed" for value in proof["results"]))
+        self.assertTrue(all(name != unit for _, name in proof["effects"]))
+        projected = runtime_scope_inventory(data, {unit})
+        self.assertFalse(projected.errors, projected.errors)
+        self.assertIn(unit, projected.scopes)
+        bound = handle.events().of_kind(SCOPE_BOUND)
+        self.assertEqual(len(bound), 1)
+        self.assertLess(bound[0]["seq"], handle.events().of_kind(RUN_STARTED)[0]["seq"])
+        self.assertEqual(bound[0]["binding"]["admitted"]["generation"], handle.scope_generation)
+        self.assertEqual(bound[0]["binding"]["admitted"]["root"], str(data / "po-heads"))
+        self.assertFalse(ScopedHeadLifecycle.read_owner(directory)["cleanup_complete"])
+        (self.root / "finish").touch()
+        await_fact(lambda: any(event.get("kind") == RUN_EXITED for event in handle.events().events),
+                   "harmless PO fixture did not exit")
+        owner = ScopedHeadLifecycle.from_run_dir(directory)
+        owner.stop_and_prove_empty()
+        self.assertTrue(ScopedHeadLifecycle.read_owner(directory)["cleanup_complete"])
+        settled = runtime_scope_inventory(data, {unit})
+        self.assertFalse(settled.errors, settled.errors)
+        self.assertFalse(settled.scopes)
+        self.assertEqual(settled.disappeared, {unit})
+
+    def test_attestation_survives_head_and_launcher_exit_with_detached_descendants(self) -> None:
+        from secretary.runtime.local_pty_head import runtime_scope_inventory
+        from secretary.host import FixtureHostSource, build_doctor_expectations
+        from secretary.host_apply import ApplyInputs, apply_host
+        from tests.fakes.upgrade import FakeUnitInstaller
+        from tests.runtime_scope_fixtures import host_fixture
+
+        data = self.root / "data"
+        data.mkdir()
+        run_id = "ci-retained-" + uuid.uuid4().hex[:12]
+        directory = data / "heads" / run_id
+        def cleanup():
+            owner = ScopedHeadLifecycle.from_run_dir(directory)
+            if owner is not None:
+                owner.stop_and_prove_empty()
+        self.addCleanup(cleanup)
+        child_file = self.root / "child.pid"
+        program = (
+            "import os,time,pathlib; pid=os.fork(); "
+            f"pathlib.Path({str(child_file)!r}).write_text(str(pid)) if pid else None; "
+            "os._exit(0) if pid else None; os.setsid(); time.sleep(60)"
+        )
+        handle = spawn_head(root=data / "heads", run_id=run_id, role="worker", task="ci:retained",
+                            command=shlex.join([sys.executable, "-u", "-c", program]),
+                            cwd=self.root, memory_limit_mib=96)
+        await_fact(lambda: bool(handle.events().of_kind(RUN_EXITED)), "head did not journal its exit")
+        owner = ScopedHeadLifecycle.from_run_dir(directory)
+        record = owner.read_owner(directory)
+        await_fact(lambda: launch_identity(record["launch_pid"]) is None, "original launcher did not exit")
+        self.assertTrue(child_file.exists())
+        unit = scope_unit(run_id)
+        projected = runtime_scope_inventory(data, {unit})
+        self.assertFalse(projected.errors, projected.errors)
+        self.assertTrue(projected.scopes[unit]["populated"])
+        with owner.ownership() as record:
+            record["launch_allowed"] = False
+            owner.update_owner(directory, record)
+        before = (directory / "scope-owner.json").read_bytes()
+        instance, packaged, desired, fixture = host_fixture(self.root, data, unit)
+        expected = build_doctor_expectations(instance, [], packaged=packaged, data_dir=data)
+        collected = FixtureHostSource(fixture).collect(expected)
+        self.assertFalse(collected.errors, collected.errors)
+        for dry in (True, False):
+            installer = FakeUnitInstaller()
+            result = apply_host(ApplyInputs(instance, [], collected.inventory, desired,
+                                           data / "host-managed.json", packaged), units=installer, dry_run=dry)
+            self.assertFalse(result.errors, result.errors)
+            self.assertEqual(result.preserved_runtime_scopes, [unit])
+            self.assertTrue(all(name != unit for _, name in installer.calls))
+            self.assertEqual((directory / "scope-owner.json").read_bytes(), before)
+        for field, value in (("generation", "substituted-generation"),
+                             ("workspace", str(self.root / "substituted-workspace"))):
+            owner.update_owner(directory, {**record, field: value})
+            self.assertTrue(runtime_scope_inventory(data, {unit}).errors, field)
+            owner.update_owner(directory, record)
+        owner.stop_and_prove_empty()
+        self.assertTrue(owner.read_owner(directory)["cleanup_complete"])
+        settled = runtime_scope_inventory(data, {unit})
+        self.assertFalse(settled.errors, settled.errors)
+        self.assertEqual(settled.disappeared, {unit})
+
+    def test_deployed_po_producer_new_launcher_preserves_path_and_runtime_bindings(self) -> None:
+        bin_dir = self.root / "prepared cli tools"
+        bin_dir.mkdir()
+        result = self.root / "environment.json"
+        fake = bin_dir / "prepared-only-cli"
+        keys = ["PATH", "PYTHONPATH", "HOME", "CODEX_HOME", "BOARD_ACTOR",
+                "SCOPED_CONFIG_SENTINEL", "SUPPLIED_EMPTY", PO_SESSION_ENV, PO_REQUEST_ENV]
+        fake.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json,os,pathlib,subprocess,sys,secretary\n"
+            "control=subprocess.run(['python3','-P','-m','secretary','--help'],capture_output=True)\n"
+            "pathlib.Path(sys.argv[1]).write_text(json.dumps({"
+            f"'environment':{{k:os.environ[k] for k in {keys!r} if k in os.environ}},"
+            "'python':sys.executable,'source':secretary.__file__,"
+            "'uid':os.getuid(),'gid':os.getgid(),'groups':os.getgroups(),"
+            "'control_exit':control.returncode,'args':sys.argv[2:]}))\n"
+        )
+        fake.chmod(0o700)
+        environment = turn_environment({
+            "PATH": str(bin_dir) + ":/usr/bin:/bin",
+            "HOME": str(self.root / "runtime home"),
+            "CODEX_HOME": str(self.root / "codex home"),
+            "SCOPED_CONFIG_SENTINEL": "safe spaces ' ; $(touch NEVER) `touch NEVER`",
+            "SUPPLIED_EMPTY": "",
+        })
+        store = SimpleNamespace(turn_request_id=lambda *_: "disposable-request")
+        runner = PoRunner(store, self.root / "data", env=environment, scope_owner_unit="")
+        session = SimpleNamespace(session_id="disposable-session", cli="codex", model=None,
+                                  effort="high", cwd=str(self.root))
+        files = runner.files(session.session_id, 1)
+        files.directory.mkdir(parents=True)
+        files.prompt.write_text("harmless input")
+        def cleanup():
+            owner = ScopedHeadLifecycle.from_run_dir(runner._scope_dir(session.session_id, 1))
+            if owner is not None:
+                owner.stop_and_prove_empty()
+        self.addCleanup(cleanup)
+        # This is the deployed producer's actual function from the 64c42d7 Git
+        # object. The launcher process imports only the candidate source. No live
+        # PO process/receipt, provider, credential or installed state is touched.
+        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.scope_argv",
+                        deployed_scope_argv()):
+            process = runner._scoped_launch(
+                session, 1, [fake.name, str(result), "argument ; $(touch NEVER)", ""], files,
+                runner.session_environment(session, 1),
+                HeadSpec.from_profile("ci-po", {"adapter": "codex", "memory_limit_mib": 256}),
+            )
+        self.assertEqual(process.wait(timeout=15), 0)
+        actual = json.loads(result.read_text())
+        for key, value in environment.items():
+            self.assertEqual(actual["environment"][key], value, key)
+        self.assertEqual(actual["environment"][PO_SESSION_ENV], session.session_id)
+        self.assertEqual(actual["environment"][PO_REQUEST_ENV], "disposable-request")
+        self.assertNotIn("FOREIGN_INSTALLATION", actual["environment"])
+        self.assertEqual(actual["control_exit"], 0)
+        self.assertEqual(actual["args"], ["argument ; $(touch NEVER)", ""])
+        self.assertEqual(Path(actual["python"]).parent, Path(sys.executable).parent)
+        self.assertTrue(actual["source"].startswith(environment["PYTHONPATH"].split(":")[0]))
+        self.assertEqual((actual["uid"], actual["gid"], sorted(actual["groups"])),
+                         (os.getuid(), os.getgid(), sorted(os.getgroups())))
+        self.assertFalse((self.root / "NEVER").exists())
+        owner = ScopedHeadLifecycle.from_run_dir(process.handle.run_dir)
+        self.assertTrue(owner.read_owner(process.handle.run_dir)["launch_allowed"])
+        owner.stop_and_prove_empty()
+        self.assertTrue(owner.read_owner(process.handle.run_dir)["cleanup_complete"])
+        # No prepared values are allowed into bootstrap argv, scope properties or
+        # persistent diagnostics. The result is private disposable test evidence.
+        for name in ("scope-owner.json", "supervisor.log", "journal.jsonl"):
+            path = process.handle.run_dir / name
+            if path.exists():
+                self.assertNotIn(environment["SCOPED_CONFIG_SENTINEL"], path.read_text())
 
     def test_detached_descendant_stop_failure_retains_owner_and_real_retry_empties_scope(self) -> None:
         child_file = self.root / "detached.pid"

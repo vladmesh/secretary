@@ -259,9 +259,9 @@ def _spec_json(spec: HeadSpec) -> dict[str, Any]:
 
     Written rather than re-resolved: the registry can be edited while a head is running.
 
-    This block is a head's launch identity as well as its launch shape — two fingerprints hash it
-    whole — so a field is added here only when it really identifies the head. `spec.runtime` does
-    not; `HeadRun.to_json` records it beside this block and says why.
+    Codex v1 provider identity uses the fixed projection in `runtime.head_run_binding`; it must not
+    grow when this persisted launch shape gains lifecycle fields such as memory_limit_mib.
+    `HeadRun.to_json` records runtime beside this block for legacy record compatibility.
     """
     result: dict[str, Any] = {
         "profile_id": spec.profile_id,
