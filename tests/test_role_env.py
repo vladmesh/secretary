@@ -345,6 +345,33 @@ class ManagedInterpreterTests(unittest.TestCase):
                 )
                 self.assertNotIn(str(self.product / ".venv/bin"), env["PATH"])
 
+    def test_worker_and_reviewer_launches_redirect_tool_caches_into_the_owned_namespace(self) -> None:
+        """secretary-1920: test and lint caches land where owned cleanup removes them as a whole."""
+        workspace = self.root / "workspace"
+        (workspace / role_env.WORKSPACE_ENV_DIR).parent.mkdir(parents=True)
+        (workspace / role_env.WORKSPACE_ENV_DIR).symlink_to(Path(sys.prefix), target_is_directory=True)
+        namespace = workspace / ".secretary-task-env"
+        expected = {
+            "PYTHONPYCACHEPREFIX": str(namespace / "pycache"),
+            "RUFF_CACHE_DIR": str(namespace / "ruff-cache"),
+            "MYPY_CACHE_DIR": str(namespace / "mypy-cache"),
+        }
+        probe = "; ".join(f'printf "%s\\n" "${name}"' for name in expected)
+        for role in sorted(role_env.RUFF_ROLES):
+            with self.subTest(role=role):
+                with mock.patch.dict(os.environ, self.launcher_env, clear=True):
+                    # The dispatcher's head binding, the command `InstanceCatalog.head_launch` renders.
+                    command = wrap_role_command(role, probe, workspace=str(workspace))
+                    env = role_env.runtime_env(
+                        role,
+                        base_env={"PATH": "/usr/bin", "PYTHONPYCACHEPREFIX": "/ambient"},
+                        workspace=workspace,
+                    )
+                result = self.run_clean(command)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.splitlines(), list(expected.values()))
+                self.assertEqual({name: env[name] for name in expected}, expected)
+
     def test_the_role_env_puts_the_product_venv_first(self) -> None:
         for role in self.ROLES:
             with self.subTest(role=role), mock.patch.dict(os.environ, self.launcher_env, clear=True):

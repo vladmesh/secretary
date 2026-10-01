@@ -9819,7 +9819,9 @@ class HeadPromptTests(unittest.TestCase):
         self.assertIn("python3 -P -m secretary check show --module", doc)
         # The shell shape is offered, with the promise it cannot keep spelled out.
         self.assertIn("never reused in place of a run", doc)
-        self.assertIn("state/checks/broad-<digest>.json", doc)
+        # secretary-1920: the receipt is the pipeline's own output, kept in the owned namespace.
+        self.assertIn("`.secretary-task-env/checks/broad-<digest>.json`", doc)
+        self.assertNotIn("state/checks", doc)
         self.assertIn("worker-local broad receipt already covers is prohibited", doc)
         # Reuse is bounded by the candidate-trust rule the wrapper enforces.
         self.assertIn("imported the project from this workspace", doc)

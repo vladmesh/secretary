@@ -292,6 +292,12 @@ class LocalRunPacketTests(unittest.TestCase):
                     self.reader.show.side_effect = None
 
 
+    def test_worker_packet_names_the_receipt_in_the_owned_namespace(self) -> None:
+        """secretary-1920: the packet points where `check broad` writes in a dispatcher workspace."""
+        worker, _ = self.packets()
+        self.assertIn("`.secretary-task-env/checks/broad-<digest>.json` in this workspace", worker)
+        self.assertNotIn("state/checks", worker)
+
     def test_secretary_and_codegen_receive_same_rule_and_only_own_entries(self) -> None:
         for project in ("secretary", "codegen-orchestrator"):
             for packet in self.packets(project=project):

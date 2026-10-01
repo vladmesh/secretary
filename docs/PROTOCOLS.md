@@ -1232,7 +1232,8 @@ flag, candidate SHA), and the sprint summary lists it under `degraded_cards`.
 Workers use focused checks while developing and run at most one local broad suite per report
 generation/unchanged SHA unless they state why it was rerun. The broad run goes through
 `secretary check broad`, which streams output, returns the check's exit status and writes a
-worker-local broad receipt under the ignored `state/checks/` path: command and check-set digest, cwd
+worker-local broad receipt under the ignored `state/checks/` path (in a dispatcher workspace, under the
+dispatcher-owned `.secretary-task-env/checks/`): command and check-set digest, cwd
 and imported project provenance, start/end/duration, exit code, parsed verdict and counts (scanned off
 the stream), and a bounded diagnostic tail. The receipt records content as one git tree object id —
 the tree this worktree, with tracked edits and untracked files, would commit to — so

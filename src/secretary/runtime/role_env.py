@@ -159,6 +159,16 @@ PRODUCT_VENV_ROLES = frozenset(("observer", "steward", "retro", "curator"))
 # Reserved to the dispatcher. A project's conventional ``.venv`` remains adapter-owned, so uv,
 # make and setup commands never share an environment with the head-launch boundary.
 WORKSPACE_ENV_DIR = ".secretary-task-env/venv"
+# The dispatcher-owned namespace that holds that environment. Owned cleanup removes it as a whole,
+# so everything the pipeline itself generates in a workspace belongs inside it.
+WORKSPACE_NAMESPACE = Path(WORKSPACE_ENV_DIR).parts[0]
+# Standard tool settings that keep a worker's or reviewer's test and lint caches inside that
+# namespace instead of the candidate source tree, where cleanup would rightly read them as work.
+WORKSPACE_TOOL_CACHES = {
+    "PYTHONPYCACHEPREFIX": "pycache",
+    "RUFF_CACHE_DIR": "ruff-cache",
+    "MYPY_CACHE_DIR": "mypy-cache",
+}
 # Everything the pipeline itself writes into a candidate checkout, excluded through the repository's
 # local ``info/exclude`` on every bring-up so a project's committed ``.gitignore`` needs no pipeline
 # entries: the reserved namespace, the dispatcher's task document and the ``secretary check broad``
@@ -170,6 +180,30 @@ WORKSPACE_EXCLUDES = (
     "/state/checks/",
     "/.secretary-report/",
 )
+
+
+def workspace_tool_cache_env(workspace: Path | str) -> dict[str, str]:
+    """The cache redirections a head launched into `workspace` runs with."""
+    namespace = Path(workspace).expanduser() / WORKSPACE_NAMESPACE
+    return {name: str(namespace / directory) for name, directory in WORKSPACE_TOOL_CACHES.items()}
+
+
+def dispatcher_workspace_namespace(root: Path | str) -> Path | None:
+    """`root`'s reserved namespace when the dispatcher's ownership claim there is intact, else None.
+
+    The claim is the one `_claim_workspace_environment` writes: an `owner.json` naming the
+    dispatcher and this exact workspace, inside a namespace that resolves within it.
+    """
+    try:
+        resolved = Path(root).resolve(strict=True)
+        namespace = resolved / WORKSPACE_NAMESPACE
+        observed = json.loads((namespace / "owner.json").read_text(encoding="utf-8"))
+        inside = namespace.resolve(strict=True).is_relative_to(resolved)
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        return None
+    expected = {"owner": "secretary-dispatcher", "schema_version": 1, "workspace": str(resolved)}
+    return namespace if observed == expected and inside and not namespace.is_symlink() else None
+
 
 # This gates the synthetic BOARD_ROLE value. po and dispatcher have no allowlist entry, so they
 # are rejected before reaching this gate; they remain here as the board's declared roles.
@@ -333,6 +367,7 @@ def runtime_env(
                 raise RoleEnvError(f"workspace Python environment is unavailable at {environment}")
             env["PATH"] = str(venv_bin) + os.pathsep + env.get("PATH", "")
             env["VIRTUAL_ENV"] = str(environment)
+            env.update(workspace_tool_cache_env(workspace))
         # The wrapper itself is imported through an explicit production source prefix. That is a
         # trusted command boundary, not ambient authority for every command the head subsequently
         # runs. Candidate imports come from its environment or the broad-check bootstrap.

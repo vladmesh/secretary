@@ -45,9 +45,12 @@ from signal import NSIG
 from typing import IO, Any
 
 from secretary._fsutil import write_text_atomic
+from secretary.runtime.role_env import dispatcher_workspace_namespace
 
 SCHEMA_VERSION = 1
 RECEIPT_DIR_NAME = Path("state") / "checks"
+#: In a dispatcher workspace the receipt is the pipeline's own output, kept in its owned namespace.
+DISPATCHER_RECEIPT_DIR_NAME = Path("checks")
 #: Bound the artifact's only unbounded input by bytes and lines.
 TAIL_BYTES = 8192
 TAIL_LINES = 120
@@ -303,6 +306,14 @@ def as_spec(check: CheckSpec | str) -> CheckSpec:
 
 
 def receipt_dir(root: Path) -> Path:
+    """Where `root`'s receipts live: the dispatcher's namespace when it owns one, else `state/checks`.
+
+    Writer and every reader resolve the directory here, so a dispatcher workspace's receipt is
+    found where it was written and owned cleanup removes it with the namespace.
+    """
+    namespace = dispatcher_workspace_namespace(root)
+    if namespace is not None:
+        return namespace / DISPATCHER_RECEIPT_DIR_NAME
     return Path(root) / RECEIPT_DIR_NAME
 
 

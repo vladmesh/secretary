@@ -1529,6 +1529,13 @@ adapter-owned `.venv`. Before creating it the dispatcher appends any missing lin
 `info/exclude`: `.secretary-task-env/`, `/TASK.md` and `/state/checks/`. Projects need no `.gitignore`
 entries; linked worktrees share the file, and the entries stay after cleanup.
 
+Everything else the pipeline generates in a card workspace is owned too, so a settled Done workspace is
+removable under the unchanged cleanup dirtiness rule. Worker and reviewer heads run with
+`PYTHONPYCACHEPREFIX`, `RUFF_CACHE_DIR` and `MYPY_CACHE_DIR` pointing into `.secretary-task-env/`; the
+broad receipt lands there; and files the editable install creates in the source tree (for example
+`src/*.egg-info/`) are recorded with their exact digests in the cleanup journal's `generated` map right
+after the install. A file that existed before the install, or that a head later rewrites, stays author work.
+
 When the adapter declares `broad_check` without `broad_check.interpreter`, the candidate's `.[dev]` is
 installed into this environment, so worker and reviewer tools and the inner broad suite resolve there.
 That install may need package-index access; an unavailable index is a bring-up failure, never
@@ -3050,7 +3057,9 @@ interpreter with `-P`; when a contract omits `broad_check.interpreter`, the inne
 
 `check broad` streams output to stderr, exits with the check's status (`128+N` for a signal), and writes one
 receipt under `state/checks/` in the workspace (ignored, never committed): check set and digest, working
-directory, import provenance, timing, exit code, parsed verdict and counts, bounded output tail. A raw exit
+directory, import provenance, timing, exit code, parsed verdict and counts, bounded output tail. In a workspace
+whose `.secretary-task-env/` the dispatcher owns, writer, `check show` and `--reuse` all use
+`.secretary-task-env/checks/` instead, so owned cleanup removes the receipt with the namespace. A raw exit
 code that disagrees with the runner's result is refused as `receipt_status_mismatch`.
 
 Two shapes:

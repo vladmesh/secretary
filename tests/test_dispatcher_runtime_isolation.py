@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import sys
@@ -15,7 +16,7 @@ from unittest import mock
 from secretary.broad_check import load_receipt, receipt_path, run_broad_check
 from secretary.dispatch import gate_lifecycle
 from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.cleanup import CleanupOwner
+from secretary.dispatch.cleanup import CleanupJournal, CleanupOwner
 from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from secretary.dispatch.runtime_provenance import RuntimeProvenance
@@ -317,6 +318,53 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
 
             candidate_python = str(workspace / ".secretary-task-env" / "venv" / "bin" / "python3")
             self.assertIn([candidate_python, "-m", "pip", "install", "-e", ".[dev]"], commands)
+
+    def test_install_output_is_recorded_as_exact_generated_bytes_only_when_new(self) -> None:
+        """secretary-1920: what the editable install creates is the dispatcher's, nothing else is."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "task"
+            _git_workspace(workspace)
+            (workspace / ".gitignore").write_text("*.egg-info/\n", encoding="utf-8")
+            (workspace / "pyproject.toml").write_text("[project]\nname = 'sample'\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(workspace), "add", "."], check=True)
+            subprocess.run(["git", "-C", str(workspace), "commit", "-qm", "project"], check=True)
+            metadata = workspace / "src" / "sample.egg-info"
+            metadata.mkdir(parents=True)
+            (metadata / "top_level.txt").write_text("author kept\n", encoding="utf-8")
+            (workspace / "notes.txt").write_text("author notes\n", encoding="utf-8")
+            catalog = SimpleNamespace(
+                adapter=lambda project: {"broad_check": {"module": "tests.broad", "import_package": "sample"}}
+            )
+            host = CommandHostRuntime(  # type: ignore[arg-type]
+                catalog, Path(tmp) / "data", mode="real", production_runtime=_Runtime([_observation()])
+            )
+            original_run = host._run
+            written = {"PKG-INFO": b"Metadata-Version: 2.1\nName: sample\n", "SOURCES.txt": b"\xffbinary\n",
+                       "top_level.txt": b"sample\n"}
+
+            def run(args: list[str], label: str, *, cwd: Path | None = None):
+                if label == "workspace candidate dependencies":
+                    # The install's effect on the source tree, including a rewrite of an existing file.
+                    for name, body in written.items():
+                        (metadata / name).write_bytes(body)
+                    return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+                return original_run(args, label, cwd=cwd)
+
+            with (
+                mock.patch.object(host, "_run", run),
+                mock.patch.object(host, "_require_workspace_environment"),
+            ):
+                host._prepare_workspace_environment(str(workspace), project="sample")
+
+            generated = CleanupJournal(Path(tmp) / "data").read()["generated"]
+            root = workspace.resolve()
+            self.assertEqual(
+                generated,
+                {
+                    str(root / "src/sample.egg-info" / name): hashlib.sha256(written[name]).hexdigest()
+                    for name in ("PKG-INFO", "SOURCES.txt")
+                },
+            )
 
     def test_reserved_environment_is_locally_excluded_and_cannot_be_staged(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
