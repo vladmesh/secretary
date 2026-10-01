@@ -132,8 +132,13 @@ def _identity(repo: Path, workspace: str, branch: str) -> dict[str, Any]:
     if not (path / ".git").is_file() or (path / ".git").is_symlink():
         raise HostError("cleanup workspace Git registration is substituted")
     stat = path.stat()
+    admin_stat = admin.stat()
     result.update(workspace=str(path), device=stat.st_dev, inode=stat.st_ino,
                   admin=str(admin), gitfile=(path / ".git").read_text(),
+                  admin_device=admin_stat.st_dev, admin_inode=admin_stat.st_ino,
+                  admin_gitdir=(admin / "gitdir").read_text(),
+                  admin_commondir=(admin / "commondir").read_text(),
+                  admin_head=(admin / "HEAD").read_text(),
                   tip=row["HEAD"])
     return result
 
@@ -199,7 +204,8 @@ class CleanupJournal:
         if identity is not None:
             if intent.get("identity"):
                 old = intent["identity"]
-                for field in ("repo", "common", "workspace", "device", "inode", "admin", "gitfile", "branch"):
+                for field in ("repo", "common", "workspace", "device", "inode", "admin", "gitfile", "branch",
+                              "admin_device", "admin_inode", "admin_gitdir", "admin_commondir"):
                     if old.get(field) != identity.get(field):
                         raise HostError("cleanup ownership changed within the recorded attempt")
             intent["identity"] = identity
@@ -272,7 +278,8 @@ class CleanupJournal:
     def summary(self, *, sprint: str = "") -> list[dict[str, Any]]:
         return [{"id": key, "ref": intent["task"]["ref"], "status": intent["status"],
                  "disposition": intent["disposition"], "reason": intent["reason"],
-                 "identity": intent.get("identity"), "progress": intent["progress"]}
+                 "identity": intent.get("identity"), "commit_proof": intent.get("commit_proof"),
+                 "progress": intent["progress"]}
                 for key, intent in sorted(self.read()["intents"].items())
                 if not sprint or intent["task"].get("sprint") == sprint]
 
@@ -358,8 +365,11 @@ class CleanupOwner:
                     raise HostError("observer closeout has no completed close handoff")
                 for other in self.journal.read()["intents"].values():
                     if (other["task"].get("sprint") == task["ref"] and other["task"].get("kind") != "observer"
-                            and other["status"] != "completed"
-                            and not other["progress"].get("heads_stopped")):
+                            and not (other["status"] == "completed" or
+                                     (other["status"] == "preserved"
+                                      and other["progress"].get("preservation_verified")
+                                      and other["progress"].get("heads_stopped")
+                                      and other["progress"].get("claim_settled")))):
                         raise HostError("observer closeout waits for card cleanup before final external stop")
             observers = self._state().get("observers", {})
             if not isinstance(observers, dict):
@@ -563,6 +573,60 @@ class CleanupOwner:
                 return key
         return ""
 
+    def _admitted_registration(self, intent: dict[str, Any], repo: Path) -> None:
+        """The retained admin entry can finish a previously admitted Git effect."""
+        identity = intent["identity"]
+        path = _canonical(identity["workspace"])
+        if not intent["progress"].get("removal_started") or path.exists() or path.is_symlink():
+            raise HostError("cleanup missing directory has no admitted removal proof")
+        common = _canonical(_git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+        admin = _canonical(identity["admin"])
+        if (str(common) != identity["common"] or admin.parent != common / "worktrees"
+                or not admin.is_dir()):
+            raise HostError("cleanup retained admin/common directory changed")
+        stat = admin.stat()
+        if (stat.st_dev, stat.st_ino) != (identity.get("admin_device"), identity.get("admin_inode")):
+            raise HostError("cleanup retained admin identity changed")
+        for name in ("gitdir", "commondir", "HEAD"):
+            file = admin / name
+            if (not file.is_file() or file.is_symlink()
+                    or file.read_text() != identity.get("admin_" + name.lower())):
+                raise HostError("cleanup retained admin registration changed")
+        if ((admin / "gitdir").read_text().strip() != str(path / ".git")
+                or (admin / (admin / "commondir").read_text().strip()).resolve() != common):
+            raise HostError("cleanup retained admin path mapping changed")
+        rows = [row for row in _registered(repo) if row.get("worktree") == str(path)]
+        if (len(rows) != 1 or rows[0].get("branch", "") != identity["branch"]
+                or rows[0].get("HEAD") != identity["tip"] or "locked" in rows[0]):
+            raise HostError("cleanup retained worktree registration or HEAD changed")
+        if identity["branch"] and _ref_tip(repo, identity["branch"]) != identity["tip"]:
+            raise HostError("cleanup retained worktree ref changed")
+
+    def _verify_commits(self, intent: dict[str, Any], repo: Path, *,
+                        preservation_verified: bool = True) -> None:
+        """Every exact HEAD needs a persistent publication/retention witness."""
+        identity = intent["identity"]
+        tip = identity["tip"]
+        if self._published(repo, tip):
+            refs = _git(repo, "for-each-ref", "--format=%(refname)", "--contains=" + tip, "refs/remotes/")
+            if not refs:
+                raise HostError("cleanup commit retention witness disappeared")
+            intent["commit_proof"] = {"tip": tip, "publication": "remote-tracking", "refs": refs.splitlines()}
+            return
+        if intent["task"].get("kind") == "observer":
+            # The existing observer producer cuts detached worktrees from this
+            # empty, parentless root commit. Its named branch already retains
+            # it. No user commit or arbitrary local ref gains this authority.
+            from secretary.dispatch.host import OBSERVER_REPO_BRANCH
+            ref = "refs/heads/" + OBSERVER_REPO_BRANCH
+            if (_ref_tip(repo, ref) == tip and _git(repo, "rev-list", "--parents", "-n", "1", tip) == tip
+                    and not _git(repo, "ls-tree", "-r", tip)):
+                intent["commit_proof"] = {"tip": tip, "publication": "owned observer root", "refs": [ref]}
+                return
+        if not preservation_verified:
+            raise HostError("cleanup interrupted removal awaits commit retention proof")
+        raise Preserved("unpublished commits; workspace and candidate ref retained", verified=True)
+
     def _remove_workspace(self, intent: dict[str, Any], repo: Path) -> None:
         self._provenance("cleanup-before-worktree-remove")
         identity = intent["identity"]
@@ -572,6 +636,9 @@ class CleanupOwner:
         path = _canonical(workspace)
         rows = [row for row in _registered(repo) if row.get("worktree") == workspace]
         if not path.exists() and not rows:
+            admin = _canonical(identity["admin"])
+            if admin.exists():
+                raise HostError("cleanup retained admin registration changed its workspace mapping")
             # Interrupted Git removal is resumable only from an effect already
             # admitted against this exact identity and durably recorded.
             if not intent["progress"].get("removal_started"):
@@ -579,13 +646,20 @@ class CleanupOwner:
                 if not shared:
                     raise HostError("cleanup workspace disappeared without removal evidence")
                 intent["progress"]["workspace_disposed_by"] = shared
+            self._verify_commits(intent, repo)
             return
-        fresh = _identity(repo, workspace, identity["branch"].removeprefix("refs/heads/") if identity["branch"] else "")
-        if fresh != identity:
-            raise HostError("cleanup workspace, registration or HEAD changed")
-        dirty = self._dirty(intent, path)
-        if dirty:
-            raise Preserved("dirty tracked, untracked or ignored work: " + "; ".join(dirty[:8]))
+        missing = not path.exists() and not path.is_symlink()
+        if missing:
+            self._admitted_registration(intent, repo)
+            self._verify_commits(intent, repo, preservation_verified=False)
+        else:
+            fresh = _identity(repo, workspace, identity["branch"].removeprefix("refs/heads/") if identity["branch"] else "")
+            if fresh != identity:
+                raise HostError("cleanup workspace, registration or HEAD changed")
+            dirty = self._dirty(intent, path)
+            if dirty:
+                raise Preserved("dirty tracked, untracked or ignored work: " + "; ".join(dirty[:8]), verified=True)
+            self._verify_commits(intent, repo)
         # No forced removal: first delete only exact generated bytes whose
         # ownership was validated above. Git independently refuses dirty work.
         generated = self.journal.read()["generated"]
@@ -594,7 +668,7 @@ class CleanupOwner:
             if file.parent == path and file.is_file() and not file.is_symlink():
                 if hashlib.sha256(file.read_bytes()).hexdigest() == digest:
                     file.unlink()
-        if self._environment_owner(intent, path) == "dispatcher":
+        if not missing and self._environment_owner(intent, path) == "dispatcher":
             namespace = _canonical(path / ".secretary-task-env")
             stat = namespace.stat()
             intent["generated_environment"] = {"device": stat.st_dev, "inode": stat.st_ino,
@@ -603,12 +677,20 @@ class CleanupOwner:
             intent["progress"]["environment_removal_started"] = True
             self._checkpoint_intent(intent)
             shutil.rmtree(namespace)
+        # Admit Git only after exact identity, author-work and retention proof.
+        intent["progress"]["removal_started"] = True
+        self._checkpoint_intent(intent)
         def run_git(args, cwd):
             capture = getattr(self.runtime.host, "run_capture", None)
             if callable(capture):
                 return capture(["git", "-C", str(cwd), *args], "owned cleanup Git")
             return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=30)
-        if not git_worktree.remove(run_git, repo, path):
+        if missing:
+            removed = git_worktree.remove(run_git, repo, path,
+                                         admitted_missing=lambda: self._admitted_registration(intent, repo))
+        else:
+            removed = git_worktree.remove(run_git, repo, path)
+        if not removed:
             raise HostError("cleanup worktree removal failed; directory or registration remains")
 
     def _published(self, repo: Path, tip: str) -> bool:
@@ -635,18 +717,18 @@ class CleanupOwner:
                     return
             raise Preserved("candidate ref missing without settlement evidence")
         if current != tip:
-            raise Preserved("candidate ref changed; retained current tip " + current)
+            raise Preserved("candidate ref changed; retained current tip " + current, verified=True)
         if any(row.get("branch") == ref for row in _registered(repo)):
             raise Preserved("branch still used by a registered worktree")
         main = _git(repo, "rev-parse", "--verify", "refs/heads/" + base)
         result = subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor", tip, main],
                                 capture_output=True, text=True, timeout=30)
         if result.returncode == 1:
-            raise Preserved("unmerged candidate ref retained at " + tip)
+            raise Preserved("unmerged candidate ref retained at " + tip, verified=True)
         if result.returncode:
             raise HostError("cleanup merge proof unavailable")
         if not self._published(repo, tip):
-            raise Preserved("unpublished candidate commits retained at " + tip)
+            raise Preserved("unpublished candidate commits retained at " + tip, verified=True)
         # The integration witness and candidate tip are locked and verified in
         # one native Git ref transaction. Never use branch -D after a stale probe.
         command = f"start\nverify refs/heads/{base} {main}\ndelete {ref} {tip}\nprepare\ncommit\n"
@@ -668,6 +750,7 @@ class CleanupOwner:
         # Retained receipts survive, but current refusal must revoke admission's
         # settlement signal rather than exposing a prior successful observation.
         intent["progress"]["heads_stopped"] = False
+        intent["progress"]["preservation_verified"] = False
         self.journal.save(value)
         try:
             self._validate_owner(intent)
@@ -678,12 +761,8 @@ class CleanupOwner:
             if not intent.get("identity"):
                 raise Preserved("missing exact workspace/attempt ownership proof")
             repo, base = self._binding(intent)
-            # Publication proof precedes removal too: preserve unpublished work
-            # even when its local ref would happen to survive removal.
-            if intent["identity"]["branch"] and not self._published(repo, intent["identity"]["tip"]):
-                raise Preserved("unpublished commits; workspace and candidate ref retained")
-            intent["progress"]["removal_started"] = True
-            self.journal.save(value)
+            if not intent["identity"].get("workspace"):
+                self._verify_commits(intent, repo)
             self._remove_workspace(intent, repo)
             intent["progress"]["workspace_removed"] = True
             self.journal.save(value)
@@ -700,6 +779,7 @@ class CleanupOwner:
             if intent["progress"].get("heads_stopped"):
                 try:
                     self._settle_claim(intent)
+                    intent["progress"]["preservation_verified"] = exc.verified
                 except Exception as settlement:
                     intent["status"] = "pending"
                     intent["reason"] += "; " + str(settlement)
@@ -735,6 +815,7 @@ class CleanupOwner:
         identity remain visible and preserved, rather than guessed from a glob.
         """
         rows = []
+        recorded = self.journal.read()["intents"]
         bindings = getattr(self.runtime.catalog, "registered_bindings", None)
         if bindings is None:
             bindings = self.runtime.catalog.bindings
@@ -755,6 +836,38 @@ class CleanupOwner:
                     row["merged"] = merge.returncode == 0 if merge.returncode in (0, 1) else None
                     row["published"] = self._published(repo, tip)
                     try:
+                        owners = {key: intent for key, intent in recorded.items()
+                                  if ((intent.get("identity") or {}).get("repo") == str(repo)
+                                      and (intent.get("identity") or {}).get("branch") == ref)
+                                  or (intent["task"]["ref"] == card_ref
+                                      and intent["task"].get("project") == project)}
+                        if owners:
+                            row["recorded_owners"] = [
+                                {"cleanup_id": key, "attempt_id": intent["record"].get("attempt_id"),
+                                 "identity": intent.get("identity"), "status": intent["status"]}
+                                for key, intent in owners.items()]
+                            if any(not intent.get("identity") or
+                                   intent["identity"]["repo"] != str(repo) or
+                                   intent["identity"]["branch"] != ref or
+                                   intent["identity"]["tip"] != tip or
+                                   intent["task"]["ref"] != card_ref or
+                                   intent["task"].get("project") != project
+                                   for intent in owners.values()):
+                                raise Preserved("recorded ownership conflicts with current ref; retained current tip " + tip)
+                            row["reason"] = "retained exact owner; replay existing cleanup obligations"
+                            row["cleanup_ids"] = list(owners)
+                            if catch_up:
+                                task = self.runtime.reader.show(card_ref)
+                                for intent in owners.values():
+                                    if intent["status"] == "owned":
+                                        if task.get("state") != "done" and not task.get("closed"):
+                                            raise Preserved("card is still active")
+                                        self.journal.request(task, "archive" if task.get("closed") else "done",
+                                                             intent["record"])
+                            if any(intent["status"] == "completed" for intent in owners.values()):
+                                row["reason"] = "ref present after completed cleanup; retained recorded provenance"
+                            rows.append(row)
+                            continue
                         task = self.runtime.reader.show(card_ref)
                         events = self.runtime.audit.events(card_ref)
                         owned = any(e.get("kind") == "claimed" or (e.get("payload", {}).get("to") == "in_progress"
@@ -786,3 +899,7 @@ class CleanupOwner:
 
 class Preserved(HostError):
     """Owned work deliberately retained; distinct from a retryable failed effect."""
+
+    def __init__(self, reason: str, *, verified: bool = False):
+        super().__init__(reason)
+        self.verified = verified

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -20,6 +21,7 @@ from secretary.dispatch.observer import ObserverRecord
 from secretary.dispatch.production import _reconcile_production
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.types import HostError
+from secretary.infra import git_worktree
 from secretary.observer_root import observer_root_repo
 from secretary.runtime.head import HeadRun, HeadSpec, StopInitiator, TaskRef
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
@@ -96,6 +98,379 @@ class OwnedCleanupTests(unittest.TestCase):
         path = self.data / "dispatcher" / "production-state.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"records": records}))
+
+    def observer(self, *, committed=False):
+        repo = observer_root_repo(self.data)
+        repo.mkdir(parents=True)
+        git(repo, "init", "--quiet", "--initial-branch=observers")
+        git(repo, "config", "user.name", "Cleanup Test")
+        git(repo, "config", "user.email", "cleanup@example.invalid")
+        git(repo, "commit", "--quiet", "--allow-empty", "-m", "root")
+        path = self.data / "workspaces" / "observers" / "sprint-1"
+        path.parent.mkdir(parents=True)
+        git(repo, "worktree", "add", "--detach", str(path), "HEAD")
+        if committed:
+            (path / "NOTES.md").write_text("retained user notes\n")
+            git(path, "add", "NOTES.md")
+            git(path, "commit", "--quiet", "-m", "user notes")
+        self.host.observer_workspace = lambda ref: str(path)
+        self.runtime.sprints = SimpleNamespace(show=lambda *a, **k: {
+            "id": "sprint-1", "ref": "sprint:1", "status": "closed"})
+        run = HeadRun(run_id="observer-run", spec=HeadSpec(
+            profile_id="test", adapter="unknown", runtime=LOCAL_PTY_RUNTIME),
+            workspace=str(path), task_ref=TaskRef.sprint("sprint:1"), role="observer")
+        return repo, path, ObserverRecord(sprint="sprint:1", generation="observer-gen",
+                                         workspace=str(path), head_possible=True, head_run=run.to_json())
+
+    def maintenance(self, *, expected_exit=0):
+        self.runtime.cleanup = self.owner
+        args = argparse.Namespace(instance="unused", residue_replay=True, residue_inventory=False, limit=20)
+        with mock.patch("secretary.dispatch.bootstrap.runtime_from_args", return_value=self.runtime), mock.patch("builtins.print") as output:
+            self.assertEqual(run_residue_maintenance(args), expected_exit)
+        return json.loads(output.call_args.args[0])
+
+    def interrupt_git_directory_removal(self):
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        def interrupted(args, **kwargs):
+            if args[3:5] == ["worktree", "remove"]:
+                self.assertTrue(self.owner.journal.read()["intents"][key]["progress"]["removal_started"])
+                shutil.rmtree(self.workspace)  # Simulate Git's first effect in this disposable repo.
+                raise KeyboardInterrupt("Git interrupted before admin removal")
+            return native(args, **kwargs)
+        native = subprocess.run
+        with mock.patch("secretary.infra.git_worktree.subprocess.run", side_effect=interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                self.owner.replay_one(key)
+        self.assertFalse(self.workspace.exists())
+        self.assertIn(str(self.workspace), git(self.repo, "worktree", "list", "--porcelain"))
+        return key
+
+    def test_detached_unpublished_observer_commit_keeps_clean_checkout_and_notes(self):
+        repo, path, observer = self.observer(committed=True)
+        tip = git(path, "rev-parse", "HEAD")
+        self.assertEqual(git(repo, "for-each-ref", "--contains=" + tip), "")
+        self.assertEqual(git(path, "status", "--porcelain"), "")
+        result = self.owner.cleanup_observer(observer)
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertTrue(result["progress"]["preservation_verified"])
+        self.assertEqual((path / "NOTES.md").read_text(), "retained user notes\n")
+        self.assertEqual(git(path, "rev-parse", "HEAD"), tip)
+        self.assertIn(str(path), git(repo, "worktree", "list", "--porcelain"))
+
+    def test_detached_published_observer_commit_has_retaining_ref_after_removal(self):
+        repo, path, observer = self.observer(committed=True)
+        tip = git(path, "rev-parse", "HEAD")
+        git(repo, "update-ref", "refs/remotes/origin/notes", tip)
+        result = self.owner.cleanup_observer(observer)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertFalse(path.exists())
+        self.assertNotIn(str(path), git(repo, "worktree", "list", "--porcelain"))
+        self.assertEqual(git(repo, "rev-parse", "refs/remotes/origin/notes"), tip)
+        self.assertEqual(result["commit_proof"]["refs"], ["refs/remotes/origin/notes"])
+
+    def test_detached_observer_local_user_ref_is_retention_without_publication(self):
+        repo, path, observer = self.observer(committed=True)
+        tip = git(path, "rev-parse", "HEAD")
+        git(repo, "update-ref", "refs/heads/user-notes", tip)
+        result = self.owner.cleanup_observer(observer)
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertTrue(path.exists())
+        self.assertEqual(git(repo, "rev-parse", "refs/heads/user-notes"), tip)
+
+    def test_observer_existing_empty_root_branch_retains_disposable_head(self):
+        repo, path, observer = self.observer()
+        tip = git(repo, "rev-parse", "refs/heads/observers")
+        result = self.owner.cleanup_observer(observer)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertFalse(path.exists())
+        self.assertEqual(git(repo, "rev-parse", "refs/heads/observers"), tip)
+        self.assertEqual(result["commit_proof"]["publication"], "owned observer root")
+
+    def test_observer_changed_root_branch_does_not_adopt_unpublished_user_commit(self):
+        repo, path, observer = self.observer(committed=True)
+        tip = git(path, "rev-parse", "HEAD")
+        git(repo, "update-ref", "refs/heads/observers", tip)
+        result = self.owner.cleanup_observer(observer)
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertTrue(path.exists())
+
+    def test_detached_observer_without_existing_root_ref_is_preserved(self):
+        repo, path, observer = self.observer()
+        git(repo, "update-ref", "-d", "refs/heads/observers")
+        result = self.owner.cleanup_observer(observer)
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertTrue(path.exists())
+
+    def test_public_maintenance_cannot_readopt_changed_recorded_ref(self):
+        key = self.request("archive")
+        self.task["closed"] = True
+        remove = self.owner._remove_workspace
+        def interrupted(intent, repo):
+            remove(intent, repo)
+            raise KeyboardInterrupt("crash before ref settlement")
+        with mock.patch.object(self.owner, "_remove_workspace", side_effect=interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                self.owner.replay_one(key)
+        (self.repo / "file").write_text("replacement published work\n")
+        git(self.repo, "commit", "--quiet", "-am", "replacement")
+        newer = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", newer)
+        git(self.repo, "update-ref", "refs/heads/pipeline/sample-1", newer)
+        for _ in range(2):
+            result = self.maintenance()
+            self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), newer)
+            self.assertEqual([r["status"] for r in result["replay"]], ["preserved"])
+            self.assertIn("recorded ownership conflicts", result["residue"][0]["reason"])
+            provenance = result["residue"][0]["recorded_owners"]
+            self.assertEqual(provenance[0]["attempt_id"], "attempt-1")
+            self.assertEqual(provenance[0]["identity"]["tip"], self.base)
+        self.assertEqual(list(self.owner.journal.read()["intents"]), [key])
+
+    def test_public_maintenance_keeps_replacement_after_unadmitted_disappearance(self):
+        key = self.request("archive")
+        self.task["closed"] = True
+        git(self.repo, "worktree", "remove", str(self.workspace))
+        (self.repo / "file").write_text("replacement\n")
+        git(self.repo, "commit", "--quiet", "-am", "replacement")
+        tip = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", tip)
+        git(self.repo, "update-ref", "refs/heads/pipeline/sample-1", tip)
+        result = self.maintenance(expected_exit=1)
+        self.assertIn("recorded ownership conflicts", result["residue"][0]["reason"])
+        self.assertEqual([r["status"] for r in result["replay"]], ["pending"])
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), tip)
+        self.assertEqual(list(self.owner.journal.read()["intents"]), [key])
+
+    def test_public_maintenance_does_not_replace_unproven_recorded_attempt(self):
+        key = self.owner.journal.remember(self.task, self.record.to_json(), disposition="archive")
+        self.task["closed"] = True
+        git(self.repo, "worktree", "remove", str(self.workspace))
+        result = self.maintenance()
+        self.assertIn("recorded ownership conflicts", result["residue"][0]["reason"])
+        self.assertEqual([r["status"] for r in result["replay"]], ["preserved"])
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+        self.assertEqual(list(self.owner.journal.read()["intents"]), [key])
+
+    def test_public_maintenance_reuses_exact_pending_owner_and_retries(self):
+        self.head(generation="")
+        key = self.request("archive")
+        self.task["closed"] = True
+        with mock.patch("secretary.dispatch.cleanup.git_worktree.remove", return_value=False):
+            result = self.maintenance(expected_exit=1)
+        self.assertEqual([r["status"] for r in result["replay"]], ["pending"])
+        self.assertEqual(result["residue"][0]["cleanup_ids"], [key])
+        result = self.maintenance()
+        self.assertEqual([r["status"] for r in result["replay"]], ["completed"])
+        self.assertEqual(list(self.owner.journal.read()["intents"]), [key])
+        self.assertFalse(self.workspace.exists())
+        self.assertEqual(self.maintenance()["replay"], [])
+
+    def test_public_maintenance_reuses_owned_attempt_before_archival(self):
+        self.head()
+        key = self.owner.remember(self.task, self.record)
+        self.task["closed"] = True
+        self.assertEqual([r["status"] for r in self.maintenance()["replay"]], ["completed"])
+        self.assertEqual(list(self.owner.journal.read()["intents"]), [key])
+
+    def assert_observer_waits_for_failure(self, failure):
+        self.head(generation="")
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request("close")
+        _, path, observer = self.observer()
+        with failure:
+            result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertTrue(result["progress"]["heads_stopped"])
+        result = self.owner.cleanup_observer(observer)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertTrue(path.exists())
+        self.assertNotIn(("observer-run", ""), self.stops)
+        self.owner.replay()
+        card = self.owner.journal.read()["intents"][key]
+        self.assertEqual(card["status"], "completed", card["reason"])
+        result = self.owner.cleanup_observer(observer)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertFalse(path.exists())
+        self.assertIn(("observer-run", ""), self.stops)
+
+    def test_observer_waits_for_refused_card_removal_then_replay(self):
+        self.assert_observer_waits_for_failure(mock.patch(
+            "secretary.dispatch.cleanup.git_worktree.remove", return_value=False))
+
+    def test_observer_waits_for_unreadable_card_git_then_replay(self):
+        self.assert_observer_waits_for_failure(mock.patch.object(
+            self.owner, "_dirty", side_effect=HostError("Git evidence unreadable")))
+
+    def test_observer_waits_for_failed_card_ref_settlement_then_replay(self):
+        self.assert_observer_waits_for_failure(mock.patch.object(
+            self.owner, "_delete_branch", side_effect=HostError("ref transaction refused")))
+
+    def test_observer_waits_for_failed_card_claim_settlement_then_replay(self):
+        self.assert_observer_waits_for_failure(mock.patch.object(
+            self.runtime.writer, "settle_cleanup_claim", side_effect=HostError("claim write refused")))
+
+    def test_observer_waits_for_unverified_preservation_despite_settled_heads(self):
+        key = self.owner.journal.remember(self.task, self.record.to_json(), disposition="close")
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "preserved")
+        self.assertTrue(result["progress"]["heads_stopped"])
+        self.assertTrue(result["progress"]["claim_settled"])
+        self.assertFalse(result["progress"]["preservation_verified"])
+        _, path, observer = self.observer()
+        result = self.owner.cleanup_observer(observer)
+        self.assertEqual(result["status"], "pending")
+        self.assertTrue(path.exists())
+        self.assertEqual(self.stops, [])
+
+    def test_observer_can_follow_verified_dirty_card_preservation(self):
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        (self.workspace / "notes").write_text("user notes")
+        key = self.request("close")
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "preserved")
+        self.assertTrue(result["progress"]["preservation_verified"])
+        _, path, observer = self.observer()
+        self.assertEqual(self.owner.cleanup_observer(observer)["status"], "completed")
+        self.assertFalse(path.exists())
+        self.assertEqual((self.workspace / "notes").read_text(), "user notes")
+        self.assertIsNone(self.task["claim"]["worker"])
+
+    def test_partial_git_directory_before_admin_removal_recovers_and_repeats(self):
+        key = self.interrupt_git_directory_removal()
+        result = CleanupOwner(self.runtime).replay_one(key)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertTrue(result["progress"]["workspace_removed"])
+        self.assertNotIn(str(self.workspace), git(self.repo, "worktree", "list", "--porcelain"))
+        self.assertEqual(git(self.repo, "for-each-ref", "refs/heads/pipeline/"), "")
+        self.assertIsNone(self.task["claim"]["worker"])
+        self.assertEqual(CleanupOwner(self.runtime).replay_one(key), result)
+
+    def test_missing_registered_directory_without_admission_is_not_adopted(self):
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        shutil.rmtree(self.workspace)
+        for _ in range(2):
+            result = self.owner.replay_one(key)
+            self.assertEqual(result["status"], "pending", result["reason"])
+            self.assertIn("no admitted removal proof", result["reason"])
+            self.assertFalse(result["progress"].get("removal_started"))
+        self.assertIn(str(self.workspace), git(self.repo, "worktree", "list", "--porcelain"))
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+        self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+
+    def test_partial_removal_rejects_substituted_admin_identity(self):
+        key = self.interrupt_git_directory_removal()
+        admin = Path(self.owner.journal.read()["intents"][key]["identity"]["admin"])
+        old = admin.with_name(admin.name + "-original")
+        admin.rename(old)
+        shutil.copytree(old, admin)
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertIn("admin identity changed", result["reason"])
+        self.assertTrue(admin.exists())
+        self.assertFalse(result["progress"].get("workspace_removed"))
+        self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+
+    def test_partial_removal_rejects_changed_admin_path_mapping(self):
+        key = self.interrupt_git_directory_removal()
+        admin = Path(self.owner.journal.read()["intents"][key]["identity"]["admin"])
+        (admin / "gitdir").write_text(str(self.root / "foreign" / ".git") + "\n")
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertTrue(admin.exists())
+        self.assertFalse(result["progress"].get("workspace_removed"))
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+
+    def test_partial_removal_rejects_changed_admin_head_and_retains_claim(self):
+        key = self.interrupt_git_directory_removal()
+        admin = Path(self.owner.journal.read()["intents"][key]["identity"]["admin"])
+        (admin / "HEAD").write_text(self.base + "\n")
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertIn("registration changed", result["reason"])
+        self.assertTrue(admin.exists())
+        self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+
+    def test_partial_removal_changed_ref_retains_replacement_and_claim(self):
+        key = self.interrupt_git_directory_removal()
+        (self.repo / "file").write_text("replacement work\n")
+        git(self.repo, "commit", "--quiet", "-am", "replacement")
+        tip = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "update-ref", "refs/remotes/origin/main", tip)
+        git(self.repo, "update-ref", "refs/heads/pipeline/sample-1", tip)
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertIn("HEAD changed", result["reason"])
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), tip)
+        self.assertIn(str(self.workspace), git(self.repo, "worktree", "list", "--porcelain"))
+        self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+
+    def test_partial_removal_revalidates_at_shared_native_effect(self):
+        key = self.interrupt_git_directory_removal()
+        admin = Path(self.owner.journal.read()["intents"][key]["identity"]["admin"])
+        calls = []
+        def capture(args, label):
+            calls.append(args)
+            if args[3:5] == ["worktree", "list"]:
+                (admin / "HEAD").write_text(self.base + "\n")
+            return subprocess.run(args, capture_output=True, text=True)
+        self.host.run_capture = capture
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertIn("registration changed", result["reason"])
+        self.assertFalse(any(args[3:5] == ["worktree", "remove"] for args in calls))
+        self.assertTrue(admin.exists())
+        self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+
+    def test_partial_removal_unreadable_registration_retries_without_settlement(self):
+        key = self.interrupt_git_directory_removal()
+        with mock.patch("secretary.dispatch.cleanup._registered", side_effect=HostError("registration unreadable")):
+            result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+        self.assertEqual(self.owner.replay()[0]["status"], "completed")
+
+    def test_shared_primitive_missing_directory_needs_owner_proof(self):
+        self.interrupt_git_directory_removal()
+        def run(args, cwd):
+            return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+        self.assertFalse(git_worktree.remove(run, self.repo, self.workspace))
+        self.assertIn(str(self.workspace), git(self.repo, "worktree", "list", "--porcelain"))
+
+    def test_partial_removal_rejects_replacement_workspace_before_native_effect(self):
+        key = self.interrupt_git_directory_removal()
+        self.workspace.mkdir()
+        (self.workspace / "NOTES.md").write_text("replacement user notes")
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertEqual((self.workspace / "NOTES.md").read_text(), "replacement user notes")
+        self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+
+    def test_partial_removal_rejects_symlink_admin_substitution(self):
+        key = self.interrupt_git_directory_removal()
+        admin = Path(self.owner.journal.read()["intents"][key]["identity"]["admin"])
+        original = self.root / "retained-admin"
+        admin.rename(original)
+        admin.symlink_to(original, target_is_directory=True)
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertIn("substituted", result["reason"])
+        self.assertTrue(admin.is_symlink())
+        self.assertTrue(original.exists())
+        self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+
+    def test_partial_removal_lost_publication_stays_pending_with_registration(self):
+        key = self.interrupt_git_directory_removal()
+        git(self.repo, "update-ref", "-d", "refs/remotes/origin/main")
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertFalse(result["progress"].get("preservation_verified"))
+        self.assertIn(str(self.workspace), git(self.repo, "worktree", "list", "--porcelain"))
+        self.assertEqual(self.task["claim"]["worker"], self.record.worker)
+        git(self.repo, "update-ref", "refs/remotes/origin/main", self.base)
+        self.assertEqual(self.owner.replay_one(key)["status"], "completed")
 
     def test_done_removes_merged_workspace_and_exact_local_branch(self):
         self.head()

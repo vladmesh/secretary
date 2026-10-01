@@ -30,11 +30,14 @@ def add(
     return git(["worktree", "add", *placement, str(target), start], Path(repo))
 
 
-def remove(git: GitRunner, repo: Path, target: Path) -> bool:
+def remove(git: GitRunner, repo: Path, target: Path, *,
+           admitted_missing: Callable[[], None] | None = None) -> bool:
     """Remove an exact registered, clean linked worktree and prove both effects.
 
     Callers own admission and identity proof. This shared primitive never forces
     removal, recursively deletes a refused directory or prunes other registrations.
+    Only an owner's durable admission and current exact registration proof can
+    authorize finishing an interrupted removal whose directory is already gone.
     """
     target = Path(target)
     if target.absolute() != target.resolve() or target.resolve() == Path(repo).resolve():
@@ -49,6 +52,12 @@ def remove(git: GitRunner, repo: Path, target: Path) -> bool:
     registered = listed()
     if registered is None:
         return False
+    if not target.exists() and not target.is_symlink() and admitted_missing is not None:
+        admitted_missing()  # Revalidate at the native effect, under the owner's lock.
+        if not registered:
+            return False
+        result = git(["worktree", "remove", str(target)], Path(repo))
+        return result.returncode == 0 and not target.exists() and not target.is_symlink() and listed() is False
     if not registered:
         return not target.exists() and not target.is_symlink()
     if not target.is_dir() or target.is_symlink():

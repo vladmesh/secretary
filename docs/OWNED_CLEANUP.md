@@ -51,6 +51,15 @@ consumer has already settled them. Git removal uses no force, recursive director
 fallback or broad metadata pruning, and confirms both directory and registration
 absence. Failed creation/adoption preserves its unadmitted residue.
 
+Detached HEADs require the same commit retention proof. A remote-tracking ref
+containing the exact HEAD proves publication and retention. The existing observer
+producer's empty, parentless root commit is disposable only while its named
+`observers` branch still retains that exact commit in the owned observer root.
+User commits, arbitrary local refs, reflogs and a SHA in the journal do not grant
+that authority. Detached unpublished user commits retain their checkout and
+registration even when Git status is clean. The intent records the retaining refs
+before admitting removal; cleanup never creates a preservation ref retroactively.
+
 A published clean unmerged checkout can be removed while its exact local ref is
 retained. Ref deletion requires the exact card's local pipeline namespace, no
 registered checkout or active owner, publication and ancestry into the registered
@@ -61,7 +70,14 @@ this settlement.
 
 Effect-start progress is durable before removal and ref deletion. Replay can
 finish after a crash between removal and claim/ref settlement, without adopting
-a replacement directory. Environment deletion also retains its exact namespace
+a replacement directory. Git admission follows exact registration, author-work
+and commit proof. If Git removes the directory before its admin entry, the owner
+revalidates the retained admin inode and `HEAD`/`gitdir`/`commondir`, common directory,
+path, registration and ref against that admission at the shared primitive's native
+removal boundary. Only that proof permits ordinary targeted `git worktree remove`
+to finish a missing-directory registration. A generic missing path, changed mapping,
+substitution or unreadable evidence remains pending. Registration and directory
+absence precede ref/claim settlement. Environment deletion also retains its exact namespace
 identity before effects, so an interrupted deletion of its ownership file remains
 replayable without adopting a replacement namespace. Terminal stale matching claims are cleared only after
 verified head settlement; pending failures keep their owner. `completed`,
@@ -88,11 +104,21 @@ reported. All repository types use the same contract, including instance-local
 pipeline branches. A local remote-tracking ref is publication evidence; replay
 does not fetch or operate on remote refs.
 
+Recorded repository/ref/card/attempt/tip ownership precedes enumeration. Inventory
+reports those owners and reuses their obligations; it cannot admit a new synthetic
+attempt over a conflicting or unproven owner, even if the replacement tip is merged
+and published. A ref present after completed cleanup retains its provenance and is
+not re-adopted. Historical claim evidence does not override an exact recorded tip.
+
 Close stages its observer handoff in the cleanup journal using the original
 generation and launch count. The external dispatcher enriches that obligation
 from the exact observer registration, waits for the existing close transaction
 to finish and for card cleanup/verified preservation, then processes the observer
 last. Retained observer user work appears as preservation in the same inventory.
+Pending Git removal, registration, ref or claim settlement blocks observer stop,
+including after exact card heads are stopped. Preservation permits handoff only
+when the owner verified the retained disposition and settled heads and claims;
+missing ownership reported as preservation cannot stand in for that proof.
 A failed handoff or stop remains pending after board closure. Neither the closing
 observer nor a code worker cleans live residue. Installation and final residue
 proof belong to the subsequent authorized PO operation.
