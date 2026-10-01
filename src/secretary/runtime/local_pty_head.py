@@ -3252,6 +3252,17 @@ def head_run_directory(root: str | os.PathLike[str], run_id: str) -> Path:
         raise ValueError(str(exc)) from None
 
 
+def runtime_scope_inventory(data_dir: Path, units: set[str]):
+    """Read canonical lifecycle ownership for host preservation and diagnostics.
+
+    Consumers use this runtime boundary, never the private PTY owner format.
+    The projection grants no launch, adoption or cleanup authority.
+    """
+    from secretary.runtime.head.local_pty.scope_inventory import read_runtime_scopes
+
+    return read_runtime_scopes(data_dir, units)
+
+
 def head_run_first_record(run_dir: str | os.PathLike[str]) -> dict[str, Any] | None:
     """Whose run this is, from the journal's first record: its `task`, `role`, `run_id` and `at`.
 

@@ -62,6 +62,46 @@ class ScopeBackendTests(unittest.TestCase):
                           command=shlex.join([sys.executable, "-u", "-c", program]),
                           memory_limit_mib=96)
 
+    def test_active_po_self_upgrade_and_doctor_preserve_native_scope_then_lifecycle_settles(self) -> None:
+        from secretary.runtime.local_pty_head import runtime_scope_inventory
+
+        data = self.root / "data"
+        data.mkdir()
+        run_id = "ci-po-self-" + uuid.uuid4().hex[:12]
+        directory = data / "po-heads" / run_id
+        def cleanup():
+            owner = ScopedHeadLifecycle.from_run_dir(directory)
+            if owner is not None:
+                owner.stop_and_prove_empty()
+        self.addCleanup(cleanup)
+        repo = Path(__file__).resolve().parents[1]
+        handle = spawn_head(
+            root=data / "po-heads", run_id=run_id, role="po", task="po:ci:disposable-session:1",
+            command=shlex.join([sys.executable, "-u", str(repo / "tests/fixtures/scope_self_upgrade.py"),
+                                str(self.root), str(data), run_id]), cwd=self.root,
+            env={"PYTHONPATH": os.pathsep.join((str(repo / "src"), str(repo)))}, memory_limit_mib=256,
+        )
+        await_fact(lambda: (self.root / "proof.json").exists(), "PO self-upgrade did not produce preservation proof")
+        proof = json.loads((self.root / "proof.json").read_text())
+        unit = scope_unit(run_id)
+        self.assertEqual(proof["unit"], unit)
+        self.assertTrue(all(value != "failed" for value in proof["results"]))
+        self.assertTrue(all(name != unit for _, name in proof["effects"]))
+        projected = runtime_scope_inventory(data, {unit})
+        self.assertFalse(projected.errors, projected.errors)
+        self.assertIn(unit, projected.scopes)
+        self.assertFalse(ScopedHeadLifecycle.read_owner(directory)["cleanup_complete"])
+        (self.root / "finish").touch()
+        await_fact(lambda: any(event.get("kind") == RUN_EXITED for event in handle.events().events),
+                   "harmless PO fixture did not exit")
+        owner = ScopedHeadLifecycle.from_run_dir(directory)
+        owner.stop_and_prove_empty()
+        self.assertTrue(ScopedHeadLifecycle.read_owner(directory)["cleanup_complete"])
+        settled = runtime_scope_inventory(data, {unit})
+        self.assertFalse(settled.errors, settled.errors)
+        self.assertFalse(settled.scopes)
+        self.assertEqual(settled.disappeared, {unit})
+
     def test_deployed_po_producer_new_launcher_preserves_path_and_runtime_bindings(self) -> None:
         bin_dir = self.root / "prepared cli tools"
         bin_dir.mkdir()

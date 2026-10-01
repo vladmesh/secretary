@@ -62,6 +62,7 @@ def collect_status(
     expected = build_doctor_expectations(
         report.instance,
         report.bindings,
+        data_dir=data_dir,
         packaged=resolve_installed_packaged(
             report.instance,
             instance_path=instance_dir,
@@ -109,6 +110,8 @@ def collect_status(
             "units": _units(expected, collected, offline=offline),
             "schedules": _schedules(expected, collected, offline=offline),
             "inventory_errors": collected.errors,
+            "runtime_scopes": list(collected.inventory.runtime_scopes.scopes.values())
+            if collected.inventory.runtime_scopes is not None else [],
             "resources": _host_resources(data_dir),
         },
         "dispatcher": {

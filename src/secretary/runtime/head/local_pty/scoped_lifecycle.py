@@ -111,12 +111,17 @@ class ScopedHeadLifecycle:
             raise
         except (OSError, ValueError) as exc:
             raise MemoryScopeError(f"could not read scope owner in {run_dir}: {exc}") from exc
+        return ScopedHeadLifecycle.validate_owner(record)
+
+    @staticmethod
+    def validate_owner(record: Any) -> dict[str, Any]:
+        """Validate the deployed owner format for lifecycle and read-only projections."""
         try:
             run_id = record["run_id"]
             if not isinstance(run_id, str) or not run_id or record["unit"] != scope_unit(run_id):
                 raise ValueError("invalid scope identity")
         except (KeyError, TypeError, ValueError) as exc:
-            raise MemoryScopeError(f"invalid scope owner in {run_dir}: {exc}") from exc
+            raise MemoryScopeError(f"invalid scope owner: {exc}") from exc
         if not isinstance(record.get("generation"), str) or not record["generation"]:
             raise MemoryScopeError("scope owner has no launch generation")
         if type(record.get("launch_allowed")) is not bool or type(record.get("cleanup_complete")) is not bool:

@@ -71,6 +71,7 @@ class ApplyResult:
     dry_run: bool = False
     runtime_changes: list[PlanChange] = field(default_factory=list)
     runtime_findings: list[str] = field(default_factory=list)
+    preserved_runtime_scopes: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -91,6 +92,7 @@ class ApplyResult:
         for conflict in self.conflicts:
             lines.append(f"conflict: {conflict.kind} {conflict.name} is not owned by this instance")
         lines.extend(f"error: {message}" for message in self.errors)
+        lines.extend(f"preserved runtime scope: {unit}" for unit in self.preserved_runtime_scopes)
         return lines
 
 
@@ -412,6 +414,15 @@ def apply_host(
     dry_run: bool = False,
 ) -> ApplyResult:
     """Reconcile the host to the instance. Fails closed on any conflict."""
+    if inputs.inventory.runtime_scopes is not None:
+        from dataclasses import replace
+
+        fresh = inputs.inventory.runtime_scopes.revalidate()
+        if fresh.errors:
+            return ApplyResult(errors=["runtime ownership unavailable: " + "; ".join(fresh.errors.values())],
+                               dry_run=dry_run)
+        inputs = replace(inputs, inventory=replace(
+            inputs.inventory, units=inputs.inventory.units - fresh.disappeared, runtime_scopes=fresh))
     host = inputs.instance.get("host", {}) if isinstance(inputs.instance, dict) else {}
     prefix = host.get("unit_prefix", "") if isinstance(host, dict) else ""
     errors = plan_input_errors(inputs.instance, inputs.bindings, packaged=inputs.packaged)
@@ -431,12 +442,24 @@ def apply_host(
         foreign_units(host),
     )
     result = ApplyResult(changes=changes, dry_run=dry_run)
+    if inputs.inventory.runtime_scopes is not None:
+        result.preserved_runtime_scopes = sorted(inputs.inventory.runtime_scopes.scopes)
     result.conflicts = [change for change in changes if change.action == "conflict"]
     if result.conflicts:
         # Nothing is written: a conflict means at least one name in our namespace
         # is not provably ours, and a partial reconcile around it would leave the
         # host in a state neither the plan nor the manifest describes.
         return result
+    if inputs.inventory.runtime_scopes is not None:
+        deleting = {change.name for change in changes if change.kind == "unit" and change.action == "delete"}
+        for scope_name, scope in inputs.inventory.runtime_scopes.scopes.items():
+            dependencies = deleting.intersection(scope["binds_to"])
+            if dependencies:
+                result.errors.append(
+                    f"preserved runtime scope {scope_name} is bound to {', '.join(sorted(dependencies))}; "
+                    "settle its runtime lifecycle before removing the bound service")
+        if result.errors:
+            return result
     desired_by_id = {resource.logical_id: resource for resource in desired}
     packaged_by_name = {unit.name: unit for unit in inputs.packaged}
     # Check the whole batch before the first write. A unit the plan wants but the

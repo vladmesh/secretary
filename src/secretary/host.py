@@ -33,6 +33,7 @@ from secretary.infra.systemd import (
     CommandResult as _CmdResult,
 )
 from secretary.projects.availability import ProjectAvailability
+from secretary.runtime.local_pty_head import runtime_scope_inventory
 from secretary.runtime.paths import component_enabled, configured_product_root
 
 KINDS = ("projects", "units")
@@ -428,6 +429,17 @@ def plan_changes(
     is never deleted: the registration it names is Orca's own state.
     """
     declared_foreign = set(declared_foreign)
+    desired, managed = list(desired), list(managed)
+    scope_resources = [resource for resource in [*desired, *managed]
+                       if resource.kind == "unit" and resource.name.endswith(".scope")
+                       and (resource.name not in declared_foreign
+                            or actual.runtime_scopes is not None
+                            and resource.name in actual.runtime_scopes.scopes)]
+    if scope_resources:
+        # A scope is never a packaged resource, even if an old manifest or
+        # explicit host configuration attempts to put it in that lifecycle.
+        return [PlanChange(resource.logical_id, "unit", resource.name, "conflict")
+                for resource in scope_resources]
     actual_names = {"unit": actual.units}
     # Do not let an older manifest record pull a now-declared foreign unit back
     # under management through the deletion pass below.
@@ -466,6 +478,8 @@ def plan_changes(
     # alone. Declaring it is the only way to say so, so silence here is still
     # fail-closed.
     known_units.update(declared_foreign)
+    if actual.runtime_scopes is not None and not actual.runtime_scopes.errors:
+        known_units.update(actual.runtime_scopes.scopes)
     if unit_prefix:
         for name in actual.units:
             if name.startswith(unit_prefix) and name not in known_units:
@@ -483,6 +497,7 @@ class HostInventory:
     # systemd's LastTriggerUSec per probed timer ("n/a" when it never fired): the evidence that a
     # schedule ran, which `enabled`/`active` of a waiting timer cannot give.
     timer_triggers: dict[str, str] = field(default_factory=dict)
+    runtime_scopes: Any = None
 
 
 @dataclass(frozen=True)
@@ -496,6 +511,7 @@ class Expectations:
     foreign_units: set[str] = field(default_factory=set)
     unit_runtime: dict[str, tuple[bool, bool]] = field(default_factory=dict)
     project_error: str = ""
+    runtime_data_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -586,6 +602,7 @@ def build_doctor_expectations(
     bindings: Iterable[dict[str, Any]],
     *,
     packaged: Iterable[PackagedUnit] | None = None,
+    data_dir: Path | None = None,
 ) -> Expectations:
     """Derive doctor parity from reconcile's canonical desired state."""
     bindings = list(bindings)
@@ -616,6 +633,7 @@ def build_doctor_expectations(
         foreign_units=foreign_units(host),
         unit_runtime=unit_runtime_expectations(desired, packaged),
         project_error=project_error,
+        runtime_data_dir=data_dir,
     )
 
 
@@ -664,9 +682,10 @@ def _diff(expected: set[str], actual: set[str]) -> KindDiff:
 
 def inventory(expected: Expectations, actual: HostInventory) -> dict[str, KindDiff]:
     """Compare expectations against a host inventory, one KindDiff per kind."""
+    transient = set(actual.runtime_scopes.scopes) if actual.runtime_scopes is not None else set()
     return {
         "projects": _diff(expected.projects, actual.projects),
-        "units": _diff(expected.units, actual.units - expected.foreign_units),
+        "units": _diff(expected.units, actual.units - expected.foreign_units - transient),
     }
 
 
@@ -675,6 +694,22 @@ class HostSource(ABC):
 
     @abstractmethod
     def collect(self, expected: Expectations) -> CollectResult: ...
+
+
+def _with_runtime_scopes(expected: Expectations, collected: CollectResult) -> CollectResult:
+    """Keep runtime preservation evidence separate from packaged desired state."""
+    from dataclasses import replace
+
+    if expected.runtime_data_dir is None or "units" in collected.errors:
+        return collected
+    projected = runtime_scope_inventory(expected.runtime_data_dir, collected.inventory.units)
+    errors = dict(collected.errors)
+    if projected.errors:
+        errors["units"] = "runtime ownership unavailable: " + "; ".join(projected.errors.values())
+    actual = replace(collected.inventory,
+                     units=collected.inventory.units - projected.disappeared,
+                     runtime_scopes=projected)
+    return CollectResult(actual, errors)
 
 
 def _names_from_dir(directory: Path) -> set[str]:
@@ -751,7 +786,8 @@ class FixtureHostSource(HostSource):
             )
             if reason
         }
-        return CollectResult(HostInventory(projects, units, states, timer_triggers=triggers), errors)
+        return _with_runtime_scopes(expected, CollectResult(
+            HostInventory(projects, units, states, timer_triggers=triggers), errors))
 
     def _timer_triggers(self) -> tuple[dict[str, str], str]:
         """Optional fixture last triggers: ``timer LastTriggerUSec`` per line (the value has spaces)."""
@@ -823,7 +859,7 @@ class LiveHostSource(HostSource):
         else:
             inventory = HostInventory(inventory.projects, units, unit_states, timer_triggers=triggers)
 
-        return CollectResult(inventory=inventory, errors=errors)
+        return _with_runtime_scopes(expected, CollectResult(inventory=inventory, errors=errors))
 
     def _projects(self, expected: Expectations) -> tuple[set[str], str]:
         if expected.project_error:
@@ -874,6 +910,16 @@ class LiveHostSource(HostSource):
             token = fields[0] if fields else ""
             if token.startswith(prefix):
                 names.add(token)
+        # Transient scopes have no unit file. Enumerate loaded units as well so
+        # an unknown transient unit cannot disappear from ownership comparison.
+        loaded = self._run(["systemctl", "list-units", "--all", "--plain", "--no-legend", f"{prefix}*"])
+        reason = observation_error(loaded, allow_empty_match=True)
+        if reason:
+            return set(), {}, {}, reason
+        for line in loaded.stdout.splitlines():
+            fields = line.split()
+            if fields and fields[0].startswith(prefix):
+                names.add(fields[0])
         states: dict[str, tuple[str, str]] = {}
         triggers: dict[str, str] = {}
         for name in expected.unit_runtime:

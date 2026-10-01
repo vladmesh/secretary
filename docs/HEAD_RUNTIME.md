@@ -152,6 +152,48 @@ or without a `handle`: the tick never deletes it and never raises a head beside 
 pane-era head it names is confirmed gone. Pinned by `tests/test_automations_dispatch_local_pty.py`
 (`FailClosedTests`).
 
+## Runtime scopes in host reconciliation
+
+`runtime.local_pty_head.runtime_scope_inventory(data_dir, units)` is the supported read-only
+projection of `ScopedHeadLifecycle` ownership. Upgrade's host step, reconcile plan/apply and
+doctor/status consume it through host inventory. The selected installation's canonical `heads`,
+`po-heads` and `webproto/heads` directories are the authority; PO turn symlinks are recovery
+pointers and are never followed to discover ownership. There is no additional registry or owner
+format. The lifecycle's `validate_owner` is shared with its existing `read_owner`.
+
+The projection anchors directories and regular owner files without following symlinks, reads under
+the existing owner lock, validates run-derived unit identity and generation, and checks native
+systemd invocation and recursive cgroup membership. A live launcher must retain its recorded
+boot/start identity, exact run directory and role/task/workspace argv, with a scoped descendant.
+When that launcher has ended, a single journaled launch and its matching heartbeat can bound
+systemd's monotonic activation between launcher and head birth on the same boot. Multiple
+journaled incarnations without a live generation-bound launcher are unavailable: the deployed
+journal carries no generation and cannot lend an old owner's identity to a replacement. Missing,
+damaged, unreadable or substituted evidence refuses recognition. Native disappearance is an
+observed disappearance, never a lifecycle cleanup receipt.
+
+Apply revalidates the projection before effects and rejects changed generation, launch identity,
+directory, cgroup inode or systemd invocation. Recognized scopes appear separately in status and
+reconcile/upgrade diagnostics. They are excluded from packaged missing/unmanaged comparisons,
+never added to desired state or the managed manifest, and never enabled, stopped, rendered or
+deleted by host reconciliation. Closed admission with cleanup pending retains the same runtime
+owner; lock contention or insufficient native evidence makes inspection unavailable. Admission,
+termination, descendant cleanup and empty proof remain `ScopedHeadLifecycle` responsibilities.
+Unknown scopes still conflict and explicit foreign unit handling is unchanged.
+Removing a packaged service named in a preserved scope's native `BindsTo` dependency is also
+refused before effects: disabling that service would otherwise stop the scope indirectly.
+A lifecycle-completed scope with verified empty membership can remain visible until systemd
+collects it. Its completed flag is reported truthfully; a completed owner with populated
+membership is a refusal. Host inspection never records or clears the lifecycle's empty proof.
+
+`tests/test_runtime_scope_inventory.py` exercises the supported host step and doctor inventory
+with disposable ownership/native fixtures. The CI-only self-upgrade case in
+`tests/test_head_scope_backend.py` runs those consumers inside a real PO-like system scope and
+then proves ordinary owned lifecycle settlement. It uses a harmless head and temporary instance,
+data and packaged units. It also reads native host inventory with a reconciled empty packaged
+catalogue and the real systemd installer, so native dry-run and apply must preserve their only
+live resource without any installer effect. Packaged-fixture effects are recorded separately.
+
 ## `local-pty` parity criteria
 
 Every capability Orca gave a head, and what gives it on `local-pty`. Status is one of:
