@@ -347,8 +347,12 @@ def build_parser() -> argparse.ArgumentParser:
     residue.add_argument("--residue-inventory", action="store_true",
                          help="read owned and preserved Git residue without effects")
     residue.add_argument("--residue-replay", action="store_true",
-                         help="capture proven archived residue and replay bounded cleanup")
-    maintenance.add_argument("--limit", type=int, default=20, help="cleanup replay bound (1..100)")
+                         help="replay only the named --target cleanups of one --project at their read --manifest")
+    maintenance.add_argument("--project", help="read or replay only this registered project's residue")
+    maintenance.add_argument("--target", action="append", default=[],
+                             help="a manifest target id (intent key or ref@tip); repeat, at most 20")
+    maintenance.add_argument("--manifest", action="append", default=[],
+                             help="the manifest digest read for the --target at the same position")
     maintenance.set_defaults(handler=run_instance_maintenance)
 
     project = subparsers.add_parser("project")
@@ -1914,6 +1918,10 @@ def run_backup_create(args: argparse.Namespace) -> int:
 def run_instance_maintenance(args: argparse.Namespace) -> int:
     if getattr(args, "residue_inventory", False) or getattr(args, "residue_replay", False):
         return run_residue_maintenance(args)
+    if getattr(args, "project", None) or getattr(args, "target", None) or getattr(args, "manifest", None):
+        print(json.dumps({"status": "refused", "error": "--project, --target and --manifest belong to "
+                          "--residue-inventory or --residue-replay"}, sort_keys=True))
+        return 2
     from secretary.infra import instance_maintenance
     from secretary.runtime.paths import instance_dir
 
@@ -1930,21 +1938,36 @@ def run_instance_maintenance(args: argparse.Namespace) -> int:
 
 def run_residue_maintenance(args: argparse.Namespace) -> int:
     from secretary.dispatch.bootstrap import runtime_from_args
-    from secretary.dispatch.cleanup import ownership_lock
+    from secretary.dispatch.cleanup import UnknownProject, ownership_lock
     from secretary.dispatch.types import DispatcherError, HostError
+    project = getattr(args, "project", None)
+    targets = list(getattr(args, "target", None) or [])
+    digests = list(getattr(args, "manifest", None) or [])
+    # No global batch exists: a replay names one project and its exact manifest targets.
+    refusal = ""
+    if args.residue_replay and (not project or not targets):
+        refusal = "--residue-replay needs --project and at least one --target with its --manifest digest"
+    elif args.residue_replay and len(digests) != len(targets):
+        refusal = "--residue-replay needs one --manifest digest per --target, in the same order"
+    elif not args.residue_replay and (targets or digests):
+        refusal = "--target and --manifest belong to --residue-replay"
+    if refusal:
+        print(json.dumps({"status": "refused", "error": refusal}, sort_keys=True))
+        return 2
     try:
         runtime = runtime_from_args(args.instance, None, host_mode="real", owner="instance-maintenance")
         with ownership_lock(runtime.data_dir):
-            inventory = runtime.cleanup.inventory(catch_up=args.residue_replay)
-            replay = runtime.cleanup.replay(limit=args.limit) if args.residue_replay else []
-            result = {**inventory, "replay": [{"ref": item["task"]["ref"], "status": item["status"],
-                                              "reason": item["reason"], "progress": item["progress"]}
-                                             for item in replay]}
+            result: dict = {}
             if args.residue_replay:
-                result.update(runtime.cleanup.inventory())
-        failed = any(row["status"] == "pending" for row in result["intents"] + result["residue"])
+                result["replay"] = runtime.cleanup.replay_targets(project, list(zip(targets, digests)))
+            result.update(runtime.cleanup.inventory(project=project))
+        failed = (any(row["status"] == "pending" for row in result["intents"] + result["residue"])
+                  or any(item["status"] in {"pending", "refused"} for item in result.get("replay", [])))
         print(json.dumps({"status": "pending" if failed else "ok", **result}, sort_keys=True))
         return 1 if failed else 0
+    except UnknownProject as exc:
+        print(json.dumps({"status": "refused", "error": str(exc)}, sort_keys=True))
+        return 2
     except (DispatcherError, HostError, OSError) as exc:
         print(json.dumps({"status": "pending", "error": str(exc)}, sort_keys=True))
         return 1

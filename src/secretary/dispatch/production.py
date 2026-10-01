@@ -995,7 +995,7 @@ class _ProbeCleanup:
         self._inner = inner
 
     def __getattr__(self, name: str) -> Any:
-        if name in {"cleanup", "cleanup_observer", "remember", "replay", "replay_one"}:
+        if name in {"cleanup", "cleanup_observer", "remember", "replay", "replay_one", "replay_targets"}:
             def effect(*args: Any, **kwargs: Any) -> Any:
                 raise ProbeAbort("owned-cleanup", {})
             return effect

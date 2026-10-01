@@ -1568,6 +1568,56 @@ real dispatcher refuses to start (`workspace_roots_overlap`, naming both paths) 
 are equal or one is inside the other. Point `SECRETARY_DISPATCHER_WORKSPACES_ROOT` or the instance
 `data_dir` elsewhere so the two are disjoint.
 
+## Git residue: read the manifest, then replay exact targets
+
+Card and observer Git residue (worktrees and `pipeline/*` refs) is settled by the cleanup owner. The
+tick replays journaled obligations by itself. An operator cleans older residue in two steps. There is
+no global batch: `--residue-replay` without `--project` and at least one `--target` is refused as a
+usage error, and nothing is written.
+
+1. Read the project's manifest. This step performs no effect and writes nothing, not even the journal
+   or its replay cursor:
+
+       secretary instance-maintenance --instance INSTANCE --residue-inventory --project PROJECT
+
+   Only that binding's repository, audit and intents are read. An unregistered project is refused
+   before any read. Without `--project` the command is a read-only report over every project.
+
+   `manifest` has one entry for every residue row and every journaled intent of the project:
+   - `target`: the intent key, `ref@tip` for branch-only residue, or `worktree:PATH` for a foreign
+     worktree. A row with recorded owners names their intent keys in `targets`.
+   - `effects`, in execution order: `request-settlement` (an owned attempt of a Done or archived
+     card), `stop-head` (run ids), `remove-worktree` (path, identity, dirty-check result),
+     `delete-ref` (ref and tip, base ref and base tip, merged and published proof), `settle-claim`.
+   - `outcome`: `eligible`, `preserved`, `pending` or `completed`, with the exact preservation or
+     pending `reason`. Preserved targets still list the head stops and claim settlement a replay
+     would do.
+   - `digest`: over the target, its effects, outcome and inputs.
+
+   Branch-only residue counts as owned when all of the following hold:
+   - the card's project is this binding;
+   - the card is Done or archived;
+   - the board audit has `card.started` by the `dispatcher` role (older `claimed` forms are still
+     accepted; `card.started` by any other role is not);
+   - no worktree is registered for the ref.
+
+   Its replay then deletes the ref only through the exact-tip transaction, so an unmerged or
+   unpublished ref stays preserved.
+
+2. Replay the targets you chose, each with the digest you read, in the same order (at most 20):
+
+       secretary instance-maintenance --instance INSTANCE --residue-replay --project PROJECT \
+           --target TARGET --manifest DIGEST [--target TARGET --manifest DIGEST ...]
+
+   Before any effect the target's manifest is recomputed. A different digest, an unknown target or
+   another project's target is `refused` with nothing written. A branch-only target that is not
+   `eligible` reports its outcome and is not adopted. Other intents and the replay cursor stay as
+   they were. `replay` reports each target's `status`, `reason` and `progress`. If a target is
+   refused, read the manifest again before you retry.
+
+Code never chooses the targets. Protected candidates and audit branches stay until an operator
+names them.
+
 ## Sprint observer heads
 
 The production tick keeps one observer head per open sprint. Observers claim no cards and use no

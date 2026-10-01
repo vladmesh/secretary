@@ -19,8 +19,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary.broad_check import run_broad_check
-from secretary.cli import run_residue_maintenance
-from secretary.dispatch.cleanup import CleanupJournal, CleanupOwner, ownership_lock
+from secretary.cli import build_parser, run_residue_maintenance
+from secretary.dispatch.cleanup import CleanupJournal, CleanupOwner, UnknownProject, ownership_lock
 from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.observer import ObserverRecord
 from secretary.dispatch.production import _reconcile_production
@@ -128,12 +128,23 @@ class OwnedCleanupTests(unittest.TestCase):
         return repo, path, ObserverRecord(sprint="sprint:1", generation="observer-gen",
                                          workspace=str(path), head_possible=True, head_run=run.to_json())
 
-    def maintenance(self, *, expected_exit=0):
+    def residue_command(self, *, replay=False, project=None, targets=(), digests=(), expected_exit=0):
         self.runtime.cleanup = self.owner
-        args = argparse.Namespace(instance="unused", residue_replay=True, residue_inventory=False, limit=20)
+        args = argparse.Namespace(instance="unused", residue_replay=replay, residue_inventory=not replay,
+                                  project=project, target=list(targets), manifest=list(digests))
         with mock.patch("secretary.dispatch.bootstrap.runtime_from_args", return_value=self.runtime), mock.patch("builtins.print") as output:
             self.assertEqual(run_residue_maintenance(args), expected_exit)
         return json.loads(output.call_args.args[0])
+
+    def maintenance(self, *, expected_exit=0, project="sample"):
+        """The operator procedure: read the project's manifest, then replay its open targets exactly."""
+        inventory = self.owner.inventory(project=project)
+        chosen = [entry for entry in inventory["manifest"]
+                  if entry["outcome"] != "completed" and (len(entry["target"]) == 64 or entry["outcome"] == "eligible")]
+        if not chosen:
+            return {**inventory, "replay": []}
+        return self.residue_command(replay=True, project=project, targets=[e["target"] for e in chosen],
+                                    digests=[e["digest"] for e in chosen], expected_exit=expected_exit)
 
     def interrupt_git_directory_removal(self):
         self.task["claim"]["worker"] = self.record.worker
@@ -863,21 +874,16 @@ class OwnedCleanupTests(unittest.TestCase):
         inventory = self.owner.inventory()
         self.assertEqual(len(inventory["residue"]), 2)
         self.assertFalse(self.owner.journal.path.exists())
-        args = argparse.Namespace(instance="unused", residue_replay=True, residue_inventory=False, limit=20)
-        self.runtime.cleanup = self.owner
-        with mock.patch("secretary.dispatch.bootstrap.runtime_from_args", return_value=self.runtime), mock.patch("builtins.print") as output:
-            args.residue_replay = False
-            args.residue_inventory = True
-            self.assertEqual(run_residue_maintenance(args), 0)
-        self.assertEqual(len(json.loads(output.call_args.args[0])["residue"]), 2)
+        rendered = self.residue_command()
+        self.assertEqual(len(rendered["residue"]), 2)
+        self.assertEqual([e["outcome"] for e in rendered["manifest"]], ["eligible", "eligible"])
         self.assertFalse(self.owner.journal.path.exists(), "public inventory must remain read-only")
-        args.residue_replay = True
-        args.residue_inventory = False
-        with mock.patch("secretary.dispatch.bootstrap.runtime_from_args", return_value=self.runtime), mock.patch("builtins.print") as output:
-            self.assertEqual(run_residue_maintenance(args), 0)
-        rendered = json.loads(output.call_args.args[0])
-        self.assertEqual([x["status"] for x in rendered["replay"]], ["completed", "completed"])
+        # No global batch: each project is replayed on its own, by its exact targets.
+        for project in ("instance", "sample"):
+            rendered = self.maintenance(project=project)
+            self.assertEqual([x["status"] for x in rendered["replay"]], ["completed"])
         self.assertEqual(git(second, "for-each-ref", "--format=%(refname)", "refs/heads/pipeline/"), "")
+        self.assertEqual(git(self.repo, "for-each-ref", "--format=%(refname)", "refs/heads/pipeline/"), "")
 
     def test_old_archived_worktree_without_runtime_proof_is_preserved(self):
         self.task["closed"] = True
@@ -1785,6 +1791,276 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertEqual(self.stops, [])
         self.assertTrue(self.workspace.exists())
 
+
+    # secretary-1921: project- and target-scoped residue replay with a read-only effect manifest.
+
+    def second_project(self):
+        """A second registered binding with its own merged branch-only residue and a pending intent."""
+        second = self.root / "instance"
+        git(self.root, "clone", "--quiet", str(self.repo), str(second))
+        git(second, "branch", "pipeline/instance-2")
+        git(second, "update-ref", "refs/remotes/origin/main", self.base)
+        self.catalog.bindings["instance"] = {"repo": str(second), "default_branch": "main"}
+        other = {**self.task, "id": "task-2", "ref": "instance-2", "project": "instance", "closed": True}
+        self.tasks["instance-2"] = other
+        key = self.owner.journal.remember(other, {"attempt_id": "instance-attempt", "worker": "", "workspace": ""},
+                                          disposition="archive")
+        return second, key
+
+    def branch_only(self, events):
+        git(self.repo, "worktree", "remove", str(self.workspace))
+        self.task["closed"] = True
+        self.runtime.audit = SimpleNamespace(events=lambda ref: copy.deepcopy(events))
+        return "refs/heads/pipeline/sample-1@" + self.base
+
+    def entry(self, inventory, target):
+        return next(entry for entry in inventory["manifest"] if entry["target"] == target)
+
+    def recorded_reads(self):
+        """Every Git repository and audit ref the cleanup owner reads while the context is open."""
+        calls, refs = [], []
+        native = subprocess.run
+        def run(args, *rest, **kwargs):
+            if args[:2] == ["git", "-C"]:
+                calls.append(str(args[2]))
+            return native(args, *rest, **kwargs)
+        audit = self.runtime.audit
+        self.runtime.audit = SimpleNamespace(events=lambda ref: refs.append(ref) or audit.events(ref))
+        self.addCleanup(setattr, self.runtime, "audit", audit)
+        return calls, refs, mock.patch("secretary.dispatch.cleanup.subprocess.run", side_effect=run)
+
+    def test_project_inventory_and_replay_never_read_or_write_the_other_binding(self):
+        second, foreign = self.second_project()
+        target = self.branch_only([{"kind": "card.started", "actor": {"role": "dispatcher", "id": "secretary-production"}}])
+        before = self.owner.journal.read()["intents"][foreign]
+        calls, refs, patch = self.recorded_reads()
+        with patch:
+            inventory = self.owner.inventory(project="sample")
+            self.assertEqual({row["project"] for row in inventory["residue"]}, {"sample"})
+            self.assertEqual([item["ref"] for item in inventory["intents"]], [])
+            self.assertEqual([entry["target"] for entry in inventory["manifest"]], [target])
+            digest = self.entry(inventory, target)["digest"]
+            result = self.owner.replay_targets("sample", [(target, digest)])
+        self.assertEqual([item["status"] for item in result], ["completed"])
+        self.assertTrue(calls)
+        self.assertFalse([path for path in calls if path.startswith(str(second))], calls)
+        self.assertNotIn("instance-2", refs)
+        value = self.owner.journal.read()
+        self.assertEqual(value["intents"][foreign], before)
+        self.assertEqual({intent["task"]["project"] for intent in value["intents"].values()}, {"sample", "instance"})
+        self.assertEqual(git(second, "for-each-ref", "--format=%(refname)", "refs/heads/pipeline/"),
+                         "refs/heads/pipeline/instance-2")
+
+    def test_unknown_project_is_refused_before_any_read(self):
+        self.request()
+        with mock.patch("secretary.dispatch.cleanup.subprocess.run", side_effect=AssertionError("Git read")), \
+                mock.patch.object(CleanupJournal, "read", side_effect=AssertionError("journal read")):
+            with self.assertRaises(UnknownProject):
+                self.owner.inventory(project="unknown")
+            with self.assertRaises(UnknownProject):
+                self.owner.replay_targets("unknown", [("0" * 64, "0" * 64)])
+            result = self.residue_command(project="unknown", expected_exit=2)
+        self.assertEqual(result["status"], "refused")
+        self.assertIn("not registered: unknown", result["error"])
+
+    def test_plain_inventory_reads_every_project_and_writes_nothing(self):
+        second, foreign = self.second_project()
+        key = self.request()
+        value = self.owner.journal.read()
+        value["replay_cursor"] = key
+        self.owner.journal.save(value)
+        before = self.owner.journal.path.read_bytes()
+        inventory = self.owner.inventory()
+        rendered = self.residue_command(expected_exit=1)  # The requested intent is still pending.
+        self.assertEqual({row["project"] for row in rendered["residue"]}, {"sample", "instance"})
+        self.assertLessEqual({key, foreign}, {entry["target"] for entry in inventory["manifest"]})
+        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        self.assertEqual(self.stops, [])
+        self.assertTrue(self.workspace.exists())
+        self.assertEqual(git(second, "for-each-ref", "--format=%(refname)", "refs/heads/pipeline/"),
+                         "refs/heads/pipeline/instance-2")
+
+    def test_manifest_plans_every_admitted_effect_in_order_without_performing_one(self):
+        self.head()
+        self.task["claim"]["worker"] = self.record.worker
+        key = self.request()
+        before = self.owner.journal.path.read_bytes()
+        entry = self.entry(self.owner.inventory(project="sample"), key)
+        self.assertEqual(entry["outcome"], "eligible", entry["reason"])
+        self.assertEqual([effect["effect"] for effect in entry["effects"]],
+                         ["stop-head", "remove-worktree", "delete-ref", "settle-claim"])
+        stop, removal, deletion, claim = entry["effects"]
+        self.assertEqual(stop["run_id"], "run-worker")
+        self.assertEqual((removal["path"], removal["dirty"]), (str(self.workspace), "clean"))
+        self.assertEqual(removal["identity"]["inode"], self.workspace.stat().st_ino)
+        self.assertEqual(deletion, {"effect": "delete-ref", "ref": "refs/heads/pipeline/sample-1", "tip": self.base,
+                                    "base": "refs/heads/main", "base_tip": self.base,
+                                    "merged": True, "published": True})
+        self.assertEqual(claim, {"effect": "settle-claim", "worker": self.record.worker, "board_write": True})
+        # No effect and no journal write: the effects above would all be admitted by a replay.
+        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        self.assertEqual(self.stops, [])
+        self.assertTrue(self.workspace.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+        self.assertEqual(self.tasks["sample-1"]["claim"]["worker"], self.record.worker)
+        self.assertEqual(self.entry(self.owner.inventory(project="sample"), key)["digest"], entry["digest"])
+        result = self.owner.replay_targets("sample", [(key, entry["digest"])])
+        self.assertEqual([(item["status"], item["replayed"]) for item in result], [("completed", True)])
+        self.assertFalse(self.workspace.exists())
+
+    def test_replay_touches_only_its_named_target(self):
+        _, foreign = self.second_project()
+        key = self.request()
+        value = self.owner.journal.read()
+        other = "0" * 64 if key != "0" * 64 else "f" * 64
+        value["intents"][other] = copy.deepcopy(value["intents"][key])
+        value["intents"][other]["status"] = "pending"
+        value["replay_cursor"] = other
+        self.owner.journal.save(value)
+        untouched = json.dumps({k: v for k, v in value.items() if k != "intents"}, sort_keys=True)
+        others = {name: json.dumps(value["intents"][name], sort_keys=True) for name in (other, foreign)}
+        digest = self.entry(self.owner.inventory(project="sample"), key)["digest"]
+        # The other pending intent keeps the command pending; it is reported, never replayed.
+        result = self.residue_command(replay=True, project="sample", targets=[key], digests=[digest], expected_exit=1)
+        self.assertEqual([(item["target"], item["status"]) for item in result["replay"]], [(key, "completed")])
+        value = self.owner.journal.read()
+        self.assertEqual(json.dumps({k: v for k, v in value.items() if k != "intents"}, sort_keys=True), untouched)
+        self.assertEqual({name: json.dumps(value["intents"][name], sort_keys=True) for name in others}, others)
+
+    def test_replay_refuses_changed_unknown_and_foreign_targets_before_any_effect(self):
+        _, foreign = self.second_project()
+        self.head()
+        key = self.request()
+        before = self.owner.journal.path.read_bytes()
+        foreign_ref = "refs/heads/pipeline/instance-2@" + self.base
+        result = self.owner.replay_targets("sample", [(key, "0" * 64), ("f" * 64, "0" * 64),
+                                                      (foreign, "0" * 64), (foreign_ref, "0" * 64)])
+        self.assertEqual([item["status"] for item in result], ["refused"] * 4)
+        self.assertIn("digest differs", result[0]["reason"])
+        self.assertTrue(all("unknown target" in item["reason"] for item in result[1:]))
+        self.assertFalse(any(item["replayed"] for item in result))
+        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        self.assertEqual(self.stops, [])
+        self.assertTrue(self.workspace.exists())
+        # A digest read before the evidence changed no longer admits the target.
+        digest = self.entry(self.owner.inventory(project="sample"), key)["digest"]
+        (self.workspace / "notes").write_text("new author work\n")
+        result = self.owner.replay_targets("sample", [(key, digest)])
+        self.assertEqual(result[0]["status"], "refused")
+        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        with self.assertRaises(HostError):
+            self.owner.replay_targets("sample", [(str(index), "0" * 64) for index in range(21)])
+        with self.assertRaises(HostError):
+            self.owner.replay_targets("sample", [(key, digest), (key, digest)])
+
+    def test_global_replay_batch_no_longer_exists(self):
+        self.request()
+        before = self.owner.journal.path.read_bytes()
+        with mock.patch("secretary.dispatch.bootstrap.runtime_from_args", side_effect=AssertionError("runtime")):
+            for kwargs in ({}, {"project": "sample"}, {"targets": ["x"], "digests": ["y"]},
+                           {"project": "sample", "targets": ["x"]}):
+                args = argparse.Namespace(instance="unused", residue_replay=True, residue_inventory=False,
+                                          project=kwargs.get("project"), target=kwargs.get("targets", []),
+                                          manifest=kwargs.get("digests", []))
+                with mock.patch("builtins.print") as output:
+                    self.assertEqual(run_residue_maintenance(args), 2)
+                self.assertEqual(json.loads(output.call_args.args[0])["status"], "refused")
+        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        self.assertTrue(self.workspace.exists())
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr"):
+            build_parser().parse_args(["instance-maintenance", "--residue-replay", "--limit", "20"])
+
+    def test_dispatcher_card_started_proves_branch_only_ownership(self):
+        target = self.branch_only([{"kind": "card.started", "actor": {"role": "dispatcher", "id": "secretary-production"}}])
+        inventory = self.owner.inventory(project="sample")
+        self.assertEqual(inventory["residue"][0]["reason"], "owned branch-only residue; eligible for exact-tip replay")
+        entry = self.entry(inventory, target)
+        self.assertEqual(entry["outcome"], "eligible", entry["reason"])
+        self.assertEqual([effect["effect"] for effect in entry["effects"]], ["delete-ref", "settle-claim"])
+        self.assertFalse(self.owner.journal.path.exists())
+        result = self.residue_command(replay=True, project="sample", targets=[target], digests=[entry["digest"]])
+        self.assertEqual([item["status"] for item in result["replay"]], ["completed"])
+        self.assertEqual(git(self.repo, "for-each-ref", "--format=%(refname)", "refs/heads/pipeline/"), "")
+
+    def test_other_role_card_started_does_not_prove_ownership(self):
+        target = self.branch_only([{"kind": "card.started", "actor": {"role": "po", "id": "po"}},
+                                   {"kind": "card.moved", "actor": {"role": "dispatcher", "id": "secretary-production"}}])
+        entry = self.entry(self.owner.inventory(project="sample"), target)
+        self.assertEqual((entry["outcome"], entry["reason"]), ("preserved", "card/project or audited claim proof missing"))
+        result = self.owner.replay_targets("sample", [(target, entry["digest"])])
+        self.assertEqual((result[0]["status"], result[0]["replayed"]), ("preserved", False))
+        self.assertFalse(self.owner.journal.path.exists())
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+
+    def test_card_of_another_project_does_not_prove_ownership(self):
+        target = self.branch_only([{"kind": "card.started", "actor": {"role": "dispatcher", "id": "secretary-production"}}])
+        self.task["project"] = "instance"
+        entry = self.entry(self.owner.inventory(project="sample"), target)
+        self.assertEqual((entry["outcome"], entry["reason"]), ("preserved", "card/project or audited claim proof missing"))
+
+    def test_ref_with_a_worktree_is_preserved_despite_dispatcher_card_started(self):
+        self.task["closed"] = True
+        self.runtime.audit = SimpleNamespace(events=lambda ref: [
+            {"kind": "card.started", "actor": {"role": "dispatcher", "id": "secretary-production"}}])
+        target = "refs/heads/pipeline/sample-1@" + self.base
+        entry = self.entry(self.owner.inventory(project="sample"), target)
+        self.assertEqual(entry["outcome"], "preserved")
+        self.assertIn("historical worktree", entry["reason"])
+        self.assertEqual(self.owner.replay_targets("sample", [(target, entry["digest"])])[0]["replayed"], False)
+        self.assertTrue(self.workspace.exists())
+
+    def test_unmerged_or_unpublished_branch_only_ref_is_retained(self):
+        target = self.branch_only([{"kind": "card.started", "actor": {"role": "dispatcher", "id": "secretary-production"}}])
+        git(self.repo, "checkout", "--quiet", "pipeline/sample-1")
+        (self.repo / "file").write_text("candidate\n")
+        git(self.repo, "commit", "--quiet", "-am", "candidate")
+        tip = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "checkout", "--quiet", "main")
+        git(self.repo, "update-ref", "refs/remotes/origin/candidate", tip)
+        target = "refs/heads/pipeline/sample-1@" + tip
+        entry = self.entry(self.owner.inventory(project="sample"), target)
+        self.assertEqual((entry["outcome"], entry["reason"]), ("preserved", "unmerged candidate ref retained at " + tip))
+        git(self.repo, "update-ref", "-d", "refs/remotes/origin/candidate")
+        git(self.repo, "merge", "--quiet", "--ff-only", "pipeline/sample-1")
+        entry = self.entry(self.owner.inventory(project="sample"), target)
+        self.assertEqual(entry["outcome"], "preserved")
+        self.assertIn("unpublished commits", entry["reason"])
+        result = self.owner.replay_targets("sample", [(target, entry["digest"])])
+        self.assertEqual((result[0]["status"], result[0]["replayed"]), ("preserved", False))
+        self.assertIn("unpublished commits", result[0]["reason"])
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), tip)
+        self.assertFalse(self.owner.journal.path.exists())
+
+    def test_dirty_work_is_itemized_in_manifest_and_replay_result(self):
+        self.head()
+        key = self.request()
+        (self.workspace / "ignored").write_text("ignored author work\n")
+        entry = self.entry(self.owner.inventory(project="sample"), key)
+        self.assertEqual(entry["outcome"], "preserved")
+        self.assertIn("dirty tracked, untracked or ignored work: !! ignored", entry["reason"])
+        self.assertEqual([effect["effect"] for effect in entry["effects"]], ["stop-head", "settle-claim"])
+        result = self.owner.replay_targets("sample", [(key, entry["digest"])])
+        self.assertEqual(result[0]["status"], "preserved")
+        self.assertIn("!! ignored", result[0]["reason"])
+        self.assertTrue((self.workspace / "ignored").exists())
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+
+    def test_owned_attempt_of_a_terminal_card_plans_its_settlement_request_first(self):
+        self.head()
+        key = self.owner.remember(self.task, self.record)
+        before = self.owner.journal.path.read_bytes()
+        self.task["state"] = "in_progress"
+        entry = self.entry(self.owner.inventory(project="sample"), key)
+        self.assertEqual((entry["outcome"], entry["reason"]), ("preserved", "card is still active"))
+        self.assertEqual(self.owner.replay_targets("sample", [(key, entry["digest"])])[0]["replayed"], False)
+        self.task["state"] = "done"
+        self.task["closed"] = True
+        entry = self.entry(self.owner.inventory(project="sample"), key)
+        self.assertEqual(entry["effects"][0], {"effect": "request-settlement", "disposition": "archive"})
+        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        result = self.owner.replay_targets("sample", [(key, entry["digest"])])
+        self.assertEqual(result[0]["status"], "completed", result[0]["reason"])
+        self.assertEqual(self.owner.journal.read()["intents"][key]["disposition"], "archive")
 
 class SettledHeadStopTests(unittest.TestCase):
     """secretary-1918: stopping an already-settled head keeps its receipt and mints nothing."""
