@@ -5,16 +5,20 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
 from dataclasses import replace
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from secretary.broad_check import run_broad_check
 from secretary.cli import run_residue_maintenance
 from secretary.dispatch.cleanup import CleanupJournal, CleanupOwner, ownership_lock
 from secretary.dispatch.host import CommandHostRuntime
@@ -26,6 +30,7 @@ from secretary.infra import git_worktree
 from secretary.observer_root import observer_root_repo
 from secretary.runtime.head import HeadRun, HeadSpec, StopInitiator, TaskRef
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from secretary.runtime.role_env import workspace_tool_cache_env
 from tests.fakes.dispatcher import FakeCatalog, FakeHost
 from tests.production_runtime_fixtures import registered_production_runtime
 
@@ -602,6 +607,104 @@ class OwnedCleanupTests(unittest.TestCase):
                 self.owner.replay_one(key)
         result = self.owner.replay_one(key)
         self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertFalse(self.workspace.exists())
+
+    def pipeline_generated_workspace(self):
+        """A merged, published Done workspace holding only what Secretary's own pipeline wrote.
+
+        Every artifact comes from its real producer: the environment claim, the install record,
+        the prompt writer, a Python import and the broad-check writer under the head's cache env.
+        """
+        (self.workspace / "module.py").write_text("VALUE = 1\n")
+        git(self.workspace, "add", "module.py")
+        git(self.workspace, "commit", "--quiet", "-m", "work")
+        tip = git(self.workspace, "rev-parse", "HEAD")
+        git(self.repo, "update-ref", "refs/heads/main", tip)
+        git(self.repo, "update-ref", "refs/remotes/origin/main", tip)
+        host = CommandHostRuntime(SimpleNamespace(), self.data, mode="real",
+                                  production_runtime=SimpleNamespace(interpreter=sys.executable))
+        namespace = host._claim_workspace_environment(str(self.workspace)).parent
+        self.host._decide_workspace_environment_ownership = host._decide_workspace_environment_ownership
+        before = host._workspace_extra_files(self.workspace)
+        metadata = self.workspace / "src" / "sample.egg-info"
+        metadata.mkdir(parents=True)
+        (metadata / "PKG-INFO").write_text("Metadata-Version: 2.1\nName: sample\n")
+        (metadata / "SOURCES.txt").write_text("module.py\n")
+        host._record_install_output(self.workspace, before)
+        host._write_prompt(self.workspace / "TASK.md", "# Task sample-1\n")
+        caches = workspace_tool_cache_env(self.workspace)
+        subprocess.run([sys.executable, "-c", "import module"], cwd=self.workspace, check=True,
+                       env={**os.environ, **caches})
+        code, _ = run_broad_check("true", root=self.workspace, stream=StringIO(),
+                                  env={**os.environ, **caches})
+        self.assertEqual(code, 0)
+        self.assertTrue(any((namespace / "pycache").rglob("module*.pyc")))
+        self.assertTrue(any((namespace / "checks").glob("broad-*.json")))
+        return namespace, metadata
+
+    def test_pipeline_generated_artifacts_prove_a_done_workspace_clean(self):
+        """secretary-1920: owned caches, recorded install output and the prompt are not author work."""
+        self.pipeline_generated_workspace()
+        key = self.request()
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertFalse(self.workspace.exists())
+        self.assertNotIn(str(self.workspace), git(self.repo, "worktree", "list", "--porcelain"))
+        self.assertEqual(git(self.repo, "for-each-ref", "--format=%(refname)", "refs/heads/pipeline/"), "")
+
+    def test_retention_floor_survives_pipeline_generated_artifacts(self):
+        """secretary-1920: each piece of real work still keeps the workspace, named in the reason."""
+        namespace, metadata = self.pipeline_generated_workspace()
+        with (self.repo / ".git" / "info" / "exclude").open("a") as exclude:
+            exclude.write("__pycache__/\n")
+        key = self.request()
+        pycache = self.workspace / "__pycache__" / "x.pyc"
+        untracked = self.workspace / "notes.txt"
+        egg = metadata / "SOURCES.txt"
+        original = egg.read_text()
+        owner_file = namespace / "owner.json"
+        claim = owner_file.read_text()
+        ownership = self.host._decide_workspace_environment_ownership
+
+        def outside_cache():
+            pycache.parent.mkdir()
+            pycache.write_bytes(b"bytecode")
+            return lambda: shutil.rmtree(pycache.parent)
+
+        def untracked_file():
+            untracked.write_text("author notes\n")
+            return untracked.unlink
+
+        def modified_install_output():
+            egg.write_text("rewritten by a head\n")
+            return lambda: egg.write_text(original)
+
+        def unowned_namespace():
+            # The host's ownership answer is not the dispatcher's: every namespace row is work.
+            self.host._decide_workspace_environment_ownership = lambda path: "absent"
+            return lambda: setattr(self.host, "_decide_workspace_environment_ownership", ownership)
+
+        cases = (("!! __pycache__/x.pyc", outside_cache), ("?? notes.txt", untracked_file),
+                 ("src/sample.egg-info/SOURCES.txt", modified_install_output),
+                 ("!! .secretary-task-env/", unowned_namespace))
+        for named, introduce in cases:
+            with self.subTest(named=named):
+                restore = introduce()
+                result = self.owner.replay_one(key)
+                self.assertEqual(result["status"], "preserved", result["reason"])
+                self.assertIn("dirty tracked, untracked or ignored work", result["reason"])
+                self.assertIn(named, result["reason"])
+                self.assertTrue(self.workspace.exists())
+                restore()
+        # A claim naming another workspace is refused before any effect, as before.
+        owner_file.write_text(claim.replace(str(self.workspace), str(self.workspace) + "-other"))
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending", result["reason"])
+        self.assertIn(".secretary-task-env", result["reason"])
+        self.assertTrue(self.workspace.exists())
+        owner_file.write_text(claim)
+        # Each refusal above was the only obstacle: restored, the same intent completes.
+        self.assertEqual(self.owner.replay_one(key)["status"], "completed")
         self.assertFalse(self.workspace.exists())
 
     def test_unpublished_commits_preserve_workspace_and_ref(self):

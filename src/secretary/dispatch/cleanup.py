@@ -229,9 +229,10 @@ class CleanupJournal:
                 os.unlink(name)
 
     @serialized
-    def generated(self, path: Path, body: str) -> None:
+    def generated(self, path: Path, body: str | bytes) -> None:
         value = self.read()
-        value["generated"][str(path.absolute())] = hashlib.sha256(body.encode()).hexdigest()
+        data = body if isinstance(body, bytes) else body.encode()
+        value["generated"][str(path.absolute())] = hashlib.sha256(data).hexdigest()
         self.save(value)
 
     @serialized
@@ -847,7 +848,10 @@ class CleanupOwner:
         generated = self.journal.read()["generated"]
         for name, digest in generated.items():
             file = Path(name)
-            if file.parent == path and file.is_file() and not file.is_symlink():
+            # Nested generated files, such as an editable install's metadata, qualify only through
+            # real directories of this workspace: a symlinked parent never leads the unlink outside.
+            if (file.is_relative_to(path) and file != path and file.parent.resolve() == file.parent
+                    and file.is_file() and not file.is_symlink()):
                 if hashlib.sha256(file.read_bytes()).hexdigest() == digest:
                     file.unlink()
         if not missing and self._environment_owner(intent, path) == "dispatcher":

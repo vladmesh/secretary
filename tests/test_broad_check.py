@@ -36,6 +36,7 @@ from secretary.broad_check import (
     usable_receipt,
 )
 from secretary.cli import main
+from secretary.runtime.role_env import workspace_tool_cache_env
 
 
 def _git(root: Path, *args: str) -> None:
@@ -2056,3 +2057,71 @@ class CheckCommandTests(BroadCheckTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DispatcherWorkspaceReceiptTests(BroadCheckTestCase):
+    """secretary-1920: in a dispatcher workspace the receipt is generated output in the owned namespace."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.namespace = self.root / ".secretary-task-env"
+        self.namespace.mkdir()
+        self._claim(str(self.root.resolve()))
+        exclude = self.root / ".git" / "info" / "exclude"
+        exclude.write_text(".secretary-task-env/\n", encoding="utf-8")
+        self.suite = self._suite("ownedsuite", "print('ran')\n")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-q", "-m", "suite")
+
+    def _claim(self, workspace: str) -> None:
+        owner = {"owner": "secretary-dispatcher", "schema_version": 1, "workspace": workspace}
+        (self.namespace / "owner.json").write_text(json.dumps(owner) + "\n", encoding="utf-8")
+
+    def _main(self, argv: list[str]) -> tuple[int, dict]:
+        stdout = StringIO()
+        # The cache redirections every dispatcher-launched worker and reviewer runs with.
+        caches = workspace_tool_cache_env(self.root)
+        with (
+            mock.patch("sys.stdout", stdout),
+            mock.patch("sys.stderr", StringIO()),
+            mock.patch.dict(os.environ, caches),
+        ):
+            code = main(argv)
+        return code, json.loads(stdout.getvalue())
+
+    def test_writer_show_and_reuse_all_use_the_owned_namespace(self) -> None:
+        expected = self.namespace.resolve() / "checks" / f"broad-{self.suite.digest[:16]}.json"
+        argv = ["--root", str(self.root), "--module", "ownedsuite"]
+
+        code, written = self._main(["check", "broad", *argv])
+        self.assertEqual(code, 0)
+        self.assertFalse(written["reused"])
+        self.assertEqual(written["path"], str(expected))
+        self.assertTrue(expected.is_file())
+        self.assertFalse((self.root / "state").exists())
+
+        code, shown = self._main(["check", "show", *argv])
+        self.assertEqual(code, 0, shown)
+        self.assertTrue(shown["usable"])
+        self.assertEqual(shown["path"], str(expected))
+
+        code, reused = self._main(["check", "broad", "--reuse", *argv])
+        self.assertEqual(code, 0)
+        self.assertTrue(reused["reused"])
+        self.assertEqual(reused["path"], str(expected))
+        self.assertEqual(usable_receipt(self.root, self.suite).path, expected)
+
+        # Nothing outside the owned namespace is left behind for cleanup to read as work.
+        status = _git_out(self.root, "status", "--porcelain=v1", "--ignored", "--untracked-files=all")
+        written = sorted({line[3:].split("/")[0] for line in status.splitlines()})
+        self.assertEqual(written, [".secretary-task-env"])
+
+    def test_a_namespace_the_dispatcher_does_not_own_keeps_the_ordinary_location(self) -> None:
+        self._claim(str(self.root.resolve() / "elsewhere"))
+
+        code, payload = self._main(["check", "broad", "--root", str(self.root), "--module", "ownedsuite"])
+
+        self.assertEqual(code, 0)
+        ordinary = self.root / "state" / "checks" / f"broad-{self.suite.digest[:16]}.json"
+        self.assertEqual(payload["path"], str(ordinary))
+        self.assertFalse((self.namespace / "checks").exists())
