@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import runpy
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -13,12 +15,14 @@ from unittest import mock
 from secretary import cli, status, upgrade
 from secretary.host import (
     FixtureHostSource,
+    LiveHostSource,
     PlannedResource,
     build_doctor_expectations,
     inventory,
     plan_changes,
 )
 from secretary.host_apply import ApplyInputs, apply_host
+from secretary.infra.systemd import CommandResult
 from secretary.runtime.head.local_pty import protocol
 from secretary.runtime.head.local_pty import scope_inventory as reader
 from secretary.runtime.head.local_pty.journal import RUN_STARTED, JournalWriter
@@ -133,6 +137,33 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         self.assertNotIn(unit, diffs["units"].missing_on_host)
         self.assertFalse(ScopedHeadLifecycle.read_owner(directory)["cleanup_complete"])
         self.assertNotIn(unit, [row["name"] for row in status._units(self.expected, collected, offline=False)])
+
+    def test_ci_self_upgrade_program_exercises_all_consumers_without_scope_effects(self):
+        _, directory, unit = self.owner()
+        fixture_root = self.root / "ci-program"
+        fixture_root.mkdir()
+        (fixture_root / "finish").touch()
+        program = Path(__file__).parent / "fixtures" / "scope_self_upgrade.py"
+
+        def native_reply(command):
+            if command[1] == "list-unit-files":
+                return CommandResult(True, 0, "", "")
+            if command[1] == "list-units":
+                return CommandResult(True, 0, f"{unit} loaded active running Disposable scope\n", "")
+            raise AssertionError(f"unexpected native observation: {command}")
+
+        before = (directory / "scope-owner.json").read_bytes()
+        with (
+            mock.patch.object(sys, "argv", [str(program), str(fixture_root), str(self.data), "po-self"]),
+            mock.patch.object(LiveHostSource, "_run", side_effect=native_reply),
+        ):
+            runpy.run_path(str(program), run_name="__main__")
+        proof = json.loads((fixture_root / "proof.json").read_text())
+        self.assertEqual(len(proof["results"]), 4)
+        self.assertTrue(all(value != "failed" for value in proof["results"]))
+        self.assertEqual(proof["results"][-2:], ["unchanged", "unchanged"])
+        self.assertTrue(all(name != unit for _, name in proof["effects"]))
+        self.assertEqual((directory / "scope-owner.json").read_bytes(), before)
 
     def test_foreign_and_missing_owner_remain_conflicts_and_prevent_all_effects(self):
         _, _, owned = self.owner("worker", "previous-1896", "heads")

@@ -62,7 +62,8 @@ if run_id not in [row["run_id"] for row in snapshot["host"]["runtime_scopes"]]:
 # before it can terminate the fixture.
 native_product = root / "native-product"
 (native_product / "packaging/systemd").mkdir(parents=True)
-native_instance = {**instance, "host": {"unit_prefix": "secretary-head-"}}
+native_instance = {**instance, "host": {"unit_prefix": "secretary-head-",
+                                       "components": {"dispatcher-production": {"enabled": False}}}}
 native_report = SimpleNamespace(**{**vars(report), "instance": native_instance, "host": native_instance["host"]})
 (data / "host-managed.json").write_text('{"version":1,"resources":[]}\n')
 class NativeInstaller(SystemdUnitInstaller):

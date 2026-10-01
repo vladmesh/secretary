@@ -75,13 +75,19 @@ class ScopeBackendTests(unittest.TestCase):
                 owner.stop_and_prove_empty()
         self.addCleanup(cleanup)
         repo = Path(__file__).resolve().parents[1]
+        output_path = self.root / "head-output.log"
+        command = shlex.join([sys.executable, "-u", str(repo / "tests/fixtures/scope_self_upgrade.py"),
+                             str(self.root), str(data), run_id])
         handle = spawn_head(
             root=data / "po-heads", run_id=run_id, role="po", task="po:ci:disposable-session:1",
-            command=shlex.join([sys.executable, "-u", str(repo / "tests/fixtures/scope_self_upgrade.py"),
-                                str(self.root), str(data), run_id]), cwd=self.root,
+            command=command + " >" + shlex.quote(str(output_path)) + " 2>&1", cwd=self.root,
             env={"PYTHONPATH": os.pathsep.join((str(repo / "src"), str(repo)))}, memory_limit_mib=256,
         )
-        await_fact(lambda: (self.root / "proof.json").exists(), "PO self-upgrade did not produce preservation proof")
+        try:
+            await_fact(lambda: (self.root / "proof.json").exists(), "PO self-upgrade did not produce preservation proof")
+        except AssertionError:
+            output = output_path.read_text(errors="replace")[-8192:] if output_path.exists() else "no head output"
+            self.fail(f"PO self-upgrade did not produce preservation proof; head output:\n{output}")
         proof = json.loads((self.root / "proof.json").read_text())
         unit = scope_unit(run_id)
         self.assertEqual(proof["unit"], unit)

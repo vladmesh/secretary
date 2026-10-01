@@ -175,6 +175,7 @@ from typing import Any
 from secretary.runtime.head import local_pty
 from secretary.runtime.head.identity import task_binding
 from secretary.runtime.head.local_pty import protocol
+from secretary.runtime.head.local_pty.scope_inventory import RuntimeScopeInventory
 from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 from secretary.runtime.head.memory import MemoryScopeError
 from secretary.runtime.head.operations import (
@@ -3252,7 +3253,7 @@ def head_run_directory(root: str | os.PathLike[str], run_id: str) -> Path:
         raise ValueError(str(exc)) from None
 
 
-def runtime_scope_inventory(data_dir: Path, units: set[str]):
+def runtime_scope_inventory(data_dir: Path, units: set[str]) -> RuntimeScopeInventory:
     """Read canonical lifecycle ownership for host preservation and diagnostics.
 
     Consumers use this runtime boundary, never the private PTY owner format.
