@@ -14,7 +14,6 @@ from secretary.host import (
     FixtureHostSource,
     LiveHostSource,
     build_doctor_expectations,
-    build_expectations,
     build_plan,
     foreign_units,
     load_managed_manifest,
@@ -48,7 +47,8 @@ def run_reconcile_plan(args) -> int:
     if args.offline:
         print("secretary reconcile plan: --offline cannot produce a plan; use --host-fixture instead")
         return 2
-    expected = build_expectations(report.bindings, report.host)
+    expected = build_doctor_expectations(report.instance, report.bindings, packaged=packaged,
+                                         data_dir=report.data_dir)
     source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource()
     collected = source.collect(expected)
     if collected.errors:
@@ -216,7 +216,8 @@ def run_reconcile_apply(args) -> int:
     except ValueError as exc:
         print("secretary reconcile apply: " + str(exc))
         return 2
-    expected = build_doctor_expectations(report.instance, report.bindings, packaged=packaged)
+    expected = build_doctor_expectations(report.instance, report.bindings, packaged=packaged,
+                                         data_dir=report.data_dir)
     source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource(runtime_user)
     collected = source.collect(expected)
     if collected.errors:
@@ -249,7 +250,10 @@ def run_reconcile_apply(args) -> int:
         print(line)
     if result.conflicts:
         print("secretary reconcile apply: refusing to write while the host holds unowned names")
-        print("  adopt them with `secretary reconcile adopt`, or declare them in host.foreign_units")
+        if any(change.name.endswith(".scope") for change in result.conflicts):
+            print("  inspect canonical runtime ownership and native scope identity; retain uncertain scopes for their lifecycle")
+        else:
+            print("  adopt them with `secretary reconcile adopt`, or declare them in host.foreign_units")
         return 1
     if result.errors:
         return 2

@@ -704,6 +704,12 @@ class PackagedRuntimeParityTests(PortableFixture):
         if verb == "list-unit-files":
             output = "".join(f"{unit} enabled enabled\n" for unit in sorted(self.units.files))
             return subprocess.CompletedProcess(argv, 0, stdout=output, stderr="")
+        if verb == "list-units":
+            output = "".join(
+                f"{unit} loaded {active} running Disposable fixture\n"
+                for unit, (_, active) in sorted(self.units.unit_states().items())
+            )
+            return subprocess.CompletedProcess(argv, 0, stdout=output, stderr="")
         if verb == "show":
             return subprocess.CompletedProcess(argv, 0, stdout="n/a\n", stderr="")
         enabled, active = self.units.unit_states()[name]

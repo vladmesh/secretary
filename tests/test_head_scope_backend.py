@@ -18,8 +18,8 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary.runtime.head.local_pty.client import LocalPtySpawnError, spawn_head
-from secretary.runtime.head.local_pty.journal import RUN_EXITED
-from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+from secretary.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, SCOPE_BOUND
+from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle, launch_identity
 from secretary.runtime.head.memory import MemoryScopeError, scope_unit
 from secretary.runtime.head.run import HeadRun, StopInitiator
 from secretary.runtime.head.spec import HeadSpec
@@ -61,6 +61,121 @@ class ScopeBackendTests(unittest.TestCase):
         return spawn_head(root=self.root, run_id=run_id, role="worker", task="ci:owned-fixture",
                           command=shlex.join([sys.executable, "-u", "-c", program]),
                           memory_limit_mib=96)
+
+    def test_active_po_self_upgrade_and_doctor_preserve_native_scope_then_lifecycle_settles(self) -> None:
+        from secretary.runtime.local_pty_head import runtime_scope_inventory
+
+        data = self.root / "data"
+        data.mkdir()
+        run_id = "ci-po-self-" + uuid.uuid4().hex[:12]
+        directory = data / "po-heads" / run_id
+        def cleanup():
+            owner = ScopedHeadLifecycle.from_run_dir(directory)
+            if owner is not None:
+                owner.stop_and_prove_empty()
+        self.addCleanup(cleanup)
+        repo = Path(__file__).resolve().parents[1]
+        output_path = self.root / "head-output.log"
+        command = shlex.join([sys.executable, "-u", str(repo / "tests/fixtures/scope_self_upgrade.py"),
+                             str(self.root), str(data), run_id])
+        # The persistent released PO emits this exact argv before it adopts new
+        # source. Only the new executable owns the prospective attestation.
+        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.scope_argv", deployed_scope_argv()):
+            handle = spawn_head(
+                root=data / "po-heads", run_id=run_id, role="po", task="po:ci:disposable-session:1",
+                command=command + " >" + shlex.quote(str(output_path)) + " 2>&1", cwd=self.root,
+                env={"PYTHONPATH": os.pathsep.join((str(repo / "src"), str(repo)))}, memory_limit_mib=256,
+            )
+        try:
+            await_fact(lambda: (self.root / "proof.json").exists(), "PO self-upgrade did not produce preservation proof")
+        except AssertionError:
+            output = output_path.read_text(errors="replace")[-8192:] if output_path.exists() else "no head output"
+            self.fail(f"PO self-upgrade did not produce preservation proof; head output:\n{output}")
+        proof = json.loads((self.root / "proof.json").read_text())
+        unit = scope_unit(run_id)
+        self.assertEqual(proof["unit"], unit)
+        self.assertTrue(all(value != "failed" for value in proof["results"]))
+        self.assertTrue(all(name != unit for _, name in proof["effects"]))
+        projected = runtime_scope_inventory(data, {unit})
+        self.assertFalse(projected.errors, projected.errors)
+        self.assertIn(unit, projected.scopes)
+        bound = handle.events().of_kind(SCOPE_BOUND)
+        self.assertEqual(len(bound), 1)
+        self.assertLess(bound[0]["seq"], handle.events().of_kind(RUN_STARTED)[0]["seq"])
+        self.assertEqual(bound[0]["binding"]["admitted"]["generation"], handle.scope_generation)
+        self.assertEqual(bound[0]["binding"]["admitted"]["root"], str(data / "po-heads"))
+        self.assertFalse(ScopedHeadLifecycle.read_owner(directory)["cleanup_complete"])
+        (self.root / "finish").touch()
+        await_fact(lambda: any(event.get("kind") == RUN_EXITED for event in handle.events().events),
+                   "harmless PO fixture did not exit")
+        owner = ScopedHeadLifecycle.from_run_dir(directory)
+        owner.stop_and_prove_empty()
+        self.assertTrue(ScopedHeadLifecycle.read_owner(directory)["cleanup_complete"])
+        settled = runtime_scope_inventory(data, {unit})
+        self.assertFalse(settled.errors, settled.errors)
+        self.assertFalse(settled.scopes)
+        self.assertEqual(settled.disappeared, {unit})
+
+    def test_attestation_survives_head_and_launcher_exit_with_detached_descendants(self) -> None:
+        from secretary.runtime.local_pty_head import runtime_scope_inventory
+        from secretary.host import FixtureHostSource, build_doctor_expectations
+        from secretary.host_apply import ApplyInputs, apply_host
+        from tests.fakes.upgrade import FakeUnitInstaller
+        from tests.runtime_scope_fixtures import host_fixture
+
+        data = self.root / "data"
+        data.mkdir()
+        run_id = "ci-retained-" + uuid.uuid4().hex[:12]
+        directory = data / "heads" / run_id
+        def cleanup():
+            owner = ScopedHeadLifecycle.from_run_dir(directory)
+            if owner is not None:
+                owner.stop_and_prove_empty()
+        self.addCleanup(cleanup)
+        child_file = self.root / "child.pid"
+        program = (
+            "import os,time,pathlib; pid=os.fork(); "
+            f"pathlib.Path({str(child_file)!r}).write_text(str(pid)) if pid else None; "
+            "os._exit(0) if pid else None; os.setsid(); time.sleep(60)"
+        )
+        handle = spawn_head(root=data / "heads", run_id=run_id, role="worker", task="ci:retained",
+                            command=shlex.join([sys.executable, "-u", "-c", program]),
+                            cwd=self.root, memory_limit_mib=96)
+        await_fact(lambda: bool(handle.events().of_kind(RUN_EXITED)), "head did not journal its exit")
+        owner = ScopedHeadLifecycle.from_run_dir(directory)
+        record = owner.read_owner(directory)
+        await_fact(lambda: launch_identity(record["launch_pid"]) is None, "original launcher did not exit")
+        self.assertTrue(child_file.exists())
+        unit = scope_unit(run_id)
+        projected = runtime_scope_inventory(data, {unit})
+        self.assertFalse(projected.errors, projected.errors)
+        self.assertTrue(projected.scopes[unit]["populated"])
+        with owner.ownership() as record:
+            record["launch_allowed"] = False
+            owner.update_owner(directory, record)
+        before = (directory / "scope-owner.json").read_bytes()
+        instance, packaged, desired, fixture = host_fixture(self.root, data, unit)
+        expected = build_doctor_expectations(instance, [], packaged=packaged, data_dir=data)
+        collected = FixtureHostSource(fixture).collect(expected)
+        self.assertFalse(collected.errors, collected.errors)
+        for dry in (True, False):
+            installer = FakeUnitInstaller()
+            result = apply_host(ApplyInputs(instance, [], collected.inventory, desired,
+                                           data / "host-managed.json", packaged), units=installer, dry_run=dry)
+            self.assertFalse(result.errors, result.errors)
+            self.assertEqual(result.preserved_runtime_scopes, [unit])
+            self.assertTrue(all(name != unit for _, name in installer.calls))
+            self.assertEqual((directory / "scope-owner.json").read_bytes(), before)
+        for field, value in (("generation", "substituted-generation"),
+                             ("workspace", str(self.root / "substituted-workspace"))):
+            owner.update_owner(directory, {**record, field: value})
+            self.assertTrue(runtime_scope_inventory(data, {unit}).errors, field)
+            owner.update_owner(directory, record)
+        owner.stop_and_prove_empty()
+        self.assertTrue(owner.read_owner(directory)["cleanup_complete"])
+        settled = runtime_scope_inventory(data, {unit})
+        self.assertFalse(settled.errors, settled.errors)
+        self.assertEqual(settled.disappeared, {unit})
 
     def test_deployed_po_producer_new_launcher_preserves_path_and_runtime_bindings(self) -> None:
         bin_dir = self.root / "prepared cli tools"
