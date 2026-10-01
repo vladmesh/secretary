@@ -167,7 +167,7 @@ import math
 import os
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -3251,6 +3251,48 @@ def head_run_directory(root: str | os.PathLike[str], run_id: str) -> Path:
         return protocol.run_dir_for(root, run_id)
     except local_pty.ProtocolError as exc:
         raise ValueError(str(exc)) from None
+
+
+def fence_cleanup_scopes(root: Path, workspace: str, task: TaskRef,
+                         runs: Sequence[HeadRun]) -> None:
+    """Refuse Git settlement while an unrecorded generation owns its target.
+
+    This read uses the same canonical owner as stop. The dispatcher serializes
+    admission and Git effects; recorded generations still go through runtime.stop
+    for native identity and recursive empty-scope proof, including on replay.
+    """
+    if root.absolute() != root.resolve():
+        raise ValueError("cleanup scope root is substituted")
+    if not root.exists():
+        return
+    known = {(run.run_id, run.scope_generation): run for run in runs}
+    task_identity = _binding_of(task)
+    for directory in root.iterdir():
+        if directory.is_symlink():
+            raise ValueError("cleanup scope directory is substituted")
+        if not directory.is_dir():
+            continue
+        owner = ScopedHeadLifecycle.from_run_dir(directory)
+        if owner is None:
+            continue
+        if (directory != protocol.run_dir_for(root, owner.run_id)
+                or (directory / "scope-owner.json").is_symlink()):
+            raise ValueError("cleanup scope owner path differs from its canonical identity")
+        record = ScopedHeadLifecycle.read_owner(directory)
+        run = known.get((owner.run_id, owner.generation))
+        if run is not None and (record.get("workspace") != run.workspace
+                                or record.get("task") != _binding_of(run.task_ref)
+                                or record.get("role") != run.role):
+            raise ValueError("cleanup scope owner binding differs from its recorded head")
+        if record.get("workspace") == workspace or record.get("task") == task_identity:
+            if (owner.run_id, owner.generation) not in known:
+                if record.get("cleanup_complete") and not record.get("launch_allowed"):
+                    # A retained terminal flag cannot bless a reused live unit.
+                    inventory = runtime_scope_inventory(root.parent, {record["unit"]})
+                    if inventory.errors or record["unit"] not in inventory.disappeared:
+                        raise ValueError("cleanup terminal scope lacks current disappearance proof")
+                    continue
+                raise ValueError("cleanup workspace has an unrecorded or newer scope owner")
 
 
 def runtime_scope_inventory(data_dir: Path, units: set[str]) -> RuntimeScopeInventory:

@@ -339,7 +339,10 @@ class CleanupOwner:
             if record.workspace != self.runtime.host.observer_workspace(record.sprint):
                 raise HostError("observer workspace is not the exact sprint workspace")
             if Path(record.workspace).exists():
-                identity = _identity(observer_root_repo(self.data_dir), record.workspace, "")
+                try:
+                    identity = _identity(observer_root_repo(self.data_dir), record.workspace, "")
+                except HostError:
+                    pass  # Stop the exact head, but preserve unproven Git placement.
         disposition = "observer-close" if sprint["status"] == "closed" else "observer-stop"
         key = self.journal.remember(task, raw, identity=identity, disposition=disposition)
         return self.replay_one(key)
@@ -411,32 +414,14 @@ class CleanupOwner:
                     status = head_process_status(str(path))
                     if status.get("state") != "dead":
                         raise HostError("archived branch still has live or unknown head identity")
-        from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
-        root_reader = getattr(self.runtime.host, "_local_pty_root", None)
-        if not callable(root_reader):
-            return  # Simulated backends are bounded by their recorded owners.
-        root = Path(root_reader())
-        if not root.exists():
-            return
-        known = {(raw["run_id"], raw.get("scope_generation", "")) for raw in intent["heads"]}
-        for directory in root.iterdir():
-            if not directory.is_dir():
-                continue
-            owner = ScopedHeadLifecycle.from_run_dir(directory)
-            if owner is None:
-                continue
-            record = ScopedHeadLifecycle.read_owner(directory)
-            task_binding = ("sprint:" if intent["task"].get("kind") == "observer" else "card:") + intent["task"]["ref"]
-            # Observer TaskRef normalization keeps the existing sprint prefix.
-            if intent["task"].get("kind") == "observer":
-                from secretary.dispatch.heartbeat import sprint_task
-                task_binding = sprint_task(intent["task"]["ref"])
-            if (record.get("workspace") == intent["record"].get("workspace")
-                    or record.get("task") == task_binding):
-                if (owner.run_id, owner.generation) not in known:
-                    if record.get("cleanup_complete") and not record.get("launch_allowed"):
-                        continue
-                    raise HostError("cleanup workspace has an unrecorded or newer scope owner")
+        fence = getattr(self.runtime.host, "fence_cleanup_scopes", None)
+        if callable(fence):
+            from secretary.runtime.head import HeadRun, TaskRef
+            task = intent["task"]
+            reference = (TaskRef.sprint(task["ref"]) if task.get("kind") == "observer"
+                         else TaskRef.card(task["ref"]))
+            fence(intent["record"].get("workspace", ""), reference,
+                  [HeadRun.from_json(raw) for raw in intent["heads"]])
 
     def _binding(self, intent: dict[str, Any]) -> tuple[Path, str]:
         if intent["task"].get("kind") == "observer":
@@ -479,23 +464,16 @@ class CleanupOwner:
         runs = []
         for raw in latest.values():
             run = HeadRun.from_json(raw)
-            if run.workspace != record.get("workspace") or run.task_ref.ref != intent["task"]["ref"]:
+            expected_kind = "sprint" if intent["task"].get("kind") == "observer" else "card"
+            if (run.workspace != record.get("workspace") or run.task_ref.ref != intent["task"]["ref"]
+                    or run.task_ref.kind != expected_kind):
                 raise HostError("cleanup head belongs to another workspace or card")
-            root_reader = getattr(self.runtime.host, "_local_pty_root", None)
-            if run.scope_generation and callable(root_reader):
-                from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
-                from secretary.runtime.head.local_pty.protocol import run_dir_for
-                directory = run_dir_for(root_reader(), run.run_id)
-                owner = ScopedHeadLifecycle.from_run_dir(directory)
-                if owner and owner.run_id == run.run_id and owner.generation == run.scope_generation:
-                    evidence = ScopedHeadLifecycle.read_owner(directory)
-                    if evidence["cleanup_complete"] and not evidence["launch_allowed"]:
-                        continue  # This generation's durable recursive empty proof.
-            if not run.scope_generation and run.settled:
-                continue  # Deployed unscoped runs retain their confirmed stop receipt.
             guard = getattr(self.runtime.host, "_guard_head_run", None)
             if callable(guard):
-                guard(run, run.role, pid_file=run.pid_file, leaf=run.leaf)
+                guard(run, run.role, pid_file=run.pid_file, leaf=run.leaf,
+                      task=run.task_ref.ref if run.task_ref.kind == "sprint" else "card:" + run.task_ref.ref)
+            if not run.scope_generation and run.settled:
+                continue  # Deployed unscoped runs retain their confirmed stop receipt.
             runs.append(run)
         # Fence every recorded identity before stopping the first head. A
         # foreign reviewer must not cause us to stop a worker and only then refuse.
@@ -504,6 +482,15 @@ class CleanupOwner:
                 run, StopInitiator(actor="secretary-dispatcher", reason="owned residue cleanup"))
             if not receipt.ok:
                 raise HostError("cleanup head stop pending: " + receipt.reason)
+            settled = getattr(receipt, "run", None)
+            if (not isinstance(settled, HeadRun) or not settled.same_run(run) or not settled.settled
+                    or settled.scope_generation != run.scope_generation
+                    or settled.spec != run.spec or settled.workspace != run.workspace
+                    or settled.task_ref != run.task_ref or settled.role != run.role):
+                raise HostError("cleanup stop receipt does not settle the recorded run")
+            if settled.to_json() not in intent["heads"]:
+                intent["heads"].append(settled.to_json())
+                self._checkpoint_intent(intent)
 
     def _provenance(self, boundary: str) -> None:
         require = getattr(self.runtime.host, "_require_production_runtime", None)
@@ -678,15 +665,19 @@ class CleanupOwner:
             return intent
         intent["status"] = "pending"
         intent["reason"] = ""
+        # Retained receipts survive, but current refusal must revoke admission's
+        # settlement signal rather than exposing a prior successful observation.
+        intent["progress"]["heads_stopped"] = False
+        self.journal.save(value)
         try:
             self._validate_owner(intent)
-            if not intent.get("identity"):
-                raise Preserved("missing exact workspace/attempt ownership proof")
-            repo, base = self._binding(intent)
             self._scope_fence(intent)
             self._stop(intent)
             intent["progress"]["heads_stopped"] = True
             self.journal.save(value)
+            if not intent.get("identity"):
+                raise Preserved("missing exact workspace/attempt ownership proof")
+            repo, base = self._binding(intent)
             # Publication proof precedes removal too: preserve unpublished work
             # even when its local ref would happen to survive removal.
             if intent["identity"]["branch"] and not self._published(repo, intent["identity"]["tip"]):

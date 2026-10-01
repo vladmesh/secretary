@@ -23,6 +23,19 @@ existing launch identity fences. PID death never substitutes for scoped cleanup.
 Other/newer recorded owners, unrecorded scopes, unreadable evidence and unknown
 claims refuse effects. Legacy Orca records remain preserved.
 
+`CommandHostRuntime.fence_cleanup_scopes` reaches the scope reader through
+`runtime.local_pty_head.fence_cleanup_scopes`; cleanup never imports the PTY
+substrate. Recorded scoped generations always use the selected runtime's stop,
+including after a retained terminal flag. An unrecorded terminal scope needs the
+existing runtime inventory's current native disappearance proof. Successful stop
+receipts must settle the exact run, generation, spec, role, task and workspace;
+the journal retains those receipts before proceeding. Deployed unscoped runs can
+reuse their confirmed stop receipt only after their launch identity is fenced.
+
+Missing Git proof does not erase independently recorded head ownership. The
+owner settles that exact head through its lifecycle and reports the unproven
+workspace as preserved. Failed or mismatched head settlement remains pending.
+
 Before removal, the owner verifies canonical paths, catalog binding, common-dir,
 registration, Git admin path/file, inode, branch and exact HEAD. It preserves
 tracked, untracked and ignored author work and unpublished commits. Only prompt

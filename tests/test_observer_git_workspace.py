@@ -104,7 +104,7 @@ class _HeadRuntime:
 
     def stop(self, run, initiator):
         self.events.append(f"head-stop:{run.spec.runtime}")
-        return SimpleNamespace(ok=True, reason="")
+        return SimpleNamespace(ok=True, reason="", run=run.finishing(initiator).exited())
 
     def forget_head(self, run_id: str) -> None:
         return None
@@ -218,7 +218,7 @@ class ObserverGitWorkspaceTests(unittest.TestCase):
         self.assertEqual(git(self.git_path, "rev-parse", "--abbrev-ref", "HEAD"), "HEAD")
         self.assertEqual(self.orca_argvs(), [])
 
-    def test_a_stop_over_a_worktree_already_gone_only_confirms_the_head(self) -> None:
+    def test_a_completed_stop_over_a_worktree_already_gone_reuses_its_durable_proof(self) -> None:
         launched = self.prepare(SUPERVISED_HEAD, self.host.observer_workspace(REF))
         record = self.record(launched, SUPERVISED_HEAD)
         self.stop(record)
@@ -226,21 +226,21 @@ class ObserverGitWorkspaceTests(unittest.TestCase):
 
         self.stop(record)
 
-        self.assertIn("head-confirmed-gone", self.host.events)
+        self.assertEqual(self.host.cleanup_owner.journal.summary()[0]["status"], "completed")
+        self.assertNotIn(f"head-stop:{LOCAL_PTY_RUNTIME}", self.host.events)
         self.assertEqual(self.orca_argvs(), [])
         self.assertNotIn(["worktree", "remove"], [argv[:2] for argv in self.worktree_argvs()])
 
-    def test_a_directory_git_never_registered_is_cleared_not_worked_around(self) -> None:
-        """A directory at the observer's path that is not a worktree of the observer repo is
-        removed and the worktree cut in its place, rather than placed beside it."""
+    def test_a_directory_git_never_registered_is_preserved_and_starts_no_head(self) -> None:
+        """A path supplies no destructive ownership proof for its existing contents."""
         self.git_path.mkdir(parents=True)
         (self.git_path / "SPRINT.md").write_text("stale\n", encoding="utf-8")
 
-        launched = self.prepare(SUPERVISED_HEAD, self.host.observer_workspace(REF))
+        with self.assertRaises(HostError):
+            self.prepare(SUPERVISED_HEAD, self.host.observer_workspace(REF))
 
-        self.assertEqual(launched["workspace"], str(self.git_path))
-        self.assertEqual(git(self.git_path, "rev-parse", "--show-toplevel"), str(self.git_path))
-        self.assertEqual((self.git_path / "SPRINT.md").read_text(encoding="utf-8"), "# Sprint\n")
+        self.assertEqual((self.git_path / "SPRINT.md").read_text(encoding="utf-8"), "stale\n")
+        self.assertNotIn("head-start", self.host.events)
         self.assertEqual(self.orca_argvs(), [])
 
     def test_a_worktree_git_refuses_to_cut_starts_no_head(self) -> None:

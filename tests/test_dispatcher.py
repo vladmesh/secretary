@@ -10680,13 +10680,7 @@ class ObserverLaunchDeliveryRefusalTests(unittest.TestCase):
 
 
 class ObserverUnconditionalStopTests(unittest.TestCase):
-    """secretary-1462: the stop that is not the `stop` verb still owes the runtime its cleanup.
-
-    An observer's real stop is the worktree teardown, so it never reaches `HeadRuntime.stop` and
-    never reaches the forgetting that verb does for itself. The head runtime is built once per
-    `CommandHostRuntime` and lives as long as the production loop, so without this every head the
-    loop ever launched leaves an epoch, an output mark and an admission entry behind it.
-    """
+    """Observer settlement reaches its durable owner and forgets only after its receipt."""
 
     def setUp(self) -> None:
         from types import SimpleNamespace
@@ -10713,7 +10707,10 @@ class ObserverUnconditionalStopTests(unittest.TestCase):
             ).to_json(),
         )
         self.torn_down: list[Any] = []
-        self.host._stop_observer_head = self.torn_down.append  # type: ignore[method-assign]
+        def cleanup(record):
+            self.torn_down.append(record)
+            return {"status": "completed", "reason": ""}
+        self.host.cleanup_owner = SimpleNamespace(cleanup_observer=cleanup)
 
     def test_an_unconditional_observer_stop_leaves_nothing_of_the_head_in_the_runtime(self) -> None:
         activity = self.host.head_runtime_for(LOCAL_PTY_RUNTIME).activity

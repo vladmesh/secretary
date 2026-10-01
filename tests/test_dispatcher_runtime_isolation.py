@@ -111,7 +111,8 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             record = _record(str(Path(tmp) / "task"))
             run = HeadRun(run_id="fixture-run", spec=HeadSpec(profile_id="fixture", adapter="unknown", runtime=LOCAL_PTY_RUNTIME),
                           workspace=record.workspace, task_ref=TaskRef.card("secretary-1"))
-            backend = SimpleNamespace(stop=lambda *a: (host.effects.append("stop") or SimpleNamespace(ok=True)))
+            backend = SimpleNamespace(stop=lambda run, initiator: (host.effects.append("stop") or SimpleNamespace(
+                ok=True, run=run.finishing(initiator).exited())))
             host.head_runtime_for = lambda run: backend
             owner = CleanupOwner(SimpleNamespace(data_dir=Path(tmp), host=host))
             intent = {"task": {"ref": "secretary-1"}, "record": {"workspace": record.workspace}, "heads": [run.to_json()]}

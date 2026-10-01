@@ -20,7 +20,7 @@ from secretary.dispatch.observer import ObserverRecord
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.types import HostError
 from secretary.observer_root import observer_root_repo
-from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
+from secretary.runtime.head import HeadRun, HeadSpec, StopInitiator, TaskRef
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 
 
@@ -71,7 +71,8 @@ class OwnedCleanupTests(unittest.TestCase):
 
     def stop(self, run, initiator):
         self.stops.append((run.run_id, run.scope_generation))
-        return SimpleNamespace(ok=not self.stop_failure, reason="simulated stop failure")
+        return SimpleNamespace(ok=not self.stop_failure, reason="simulated stop failure",
+                               run=run.finishing(initiator).exited())
 
     def settle_claim(self, task, worker):
         self.assertEqual(task["claim"]["worker"], worker)
@@ -301,6 +302,63 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertEqual(result["status"], "preserved")
         self.assertTrue(self.repo.exists())
 
+    def test_missing_git_proof_still_settles_the_exact_recorded_head(self):
+        self.head()
+        self.record.workspace = str(self.repo)
+        self.record.worker_head_run["workspace"] = str(self.repo)
+        result = self.owner.cleanup(self.task, self.record, "inactive")
+        self.assertEqual(result["status"], "preserved", result["reason"])
+        self.assertTrue(result["progress"]["heads_stopped"])
+        self.assertEqual(self.stops, [("run-worker", "generation-1")])
+        self.assertTrue(self.repo.exists())
+
+    def test_unscoped_stop_receipt_survives_crash_and_replay_without_a_second_stop(self):
+        run = self.head(generation="")
+        def stop(run, initiator):
+            self.stops.append((run.run_id, run.scope_generation))
+            return SimpleNamespace(ok=True, reason="", run=run.finishing(initiator).exited())
+        self.backend.stop = stop
+        key = self.request()
+        with mock.patch.object(self.owner, "_remove_workspace", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.owner.replay_one(key)
+        saved = self.owner.journal.read()["intents"][key]
+        self.assertTrue(HeadRun.from_json(saved["heads"][-1]).settled)
+        self.assertEqual(CleanupOwner(self.runtime).replay_one(key)["status"], "completed")
+        self.assertEqual(self.stops, [(run.run_id, "")])
+
+    def test_a_stop_receipt_for_another_generation_never_authorizes_git_effects(self):
+        from dataclasses import replace
+        run = self.head()
+        settled = replace(run.finishing(StopInitiator(actor="test")).exited(), scope_generation="replacement")
+        self.backend.stop = lambda *args: SimpleNamespace(ok=True, reason="", run=settled)
+        result = self.owner.cleanup(self.task, self.record, "done")
+        self.assertEqual(result["status"], "pending")
+        self.assertIn("does not settle", result["reason"])
+        self.assertTrue(self.workspace.exists())
+
+    def test_a_bare_ok_stop_without_a_settled_run_is_pending(self):
+        self.head()
+        self.backend.stop = lambda *args: SimpleNamespace(ok=True)
+        result = self.owner.cleanup(self.task, self.record, "done")
+        self.assertEqual(result["status"], "pending")
+        self.assertFalse(result["progress"].get("heads_stopped", False))
+        self.assertTrue(self.workspace.exists())
+
+    def test_a_settled_scoped_run_still_reaches_the_runtime_empty_proof_on_replay(self):
+        self.head()
+        key = self.request()
+        with mock.patch.object(self.owner, "_remove_workspace", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.owner.replay_one(key)
+        self.stop_failure = True
+        result = CleanupOwner(self.runtime).replay_one(key)
+        self.assertEqual(result["status"], "pending")
+        self.assertFalse(result["progress"]["heads_stopped"])
+        self.assertIn("has not verified", self.owner.journal.admission_refusal(self.task["ref"]))
+        self.assertEqual(self.stops, [("run-worker", "generation-1"), ("run-worker", "generation-1")])
+        self.assertTrue(self.workspace.exists())
+
     def test_unreadable_journal_never_adopts_residue(self):
         self.request()
         self.owner.journal.path.write_text("unreadable")
@@ -321,6 +379,14 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertFalse(self.owner.journal.path.exists())
         args = argparse.Namespace(instance="unused", residue_replay=True, residue_inventory=False, limit=20)
         self.runtime.cleanup = self.owner
+        with mock.patch("secretary.dispatch.bootstrap.runtime_from_args", return_value=self.runtime), mock.patch("builtins.print") as output:
+            args.residue_replay = False
+            args.residue_inventory = True
+            self.assertEqual(run_residue_maintenance(args), 0)
+        self.assertEqual(len(json.loads(output.call_args.args[0])["residue"]), 2)
+        self.assertFalse(self.owner.journal.path.exists(), "public inventory must remain read-only")
+        args.residue_replay = True
+        args.residue_inventory = False
         with mock.patch("secretary.dispatch.bootstrap.runtime_from_args", return_value=self.runtime), mock.patch("builtins.print") as output:
             self.assertEqual(run_residue_maintenance(args), 0)
         rendered = json.loads(output.call_args.args[0])
@@ -344,6 +410,7 @@ class OwnedCleanupTests(unittest.TestCase):
         ScopedHeadLifecycle("other-run", 128, generation="new-generation").persist(
             run_dir, role="worker", task="card:sample-1", workspace=str(self.workspace))
         self.host._local_pty_root = lambda: root
+        self.host.fence_cleanup_scopes = lambda *args: CommandHostRuntime.fence_cleanup_scopes(self.host, *args)
         result = self.owner.replay_one(key)
         self.assertEqual(result["status"], "pending")
         self.assertIn("newer scope", result["reason"])
@@ -369,8 +436,57 @@ class OwnedCleanupTests(unittest.TestCase):
         run_dir.mkdir(parents=True)
         (run_dir / "scope-owner.json").write_text("unreadable")
         self.host._local_pty_root = lambda: root
+        self.host.fence_cleanup_scopes = lambda *args: CommandHostRuntime.fence_cleanup_scopes(self.host, *args)
         self.assertEqual(self.owner.replay_one(key)["status"], "pending")
         self.assertTrue(self.workspace.exists())
+
+    def test_scope_binding_and_path_substitution_refuse_before_stop(self):
+        from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+        run = self.head()
+        root = self.root / "heads"
+        directory = root / run.run_id
+        directory.mkdir(parents=True)
+        owner = ScopedHeadLifecycle(run.run_id, 128, generation=run.scope_generation)
+        owner.persist(directory, role="worker", task="card:foreign", workspace=str(self.workspace))
+        self.host._local_pty_root = lambda: root
+        self.host.fence_cleanup_scopes = lambda *args: CommandHostRuntime.fence_cleanup_scopes(self.host, *args)
+        key = self.request()
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending")
+        self.assertIn("binding differs", result["reason"])
+        evidence = owner.read_owner(directory)
+        evidence["task"] = "card:sample-1"
+        owner.update_owner(directory, evidence)
+        owner_path = directory / "scope-owner.json"
+        owner_path.rename(directory / "borrowed.json")
+        owner_path.symlink_to(directory / "borrowed.json")
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending")
+        self.assertEqual(self.stops, [])
+        self.assertTrue(self.workspace.exists())
+
+    def test_unknown_terminal_scope_needs_supported_native_disappearance_proof(self):
+        from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+        root = self.root / "heads"
+        directory = root / "old-run"
+        directory.mkdir(parents=True)
+        ScopedHeadLifecycle("old-run", 128, generation="old").persist(
+            directory, role="worker", task="card:sample-1", workspace=str(self.workspace))
+        record = ScopedHeadLifecycle.read_owner(directory)
+        record.update(launch_allowed=False, cleanup_complete=True)
+        ScopedHeadLifecycle.update_owner(directory, record)
+        self.host._local_pty_root = lambda: root
+        self.host.fence_cleanup_scopes = lambda *args: CommandHostRuntime.fence_cleanup_scopes(self.host, *args)
+        key = self.request()
+        with mock.patch("secretary.runtime.local_pty_head.runtime_scope_inventory", return_value=SimpleNamespace(
+                errors={}, disappeared=set())):
+            result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending")
+        self.assertTrue(self.workspace.exists())
+        with mock.patch("secretary.runtime.local_pty_head.runtime_scope_inventory", return_value=SimpleNamespace(
+                errors={}, disappeared={record["unit"]})):
+            result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "completed", result["reason"])
 
     def test_replacement_admission_refuses_unsettled_old_heads(self):
         self.head()

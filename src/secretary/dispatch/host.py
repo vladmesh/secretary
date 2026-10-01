@@ -836,6 +836,7 @@ class CommandHostRuntime:
         # save. Its durable-state owner installs this only while it holds the record's file: this
         # host has a record, not that file. Unset, a run reaches disk with the tick's records.
         self.commit_state: Callable[[], None] | None = None
+        self.cleanup_owner: Any | None = None
         # The first preflight fixes a provider source's baseline before its pane exists. A launch
         # may attest the same run again immediately before opening that pane, but that second
         # read must not replace the durable baseline with a listing taken later in bring-up.
@@ -2512,6 +2513,15 @@ class CommandHostRuntime:
             )
             if not receipt.ok:
                 raise HostError(f"the {role} head of {workspace} was not stopped: {receipt.reason}")
+
+    def fence_cleanup_scopes(self, workspace: str, task: head_ops.TaskRef,
+                             runs: Sequence[head_ops.HeadRun]) -> None:
+        """Read scope ownership through the runtime's supported boundary."""
+        from secretary.runtime.local_pty_head import fence_cleanup_scopes
+        try:
+            fence_cleanup_scopes(Path(self._local_pty_root()), workspace, task, runs)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise HostError(f"cleanup scope evidence unavailable: {exc}") from exc
 
     def stop_head(self, record: DispatcherRecord, kind: str, initiator: str = STOPPED_BY_DISPATCHER) -> None:
         """Stop one role's head through the head operation, recording who ended it."""
