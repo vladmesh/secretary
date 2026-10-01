@@ -361,6 +361,54 @@ class OwnershipTests(unittest.TestCase):
                 self.assertEqual(stopped.run, run)
                 self.assertEqual(stopped.run.stopped_by, initiator)
 
+    def test_absent_cgroup_settles_exact_reviewer_generation_without_pid_or_loaded_unit(self) -> None:
+        owner = self.owner("absent-reviewer")
+        initiator = StopInitiator(actor="dispatcher", reason="green review")
+        run = HeadRun(run_id=owner.run_id, spec=HeadSpec.from_profile("fixture", {"adapter": "codex"}),
+                      workspace=str(self.root), task_ref=TaskRef.card("card:fixture"), role="reviewer",
+                      scope_generation=owner.generation).finishing(initiator)
+        runtime = LocalPtyHeadRuntime(self.root, head_process_status=head_process_status, stop_timeout=0)
+        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run") as backend:
+            stopped = runtime.stop(run, initiator)
+        self.assertTrue(stopped.ok, stopped.reason)
+        self.assertTrue(stopped.run.settled)
+        self.assertEqual(stopped.run.scope_generation, owner.generation)
+        proof = ScopedHeadLifecycle.read_owner(owner.directory)
+        self.assertFalse(proof["launch_allowed"])
+        self.assertTrue(proof["cleanup_complete"])
+        backend.assert_not_called()
+
+    def test_absent_cgroup_does_not_waive_a_live_launch_group(self) -> None:
+        owner = self.owner("live-launch")
+        record = ScopedHeadLifecycle.read_owner(owner.directory)
+        record.update(launch_pid=123456, launch_identity="fixture-start:1")
+        ScopedHeadLifecycle.update_owner(owner.directory, record)
+        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.launch_group_present", return_value=True), mock.patch(
+            "secretary.runtime.head.local_pty.scoped_lifecycle.os.killpg", side_effect=PermissionError("fixture"),
+        ), mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
+                      return_value=subprocess.CompletedProcess([], 1, stderr=b"refused")):
+            with self.assertRaisesRegex(MemoryScopeError, "launch group"):
+                owner.stop_and_prove_empty()
+        self.assertFalse(ScopedHeadLifecycle.read_owner(owner.directory)["cleanup_complete"])
+
+    def test_unreadable_membership_cannot_settle_exact_generation(self) -> None:
+        owner = self.owner("unreadable-membership")
+        membership = self.membership(owner)
+        read = Path.read_text
+
+        def unreadable(path, *args, **kwargs):
+            if path == membership:
+                raise PermissionError("membership unavailable")
+            return read(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", unreadable), mock.patch(
+            "secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
+            return_value=subprocess.CompletedProcess([], 0, stderr=b""),
+        ):
+            with self.assertRaisesRegex(MemoryScopeError, "verify empty head scope"):
+                owner.stop_and_prove_empty()
+        self.assertFalse(ScopedHeadLifecycle.read_owner(owner.directory)["cleanup_complete"])
+
 
 class PoTerminalOwnershipTests(unittest.TestCase):
     def setUp(self) -> None:
