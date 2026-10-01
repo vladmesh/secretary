@@ -191,23 +191,28 @@ class HostSurfaceContractTests(unittest.TestCase):
         self.assertIn("gate_check", used)
         self.assertIn("teardown", used)
         self.assertIn("prepare_worker", used)
+        self.assertIn("mode", used)
 
     def test_fake_host_covers_the_real_host_surface(self) -> None:
         for name in sorted(_used_attributes("host")):
             with self.subTest(method=name):
                 self.assertTrue(
-                    hasattr(CommandHostRuntime, name),
+                    _declares(CommandHostRuntime, name),
                     f"DispatcherRuntime calls host.{name}, missing on CommandHostRuntime",
                 )
                 self.assertTrue(
-                    hasattr(FakeHost, name),
+                    _declares(FakeHost, name),
                     f"DispatcherRuntime calls host.{name}, missing on FakeHost",
                 )
-                self.assertEqual(
-                    _signature(getattr(CommandHostRuntime, name)),
-                    _signature(getattr(FakeHost, name)),
-                    f"FakeHost.{name} signature drifted from CommandHostRuntime.{name}",
-                )
+                real = getattr(CommandHostRuntime, name, None)
+                fake = getattr(FakeHost, name, None)
+                self.assertEqual(callable(real), callable(fake), f"FakeHost.{name} kind drifted")
+                if callable(real):
+                    self.assertEqual(
+                        _signature(real),
+                        _signature(fake),
+                        f"FakeHost.{name} signature drifted from CommandHostRuntime.{name}",
+                    )
 
     def test_fake_catalog_covers_the_real_catalog_surface(self) -> None:
         # The gate reads the catalog through the host, so its calls count as runtime usage too.

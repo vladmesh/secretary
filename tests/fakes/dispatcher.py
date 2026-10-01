@@ -585,6 +585,7 @@ class FakeCatalog:
 class FakeHost:
     def __init__(self, root: Path, catalog: FakeCatalog | None = None) -> None:
         self.root = root
+        self.mode = "noop"
         # The real task-document selector reads the dispatcher's card audit; the fixture that
         # builds the dispatcher hands its writer's audit in (`tests/dispatcher_fixtures.py`).
         self.audit: Any = None

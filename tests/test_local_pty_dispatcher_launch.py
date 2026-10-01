@@ -24,6 +24,7 @@ import sys
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -54,6 +55,7 @@ from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from secretary.runtime.tui_delivery import READINESS_BUSY
 from secretary.runtime.tui_delivery import delivery_readiness_state as _delivery_readiness_state
 from tests.fakes.dispatcher import FakeCatalog
+from tests.production_runtime_fixtures import registered_production_runtime
 
 PROFILE = "claude-local-pty"
 #: The stand-in head: it writes down which process it is and what it was run with, then stays up.
@@ -642,11 +644,17 @@ class ObserverTaskIdentityTests(unittest.TestCase):
         from types import SimpleNamespace
 
         from secretary.dispatch.cleanup import CleanupOwner
-        host = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
+        host = CommandHostRuntime(
+            FakeCatalog(), self.root / "data", mode="real",
+            production_runtime=registered_production_runtime(self.root),
+        )  # type: ignore[arg-type]
         record = self._record()
         record.workspace = host.observer_workspace("sprint:1459")
-        record.head_run["workspace"] = record.workspace
-        record.head_run["spec"]["runtime"] = LOCAL_PTY_RUNTIME
+        run = replace(self.run, workspace=record.workspace,
+                      spec=replace(self.run.spec, runtime=LOCAL_PTY_RUNTIME))
+        record.head_run = run.to_json()
+        record = ObserverRecord.from_json(record.to_json())
+        self.assertEqual(HeadRun.from_json(record.head_run), run)
         runtime = SimpleNamespace(data_dir=host.data_dir, host=host,
                                   sprints=SimpleNamespace(show=lambda *a, **k: {
                                       "id": "sprint-1459", "ref": record.sprint, "status": "open"}))

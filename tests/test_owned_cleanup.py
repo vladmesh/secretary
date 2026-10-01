@@ -22,6 +22,8 @@ from secretary.dispatch.types import HostError
 from secretary.observer_root import observer_root_repo
 from secretary.runtime.head import HeadRun, HeadSpec, StopInitiator, TaskRef
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from tests.fakes.dispatcher import FakeCatalog
+from tests.production_runtime_fixtures import registered_production_runtime
 
 
 def git(repo: Path, *args: str) -> str:
@@ -554,6 +556,45 @@ class OwnedCleanupTests(unittest.TestCase):
             self.assertEqual(self.owner.cleanup(self.task, self.record, "done")["status"], "completed")
         thread.join(2)
         self.assertTrue(release.is_set())
+
+    def test_public_observer_stop_retains_unreadable_registration_and_retries(self):
+        host = CommandHostRuntime(
+            FakeCatalog(), self.data, mode="real",
+            production_runtime=registered_production_runtime(self.root),
+        )
+        self.runtime.host = host
+        self.runtime.sprints = SimpleNamespace(show=lambda *a, **k: {
+            "id": "sprint-1", "ref": "sprint:1", "status": "closed"})
+        host.cleanup_owner = self.owner
+        path = Path(host.observer_workspace("sprint:1"))
+        host._create_git_observer_workspace(path)
+        run = HeadRun(run_id="observer-run", spec=HeadSpec(
+            profile_id="test", adapter="unknown", runtime=LOCAL_PTY_RUNTIME),
+            workspace=str(path), task_ref=TaskRef.sprint("sprint:1"), role="observer")
+        observer = ObserverRecord(sprint="sprint:1", workspace=str(path), head_possible=True,
+                                  head_run=run.to_json())
+        self.backend.forget_head = mock.Mock()
+        with mock.patch.object(host, "head_runtime_for", return_value=self.backend):
+            self.stop_failure = True
+            with self.assertRaisesRegex(HostError, "stop pending"):
+                host.stop_observer(observer)
+            self.stop_failure = False
+            with mock.patch("secretary.dispatch.cleanup._registered",
+                            side_effect=HostError("worktree registrations are unreadable")):
+                with self.assertRaisesRegex(HostError, "unreadable"):
+                    host.stop_observer(observer)
+            intent = next(iter(self.owner.journal.read()["intents"].values()))
+            self.assertEqual(intent["status"], "pending")
+            self.assertTrue(intent["progress"]["heads_stopped"])
+            self.assertTrue(path.is_dir())
+            self.assertTrue(host._git_observer_worktree_listed(str(path)))
+            self.backend.forget_head.assert_not_called()
+            host.stop_observer(observer)
+        self.assertFalse(path.exists())
+        self.assertFalse(host._git_observer_worktree_listed(str(path)))
+        self.assertEqual(self.owner.journal.summary()[0]["status"], "completed")
+        self.assertEqual(len(self.stops), 2, "retry reuses the second attempt's settled receipt")
+        self.backend.forget_head.assert_called_once_with(run.run_id)
 
     def test_observer_closed_handoff_waits_for_cards_and_preserves_user_work(self):
         self.request("close")
