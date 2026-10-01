@@ -2540,6 +2540,9 @@ class CommandHostRuntime:
     def stop_review_head(self, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER) -> None:
         """End this card's reviewer through the head operation, recording who ended it."""
         run = self.review_lifecycle_run(record)
+        if run.settled:
+            self._confirm_settled_head(run, "reviewer")
+            return
         receipt = self.head_runtime_for(run).stop(
             run,
             head_ops.StopInitiator(actor=initiator),
@@ -2557,6 +2560,16 @@ class CommandHostRuntime:
             raise HostError(receipt.reason)
         self._commit_review_run(record, receipt.run)
 
+    def _confirm_settled_head(self, run: head_ops.HeadRun, role: str) -> None:
+        """A stop of a head whose end was already confirmed keeps that receipt as the record.
+
+        Nothing is minted or committed: a fresh identity would name a head that was never launched
+        (secretary-1918). The pid file is still read through the settled run, so a live foreign
+        process there is fenced and this run, should it still be alive, is taken down.
+        """
+        self._guard_head_run(run, role)
+        self._confirm_head_process_gone(run.pid_file, run=run, role=role)
+
     def _commit_review_run(self, record: DispatcherRecord, run: head_ops.HeadRun) -> None:
         """Write this reviewer's run onto the record, flushing it when the caller lent us the state."""
         record.review_head_run = run.to_json()
@@ -2567,24 +2580,19 @@ class CommandHostRuntime:
         """This card's reviewer as the head operations see it."""
         stored = record.review_head_run if isinstance(record.review_head_run, dict) else {}
         run: head_ops.HeadRun | None = None
-        runtime = ""
         if stored.get("run_id"):
             try:
                 run = head_ops.HeadRun.from_json(stored)
             except (head_ops.HeadRunError, head_ops.TaskRefError):
                 run = None
-            if run is not None and run.settled and record.owns_head(REVIEW_ROLE):
-                runtime = run.spec.runtime
-                run = None
         if run is None:
-            # A fresh identity keeps the backend a settled run named; a record with no run at all
-            # was written before runs were recorded, and carries the record rule: a legacy one.
+            # A record with no run at all was written before runs were recorded, and carries the
+            # record rule: a legacy one. A settled run is kept: it is the truthful stop receipt.
             run = head_ops.HeadRun(
                 run_id=head_ops.new_run_id(),
                 spec=HeadSpec(
                     profile_id=record.review_head,
                     adapter=self._prompt_adapter(record.review_run, record.review_head),
-                    **({"runtime": runtime} if runtime else {}),
                 ),
                 workspace=record.workspace,
                 # The reviewer's own worker id is the card's, as the claim built it: `<ref>-<slug>`.
@@ -2602,6 +2610,9 @@ class CommandHostRuntime:
     def stop_worker_head(self, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER) -> None:
         """End this card's worker through the head operation, recording who ended it."""
         run = self.worker_lifecycle_run(record)
+        if run.settled:
+            self._confirm_settled_head(run, "worker")
+            return
         receipt = self.head_runtime_for(run).stop(
             run,
             head_ops.StopInitiator(actor=initiator),
@@ -2645,26 +2656,19 @@ class CommandHostRuntime:
         """This card's worker as the head operations see it."""
         stored = record.worker_head_run if isinstance(record.worker_head_run, dict) else {}
         run: head_ops.HeadRun | None = None
-        runtime = ""
         if stored.get("run_id"):
             try:
                 run = head_ops.HeadRun.from_json(stored)
             except (head_ops.HeadRunError, head_ops.TaskRefError):
                 run = None
-            if run is not None and run.settled and record.owns_head(WORKER_ROLE):
-                # The record still names a head while the run says that head was confirmed gone: a
-                # fresh identity below keeps the stop from skipping a head already confirmed once.
-                runtime = run.spec.runtime
-                run = None
         if run is None:
-            # A fresh identity keeps the backend a settled run named; a record with no run at all
-            # was written before runs were recorded, and carries the record rule: a legacy one.
+            # A record with no run at all was written before runs were recorded, and carries the
+            # record rule: a legacy one. A settled run is kept: it is the truthful stop receipt.
             run = head_ops.HeadRun(
                 run_id=head_ops.new_run_id(),
                 spec=HeadSpec(
                     profile_id=record.head,
                     adapter=self._prompt_adapter(record.worker_run, record.head),
-                    **({"runtime": runtime} if runtime else {}),
                 ),
                 workspace=record.workspace,
                 # No card reference reaches this call, but the worker id carries one: `<ref>-<slug>`

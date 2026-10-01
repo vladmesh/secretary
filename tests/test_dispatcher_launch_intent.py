@@ -4099,10 +4099,11 @@ class WorkerLifecycleRunTests(unittest.TestCase):
         record.worker_head_run = run.to_json()
         return record
 
-    def test_a_confirmed_stop_is_not_continued_over_a_record_that_still_names_a_head(self) -> None:
-        """An `exited` run is finished with. A record that still names a head afterwards is naming
-        something that is not that run, so the next stop gets a fresh identity rather than
-        reporting a live head as already stopped — on the backend the finished run named."""
+    def test_a_confirmed_stop_is_kept_over_a_record_that_still_names_a_head(self) -> None:
+        """An `exited` run is finished with, and its receipt is the truthful record. A record that
+        still names a head afterwards gets no fresh identity: one minted here was never launched,
+        named the worker id as its card and poisoned Done cleanup (secretary-1918). The stop of a
+        settled run re-reads its pid file instead (`_confirm_settled_head`)."""
         exited = (
             head_ops.HeadRun(
                 run_id="run-1",
@@ -4119,8 +4120,9 @@ class WorkerLifecycleRunTests(unittest.TestCase):
 
         run = self.host.worker_lifecycle_run(record)
 
-        self.assertNotEqual(run.run_id, exited.run_id)
-        self.assertEqual(run.lifecycle, "spawned")
+        self.assertEqual(run.run_id, exited.run_id)
+        self.assertEqual(run.lifecycle, "exited")
+        self.assertEqual(run.task_ref, head_ops.TaskRef.card(REF))
         self.assertEqual(run.spec.runtime, LOCAL_PTY_RUNTIME)
 
 

@@ -3253,6 +3253,12 @@ def head_run_directory(root: str | os.PathLike[str], run_id: str) -> Path:
         raise ValueError(str(exc)) from None
 
 
+def head_run_pid_file(root: str | os.PathLike[str], run_id: str) -> Path:
+    """The heartbeat `run_id`'s own run directory holds: where a stop of that run reads its launch
+    identity when the run is handed over without a pid file of its own."""
+    return head_run_directory(root, run_id) / protocol.PID_FILE_NAME
+
+
 def fence_cleanup_scopes(root: Path, workspace: str, task: TaskRef,
                          runs: Sequence[HeadRun], *, recorded_only: bool = False) -> None:
     """Refuse Git settlement while an unrecorded generation owns its target.
