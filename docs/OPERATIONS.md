@@ -1585,7 +1585,8 @@ usage error, and nothing is written.
 
    `manifest` has one entry for every residue row and every journaled intent of the project:
    - `target`: the intent key, `ref@tip` for branch-only residue, or `worktree:PATH` for a foreign
-     worktree. A row with recorded owners names their intent keys in `targets`.
+     worktree. A row with recorded owners of this project names their intent keys in `targets`. A
+     row whose recorded owners conflict gets a `ref@tip` refusal entry, and is never replayable.
    - `effects`, in execution order: `request-settlement` (an owned attempt of a Done or archived
      card), `stop-head` (run ids), `remove-worktree` (path, identity, dirty-check result),
      `delete-ref` (ref and tip, base ref and base tip, merged and published proof), `settle-claim`.
@@ -1601,8 +1602,10 @@ usage error, and nothing is written.
      accepted; `card.started` by any other role is not);
    - no worktree is registered for the ref.
 
-   Its replay then deletes the ref only through the exact-tip transaction, so an unmerged or
-   unpublished ref stays preserved.
+   A ref whose card belongs to another project is reported as foreign residue, and that project's
+   audit is never read. The replay deletes the ref only through the exact-tip transaction, so an
+   unmerged or unpublished ref stays preserved. Git is read without optional locks, so the inventory
+   never refreshes an index.
 
 2. Replay the targets you chose, each with the digest you read, in the same order (at most 20):
 
@@ -1611,8 +1614,11 @@ usage error, and nothing is written.
 
    Before any effect the target's manifest is recomputed. A different digest, an unknown target or
    another project's target is `refused` with nothing written. A branch-only target that is not
-   `eligible` reports its outcome and is not adopted. Other intents and the replay cursor stay as
-   they were. `replay` reports each target's `status`, `reason` and `progress`. If a target is
+   `eligible` reports its outcome and is not adopted. An eligible one is adopted with the reviewed
+   identity only: if the ref or base tip has moved since, it is `refused` and nothing is journaled.
+   The ref transaction verifies the reviewed tip and base tip, so a later advance leaves the target
+   `pending` and deletes nothing. Every save writes back only the target's own intent, so other
+   intents and the replay cursor stay byte for byte as they were. `replay` reports each target's `status`, `reason` and `progress`. If a target is
    refused, read the manifest again before you retry.
 
 Code never chooses the targets. Protected candidates and audit branches stay until an operator

@@ -1996,7 +1996,108 @@ class OwnedCleanupTests(unittest.TestCase):
         target = self.branch_only([{"kind": "card.started", "actor": {"role": "dispatcher", "id": "secretary-production"}}])
         self.task["project"] = "instance"
         entry = self.entry(self.owner.inventory(project="sample"), target)
-        self.assertEqual((entry["outcome"], entry["reason"]), ("preserved", "card/project or audited claim proof missing"))
+        self.assertEqual((entry["outcome"], entry["reason"]),
+                         ("preserved", "foreign or project-mismatch residue: card sample-1 belongs to project instance"))
+
+    # Review round 1 of secretary-1921: the reviewer's reproductions, now asserting the corrected behavior.
+
+    def test_branch_adoption_refuses_a_tip_absent_from_the_manifest(self):
+        target = self.branch_only([{"kind": "card.started", "actor": {"role": "dispatcher"}}])
+        entry = self.entry(self.owner.inventory(project="sample"), target)
+        git(self.repo, "commit", "--quiet", "--allow-empty", "-m", "new integration")
+        newer = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "update-ref", "refs/heads/main", self.base)
+        adopt = self.owner._adopt_branch
+        def concurrent_ref_change(task, repo, ref, tip, **kwargs):
+            # Another Git process advances the candidate and main after the digest matched.
+            git(repo, "update-ref", "refs/heads/main", newer)
+            git(repo, "update-ref", "refs/remotes/origin/main", newer)
+            git(repo, "update-ref", ref, newer)
+            return adopt(task, repo, ref, tip, **kwargs)
+        with mock.patch.object(self.owner, "_adopt_branch", side_effect=concurrent_ref_change):
+            result = self.owner.replay_targets("sample", [(target, entry["digest"])])
+        self.assertEqual((result[0]["status"], result[0]["replayed"]), ("refused", False))
+        self.assertIn("changed since the manifest was read", result[0]["reason"])
+        self.assertFalse(self.owner.journal.path.exists(), "nothing is journaled for a changed target")
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), newer)
+
+    def test_ref_transaction_refuses_a_base_advanced_after_adoption(self):
+        target = self.branch_only([{"kind": "card.started", "actor": {"role": "dispatcher"}}])
+        entry = self.entry(self.owner.inventory(project="sample"), target)
+        git(self.repo, "commit", "--quiet", "--allow-empty", "-m", "new integration")
+        newer = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "update-ref", "refs/heads/main", self.base)
+        replay = self.owner.replay_one
+        def advance_then_replay(key):
+            git(self.repo, "update-ref", "refs/heads/main", newer)
+            return replay(key)
+        with mock.patch.object(self.owner, "replay_one", side_effect=advance_then_replay):
+            result = self.owner.replay_targets("sample", [(target, entry["digest"])])
+        self.assertEqual(result[0]["status"], "pending")
+        self.assertIn("differs from the reviewed manifest", result[0]["reason"])
+        self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
+
+    def test_targeted_replay_keeps_an_unselected_foreign_intent_byte_identical(self):
+        _, foreign = self.second_project()
+        run = self.head().to_json()
+        key = self.request()
+        value = self.owner.journal.read()
+        value["intents"][foreign]["heads"] = [run, copy.deepcopy(run)]
+        # A legacy on-disk journal, accepted by read(), before its next checkpoint.
+        self.owner.journal.path.write_text(json.dumps(value, sort_keys=True))
+        before = json.dumps(value["intents"][foreign], sort_keys=True)
+        entry = self.entry(self.owner.inventory(project="sample"), key)
+        result = self.owner.replay_targets("sample", [(key, entry["digest"])])
+        self.assertEqual(result[0]["status"], "completed", result[0]["reason"])
+        stored = json.loads(self.owner.journal.path.read_text())
+        self.assertEqual(json.dumps(stored["intents"][foreign], sort_keys=True), before)
+        self.assertEqual(len(stored["intents"][foreign]["heads"]), 2)
+        self.assertIn(before, self.owner.journal.path.read_text())
+
+    def test_inventory_leaves_the_real_git_index_unrefreshed(self):
+        key = self.request()
+        index = Path(git(self.workspace, "rev-parse", "--absolute-git-dir")) / "index"
+        before = index.read_bytes()
+        file = self.workspace / "file"
+        stat = file.stat()
+        os.utime(file, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2000000000))
+        entry = self.entry(self.owner.inventory(project="sample"), key)
+        self.assertEqual(entry["outcome"], "eligible", entry["reason"])
+        self.assertEqual(index.read_bytes(), before)
+
+    def test_project_inventory_never_reads_a_foreign_cards_audit(self):
+        self.second_project()
+        git(self.repo, "branch", "pipeline/instance-2")
+        _, refs, patch = self.recorded_reads()
+        with patch:
+            inventory = self.owner.inventory(project="sample")
+        row = next(row for row in inventory["residue"] if row.get("ref") == "refs/heads/pipeline/instance-2")
+        self.assertEqual(row["reason"], "foreign or project-mismatch residue: card instance-2 belongs to project instance")
+        self.assertNotIn("instance-2", refs)
+        entry = self.entry(inventory, "refs/heads/pipeline/instance-2@" + self.base)
+        self.assertEqual(entry["outcome"], "preserved")
+
+    def test_conflicting_foreign_owner_gets_a_scoped_refusal_entry(self):
+        _, foreign = self.second_project()
+        from secretary.dispatch.cleanup import _identity
+        value = self.owner.journal.read()
+        value["intents"][foreign]["identity"] = _identity(self.repo, "", "pipeline/sample-1")
+        self.owner.journal.save(value)
+        before = self.owner.journal.path.read_bytes()
+        inventory = self.owner.inventory(project="sample")
+        row = next(row for row in inventory["residue"] if row.get("ref") == "refs/heads/pipeline/sample-1")
+        self.assertIn("recorded ownership conflicts", row["reason"])
+        self.assertEqual(row["targets"], [])
+        target = "refs/heads/pipeline/sample-1@" + self.base
+        self.assertEqual([entry["target"] for entry in inventory["manifest"]], [target])
+        entry = self.entry(inventory, target)
+        self.assertEqual((entry["outcome"], entry["reason"]), ("preserved", row["reason"]))
+        self.assertNotIn(foreign, json.dumps(inventory["manifest"]))
+        result = self.owner.replay_targets("sample", [(target, entry["digest"]), (foreign, entry["digest"])])
+        self.assertEqual([(item["status"], item["replayed"]) for item in result],
+                         [("preserved", False), ("refused", False)])
+        self.assertEqual(self.owner.journal.path.read_bytes(), before)
+        self.assertTrue(self.workspace.exists())
 
     def test_ref_with_a_worktree_is_preserved_despite_dispatcher_card_started(self):
         self.task["closed"] = True
