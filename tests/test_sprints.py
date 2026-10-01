@@ -3508,6 +3508,8 @@ class SprintCloseDecisionTests(SprintFixture):
         )
 
         self.assertEqual(result["disposed_tasks"], sorted([landed, dropped]))
+        self.assertEqual({item["ref"] for item in result["cleanup"]}, {landed, dropped})
+        self.assertTrue(all(item["status"] == "pending" for item in result["cleanup"]))
         # No card of the sprint is left in a working state on the closed contract.
         self.assertEqual(TaskReader(self.client).list(sprint=ref), [])  # type: ignore[arg-type]
         for reference in (landed, dropped):

@@ -343,6 +343,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="pack the instance repository outside any tick (run by its timer)",
     )
     _add_instance(maintenance, help="path to an instance dir or instance.yaml")
+    residue = maintenance.add_mutually_exclusive_group()
+    residue.add_argument("--residue-inventory", action="store_true",
+                         help="read owned and preserved Git residue without effects")
+    residue.add_argument("--residue-replay", action="store_true",
+                         help="capture proven archived residue and replay bounded cleanup")
+    maintenance.add_argument("--limit", type=int, default=20, help="cleanup replay bound (1..100)")
     maintenance.set_defaults(handler=run_instance_maintenance)
 
     project = subparsers.add_parser("project")
@@ -1906,6 +1912,8 @@ def run_backup_create(args: argparse.Namespace) -> int:
 
 
 def run_instance_maintenance(args: argparse.Namespace) -> int:
+    if getattr(args, "residue_inventory", False) or getattr(args, "residue_replay", False):
+        return run_residue_maintenance(args)
     from secretary.infra import instance_maintenance
     from secretary.runtime.paths import instance_dir
 
@@ -1918,6 +1926,28 @@ def run_instance_maintenance(args: argparse.Namespace) -> int:
     failed = bool(cleanup["findings"])
     print(json.dumps({"status": "failed" if failed else "ok", **result, "cleanup": cleanup}, sort_keys=True))
     return 1 if failed else 0
+
+
+def run_residue_maintenance(args: argparse.Namespace) -> int:
+    from secretary.dispatch.bootstrap import runtime_from_args
+    from secretary.dispatch.cleanup import ownership_lock
+    from secretary.dispatch.types import DispatcherError, HostError
+    try:
+        runtime = runtime_from_args(args.instance, None, host_mode="real", owner="instance-maintenance")
+        with ownership_lock(runtime.data_dir):
+            inventory = runtime.cleanup.inventory(catch_up=args.residue_replay)
+            replay = runtime.cleanup.replay(limit=args.limit) if args.residue_replay else []
+            result = {**inventory, "replay": [{"ref": item["task"]["ref"], "status": item["status"],
+                                              "reason": item["reason"], "progress": item["progress"]}
+                                             for item in replay]}
+            if args.residue_replay:
+                result.update(runtime.cleanup.inventory())
+        failed = any(row["status"] == "pending" for row in result["intents"] + result["residue"])
+        print(json.dumps({"status": "pending" if failed else "ok", **result}, sort_keys=True))
+        return 1 if failed else 0
+    except (DispatcherError, HostError, OSError) as exc:
+        print(json.dumps({"status": "pending", "error": str(exc)}, sort_keys=True))
+        return 1
 
 
 def run_backup_verify(args: argparse.Namespace) -> int:

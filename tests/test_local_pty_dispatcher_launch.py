@@ -24,6 +24,7 @@ import sys
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -54,6 +55,7 @@ from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from secretary.runtime.tui_delivery import READINESS_BUSY
 from secretary.runtime.tui_delivery import delivery_readiness_state as _delivery_readiness_state
 from tests.fakes.dispatcher import FakeCatalog
+from tests.production_runtime_fixtures import registered_production_runtime
 
 PROFILE = "claude-local-pty"
 #: The stand-in head: it writes down which process it is and what it was run with, then stays up.
@@ -639,9 +641,24 @@ class ObserverTaskIdentityTests(unittest.TestCase):
         self.assertEqual(head_process_status(pid_file, expected=expected)["state"], HEARTBEAT_LIVE_MATCH)
 
     def test_the_stop_paths_expect_the_single_prefix(self) -> None:
-        host = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
+        from types import SimpleNamespace
+
+        from secretary.dispatch.cleanup import CleanupOwner
+        host = CommandHostRuntime(
+            FakeCatalog(), self.root / "data", mode="real",
+            production_runtime=registered_production_runtime(self.root),
+        )  # type: ignore[arg-type]
         record = self._record()
         record.workspace = host.observer_workspace("sprint:1459")
+        run = replace(self.run, workspace=record.workspace,
+                      spec=replace(self.run.spec, runtime=LOCAL_PTY_RUNTIME))
+        record.head_run = run.to_json()
+        record = ObserverRecord.from_json(record.to_json())
+        self.assertEqual(HeadRun.from_json(record.head_run), run)
+        runtime = SimpleNamespace(data_dir=host.data_dir, host=host,
+                                  sprints=SimpleNamespace(show=lambda *a, **k: {
+                                      "id": "sprint-1459", "ref": record.sprint, "status": "open"}))
+        host.cleanup_owner = CleanupOwner(runtime)
         seen: list[str] = []
 
         def remember(*_args: object, **kwargs: object) -> None:
@@ -649,14 +666,18 @@ class ObserverTaskIdentityTests(unittest.TestCase):
 
         with (
             mock.patch.object(CommandHostRuntime, "_guard_head_run", side_effect=remember),
-            mock.patch.object(CommandHostRuntime, "_stop_observer_terminals", side_effect=remember),
-            mock.patch.object(CommandHostRuntime, "_confirm_head_process_gone", side_effect=remember),
-            mock.patch.object(CommandHostRuntime, "_git_observer_worktree_listed", return_value=True),
-            mock.patch.object(CommandHostRuntime, "_remove_git_observer_workspace"),
+            mock.patch.object(host, "head_runtime_for", return_value=SimpleNamespace(
+                stop=mock.Mock(side_effect=lambda run, initiator: SimpleNamespace(
+                    ok=True, reason="", run=run.finishing(initiator).exited())),
+                forget_head=mock.Mock())) as selected,
         ):
-            host._stop_observer_head(record)
+            host.stop_observer(record)
 
-        self.assertEqual(seen, ["sprint:1459"] * 3)
+        self.assertEqual(seen, ["sprint:1459"])
+        stopped = selected.return_value.stop.call_args.args[0]
+        self.assertEqual(sprint_task(stopped.task_ref.ref), "sprint:1459")
+        self.assertEqual(stopped.run_id, self.run.run_id)
+        self.assertEqual(host.cleanup_owner.journal.summary()[0]["status"], "preserved")
 
 
 if __name__ == "__main__":

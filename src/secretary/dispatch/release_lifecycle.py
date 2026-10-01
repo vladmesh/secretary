@@ -452,7 +452,7 @@ def release_effect(
     if blocked is not None:
         return blocked
     try:
-        runtime.host.teardown(record)
+        cleanup_receipt = runtime.host.teardown(record)
     except HostError as exc:
         # Cleanup is a provenance boundary, not best effort. A mismatch keeps the checkout and
         # prevents Done so the next tick cannot repeatedly run an already-failed release path.
@@ -483,7 +483,8 @@ def release_effect(
     )
     records.pop(ref, None)
     runtime.save_records(payload, records)
-    return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
+    return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "done",
+            **({"cleanup": cleanup_receipt} if isinstance(cleanup_receipt, dict) else {})}
 
 
 def require_completion_evidence(

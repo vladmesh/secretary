@@ -15,11 +15,13 @@ import traceback
 import unittest
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from secretary.board.sql_audit import SqlTaskAudit
 from secretary.board.sql_cards import BOARD_ID
 from secretary.dispatch import observer_fence as dispatcher_observer_fence
+from secretary.dispatch.cleanup import CleanupOwner
 from secretary.dispatch.heartbeat import heartbeat_identity
 from secretary.dispatch.host import CommandHostRuntime, InstanceCatalog
 from secretary.dispatch.launch import infrastructure_action
@@ -65,6 +67,7 @@ from secretary.dispatch.watchdog import initial_output_stall_seconds
 from secretary.dispatch.worker_lifecycle import head_run_binding
 from secretary.head_health import HeadReadiness
 from secretary.head_registry import canonical_heads
+from secretary.infra import git_worktree
 from secretary.runtime.role_env import (
     OBSERVER_GENERATION_ENV,
     OBSERVER_SPRINT_ENV,
@@ -94,6 +97,7 @@ from tests.fakes.observer import (
 from tests.dispatcher_fixtures import SupervisedBackend, supervised_run
 from tests.fanout_fixtures import accepted_transport_run
 from tests.observer_identity import as_observer, bind_observer
+from tests.production_runtime_fixtures import registered_production_runtime
 from tests.retired_board import LEGACY_ENV, legacy_runtime_lines
 from tests.sprint_close_fixtures import close_decisions, settle_dispatcher_work
 from tests.sql_backend_fixtures import card_store
@@ -5483,7 +5487,19 @@ class RealHostStopObserverTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.root = Path(self.tmpdir.name)
-        self.host, self.backend, self.workspace = _supervised_observer_host(self.root)
+        self.host = CommandHostRuntime(
+            FakeCatalog(), self.root / "data", mode="real",
+            production_runtime=registered_production_runtime(self.root),
+        )  # type: ignore[arg-type]
+        self.backend = SupervisedBackend().install(self.host)
+        self.workspace = Path(self.host.observer_workspace("sprint:1"))
+        self.host._create_git_observer_workspace(self.workspace)
+        runtime = SimpleNamespace(
+            data_dir=self.host.data_dir, host=self.host,
+            sprints=SimpleNamespace(show=lambda *a, **k: {
+                "id": "sprint-1", "ref": "sprint:1", "status": "open"}),
+        )
+        self.host.cleanup_owner = CleanupOwner(runtime)
         self.record = ObserverRecord(
             sprint="sprint:1",
             head="observer",
@@ -5492,14 +5508,10 @@ class RealHostStopObserverTests(unittest.TestCase):
             head_possible=True,
             head_run=_supervised_observer_run(self.workspace),
         )
-        self.removed: list[str] = []
-        for name, value in (
-            ("_git_observer_worktree_listed", lambda workspace: True),
-            ("_remove_git_observer_workspace", self.removed.append),
-        ):
-            patched = mock.patch.object(self.host, name, side_effect=value)
-            patched.start()
-            self.addCleanup(patched.stop)
+
+    def assert_workspace_retained(self) -> None:
+        self.assertTrue(self.workspace.is_dir())
+        self.assertTrue(self.host._git_observer_worktree_listed(str(self.workspace)))
 
     def test_a_live_foreign_observer_heartbeat_fences_the_head_stop_and_worktree_removal(self) -> None:
         pid_file = self.root / "foreign-observer.pid"
@@ -5535,11 +5547,8 @@ class RealHostStopObserverTests(unittest.TestCase):
             workspace=str(self.workspace),
             head_possible=True,
             pid_file=str(pid_file),
-            head_run={
-                "run_id": "observer-owned-run",
-                "task_ref": {"kind": "sprint", "ref": "sprint:1", "document": ""},
-                "leaf": "leaf-observer",
-            },
+            head_run=_supervised_observer_run(
+                self.workspace, leaf="leaf-observer", pid_file=str(pid_file)),
         )
 
         with mock.patch.object(self.host, "_signal_head") as signal_head:
@@ -5547,7 +5556,10 @@ class RealHostStopObserverTests(unittest.TestCase):
                 self.host.stop_observer(record)
 
         self.assertEqual(self.backend.stops, [], "no head stop is allowed")
-        self.assertEqual(self.removed, [], "no worktree removal is allowed")
+        self.assert_workspace_retained()
+        intent = next(iter(self.host.cleanup_owner.journal.read()["intents"].values()))
+        self.assertEqual(intent["status"], "pending")
+        self.assertFalse(intent["progress"]["heads_stopped"])
         signal_head.assert_not_called()
         self.assertIsNone(foreign.poll())
 
@@ -5566,7 +5578,8 @@ class RealHostStopObserverTests(unittest.TestCase):
         with self.assertRaisesRegex(HostError, "outlived the stop"):
             self.host.stop_observer(self.record)
 
-        self.assertEqual(self.removed, [], "the worktree stays under a head that would not go")
+        self.assert_workspace_retained()
+        self.assertEqual(self.host.cleanup_owner.journal.summary()[0]["status"], "pending")
 
     def test_a_refused_stop_keeps_the_record_and_marks_stop_pending(self) -> None:
         runtime = mock.Mock()
@@ -5577,37 +5590,51 @@ class RealHostStopObserverTests(unittest.TestCase):
 
         self.assertTrue(self.record.head_possible)
         self.assertEqual(self.record.workspace, str(self.workspace))
+        self.assert_workspace_retained()
 
     def test_a_head_that_is_stopped_but_a_worktree_that_will_not_go_is_a_failed_stop(self) -> None:
         """Otherwise the record is dropped while the worktree it named is still registered, and
         nothing is left pointing at it to clean it up."""
         runtime = mock.Mock()
         runtime.host = self.host
-        with mock.patch.object(
-            self.host,
-            "_remove_git_observer_workspace",
-            side_effect=HostError(f"the observer workspace at {self.workspace} could not be removed"),
-        ):
+        with mock.patch("secretary.dispatch.cleanup.git_worktree.remove", return_value=False):
             self.assertFalse(stop_observer_head(runtime, self.record))
 
-        self.assertEqual(self.backend.stops, [("observer-run-1", "dispatcher")])
+        self.assertEqual(self.backend.stops, [("observer-run-1", "secretary-dispatcher")])
         self.assertEqual(self.record.workspace, str(self.workspace))
+        self.assert_workspace_retained()
+        intent = next(iter(self.host.cleanup_owner.journal.read()["intents"].values()))
+        self.assertEqual(intent["status"], "pending")
+        self.assertTrue(intent["progress"]["heads_stopped"])
+
+        self.assertTrue(stop_observer_head(runtime, self.record))
+        self.assertFalse(self.workspace.exists())
+        self.assertFalse(self.host._git_observer_worktree_listed(str(self.workspace)))
+        self.assertEqual(self.host.cleanup_owner.journal.summary()[0]["status"], "completed")
+        self.assertEqual(len(self.backend.stops), 1, "the durable unscoped stop receipt survives retry")
 
     def test_an_unreadable_answer_is_not_an_absent_workspace(self) -> None:
-        """git failing to list its worktrees must not read as "nothing is running": that is how a
-        live head loses its record, and the next time the sprint opens a second head is put beside it."""
+        """Unreadable registration preserves the worktree and a retryable record after exact stop."""
         runtime = mock.Mock()
         runtime.host = self.host
-        with mock.patch.object(
-            self.host,
-            "_git_observer_worktree_listed",
-            side_effect=HostError("git worktree list failed: fatal: not a git repository"),
-        ):
+        # Capture exact registration before the Git answer becomes unreadable.
+        self.backend.stop_refusal = "stop not yet confirmed"
+        self.assertFalse(stop_observer_head(runtime, self.record))
+        self.backend.stops.clear()
+        self.backend.stop_refusal = ""
+        with mock.patch("secretary.dispatch.cleanup._registered",
+                        side_effect=HostError("cleanup worktree registrations are unreadable")):
             self.assertFalse(stop_observer_head(runtime, self.record))
 
         self.assertTrue(self.record.head_possible)
         self.assertEqual(self.record.workspace, str(self.workspace))
-        self.assertEqual(self.backend.stops, [])
+        self.assertEqual(self.backend.stops, [("observer-run-1", "secretary-dispatcher")])
+        self.assert_workspace_retained()
+        intent = next(iter(self.host.cleanup_owner.journal.read()["intents"].values()))
+        self.assertEqual(intent["status"], "pending")
+        self.assertIn("unreadable", intent["reason"])
+        self.assertTrue(intent["progress"]["heads_stopped"])
+        self.assertFalse(intent["progress"].get("workspace_removed", False))
 
     def test_the_pid_file_is_named_before_the_head_exists(self) -> None:
         self.assertEqual(self.host.observer_pid_file("sprint:1"), observer_pid_file("sprint:1"))
@@ -5641,7 +5668,10 @@ class RealHostObserverTeardownTests(unittest.TestCase):
         (self.data_dir / "bodies").mkdir(parents=True, exist_ok=True)
         self.board = card_store(self, dispatcher_seed(), instance_dir=self.data_dir)
         self.catalog = _ObserverCatalog(instance_dir=self.data_dir)
-        self.host = CommandHostRuntime(self.catalog, self.data_dir / "host", mode="real")  # type: ignore[arg-type]
+        self.host = CommandHostRuntime(
+            self.catalog, self.data_dir, mode="real",
+            production_runtime=registered_production_runtime(self.data_dir),
+        )  # type: ignore[arg-type]
         self.host.preflight_codex_run = accepted_transport_run  # type: ignore[method-assign]
         self.backend = SupervisedBackend().install(self.host)
         self.audit = task_audit_for(self.board)
@@ -5654,35 +5684,30 @@ class RealHostObserverTeardownTests(unittest.TestCase):
             self.host,  # type: ignore[arg-type]
             owner="secretary-pilot",
         )
-        # The observer's git worktree, as git would answer for it: cut, listed, removed.
-        self.registered = False
         self.worktree_create_fails = False
         self.removal_refused = False
-        for name, value in (
-            ("_create_git_observer_workspace", self._create),
-            ("_git_observer_worktree_listed", lambda workspace: self.registered),
-            ("_remove_git_observer_workspace", self._remove),
-        ):
-            patched = mock.patch.object(CommandHostRuntime, name, side_effect=value, autospec=False)
-            patched.start()
-            self.addCleanup(patched.stop)
-        run = mock.patch.object(
-            CommandHostRuntime, "_run", lambda _self, args, label, **kwargs: mock.Mock(stdout="", stderr="", returncode=0)
-        )
-        run.start()
-        self.addCleanup(run.stop)
+        self.create_workspace = self.host._create_git_observer_workspace
+        self.remove_worktree = git_worktree.remove
+        create = mock.patch.object(self.host, "_create_git_observer_workspace", side_effect=self._create)
+        create.start()
+        self.addCleanup(create.stop)
+        remove = mock.patch("secretary.dispatch.cleanup.git_worktree.remove", side_effect=self._remove)
+        remove.start()
+        self.addCleanup(remove.stop)
+
+    @property
+    def registered(self) -> bool:
+        return self.host._git_observer_worktree_listed(self.host.observer_workspace("sprint:1"))
 
     def _create(self, workspace: Path) -> Path:
         if self.worktree_create_fails:
             raise HostError("git worktree add failed for the observer workspace: fatal: bad object")
-        workspace.mkdir(parents=True, exist_ok=True)
-        self.registered = True
-        return workspace
+        return self.create_workspace(workspace)
 
-    def _remove(self, workspace: str) -> None:
+    def _remove(self, run, repo: Path, workspace: Path) -> bool:
         if self.removal_refused:
-            raise HostError(f"the observer workspace at {workspace} could not be removed")
-        self.registered = False
+            return False
+        return self.remove_worktree(run, repo, workspace)
 
     def observers(self) -> dict:
         return load_observers(self.runtime.production_state.load())
@@ -5720,22 +5745,28 @@ class RealHostObserverTeardownTests(unittest.TestCase):
         self.assertEqual(self.actions(stopped), ["observer-stopped"])
         self.assertFalse(self.registered)
         self.assertEqual(self.observers(), {})
+        self.assertFalse(Path(record.workspace).exists())
+        self.assertEqual(self.runtime.cleanup.journal.summary()[0]["status"], "completed")
 
     def test_a_bring_up_that_never_cut_a_workspace_leaves_nothing_to_remove(self) -> None:
-        """The stop asks git and takes its answer, rather than removing a worktree on the strength
-        of a path the record computed before the host was ever called."""
+        """An unmaterialized launch intent is settled without deleting an unproven path."""
         self.open_sprint()
         self.worktree_create_fails = True
 
         self.runtime.production_tick()
         self.close_sprint()
-        with mock.patch.object(CommandHostRuntime, "_remove_git_observer_workspace") as remove:
+        with mock.patch("secretary.dispatch.cleanup.git_worktree.remove") as remove:
             stopped = self.runtime.production_tick()
 
         self.assertEqual(self.actions(stopped), ["observer-stopped"])
         remove.assert_not_called()
         self.assertEqual(self.backend.starts, [])
         self.assertEqual(self.observers(), {})
+        self.assertFalse(self.registered)
+        intent = next(iter(self.runtime.cleanup.journal.read()["intents"].values()))
+        self.assertEqual(intent["status"], "preserved")
+        self.assertIn("missing exact", intent["reason"])
+        self.assertTrue(intent["progress"]["heads_stopped"])
 
     def test_a_worktree_that_will_not_go_keeps_the_closed_sprint_on_the_books(self) -> None:
         """A refused teardown of a workspace with no head behind it is still a failed stop: the
@@ -5753,6 +5784,10 @@ class RealHostObserverTeardownTests(unittest.TestCase):
         self.assertEqual(record.state, "stop-pending")
         self.assertTrue(record.workspace_live)
         self.assertTrue(self.registered)
+        intent = next(iter(self.runtime.cleanup.journal.read()["intents"].values()))
+        self.assertEqual(intent["status"], "pending")
+        self.assertTrue(intent["progress"]["heads_stopped"])
+        self.assertFalse(intent["progress"].get("workspace_removed", False))
 
         self.removal_refused = False
         retried = self.runtime.production_tick()
@@ -5760,6 +5795,8 @@ class RealHostObserverTeardownTests(unittest.TestCase):
         self.assertEqual(self.actions(retried), ["observer-stopped"])
         self.assertFalse(self.registered)
         self.assertEqual(self.observers(), {})
+        self.assertFalse(Path(record.workspace).exists())
+        self.assertEqual(self.runtime.cleanup.journal.summary()[0]["status"], "completed")
 
 
 class RealHostTuiObserverLaunchTests(unittest.TestCase):

@@ -13,11 +13,17 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary.broad_check import load_receipt, receipt_path, run_broad_check
+from secretary.dispatch import gate_lifecycle
 from secretary.dispatch.host import CommandHostRuntime
+from secretary.dispatch.cleanup import CleanupOwner
+from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
+from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from secretary.dispatch.runtime_provenance import RuntimeProvenance
 from secretary.dispatch.gate import GateResult
+from secretary.dispatch.gate_receipt import AcceptedGreenGate, mint_gate_receipt
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.types import HostError
+from tests.fakes.dispatcher import FakeHost
 
 
 def _observation(classification: str = "valid") -> RuntimeProvenance:
@@ -88,6 +94,40 @@ class _Host(CommandHostRuntime):
 
 
 class DispatcherRuntimeIsolationTests(unittest.TestCase):
+    def test_recording_host_observes_worker_vitality_during_gate_wait(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            host = FakeHost(Path(tmp))
+            runtime = SimpleNamespace(host=host)
+            observation = {"pid_status": {"state": "live-match"}}
+            with (
+                mock.patch.object(host, "worker_status", return_value=observation) as status,
+                mock.patch.object(gate_lifecycle, "_reduce_and_store_vitality_episode",
+                                  return_value=mock.sentinel.episode) as reduce,
+            ):
+                record = _record()
+                episode = gate_lifecycle._worker_vitality_for_gate(
+                    runtime, {"ref": "sample-1"}, record, {}, {})
+            self.assertIs(episode, mock.sentinel.episode)
+            status.assert_called_once_with({"ref": "sample-1"}, record)
+            self.assertIs(reduce.call_args.args[5], observation)
+
+    def test_recording_host_requires_and_preserves_executed_gate_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            host = FakeHost(Path(tmp))
+            host.commit = "a" * 40
+            receipt = mint_gate_receipt(
+                validated_sha=host.head_commit(_record()), base_sha="b" * 40,
+                gate_mode="github", required_checks=[{"name": "test", "conclusion": "SUCCESS"}],
+                check_set_identity="fixture complete gate",
+            )
+            accepted = AcceptedGreenGate.accept(
+                receipt, current_sha=host.head_commit(_record()), gate_mode="github", noop=host.mode == "noop")
+            self.assertTrue(accepted.valid)
+            self.assertEqual(accepted.persisted_payload(), receipt)
+            missing = AcceptedGreenGate.accept(
+                None, current_sha=host.head_commit(_record()), gate_mode="github", noop=host.mode == "noop")
+            self.assertFalse(missing.valid)
+
     def test_gate_is_fenced_before_and_after_backend_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runtime = _Runtime([_observation(), _observation()])
@@ -106,8 +146,16 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             runtime = _Runtime([_observation(), _observation("workspace_targeted_editable")])
             host = _Host(Path(tmp), runtime)
             record = _record(str(Path(tmp) / "task"))
+            run = HeadRun(run_id="fixture-run", spec=HeadSpec(profile_id="fixture", adapter="unknown", runtime=LOCAL_PTY_RUNTIME),
+                          workspace=record.workspace, task_ref=TaskRef.card("secretary-1"))
+            backend = SimpleNamespace(stop=lambda run, initiator: (host.effects.append("stop") or SimpleNamespace(
+                ok=True, run=run.finishing(initiator).exited())))
+            host.head_runtime_for = lambda run: backend
+            owner = CleanupOwner(SimpleNamespace(data_dir=Path(tmp), host=host))
+            intent = {"task": {"ref": "secretary-1"}, "record": {"workspace": record.workspace}, "heads": [run.to_json()]}
+            owner._stop(intent)
             with self.assertRaisesRegex(HostError, "workspace_targeted_editable"):
-                host.teardown(record)
+                owner._remove_workspace(intent, Path(tmp))
         self.assertEqual(host.effects, ["stop"])
         self.assertEqual(host.environment_checks, [str(Path(tmp) / "task")])
 

@@ -9,7 +9,6 @@ this module names, and it is never run through a shell.
 
 from __future__ import annotations
 
-import shutil
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -31,19 +30,54 @@ def add(
     return git(["worktree", "add", *placement, str(target), start], Path(repo))
 
 
-def remove(git: GitRunner, repo: Path, target: Path) -> bool:
-    """Take a worktree of `repo` back, and say whether its directory is gone.
+def remove(git: GitRunner, repo: Path, target: Path, *,
+           admitted_missing: Callable[[], None] | None = None) -> bool:
+    """Remove an exact registered, clean linked worktree and prove both effects.
 
-    `--force` because what is being taken back is the whole checkout, untracked files included; a
-    directory git would not remove is removed from disk, and `prune` then drops git's record of it.
+    Callers own admission and identity proof. This shared primitive never forces
+    removal, recursively deletes a refused directory or prunes other registrations.
+    Only an owner's durable admission and current exact registration proof can
+    authorize finishing an interrupted removal whose directory is already gone.
     """
     target = Path(target)
-    if target.exists():
-        git(["worktree", "remove", "--force", str(target)], Path(repo))
-    if target.exists():
-        shutil.rmtree(target, ignore_errors=True)
-    git(["worktree", "prune"], Path(repo))
-    return not target.exists()
+    if target.absolute() != target.resolve() or target.resolve() == Path(repo).resolve():
+        return False
+
+    def listed() -> bool | None:
+        result = git(["worktree", "list", "--porcelain", "-z"], Path(repo))
+        if result.returncode:
+            return None
+        return "worktree " + str(target.absolute()) in (result.stdout or "").split("\0")
+
+    registered = listed()
+    if registered is None:
+        return False
+    if not target.exists() and not target.is_symlink() and admitted_missing is not None:
+        admitted_missing()  # Revalidate at the native effect, under the owner's lock.
+        if not registered:
+            return False
+        result = git(["worktree", "remove", str(target)], Path(repo))
+        return result.returncode == 0 and not target.exists() and not target.is_symlink() and listed() is False
+    if not registered:
+        return not target.exists() and not target.is_symlink()
+    if not target.is_dir() or target.is_symlink():
+        return False
+    if not (target / ".git").is_file() or (target / ".git").is_symlink():
+        return False
+    common = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], Path(repo))
+    actual = git(["rev-parse", "--path-format=absolute", "--git-common-dir"], target)
+    top = git(["rev-parse", "--show-toplevel"], target)
+    if (common.returncode or actual.returncode or top.returncode or
+            not (common.stdout or "").strip() or common.stdout.strip() != actual.stdout.strip() or
+            top.stdout.strip() != str(target.absolute())):
+        return False
+    # Git permits ignored files during ordinary removal. They are author work
+    # until a caller has removed its exactly owned generated files itself.
+    dirt = git(["status", "--porcelain=v1", "--ignored", "--untracked-files=all"], target)
+    if dirt.returncode or (dirt.stdout or "").strip():
+        return False
+    result = git(["worktree", "remove", str(target)], Path(repo))
+    return result.returncode == 0 and not target.exists() and listed() is False
 
 
 def head_of(git: GitRunner, workspace: Path) -> str:

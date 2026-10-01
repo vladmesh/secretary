@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from secretary.dispatch.cleanup import CleanupJournal, serialized
+
 import contextlib
 import fcntl
 import hashlib
@@ -2986,6 +2988,7 @@ class TaskWriter:
             finished += 1
         return finished
 
+    @serialized
     def claim(
         self,
         *,
@@ -3035,6 +3038,9 @@ class TaskWriter:
         # a card can have been retyped between the two attempts.
         _check_execution_record(task)
         if existing is None:
+            cleanup_refusal = CleanupJournal(self.data_dir).admission_refusal(reference)
+            if cleanup_refusal:
+                raise TaskError("live_work", cleanup_refusal, 3)
             # Admission is the fresh request's job alone, and every part of it binds: a claim is
             # admitted only from Ready, only when nobody holds the card, and only inside the
             # predecessor and capacity rules.  A retrying claimant does not get past them by
@@ -3446,6 +3452,7 @@ class TaskWriter:
                 "saveTaskMetadata", task_id=_task_number(task), values={"resolved_review_head": ""}
             )
 
+    @serialized
     def _transition_card(
         self,
         *,
@@ -4238,6 +4245,7 @@ class TaskWriter:
                 )
             self._check_archivable(task)
             self._check_dispatcher_archivable(reference)
+            self._request_workspace_cleanup(task, "close" if sprint_close else "archive")
             try:
                 self.client.call(
                     "createComment",
@@ -4501,6 +4509,7 @@ class TaskWriter:
             "replayed": result.replayed,
         }
 
+    @serialized
     def _write(
         self,
         kind: str,
@@ -5061,6 +5070,7 @@ class TaskWriter:
             task = self.reader.show(ref)
             self._check_archivable(task)
             self._check_dispatcher_archivable(ref)
+            self._request_workspace_cleanup(task, "archive")
             if not _has_archive_reason(task, expected_digest):
                 if not retry_reason:
                     raise TaskError("backend_error", "pending archive reason comment is missing", 1)
@@ -5086,6 +5096,7 @@ class TaskWriter:
         raw = project_card_by_reference(self.client, board_id, ref)
         if isinstance(raw, dict) and _task_is_active(raw):
             raise TaskError("backend_error", "pending archive remains incomplete", 1)
+        self._request_workspace_cleanup(self.reader.show(ref), "archive")
 
     def _finish_pending_restore(self, event: dict[str, Any], payload: dict[str, Any]) -> None:
         from secretary.task_restore import finish_pending_restore
@@ -5180,6 +5191,27 @@ class TaskWriter:
             return
         if _dispatcher_record_has_live_work(record):
             raise TaskError("live_work", "archive refuses a card with live dispatcher work", 3)
+
+    def _request_workspace_cleanup(self, task: dict[str, Any], disposition: str) -> None:
+        from secretary.dispatch.cleanup import CleanupJournal
+        from secretary.dispatch.types import HostError
+        try:
+            CleanupJournal(self.data_dir).request(task, disposition)
+        except HostError as exc:
+            raise TaskError("live_work", str(exc), 3) from exc
+
+    @serialized
+    def settle_cleanup_claim(self, expected: dict[str, Any], worker: str) -> None:
+        """Called only by the cleanup owner after verified head and Git settlement."""
+        with self._mutation():
+            task = self.reader.show(expected["ref"])
+            if (task["id"] != expected["id"] or task.get("claim") != expected.get("claim")
+                    or task.get("claim", {}).get("worker") != worker
+                    or (not task.get("closed") and task["state"] != "done")):
+                raise TaskError("live_work", "cleanup claim changed or remains admitted", 3)
+            self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"claim": ""})
+            if self.reader.show(expected["ref"]).get("claim", {}).get("worker"):
+                raise TaskError("backend_error", "cleanup claim settlement remains pending", 1)
 
 
 

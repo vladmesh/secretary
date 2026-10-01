@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from secretary.dispatch.cleanup import CleanupJournal, serialized
+
 import fcntl
 import functools
 import hashlib
@@ -2442,6 +2444,7 @@ class SprintWriter:
         )
         return closed
 
+    @serialized
     @_sql_atomic
     def _close_atomic(
         self,
@@ -2902,6 +2905,9 @@ class SprintWriter:
                     archived.append(task_ref)
                     self.transactions.save(document)
             self._dispose_remaining_cards(document, event, payload, decisions, targets)
+            payload["observer_cleanup"] = CleanupJournal(self.data_dir).observer_handoff(
+                self.reader.show(str(event["ref"]), include_cards=False))
+            self.transactions.save(document)
             self._write_closeout(document, event, payload)
             sprint = self.reader.show(str(event["ref"]), include_cards=False)
             typed_request_id = str(document["request_id"]) + ":typed-close"
@@ -3138,6 +3144,7 @@ class SprintWriter:
             "reason": str(payload.get("reason") or ""),
             "closeout": closeout_plan.to_result() if closeout_plan else None,
             "definition_of_done": {"satisfied": False, "reason": CLOSE_NOT_DONE},
+            "cleanup": CleanupJournal(self.data_dir).summary(sprint=str(event["ref"])),
         }
 
     @_sql_atomic

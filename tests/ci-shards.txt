@@ -45,6 +45,7 @@ component tests/test_cli.py
 component tests/test_codex_capability_matrix.py
 component tests/test_codex_fanout_policy.py
 component tests/test_codex_provider_event_ingress.py
+integration-dispatcher tests/test_codex_provider_block_sql.py
 integration-memory tests/test_curator_discover.py
 integration-memory tests/test_curator_harvest.py
 unit tests/test_curator_operator_contract.py
@@ -194,6 +195,7 @@ integration-board tests/test_sprints.py
 integration-board tests/test_sprint_guard_outside_sprint.py
 unit tests/test_state_repo.py
 unit tests/test_instance_maintenance.py
+component tests/test_owned_cleanup.py
 integration-board tests/test_status.py
 unit tests/test_measurement_script.py
 integration-board tests/test_web_command_protocol.py

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from secretary.dispatch.cleanup import serialized
+
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -262,6 +264,10 @@ class DispatcherRuntime:
         self.pause = pause or ProductionPause(data_dir)
         self.catalog = catalog
         self.host = host
+        from secretary.dispatch.cleanup import CleanupOwner
+        self.cleanup = CleanupOwner(self)
+        if isinstance(host, CommandHostRuntime):
+            host.cleanup_owner = self.cleanup
         self.owner = owner
         self.checkpoint = checkpoint
         self.checkpoint_push = checkpoint_push
@@ -984,8 +990,13 @@ class DispatcherRuntime:
             outcome=outcome,
         )
 
+    @serialized
     def save_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
         """Flush the dispatcher records into the production state."""
+        if isinstance(self.host, CommandHostRuntime) and self.host.mode == "real":
+            for ref, record in records.items():
+                if record.workspace:
+                    self.cleanup.remember(self.reader.show(ref), record)
         self.production_state.put_records(payload, records)
         payload["last_tick_at"] = now_rfc3339()
         self.production_state.save(payload)
