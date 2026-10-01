@@ -1497,5 +1497,192 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertIsNone(result["identity"])
 
 
+    # secretary-1918: a re-stop of a settled reviewer once minted and committed a run it never
+    # launched, naming the worker id as its card and the shared review pid file.
+    def settled_reviewer(self, number):
+        return HeadRun(run_id=f"run-reviewer-{number}", spec=HeadSpec(
+            profile_id="test", adapter="unknown", runtime=LOCAL_PTY_RUNTIME),
+            workspace=str(self.workspace), task_ref=TaskRef.card(self.task["ref"]), role="reviewer",
+            scope_generation=f"run-reviewer-{number}", pid_file=self.record.review_pid_file,
+        ).finishing(StopInitiator(actor="review-verdict")).exited()
+
+    def placeholder(self, **fields):
+        values = {"run_id": "placeholder-run", "spec": HeadSpec(
+            profile_id="test", adapter="unknown", runtime=LOCAL_PTY_RUNTIME),
+            "workspace": str(self.workspace), "task_ref": TaskRef.card(self.record.worker),
+            "pid_file": self.record.review_pid_file}
+        values.update(fields)
+        return HeadRun(**values).finishing(StopInitiator(actor="review-verdict")).exited()
+
+    def review_heartbeat(self, run_id, *, live=False):
+        from secretary.runtime.head.identity import publish_heartbeat
+        identity = {"run_id": run_id, "role": "reviewer", "task": "card:" + self.task["ref"]}
+        if live:
+            publish_heartbeat(self.record.review_pid_file, identity)
+            return
+        process = subprocess.Popen(["sleep", "30"])
+        try:
+            publish_heartbeat(self.record.review_pid_file, identity, pid=process.pid)
+        finally:
+            process.kill()
+            process.wait()
+
+    def placeholder_intent(self, placeholder=None):
+        """The secretary-1917 shape: a live worker, two reviewer receipts and the placeholder."""
+        def stop(run, initiator):
+            # Settled scoped reviewers still reach the runtime, which keeps their receipt.
+            self.stops.append((run.run_id, run.scope_generation))
+            finishing = run.finishing(initiator)
+            return SimpleNamespace(ok=True, reason="", run=finishing if finishing.settled else finishing.exited())
+        self.backend.stop = stop
+        self.task["claim"]["worker"] = self.record.worker
+        self.record.review_pid_file = str(self.root / "review.pid")
+        self.record.review_handle = "review-handle"
+        self.head()
+        self.record.review_head_run = self.settled_reviewer(1).to_json()
+        self.owner.remember(self.task, self.record)
+        self.record.review_head_run = (placeholder or self.placeholder()).to_json()
+        self.owner.remember(self.task, self.record)
+        self.record.review_head_run = self.settled_reviewer(2).to_json()
+        self.review_heartbeat("run-reviewer-2")
+        return self.request()
+
+    def test_settled_reviewer_placeholder_converges_through_replay(self):
+        key = self.placeholder_intent()
+        self.assertIn("placeholder-run", [h["run_id"] for h in self.owner.journal.read()["intents"][key]["heads"]])
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertTrue(result["progress"]["heads_stopped"])
+        self.assertEqual(sorted(self.stops), [("run-reviewer-1", "run-reviewer-1"),
+                                              ("run-reviewer-2", "run-reviewer-2"),
+                                              ("run-worker", "generation-1")])
+        self.assertFalse(self.workspace.exists())
+        self.assertEqual(git(self.repo, "for-each-ref", "--format=%(refname)", "refs/heads/pipeline/"), "")
+        self.assertIsNone(self.task["claim"]["worker"])
+        journal = self.owner.journal.read()
+        self.owner.replay_one(key)
+        self.assertEqual(self.owner.journal.read(), journal)
+
+    def test_settled_reviewer_placeholder_crash_after_stop_retries_to_same_result(self):
+        key = self.placeholder_intent()
+        stop = self.owner._stop
+        def interrupted(intent, **kwargs):
+            stop(intent, **kwargs)
+            raise KeyboardInterrupt("crash after stop before saving heads_stopped")
+        with mock.patch.object(self.owner, "_stop", side_effect=interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                self.owner.replay_one(key)
+        self.assertFalse(self.owner.journal.read()["intents"][key]["progress"]["heads_stopped"])
+        self.assertTrue(self.workspace.exists())
+        result = CleanupOwner(self.runtime).replay_one(key)
+        self.assertEqual(result["status"], "completed", result["reason"])
+        self.assertEqual(sorted(h["run_id"] for h in result["heads"]),
+                         ["placeholder-run", "run-reviewer-1", "run-reviewer-2", "run-worker"])
+        self.assertFalse(self.workspace.exists())
+
+    def assert_placeholder_refused(self, key):
+        result = self.owner.replay_one(key)
+        self.assertEqual(result["status"], "pending")
+        self.assertIn("another workspace or card", result["reason"])
+        self.assertFalse(result["progress"]["heads_stopped"])
+        self.assertEqual(self.stops, [])
+        self.assertTrue(self.workspace.exists())
+
+    def test_settled_reviewer_placeholder_with_a_foreign_card_still_refuses(self):
+        self.assert_placeholder_refused(self.placeholder_intent(
+            self.placeholder(task_ref=TaskRef.card("other-1-worker"))))
+
+    def test_settled_reviewer_placeholder_in_another_workspace_still_refuses(self):
+        self.assert_placeholder_refused(self.placeholder_intent(self.placeholder(workspace=str(self.repo))))
+
+    def test_settled_reviewer_placeholder_with_a_run_directory_still_refuses(self):
+        (self.data / "heads" / "placeholder-run").mkdir(parents=True)
+        self.assert_placeholder_refused(self.placeholder_intent())
+
+    def test_settled_reviewer_placeholder_named_by_a_live_pid_file_still_refuses(self):
+        key = self.placeholder_intent()
+        self.review_heartbeat("placeholder-run", live=True)
+        self.assert_placeholder_refused(key)
+
+
+class SettledHeadStopTests(unittest.TestCase):
+    """secretary-1918: stopping an already-settled head keeps its receipt and mints nothing."""
+
+    def setUp(self):
+        from tests.dispatcher_fixtures import RecordingReviewHost
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.workspace = self.root / "ws"
+        self.workspace.mkdir()
+        self.host = RecordingReviewHost(self.root)
+        self.record = DispatcherRecord(worker="sample-1-worker", workspace=str(self.workspace), handle="",
+                                       head="codex", review_head="codex-reviewer", attempt_id="attempt-1",
+                                       comment_baseline=0, review_baseline=0, state="reviewing", claimed_at=0.0)
+        self.committed = []
+        self.host.commit_state = lambda: self.committed.extend(
+            run for run in (self.record.worker_head_run, self.record.review_head_run) if run)
+
+    def stored_run(self, run_id, role, profile):
+        from tests.dispatcher_fixtures import supervised_run
+        return supervised_run(run_id, role=role, profile=profile, workspace=str(self.workspace),
+                              task_ref=TaskRef.card("sample-1"), handle="run:" + run_id)
+
+    def assert_only_card_runs_committed(self):
+        self.assertTrue(self.committed)
+        self.assertEqual({run["task_ref"]["ref"] for run in self.committed}, {"sample-1"})
+
+    def test_review_round_settled_then_stopped_again_then_round_two_stopped(self):
+        self.record.review_handle = "run:review-1"
+        self.record.review_head_run = self.stored_run("review-1", "reviewer", "codex-reviewer")
+        self.host.stop_review(self.record, "review-verdict")
+        settled = copy.deepcopy(self.record.review_head_run)
+        self.assertEqual(settled["lifecycle"], "exited")
+
+        self.host.stop_head(self.record, "review", "done")
+        self.assertEqual(self.record.review_head_run, settled)
+        self.assertEqual(self.host.backend.stops, [("review-1", "review-verdict")])
+
+        self.record.review_handle = "run:review-2"
+        self.record.review_head_run = self.stored_run("review-2", "reviewer", "codex-reviewer")
+        self.host.stop_review(self.record, "review-verdict")
+        self.assertEqual(self.host.backend.stops, [("review-1", "review-verdict"), ("review-2", "review-verdict")])
+        self.assertEqual((self.record.review_head_run["run_id"], self.record.review_head_run["lifecycle"]),
+                         ("review-2", "exited"))
+        self.assert_only_card_runs_committed()
+
+    def test_worker_settled_then_stopped_again_then_next_run_stopped(self):
+        self.record.handle = "run:worker-1"
+        self.record.worker_head_run = self.stored_run("worker-1", "worker", "codex")
+        self.host.stop_head(self.record, "worker", "review-freeze")
+        settled = copy.deepcopy(self.record.worker_head_run)
+        self.assertEqual(settled["lifecycle"], "exited")
+
+        self.host.stop_head(self.record, "worker", "done")
+        self.assertEqual(self.record.worker_head_run, settled)
+        self.assertEqual(self.host.backend.stops, [("worker-1", "review-freeze")])
+
+        self.record.handle = "run:worker-2"
+        self.record.worker_head_run = self.stored_run("worker-2", "worker", "codex")
+        self.host.stop_head(self.record, "worker", "done")
+        self.assertEqual(self.host.backend.stops, [("worker-1", "review-freeze"), ("worker-2", "done")])
+        self.assertEqual((self.record.worker_head_run["run_id"], self.record.worker_head_run["lifecycle"]),
+                         ("worker-2", "exited"))
+        self.assert_only_card_runs_committed()
+
+    def test_settled_reviewer_restop_still_fences_a_live_foreign_pid_file(self):
+        from secretary.runtime.head.identity import publish_heartbeat
+        self.record.review_handle = "run:review-1"
+        self.record.review_pid_file = str(self.root / "review.pid")
+        self.record.review_head_run = self.stored_run("review-1", "reviewer", "codex-reviewer")
+        self.host.stop_review(self.record, "review-verdict")
+        settled = copy.deepcopy(self.record.review_head_run)
+        publish_heartbeat(self.record.review_pid_file,
+                          {"run_id": "someone-else", "role": "reviewer", "task": "card:sample-1"})
+        with self.assertRaises(HostError):
+            self.host.stop_head(self.record, "review", "done")
+        self.assertEqual(self.record.review_head_run, settled)
+        self.assertEqual(self.host.backend.stops, [("review-1", "review-verdict")])
+
 if __name__ == "__main__":
     unittest.main()

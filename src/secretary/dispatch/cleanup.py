@@ -606,6 +606,8 @@ class CleanupOwner:
         runs = []
         for raw in latest.values():
             run = HeadRun.from_json(raw)
+            if self._unlaunched_placeholder(intent, run):
+                continue  # Never launched by this attempt: there is no head to stop.
             expected_kind = "sprint" if intent["task"].get("kind") == "observer" else "card"
             if (run.workspace != record.get("workspace") or run.task_ref.ref != intent["task"]["ref"]
                     or run.task_ref.kind != expected_kind):
@@ -639,6 +641,35 @@ class CleanupOwner:
             if settled.to_json() not in intent["heads"]:
                 _merge_head(intent["heads"], settled.to_json())
                 self._checkpoint_intent(intent)
+
+    def _unlaunched_placeholder(self, intent: dict[str, Any], run: Any) -> bool:
+        """An identity a re-stop of a settled head once minted and never launched (secretary-1918).
+
+        It names this attempt's worker id rather than the card. It owes no stop only while nothing
+        could have launched it: no scope, no run directory, and no pid file naming it with a live
+        or unknown process. Anything else is still a foreign head and keeps the refusal.
+        """
+        from secretary.runtime.head.identity import head_process_status
+        from secretary.runtime.head.local_pty.protocol import ProtocolError, run_dir_for
+        record = intent["record"]
+        worker = str(record.get("worker") or "")
+        if (run.scope_generation or run.role or run.task_ref.kind != "card" or not worker
+                or run.task_ref.ref != worker or run.task_ref.ref == intent["task"]["ref"]
+                or not run.workspace or run.workspace != record.get("workspace")):
+            return False
+        root = getattr(self.runtime.host, "_local_pty_root", None)
+        try:
+            run_dir = run_dir_for(root() if callable(root) else self.data_dir / "heads", run.run_id)
+        except ProtocolError:
+            return False
+        if os.path.lexists(run_dir):
+            return False
+        if run.pid_file and os.path.lexists(run.pid_file):
+            status = head_process_status(run.pid_file)
+            named = (status.get("record") or {}).get("run_id")
+            if status.get("state") != "dead" and named in (None, run.run_id):
+                return False
+        return True
 
     def _provenance(self, boundary: str) -> None:
         require = getattr(self.runtime.host, "_require_production_runtime", None)
