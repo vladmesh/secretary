@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -20,11 +21,13 @@ from secretary.codex_provider_events import (
 from secretary.dispatch import launch as dispatcher_launch
 from secretary.dispatch import observer as dispatcher_observer
 from secretary.dispatch import review as dispatcher_review
+from secretary.dispatch import worker_continuation
 from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
     confirm_launch_intent,
+    merge_launch_head_run,
     resolve_launch_intent,
     write_launch_intent,
 )
@@ -39,9 +42,10 @@ from secretary.dispatch.observer import (
 from secretary.dispatch.observer import (
     _write_launch_intent as write_observer_launch_intent,
 )
+from secretary.dispatch.provider_failure import provider_failure_for_persisted_run, provider_failure_for_run
 from secretary.dispatch.runtime import DispatcherRuntime
 from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatch.tui import provider_progress_for_run
+from secretary.dispatch.tui import provider_progress_for_persisted_run, provider_progress_for_run
 from secretary.dispatch.types import HostError
 from secretary.dispatch.worker_launch import bring_up_worker_head
 from secretary.dispatch.worker_lifecycle import WorkerContinuationLiveness
@@ -62,6 +66,7 @@ from secretary.runtime.head import (
     TaskRef,
 )
 from secretary.runtime.head import operations as head_ops
+from secretary.runtime.head_run_binding import head_run_binding
 from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 from tests.fanout_fixtures import accepted_transport_run
@@ -92,10 +97,11 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         *,
         run_id: str = "run-1",
         role: str = "worker",
+        spec: HeadSpec | None = None,
     ) -> tuple[HeadRun, dict[str, object]]:
         run = HeadRun(
             run_id=run_id,
-            spec=HeadSpec(profile_id="codex-extra", adapter="codex", model="gpt-5.6-terra"),
+            spec=spec or HeadSpec(profile_id="codex-extra", adapter="codex", model="gpt-5.6-terra"),
             workspace=str(self.workspace),
             task_ref=TaskRef.card("secretary-1428", document=str(self.workspace / "TASK.md")),
             role=role,
@@ -132,9 +138,15 @@ class CodexProviderEventIngressTests(unittest.TestCase):
             }
         )
 
-    def _preflight_run(self, *, run_id: str = "run-1", role: str = "worker") -> HeadRun:
+    def _preflight_run(
+        self,
+        *,
+        run_id: str = "run-1",
+        role: str = "worker",
+        spec: HeadSpec | None = None,
+    ) -> HeadRun:
         """The production preflight path, before the provider creates its new journal."""
-        run, attestation = self._attested_run(run_id=run_id, role=role)
+        run, attestation = self._attested_run(run_id=run_id, role=role, spec=spec)
         return codex_preflight.preflight_codex_launch(
             {"codex_home": str(self.root)},
             str(self.workspace),
@@ -322,6 +334,246 @@ class CodexProviderEventIngressTests(unittest.TestCase):
             "progressed",
         )
         self.assertEqual(liveness.busy_attempts, 0)
+
+    def _profile_bound_run(self, limit: int | None = None) -> HeadRun:
+        profile = {
+            "adapter": "codex",
+            "model": "gpt-6.1-sol",
+            "effort": "high",
+            "resource": "openai-sub",
+            "codex_mode": "tui",
+            "runtime": "local-pty",
+        }
+        if limit is not None:
+            profile["memory_limit_mib"] = limit
+        spec = HeadSpec.from_profile("codex-sol61-high", profile)
+        preflight = self._preflight_run(spec=spec)
+        self._write_source()
+        ingress = self._ingress(preflight)
+        ingress.bind_before_delivery()
+        self.assertEqual(ingress.source["state"], "bound")
+        self.assertEqual(
+            ingress.source["head_run_fingerprint"],
+            preflight.fanout_policy["provider_source"]["head_run_fingerprint"],
+        )
+        return ingress.run
+
+    def test_deployed_v1_digest_is_fixed_when_persisted_spec_grows(self) -> None:
+        # Golden digest from the deployed seven-field producer, before memory limits.
+        spec = HeadSpec.from_profile(
+            "codex-sol61-high",
+            {
+                "adapter": "codex",
+                "model": "gpt-6.1-sol",
+                "effort": "high",
+                "resource": "openai-sub",
+                "codex_mode": "tui",
+                "fallback": ["claude-opus-high"],
+                "memory_limit_mib": 12288,
+            },
+        )
+        run = HeadRun(
+            run_id="deployed-v1",
+            spec=spec,
+            workspace="/workspace",
+            task_ref=TaskRef.card("secretary-1883"),
+            role="worker",
+        )
+        for limit in (None, 8192, 12288):
+            with self.subTest(limit=limit):
+                current = replace(run, spec=replace(spec, memory_limit_mib=limit))
+                descriptor = codex_preflight.codex_provider_source_descriptor(current)
+                self.assertEqual(descriptor["head_run_fingerprint"], "e7fd0d34702c7a2374dafd04a7543d68")
+                self.assertEqual(
+                    head_run_binding(current.to_json()), ("deployed-v1", descriptor["head_run_fingerprint"])
+                )
+
+    def test_profile_memory_and_generation_conflicts_remain_lifecycle_fenced(self) -> None:
+        bound = replace(self._profile_bound_run(12288), scope_generation="original")
+        for foreign in (
+            replace(bound, spec=replace(bound.spec, memory_limit_mib=8192)),
+            replace(bound, scope_generation="replacement"),
+        ):
+            # A journal cannot attest scope ownership; the authoritative handoff must reject it.
+            self.assertEqual(head_run_binding(foreign.to_json()), head_run_binding(bound.to_json()))
+            with self.assertRaisesRegex(HostError, "identity mismatch"):
+                merge_launch_head_run(bound.to_json(), foreign.to_json())
+
+    def test_serialized_spec_digest_is_not_rebound_into_a_deployed_v1_episode(self) -> None:
+        bound = self._profile_bound_run(12288)
+        liveness = WorkerContinuationLiveness.begin(bound.to_json())
+        old_stable = {
+            key: bound.to_json()[key] for key in ("run_id", "workspace", "task_ref", "role", "spec")
+        }
+        old_digest = hashlib.sha256(
+            json.dumps(old_stable, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        ).hexdigest()[:32]
+        self.assertNotEqual(old_digest, liveness.head_run_fingerprint)
+        legacy = WorkerContinuationLiveness.from_json(
+            {**liveness.to_json(), "head_run_fingerprint": old_digest}
+        )
+        self.assertEqual(
+            legacy.observe_provider(provider_progress_for_run(bound), 10.0, head_run=bound.to_json()),
+            "unknown",
+        )
+        self.assertEqual(legacy.head_run_fingerprint, old_digest)
+        self.assertTrue(legacy.source_rejected)
+        self.assertFalse(legacy.admitted)
+
+    def test_profile_limits_survive_preflight_ingress_persistence_and_both_readers(self) -> None:
+        for limit, expected in ((None, 8192), (12288, 12288)):
+            with self.subTest(limit=limit):
+                self.source = self.source.with_name(f"profile-{expected}.jsonl")
+                bound = self._profile_bound_run(limit)
+                self.assertEqual(bound.spec.memory_limit_mib, expected)
+                # These are address/lifecycle updates after spawn, not a new provider launch.
+                addressed = replace(
+                    bound,
+                    handle="head.sock",
+                    leaf="pane-1",
+                    pid_file="head.pid",
+                    lifecycle="working",
+                    scope_generation="owned-generation",
+                )
+                persisted = json.loads(json.dumps(addressed.to_json()))
+                restored = HeadRun.from_json(persisted)
+                progress = provider_progress_for_run(restored)
+                self.assertEqual(progress["state"], "observed")
+                self.assertEqual(progress, provider_progress_for_persisted_run(persisted))
+                self.assertEqual(
+                    progress["head_run_fingerprint"],
+                    bound.fanout_policy["provider_source"]["head_run_fingerprint"],
+                )
+                self.assertEqual(provider_failure_for_run(restored)["state"], "none")
+                self._append_records(
+                    {"type": "event_msg", "payload": {"type": "task_started"}},
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "task_complete",
+                            "error": {"message": "unexpected status 503 Service Unavailable"},
+                        },
+                    },
+                )
+                self.assertNotEqual(provider_progress_for_run(restored)["cursor"], progress["cursor"])
+                failure = provider_failure_for_persisted_run(persisted)
+                self.assertEqual(failure["state"], "failed")
+                self.assertEqual(failure["run_id"], bound.run_id)
+                self.assertEqual(failure["error"]["status"], 503)
+
+    def test_profile_bound_source_follows_retained_red_gate_delivery(self) -> None:
+        bound = self._profile_bound_run(12288)
+        record = DispatcherRecord(
+            worker="worker-1",
+            workspace=str(self.workspace),
+            handle="head.sock",
+            head=bound.spec.profile_id,
+            review_head="claude",
+            attempt_id="held-attempt",
+            comment_baseline=0,
+            review_baseline=0,
+            state="validate",
+            claimed_at=1.0,
+            report_generation=1,
+            attempt_round=1,
+        )
+        record.worker_head_run = json.loads(json.dumps(bound.to_json()))
+        record.worker_continuation.begin_retention(1.0)
+        record.worker_continuation.confirm_validation_move()
+        task = {"ref": "secretary-1428", "type": "code", "comments": []}
+        runtime = mock.Mock()
+        runtime.reader.show.return_value = task
+        host = object.__new__(CommandHostRuntime)
+        runtime.host.provider_progress.side_effect = lambda *args: host.provider_progress(*args)
+        events = []
+        runtime.save_records.side_effect = lambda *_: events.append("save")
+        runtime.host.resume_worker.side_effect = lambda *_: events.append("resume")
+        with mock.patch.object(worker_continuation, "attempt_accounting") as accounting:
+            result = worker_continuation._deliver_red_continuation(
+                runtime,
+                task,
+                record,
+                {task["ref"]: record},
+                {},
+                "tick-attempt",
+                phase="gate",
+            )
+        self.assertEqual(result["action"], "gate-red-reused-worker")
+        self.assertTrue(record.worker_continuation_liveness.admitted)
+        self.assertEqual(record.worker_continuation_liveness.busy_attempts, 0)
+        self.assertLess(events.index("save"), events.index("resume"))
+        runtime.host.confirm_worker_retained.assert_called_once_with(record)
+        runtime.host.resume_worker.assert_called_once_with(task, record)
+        runtime.open_worker_round.assert_called_once()
+        runtime._stop_worker_confirmed.assert_not_called()
+        runtime.host.safe_recover_worker_continuation.assert_not_called()
+        accounting.terminal_effect.assert_not_called()
+
+    def test_profile_source_rejects_foreign_launch_facts_and_malformed_descriptors(self) -> None:
+        bound = self._profile_bound_run(12288)
+        foreign_runs = [
+            replace(bound, run_id="foreign"),
+            replace(bound, workspace=str(self.root)),
+            replace(bound, role="reviewer"),
+            replace(bound, task_ref=TaskRef.card("foreign")),
+        ]
+        for field, value in (
+            ("profile_id", "foreign"),
+            ("adapter", "claude"),
+            ("model", "foreign"),
+            ("effort", "low"),
+            ("resource", "foreign"),
+            ("codex_mode", "foreign"),
+            ("fallback", ("foreign",)),
+        ):
+            foreign_runs.append(replace(bound, spec=replace(bound.spec, **{field: value})))
+        source = bound.fanout_policy["provider_source"]
+        for field, value in (
+            ("version", 2),
+            ("run_id", []),
+            ("task_ref", None),
+            ("head_run_fingerprint", ""),
+            ("session_id", "foreign"),
+        ):
+            foreign_runs.append(
+                bound.with_fanout_policy({**bound.fanout_policy, "provider_source": {**source, field: value}})
+            )
+        for index, foreign in enumerate(foreign_runs):
+            with self.subTest(index=index):
+                self.assertIn(
+                    provider_progress_for_run(foreign)["state"], ("identity_mismatch", "unavailable")
+                )
+                self.assertEqual(provider_failure_for_run(foreign)["state"], "unavailable")
+                liveness = WorkerContinuationLiveness.begin(bound.to_json())
+                self.assertNotEqual(
+                    liveness.observe_provider(
+                        provider_progress_for_run(foreign), 10.0, head_run=bound.to_json()
+                    ),
+                    "baseline",
+                )
+                self.assertFalse(liveness.admitted)
+
+    def test_profile_source_rejects_wrong_journal_root_and_initial_range(self) -> None:
+        bound = self._profile_bound_run(12288)
+        source = bound.fanout_policy["provider_source"]
+        other = self.source.with_name("foreign.jsonl")
+        self._write_records(
+            {"type": "session_meta", "payload": {"session_id": "foreign", "cwd": str(self.workspace)}},
+            source=other,
+        )
+        wrong_range = copy.deepcopy(source["initial_range"])
+        wrong_range["digest"] = "0" * 64
+        for field, value in (
+            ("root", str(self.workspace)),
+            ("path", str(other)),
+            ("initial_range", wrong_range),
+        ):
+            with self.subTest(field=field):
+                damaged = bound.with_fanout_policy(
+                    {**bound.fanout_policy, "provider_source": {**source, field: value}}
+                )
+                self.assertNotEqual(provider_progress_for_run(damaged)["state"], "observed")
+                self.assertEqual(provider_failure_for_run(damaged)["state"], "unavailable")
 
     def test_real_bound_sources_refresh_the_shared_worker_and_reviewer_progress_seam(self) -> None:
         worker_preflight = self._preflight_run()

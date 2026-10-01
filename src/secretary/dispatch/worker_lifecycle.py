@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
+
+from secretary.runtime.head_run_binding import head_run_binding
 
 BUSY_RETRY_INITIAL_SECONDS = 30
 BUSY_RETRY_MAX_SECONDS = 5 * 60
@@ -50,34 +50,6 @@ class ContinuationRecoveryRung(StrEnum):
     SAFE_RECOVERY_RESUME_ONCE = "safe_recovery_resume_once"
     SAFE_RECOVERY_UNAVAILABLE = "safe_recovery_unavailable"
     TERMINAL = "terminal"
-
-
-def head_run_binding(value: Any) -> tuple[str, str]:
-    """Return the stable identity of a HeadRun without retaining provider or pane contents.
-
-    `run_id` is the authoritative identity; the digest binds the continuation to the run's immutable
-    launch facts as a second fence, so a corrupted record cannot turn a same-workspace session into
-    this continuation by copying a convenient run id.
-    """
-    if not isinstance(value, dict):
-        return "", ""
-    run_id = value.get("run_id")
-    workspace = value.get("workspace")
-    task_ref = value.get("task_ref")
-    spec = value.get("spec")
-    if not isinstance(run_id, str) or not run_id or not isinstance(workspace, str) or not workspace:
-        return "", ""
-    if not isinstance(task_ref, dict) or not isinstance(spec, dict):
-        return "", ""
-    stable = {
-        "run_id": run_id,
-        "workspace": workspace,
-        "task_ref": task_ref,
-        "role": str(value.get("role") or ""),
-        "spec": spec,
-    }
-    encoded = json.dumps(stable, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    return run_id, hashlib.sha256(encoded.encode("ascii")).hexdigest()[:32]
 
 
 @dataclass

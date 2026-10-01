@@ -65,6 +65,38 @@ backoff after newly orphaned claims and waiter completion. A pending owner stop
 is revisited even while its waiter remains blocked. Running rows fence their
 session's next input and restart admission; other sessions can continue.
 
+## Provider identity and scope ownership
+
+`runtime.head_run_binding.head_run_binding` owns the provider/continuation digest.
+Codex v1 fixes the input to `run_id`, the original workspace spelling, complete
+serialized `task_ref`, role, and seven spec fields: `profile_id`, `adapter`,
+`model`, `effort`, `resource`, `codex_mode`, `fallback`. The encoding is ASCII
+JSON with sorted keys and compact separators, SHA-256 truncated to 32 hex digits.
+The source descriptor separately carries the resolved workspace path. Addresses,
+lifecycle, runtime, memory limit and scope generation do not enter this digest.
+Full spec equality and scope generation remain fences in launch handoff; scope
+admission and cleanup verify their canonical owner under its lock.
+
+Preflight's `codex_provider_source_descriptor` calls the runtime implementation;
+provider-event ingress verifies against that descriptor. The dispatch
+`worker_lifecycle.head_run_binding` import exposes that same implementation to
+provider cursor reads, retained-continuation liveness, observer/reviewer progress
+and recovery. The provider-error reader shares the cursor reader's
+`_codex_bound_source` verification of descriptor, journal root, session and initial
+range. No reader discovers a replacement journal or changes a persisted digest.
+Non-Codex sources retain their existing serialized-spec digest in the same runtime
+implementation, preserving deployed Claude descriptors and continuation episodes.
+
+Deployed Codex v1 descriptors retain their exact hash, including profile-derived
+8192/12288 MiB runs. Old and new preflight producers therefore agree with the
+corrected reader without migration. An old reader still rejects memory-bearing
+Codex descriptors until it is refreshed. A persisted Codex continuation episode
+carrying the divergent serialized-spec digest fails closed at episode admission;
+it is never rewritten or tried as an alternate identity. Supported external runtime
+refresh and settlement remain the observer's responsibility. Missing, malformed or
+unsupported descriptors still refuse; this repair grants no recovery or rebind
+capability.
+
 ## Causal OOM producer and consumer
 
 The privileged scope bootstrap opens a read-only, nonblocking `/dev/kmsg` stream
