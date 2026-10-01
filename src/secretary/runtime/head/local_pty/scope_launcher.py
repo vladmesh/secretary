@@ -11,6 +11,7 @@ import sys
 import os
 
 from .scoped_lifecycle import ScopedHeadLifecycle
+from .scope_environment import EnvironmentTransferError, exec_scope
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -21,7 +22,11 @@ def main(argv: list[str] | None = None) -> int:
         os.close(fd)
         if not released:
             return 1
-        os.execvp(args[2], args[2:])
+        try:
+            exec_scope(args[2:])
+        except (EnvironmentTransferError, OSError, ValueError):
+            print("scoped environment launch refused", file=sys.stderr)
+            return 1
     return ScopedHeadLifecycle.launch_until_started(args)
 
 

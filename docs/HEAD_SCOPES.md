@@ -65,6 +65,54 @@ backoff after newly orphaned claims and waiter completion. A pending owner stop
 is revisited even while its waiter remains blocked. Running rows fence their
 session's next input and restart admission; other sessions can continue.
 
+## Prepared environment across privilege acquisition
+
+Observer, worker and reviewer start through `LocalPtyHeadRuntime.start` and
+`spawn_head`; PO turns reach the same `spawn_head` through `PoRunner._scoped_launch`.
+`_supervisor_environment` retains its existing merge of inherited environment and
+explicit overrides, with the importing product source first on `PYTHONPATH`.
+PO's `turn_environment` puts its runtime interpreter directory first on `PATH`;
+`session_environment` supplies session/request bindings. The shared launcher
+transfers this complete prepared environment, including supplied empty strings
+and home/configuration/auth bindings, across sudo's environment reset.
+
+After the existing generation admission barrier releases, `scope_launcher` creates
+one sealed anonymous memfd containing the environment and installs it as stdin.
+The synchronous `sudo -n /usr/bin/systemd-run --system --scope` preserves stdin.
+No environment payload is written to argv, systemd properties, journals or disk.
+The gated process owns the descriptor until exec; kernel descriptor lifetime owns
+cleanup on refusal, cancellation and crashes. No durable payload or replay owner
+is added to the scope lifecycle.
+
+Privilege acquisition uses absolute native binaries and a minimal fixed environment.
+The privileged bootstrap uses the launcher's product interpreter with `-I` and an
+absolute product script that inserts only its own source root. Caller PATH,
+PYTHONPATH, PYTHONHOME, loader settings and home directories cannot select privileged
+code or tools. It still verifies cgroup membership, installs the OOM contract and
+opens the kernel stream, then uses absolute `setpriv` with the original native
+uid/gid/supplementary groups. After that drop, an isolated runtime reader requires
+a sealed regular descriptor owned by that uid, an initial offset of zero, and a
+valid environment of at most 1 MiB encoded JSON. It replaces stdin with `/dev/null`
+and execs the supervisor with the prepared snapshot. The OOM descriptor is the
+bootstrap's own binding; the supervisor consumes it before launching the head.
+Transfer failures emit fixed diagnostics and refuse the scoped launch. Existing
+generation locks, cleanup proof and terminal settlement still own recovery.
+
+The persistent PO deployed at `64c42d735bd99740bba94c65788d34f7f354bee0`
+already executes a separate launcher from current product source with this environment
+and the existing argv contract. The new launcher handles that actual emitter's
+`sudo -E`/`env PYTHONPATH` prefix by selecting its own trusted bootstrap and carrying
+the snapshot on stdin. The old prefix supplies no privileged code/environment
+authority. Native identity flags must match the launcher. This permits the next
+authorized PO refresh after delivery without an observer/PO restart, owner migration,
+receipt edit or parallel compatibility subsystem. Scope records do not change.
+Disposable tests load the emitter function directly from that delivered Git object;
+CI runs it through real sudo, system scope, bootstrap, privilege drop, supervisor
+and PO head with a fake executable found only on prepared PATH. It also verifies
+`python3 -P -m secretary --help` resolves through the prepared product runtime.
+Local broad tests instrument the privileged effects; the real system scope, OOM,
+descendant and PO recovery proofs remain dispatcher-owned CI evidence.
+
 ## Provider identity and scope ownership
 
 `runtime.head_run_binding.head_run_binding` owns the provider/continuation digest.
