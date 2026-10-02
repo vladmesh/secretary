@@ -474,8 +474,9 @@ def _write_json(path: Path, payload: Any) -> None:
 def _payload_checksums(payload: Path) -> dict[str, str]:
     """Return checksums for every regular payload file except its manifest."""
     checksums: dict[str, str] = {}
+    manifest = payload / "versions.json"
     for path in sorted(payload.rglob("*")):
-        if not path.is_file() or path.is_symlink() or path.name == "versions.json":
+        if not path.is_file() or path.is_symlink() or path == manifest:
             continue
         checksums[path.relative_to(payload).as_posix()] = sha256_file(path)
     return checksums

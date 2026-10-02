@@ -186,6 +186,27 @@ class BackupTests(unittest.TestCase):
         ):
             return create_backup(instance)
 
+    def test_a_nested_versions_json_gets_a_checksum_and_the_archive_verifies(self):
+        # Only the root manifest skips checksumming (ummanu-8).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance = root / "instance"
+            data_dir = root / "ummanu-data"
+            _write_instance(instance, data_dir)
+            _write_export_surface(data_dir)
+            nested = instance / "state" / "knowledge" / "reports" / "x" / "versions.json"
+            nested.parent.mkdir(parents=True)
+            nested.write_text('{"nested": true}\n', encoding="utf-8")
+
+            result = self._create_full(instance, data_dir)
+
+            checksums = result.manifest["checksums"]
+            self.assertIn("instance/state/knowledge/reports/x/versions.json", checksums)
+            self.assertNotIn("versions.json", checksums)
+            verified = verify_backup(result.archive)
+            self.assertEqual(verified.code, 0, verified.findings)
+            self.assertEqual(verified.findings, [])
+
     def test_a_full_archive_written_with_the_model_cache_still_verifies_and_restores_without_it(self):
         from ummanu.backup_policy import is_memory_model_cache_entry
         from ummanu.restore import restore_backup
