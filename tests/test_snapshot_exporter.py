@@ -238,7 +238,12 @@ class SnapshotRepositoryTests(SnapshotCase):
 
         def build_then_race(*args, **kwargs):
             tree = real_build(*args, **kwargs)
-            foreign = git(self.repo, "commit-tree", f"{first.commit}^{{tree}}", "-p", first.commit, "-m", "foreign").strip()
+            # Its own identity: a CI runner has no global Git user.
+            foreign = git(
+                self.repo,
+                *("-c", "user.name=foreign", "-c", "user.email=foreign@example.invalid"),
+                *("commit-tree", f"{first.commit}^{{tree}}", "-p", first.commit, "-m", "foreign"),
+            ).strip()
             git(self.repo, "update-ref", SNAPSHOT_REF, foreign)
             self.foreign = foreign
             return tree
