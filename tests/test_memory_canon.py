@@ -529,6 +529,61 @@ class VerifyByIdAndContentTests(unittest.TestCase):
         )
 
 
+class VerifyDuplicateRowTests(unittest.TestCase):
+    """A derived row repeated for one fact id is a divergence, named and counted as a row."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        root = Path(self.tmpdir.name)
+        self.data_dir = root / "ummanu-data"
+        self.instance = root / "instance"
+        self.facts = self.instance / "state" / "memory" / "facts"
+        (self.facts / "global").mkdir(parents=True)
+        self.text = "---\nsource: curator\n---\none text\n"
+        (self.facts / "global" / "one.md").write_text(self.text, encoding="utf-8")
+        export_memory_snapshot(self.data_dir, self.instance)
+        self.export = self.data_dir / "memory" / "export.ndjson"
+        self.row = self.export.read_text(encoding="utf-8")
+        self.index = self.data_dir / "memory" / "index.sqlite"
+        write_index(self.index, {"global/one": self.text})
+
+    def test_a_duplicated_export_row_is_named_and_counted(self):
+        with self.export.open("a", encoding="utf-8") as handle:
+            handle.write(self.row)
+
+        report = verify_memory_journal(self.data_dir, self.instance)
+
+        self.assertFalse(report.ok)
+        self.assertEqual((report.fact_count, report.export_count, report.index_count), (1, 2, 1))
+        self.assertIn("memory export has 2 rows for one fact: global/one", report.findings)
+
+    def test_a_stale_duplicate_before_a_current_row_is_red(self):
+        stale = json.loads(self.row)
+        stale["text"] = "---\nsource: curator\n---\nold text\n"
+        self.export.write_text(json.dumps(stale) + "\n" + self.row, encoding="utf-8")
+
+        report = verify_memory_journal(self.data_dir, self.instance)
+
+        self.assertFalse(report.ok)
+        self.assertIn("memory export has 2 rows for one fact: global/one", report.findings)
+        self.assertIn("memory export content differs from the canon: global/one", report.findings)
+
+    def test_a_duplicated_index_row_in_a_hand_built_index_is_named(self):
+        with sqlite3.connect(self.index) as conn:
+            conn.execute("CREATE TABLE copy AS SELECT * FROM memories")
+            conn.execute("DROP TABLE memories")
+            conn.execute("CREATE TABLE memories AS SELECT * FROM copy")
+            conn.execute("INSERT INTO memories SELECT * FROM copy")
+            conn.commit()
+
+        report = verify_memory_journal(self.data_dir, self.instance)
+
+        self.assertFalse(report.ok)
+        self.assertEqual(report.index_count, 2)
+        self.assertIn("memory index has 2 rows for one fact: global/one", report.findings)
+
+
 class NoGitChildTests(CanonCase):
     """The whole memory path runs on a plain directory with process creation forbidden."""
 
