@@ -1901,21 +1901,33 @@ class BoardStoreSchemaTests(unittest.TestCase):
             "false",
             "the prior-runtime proof requires full Git history (actions/checkout fetch-depth: 0)",
         )
-        revision_path = "src/ummanu/board/migrations/versions/0025_card_waits_for_person.py"
-        parents = subprocess.check_output(
-            ["git", "log", "--diff-filter=A", "--format=%P", "-1", "--", revision_path], cwd=repository, text=True
-        ).split()
+        # The revision first landed under the package's earlier name, and a later rename adds the
+        # same file again under the current one: the earliest addition, by its place in the package,
+        # is the one whose parent is the previous runtime.
+        revision_path = "src/*/board/migrations/versions/0025_card_waits_for_person.py"
+        additions = subprocess.check_output(
+            ["git", "log", "--no-renames", "--diff-filter=A", "--reverse", "--format=%P", "--", revision_path],
+            cwd=repository, text=True,
+        ).split("\n")
+        parents = additions[0].split() if additions else []
         previous = parents[0] if parents else "HEAD"
+        package = next(
+            name.split("/")[1]
+            for name in subprocess.check_output(
+                ["git", "ls-tree", "-r", "--name-only", previous, "src"], cwd=repository, text=True
+            ).splitlines()
+            if name.endswith("/board/migrate.py") and name.count("/") == 3
+        )
         archive = subprocess.check_output(["git", "archive", previous, "src"], cwd=repository)
         prior_root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         with tarfile.open(fileobj=io.BytesIO(archive)) as tree:
             tree.extractall(prior_root, filter="data")
         script = """import json, sys
 from types import SimpleNamespace
-from ummanu.board import migrate
-from ummanu.board.owner_events import OwnerEventStore
-from ummanu.board.sql_cards import SqlCardClient
-from ummanu.tasks import TaskReader
+from PACKAGE.board import migrate
+from PACKAGE.board.owner_events import OwnerEventStore
+from PACKAGE.board.sql_cards import SqlCardClient
+from PACKAGE.tasks import TaskReader
 credentials = SimpleNamespace(conninfo=lambda: sys.argv[1])
 store = OwnerEventStore(credentials)
 events = store.events()
@@ -1927,7 +1939,7 @@ assert TaskReader(client).show('ummanu-800')['state'] == 'in_progress'
 client.call('createComment', task_id=client.call('getTaskByReference', project_id=1, reference='ummanu-800')['id'], user_id=0, content='old runtime still writes cards')
 client.close()
 print(json.dumps({'head': migrate.EXPECTED_SCHEMA_REVISION, 'unread': store.unread_count()}))
-"""
+""".replace("PACKAGE", package)
         result = subprocess.run(
             [sys.executable, "-P", "-c", script, self.credentials("app").conninfo(), str(prior_root)],
             env={**os.environ, "PYTHONPATH": str(prior_root / "src")}, capture_output=True, text=True, timeout=30, check=False,

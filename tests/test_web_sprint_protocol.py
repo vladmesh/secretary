@@ -427,7 +427,7 @@ class OptionsTests(SprintProtocolFixture):
         )
         self.assertEqual(
             [item["id"] for item in options["projects"]["items"]],
-            ["other", "ummanu", "secretary-instance"],
+            ["other", "secretary-instance", "ummanu"],
         )
 
     def test_a_project_an_open_sprint_holds_is_marked_as_held(self) -> None:

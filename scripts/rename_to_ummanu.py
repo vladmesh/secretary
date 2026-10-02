@@ -76,6 +76,9 @@ T_FILES = (
     "tests/test_old_name_guard.py",
 )
 T_DIRS = ("src/secretary/transition/",)
+#: Class R: quoted historical records kept byte for byte. The gate attestation of secretary-1883 is
+#: replayed against its immutable audit digest, so not even its URLs may change.
+R_FILES = ("tests/fixtures/gate_attestation_1883.json",)
 #: Class T paths that keep their own name.
 T_KEEP_PATH = (
     "scripts/transition-from-secretary.sh",
@@ -147,8 +150,8 @@ def _apply(segment: str, counts: Counter[str]) -> str:
     return segment
 
 
-def is_t_content(path: str) -> bool:
-    return path in T_FILES or path.startswith(T_DIRS)
+def is_kept_content(path: str) -> bool:
+    return path in T_FILES or path in R_FILES or path.startswith(T_DIRS)
 
 
 def tracked() -> list[str]:
@@ -179,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         path = ROOT / name
         if path.is_symlink() or not path.is_file():
             continue
-        if not is_t_content(name):
+        if not is_kept_content(name):
             text = text_of(path)
             if text is not None:
                 new = rewrite(

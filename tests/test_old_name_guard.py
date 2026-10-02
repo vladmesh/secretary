@@ -34,6 +34,8 @@ ALLOWLIST: tuple[tuple[str, re.Pattern[str] | None, tuple[str, ...]], ...] = (
     # A card ref; `secretary-0.1.0.dist-info` is a version, not a ref.
     ("R", re.compile(r"\bsecretary-\d+\b(?!\.\d)"), ANYWHERE),
     ("R", re.compile(r"\bsecretary_1727_[0-9a-f]+\.jsonl\.gz\b"), ANYWHERE),
+    # A quoted historical record, replayed against its immutable audit digest byte for byte.
+    ("R", None, ("tests/fixtures/gate_attestation_1883.json",)),
     # The names of the class T files and of the transition's own command, wherever they are referenced.
     (
         "T",
@@ -117,14 +119,18 @@ class OldNameGuardTests(unittest.TestCase):
             found += violations(name, text_of(path.read_bytes()))
         self.assertEqual(found, [], "the old product name outside docs/RENAME.md §T5:\n" + "\n".join(found))
 
-    def test_a_stray_old_name_fails_in_every_file_outside_class_t(self) -> None:
+    def test_a_stray_old_name_fails_in_every_file_outside_the_whole_file_rows(self) -> None:
         names = tracked_files()
         self.assertGreater(len(names), 100)
         exempt = {name for name in names if violations(name, "secretary") == []}
         self.assertEqual(
             exempt,
-            {name for name in names if _applies(ALLOWLIST[-1][2], name)},
-            "only the class T files may carry a stray old name",
+            {
+                name
+                for name in names
+                if any(pattern is None and _applies(globs, name) for _, pattern, globs in ALLOWLIST)
+            },
+            "only the whole-file rows (the T files and the one R record) may carry a stray old name",
         )
 
     def test_a_failure_names_the_file_line_and_match(self) -> None:
@@ -148,6 +154,7 @@ class OldNameGuardTests(unittest.TestCase):
             "tests/fixtures/local_pty_journals/secretary_1727_9c6b884b.jsonl.gz": None,
             "src/ummanu/transition/names.py": 'OLD = "secretary"\n',
             "docs/RENAME.md": "secretary → ummanu\n",
+            "tests/fixtures/gate_attestation_1883.json": '{"url": "https://github.com/vladmesh/secretary"}\n',
             "tests/ci-shards.txt": "unit tests/test_transition_from_secretary.py\n",
             "docs/PROTOCOLS.md": "Run `ummanu transition from-secretary --plan`.\n",
         }

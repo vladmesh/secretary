@@ -208,7 +208,7 @@ class HistoryReadTests(CommandProtocolFixture):
         )
         self.generic("req-generic", ref="ummanu-99")
         document = self.history()
-        self.assertEqual(sorted(self.refs(document)), ["ummanu-12", "ummanu-99", "sprint:1431"])
+        self.assertEqual(sorted(self.refs(document)), ["sprint:1431", "ummanu-12", "ummanu-99"])
 
     def test_every_row_carries_the_initiator_the_action_the_entity_and_the_result(self) -> None:
         self.commit("req-card", event_id="evt_1", reason="claimed for the worker")
