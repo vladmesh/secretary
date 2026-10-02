@@ -1,4 +1,5 @@
-"""`transition from-secretary --instance <dir> (--plan | --apply | --rollback)`.
+"""`transition from-secretary --instance <dir> (--plan | --apply | --rollback)`, and after it
+`--repair-scope-owners [--apply]` (`scope_owners`).
 
 Only the parser lives here; the transition itself is imported when the command runs.
 """
@@ -23,10 +24,16 @@ def add_transition_subcommands(subparsers: argparse._SubParsersAction) -> None: 
         help=f"move this installation from {OLD.package} to its new name; --plan first",
     )
     command.add_argument("--instance", required=True, help="the instance repository (it keeps its name)")
-    mode = command.add_mutually_exclusive_group(required=True)
+    mode = command.add_mutually_exclusive_group()
     mode.add_argument("--plan", action="store_true", help="print every step and precondition; write nothing")
     mode.add_argument("--apply", action="store_true", help="run, resuming at the first unfinished step")
     mode.add_argument("--rollback", action="store_true", help="undo what the journal says was done")
+    command.add_argument(
+        "--repair-scope-owners",
+        action="store_true",
+        help="after the transition: list settled heads' scope owners still naming the old unit; "
+        "--apply renames them",
+    )
     command.add_argument("--through", default="", help="stop after this step (the bootstrap stops after 'move')")
     command.add_argument("--sprint", default="", help="the sprint the observer prepared (default: found by marker)")
     command.add_argument(
@@ -42,14 +49,20 @@ def add_transition_subcommands(subparsers: argparse._SubParsersAction) -> None: 
 
 
 def run_transition(args: argparse.Namespace) -> int:
-    from . import engine, steps
+    from . import engine, scope_owners, steps
     from .context import Context, Journal, Layout, Runner, TransitionError
 
+    if args.repair_scope_owners and (args.plan or args.rollback):
+        return _usage("--repair-scope-owners lists without --apply and repairs with it")
+    if not (args.repair_scope_owners or args.plan or args.apply or args.rollback):
+        return _usage("one of --plan, --apply, --rollback or --repair-scope-owners is required")
     instance = Path(args.instance).expanduser()
     if instance.name == "instance.yaml":
         instance = instance.parent
     layout = Layout(home=Path(args.home).expanduser() if args.home else Path.home(), instance=instance.resolve())
     try:
+        if args.repair_scope_owners:
+            return scope_owners.repair_scope_owners(layout, apply=args.apply)
         ctx = Context(
             layout=layout,
             runner=Runner(),
@@ -66,6 +79,11 @@ def run_transition(args: argparse.Namespace) -> int:
     except TransitionError as exc:
         print(json.dumps({"error": {"code": "transition_refused", "message": str(exc)}}), file=sys.stderr)
         return 3
+
+
+def _usage(message: str) -> int:
+    print(f"transition from-{OLD.package}: {message}", file=sys.stderr)
+    return 2
 
 
 __all__ = ["add_transition_subcommands", "run_transition"]

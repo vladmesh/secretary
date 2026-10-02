@@ -168,6 +168,7 @@ import os
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -3319,6 +3320,19 @@ def runtime_scope_inventory(data_dir: Path, units: set[str]) -> RuntimeScopeInve
     from ummanu.runtime.head.local_pty.scope_inventory import read_runtime_scopes
 
     return read_runtime_scopes(data_dir, units)
+
+
+def head_scope_owner_lock(run_dir: str | os.PathLike[str]) -> AbstractContextManager[None]:
+    """The run's own scope-owner flock: every admission, cleanup and owner rewrite holds it.
+
+    Contention raises `MemoryScopeError`, the lifecycle's retryable refusal.
+    """
+    return ScopedHeadLifecycle.owner_lock(Path(run_dir))
+
+
+def head_scope_owner_valid(record: Any) -> dict[str, Any]:
+    """The lifecycle's own validation of a scope-owner record; raises `MemoryScopeError`."""
+    return ScopedHeadLifecycle.validate_owner(record)
 
 
 def head_run_first_record(run_dir: str | os.PathLike[str]) -> dict[str, Any] | None:
