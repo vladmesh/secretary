@@ -5,11 +5,9 @@ exposed over streamable-HTTP so Claude / Codex / Hermes all share ONE warm insta
 """
 
 import datetime
-import hashlib
 import json
 import os
 import sqlite3
-import subprocess
 import tempfile
 import threading
 import time
@@ -18,7 +16,6 @@ from typing import Any
 
 import numpy as np
 import sqlite_vec
-import yaml
 from fastembed import TextEmbedding
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.auth.provider import AccessToken
@@ -27,6 +24,13 @@ from mcp.server.fastmcp import FastMCP
 
 from ummanu.memory import DEFAULT_MODEL
 from ummanu.memory import access as memory_access
+from ummanu.memory.canon import (  # noqa: F401  # Service-level names of the canon parsing.
+    fact_content_hash,
+    fact_files,
+    parse_fact_text,
+    parse_frontmatter,
+    scope_for_relative,
+)
 
 DEFAULT_MEMORY_DIR = Path.home() / "ummanu-data" / "memory"
 # Canon lives in the private instance repo (docs/RECOVERY.md, "Layout"); the
@@ -302,47 +306,9 @@ def get_memory_entry(id: int, *, allowed_scopes: frozenset[str] | None = None) -
 
 
 # ── Canon → index (daemon-owned reindex) ──────────────────────────────────────
-# The production canon is the private instance repo's state/memory/facts, named
-# by MEMORY_CANON_ROOT. Prefer the atomically published export.ndjson snapshot;
-# without one we read the canon checkout at HEAD.
-
-
-def scope_for_relative(path: Path) -> str:
-    top = path.parts[0]
-    if top == "product-ummanu":
-        return "product:ummanu"
-    if top == memory_access.PO_REVIEW_SCOPE_DIR:
-        return memory_access.PO_REVIEW_SCOPE
-    return "global" if top == "global" else f"project:{top}"
-
-
-def parse_frontmatter(raw: str) -> tuple[dict, str]:
-    meta, body = {}, raw
-    if raw.startswith("---"):
-        _, front, body = raw.split("---", 2)
-        meta = yaml.safe_load(front) or {}
-    return meta, body
-
-
-def parse_fact_text(raw: str, path: str | Path, fact_id: str | None = None) -> dict:
-    rel = Path(path)
-    meta, body = parse_frontmatter(raw)
-    tags = meta.get("tags")
-    if isinstance(tags, str):
-        tag_text = tags
-    else:
-        tag_text = ",".join(tags) if tags else None
-    return {
-        "id": fact_id or str(rel.with_suffix("")),
-        "path": str(rel),
-        "slug": rel.stem,
-        "scope": scope_for_relative(rel),
-        "text": body.strip(),
-        "tags": tag_text,
-        "source": meta.get("source"),
-        "created_at": str(meta["created"]) if meta.get("created") else None,
-        "meta": meta,
-    }
+# The production canon is the live root's state/memory/facts, named by MEMORY_CANON_ROOT.
+# Prefer the atomically published export.ndjson snapshot; without one we read the canon
+# files themselves. The live root need not be a Git work tree, and nothing here calls Git.
 
 
 def load_export_snapshot(path: Path) -> list[dict]:
@@ -358,52 +324,12 @@ def load_export_snapshot(path: Path) -> list[dict]:
     return facts
 
 
-def _git(path: Path, *args: str) -> list[str]:
-    """Build a Git command safe for a root recovery over an owned checkout."""
-    # Recovery intentionally runs as root while bootstrap gives the instance
-    # checkout to the installation user.  Git must trust that checkout for every
-    # read in the canon snapshot, not merely for the initial clone/fetch.
-    return ["git", "-c", "safe.directory=*", "-C", str(path), *args]
-
-
-def git_repo_root(path: Path) -> Path | None:
-    proc = subprocess.run(
-        _git(path, "rev-parse", "--show-toplevel"),
-        check=False,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
-    if proc.returncode != 0:
-        return None
-    return Path(proc.stdout.strip())
-
-
-def load_git_head_snapshot(path: Path) -> list[dict]:
-    root = git_repo_root(path)
-    if root is None:
-        raise RuntimeError(f"canon snapshot unavailable: {path} is not a git worktree")
-    prefix = path.resolve().relative_to(root.resolve())
-    proc = subprocess.run(
-        _git(root, "ls-tree", "-r", "-z", "--name-only", "HEAD", "--", str(prefix)),
-        check=True,
-        stdout=subprocess.PIPE,
-    )
+def load_canon_files(path: Path) -> list[dict]:
+    """Every fact file under the canon root as it is on disk; symlinks are not facts."""
     facts = []
-    for raw_name in proc.stdout.split(b"\0"):
-        if not raw_name:
-            continue
-        repo_rel = raw_name.decode("utf-8")
-        if not repo_rel.endswith(".md"):
-            continue
-        rel = Path(repo_rel).relative_to(prefix)
-        show = subprocess.run(
-            _git(root, "show", f"HEAD:{repo_rel}"),
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-        )
-        facts.append(parse_fact_text(show.stdout, rel, fact_id=str(rel.with_suffix(""))))
+    for fact_id, fact_path in fact_files(path):
+        raw = fact_path.read_bytes().decode("utf-8")
+        facts.append(parse_fact_text(raw, Path(f"{fact_id}.md"), fact_id=fact_id))
     return facts
 
 
@@ -414,26 +340,23 @@ def load_canon_entries(canon: Path | None = None, export: Path | None = None) ->
         return load_export_snapshot(export)
     if not canon.is_dir():
         return []
-    return load_git_head_snapshot(canon)
+    return load_canon_files(canon)
 
 
 def canon_signature() -> tuple:
-    """Cheap change token: (file count, max mtime, total size). Catches add/edit/delete."""
+    """Cheap change token: the export's stat, else (file count, max mtime, total size) of the canon."""
     if CANON_EXPORT.is_file():
         st = CANON_EXPORT.stat()
         return ("export", st.st_mtime, st.st_size)
-    root = git_repo_root(CANON) if CANON.is_dir() else None
-    if root is not None:
-        proc = subprocess.run(
-            _git(root, "rev-parse", "HEAD"),
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-        )
-        return ("git", proc.stdout.strip())
     if not CANON.is_dir():
         return (0, 0.0, 0)
-    raise RuntimeError(f"canon snapshot unavailable: no {CANON_EXPORT} and {CANON} is not in git")
+    stats = [path.stat() for _fact_id, path in fact_files(CANON)]
+    return (
+        "files",
+        len(stats),
+        max((st.st_mtime_ns for st in stats), default=0),
+        sum(st.st_size for st in stats),
+    )
 
 
 def build_document_embedder(model: str, cache_dir: str | Path, threads: int):
@@ -452,13 +375,6 @@ def build_document_embedder(model: str, cache_dir: str | Path, threads: int):
             return [_unit(vector) for vector in embedding_model.embed(texts, batch_size=2)]
 
     return DocumentEmbedder()
-
-
-def fact_content_hash(fact: dict) -> str:
-    """Hash all indexed fields so metadata-only changes are not missed."""
-    payload = {key: fact.get(key) for key in ("text", "scope", "tags", "source", "created_at")}
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def indexed_fact_count(path: str | Path | None = None) -> int:

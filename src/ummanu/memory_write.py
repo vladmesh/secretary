@@ -15,15 +15,13 @@ from ummanu._fsutil import (
     cleanup_staging_dir as _cleanup_staging_dir,
 )
 from ummanu._fsutil import (
-    remove_path as _remove_path,
-)
-from ummanu._fsutil import (
     write_json as _write_json,
 )
 from ummanu._fsutil import (
     write_text_atomic as _write_text_atomic,
 )
 from ummanu.memory.access import PO_REVIEW_SCOPE, PO_REVIEW_SCOPE_DIR
+from ummanu.memory.canon import canon_revision, canon_transaction, recover_canon_undo
 from ummanu.memory_errors import (
     MemoryExportPublishError,
     MemoryLockError,  # noqa: F401  # Public compatibility re-export.
@@ -32,16 +30,13 @@ from ummanu.memory_errors import (
     MemoryValidationError,
 )
 from ummanu.memory_journal import (
-    _git_status,
     _memory_journal_lock,
     _publish_memory_export,
     _read_memory_facts,
-    _recover_journal_worktree,
     init_memory_journal,
     reject_legacy_memory_journal,
 )
 from ummanu.runtime.redact import redact
-from ummanu.state_repo import MEMORY_PATHSPEC
 
 MEMORY_CANONICAL_WRITER_ROLES = frozenset({"curator", "ummanu", "operator"})
 MEMORY_PROPOSAL_ONLY_ROLES = frozenset({"butler"})
@@ -67,6 +62,9 @@ class MemoryProposal:
 
 @dataclass(frozen=True)
 class MemoryWriteResult:
+    """One canon write. `commit` holds the content revision of the fact set after the write
+    (`memory.canon.content_revision`), not a Git commit: the writer makes none."""
+
     op: str
     facts_dir: Path
     commit: str
@@ -541,28 +539,28 @@ def _apply_memory_write(
     *,
     op: str,
 ) -> MemoryWriteResult:
-    """Write one fact and commit it into `state/memory` of the private repo.
+    """Write one fact into `state/memory/facts` of the live root, all or nothing.
 
-    Contract: docs/RECOVERY.md, "Writers". The commit is scoped to the memory
-    pathspec and taken under the state lock, so a dispatcher tick committing
-    `state/board`/`state/runs` at the same moment neither blocks this write nor
-    picks up half of it.
+    Contract: docs/RECOVERY.md, "Writers". No Git: the write is guarded by the undo area of
+    `memory.canon` and taken under the live-root writer lock, so a tick cutting or committing
+    `state/memory` at the same moment never sees half of it.
     """
     reject_legacy_memory_journal(memory_dir)
     facts_dir, _created = init_memory_journal(instance_dir)
-    instance_dir = state_repo.require_repo(instance_dir)
+    instance_dir = Path(instance_dir).expanduser().resolve()
     with state_repo.state_repo_lock(instance_dir):
-        return _write_locked(facts_dir, instance_dir, proposal, op=op)
+        return _write_locked(memory_dir, facts_dir, proposal, op=op)
 
 
 def _write_locked(
+    memory_dir: Path,
     facts_dir: Path,
-    instance_dir: Path,
     proposal: dict[str, Any],
     *,
     op: str,
 ) -> MemoryWriteResult:
-    _recover_journal_worktree(instance_dir)
+    # A crashed write is undone before this one looks at the canon it validates against.
+    recover_canon_undo(memory_dir)
     scope_dir = _clean_path_part(str(proposal["scope_dir"]), "scope")
     slug = _clean_slug(str(proposal["slug"]))
     actor = str(proposal["actor"])
@@ -580,32 +578,21 @@ def _write_locked(
         raise MemoryValidationError("new fact cannot supersede itself")
 
     fact_text = str(proposal["fact_text"])
-    # `state/memory` rides to the remote with the rest of the checkpoint, so the
-    # fact passes the same secret gate the tick writer applies to board and runs.
+    # `state/memory` leaves the host with the next checkpoint or cut, so the fact passes the same
+    # secret gate the tick applies to everything else it ships.
     if redact(fact_text) != fact_text:
         raise MemoryValidationError(f"secret detected in memory fact: {fact_id}")
 
-    try:
-        _write_text_atomic(target, fact_text)
+    with canon_transaction(memory_dir, facts_dir.parent) as transaction:
+        transaction.write(target, fact_text)
         for _old_id, old_path in supersede_paths:
-            _remove_path(old_path)
-        commit = state_repo.commit(
-            instance_dir,
-            MEMORY_PATHSPEC,
-            _commit_message(op, proposal, fact_id),
-        )
-        if commit is None:
-            raise MemoryValidationError("memory write produced no journal changes")
-        if _git_status(instance_dir):
-            raise RuntimeError("state/memory dirty after commit")
-    except Exception:
-        _recover_journal_worktree(instance_dir)
-        raise
+            transaction.remove(old_path)
+        revision = canon_revision(facts_dir)
 
     return MemoryWriteResult(
         op=op,
         facts_dir=facts_dir,
-        commit=commit,
+        commit=revision,
         fact=fact_id,
         actor=actor,
         source=source,
@@ -622,14 +609,12 @@ def _publish_write_export(memory_dir: Path, result: MemoryWriteResult) -> None:
             facts=facts,
             source_memory=result.facts_dir,
             source_root=result.facts_dir,
-            source_head=result.commit,
-            commit=result.commit,
             changed=True,
             record_import=False,
         )
     except RuntimeError as exc:
         raise MemoryExportPublishError(
-            f"memory export publish failed after journal commit {result.commit}: {exc}",
+            f"memory export publish failed after canon write {result.commit}: {exc}",
             result=result,
         ) from None
 
@@ -648,29 +633,3 @@ def _supersede_paths(facts_dir: Path, supersedes: tuple[str, ...]) -> list[tuple
             raise MemoryValidationError(f"superseded fact not found: {normalized}")
         paths.append((normalized, path))
     return paths
-
-
-def _commit_message(op: str, proposal: dict[str, Any], fact_id: str) -> str:
-    actor = str(proposal["actor"])
-    source = str(proposal["source"])
-    supersedes = tuple(str(item) for item in proposal.get("supersedes", []))
-    changed_facts = ", ".join((fact_id, *supersedes))
-    if op == "supersede":
-        subject = f"memory supersede: {fact_id}"
-    else:
-        subject = f"memory commit: {fact_id}"
-    lines = [
-        subject,
-        "",
-        f"Op: {op}",
-        f"Principal: {actor}",
-        f"Source: {source}",
-        f"Fact: {fact_id}",
-        f"Changed-Facts: {changed_facts}",
-    ]
-    proposal_id = proposal.get("id")
-    if isinstance(proposal_id, str) and proposal_id:
-        lines.append(f"Proposal: {proposal_id}")
-    if supersedes:
-        lines.append(f"Supersedes: {', '.join(supersedes)}")
-    return "\n".join(lines) + "\n"

@@ -1702,14 +1702,14 @@ def run_memory_verify(args: argparse.Namespace) -> int:
     except RuntimeError as exc:
         print(f"ummanu memory verify: {exc}")
         return 1
-    print(f"journal: {result.facts_dir}")
-    print(f"journal commit: {result.journal_commit or '(none)'}")
+    print(f"canon: {result.facts_dir}")
+    print(f"canon revision: {result.journal_commit or '(none)'}")
     print(f"memory facts: {result.fact_count}")
     export_count = result.export_count if result.export_count is not None else "(missing)"
     index_count = result.index_count if result.index_count is not None else "(missing)"
     print(f"export facts: {export_count}")
     print(f"index facts: {index_count}")
-    print(f"journal dirty: {'yes' if result.dirty else 'no'}")
+    print(f"undo pending: {'yes' if result.dirty else 'no'}")
     if result.findings:
         print("findings:")
         for finding in result.findings:

@@ -436,8 +436,9 @@ deferred record.
 ## Memory plane
 
 Facts are markdown records under `state/memory/facts` in the instance repository. The curator writes
-through `ummanu memory propose/commit/supersede`, which commits only `state/memory` under the
-shared instance-repository writer lock. The butler may only `propose`; `commit` and `supersede` belong
+through `ummanu memory propose/commit/supersede`, which writes only `state/memory`, as files and
+without Git, all or nothing under the shared instance-repository writer lock
+([Recovery](RECOVERY.md#writers)). The butler may only `propose`; `commit` and `supersede` belong
 to the curator, ummanu and operator roles ([Protocols](PROTOCOLS.md#memory)). Other heads read
 through MCP. The NDJSON export and the SQLite/vector index in the data directory are rebuilt from the
 canon, and one index writer publishes at a time.

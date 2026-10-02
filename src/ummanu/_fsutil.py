@@ -66,6 +66,30 @@ def write_text_atomic(path: Path, payload: str) -> None:
                 pass
 
 
+def write_bytes_atomic(path: Path, payload: bytes, *, mode: int | None = None) -> None:
+    """Replace `path` with `payload` through a synced temporary beside it, optionally with `mode`."""
+    temp_path: Path | None = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+        temp_path = Path(temp_name)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(temp_path, mode)
+        os.replace(temp_path, path)
+    except OSError as exc:
+        raise RuntimeError(f"could not write {path}: {exc}") from None
+    finally:
+        if temp_path is not None and temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
+
+
 def write_private_text_atomic_privileged(
     path: Path,
     payload: str,

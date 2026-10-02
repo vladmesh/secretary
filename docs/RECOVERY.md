@@ -173,10 +173,11 @@ checkpoint after the upgrade converts a flat checkpoint in place: it writes the 
 removes the flat files in the same commit. Earlier commits keep their flat files; history is never
 rewritten.
 
-Memory facts are stored flat in this repository; the memory writer commits `propose`/`commit`/
-`supersede` into it. `state/memory/facts` is the only canon for every derived form of memory, so the
-instance directory is a required argument on the export and index-rebuild paths: a missing argument
-fails instead of pointing the export at another installation's memory.
+Memory facts are stored flat in this repository; the memory writer writes `commit`/`supersede`
+into it as files, without Git, and the tick commits them ([Writers](#writers)).
+`state/memory/facts` is the only canon for every derived form of memory, so the instance directory
+is a required argument on the export and index-rebuild paths: a missing argument fails instead of
+pointing the export at another installation's memory.
 
 ## Cadence and RPO
 
@@ -194,8 +195,10 @@ failure or divergence for the next window or operator action.
 
 Six writers touch the instance repository, each with its own pathspec:
 
-- tick writer: `state/board`, `state/runs`, at the cadence above, under the tick lock;
-- memory writer: `state/memory`, on `propose`/`commit`/`supersede`;
+- tick writer: `state/board`, `state/runs` (and, in legacy mode, `state/memory`; below), at the
+  cadence above, under the tick lock;
+- memory writer: `state/memory`, on `commit`/`supersede` and the memory pack of `upgrade`; it writes
+  files only and makes no Git call (below);
 - knowledge writer: `state/knowledge`, on `ummanu knowledge write`;
 - secret writer: `secrets/`, on `secret init/set/import/remove` (`list` and `materialize` do not
   commit);
@@ -259,9 +262,33 @@ refused (`blocked`, exit 1). The next window commits with the legacy tip as its 
 the marker. The runbook order is: final legacy checkpoint and push, seed, switch the live root. The
 first exporter push is then a fast-forward of the remote branch.
 
+**Memory writer.** The canon is the files under `state/memory/facts` (and the pack ledgers under
+`state/memory/packs`) of the live root, whether or not the live root is a Git work tree. `memory
+commit`, `memory supersede` and the memory pack write it without Git: under the memory lock
+(`<data>/memory/.write.lock`) and the shared repository lock, each write first records the prior
+state of every path it is about to replace or remove in the **undo area** `<data>/memory/.undo`
+(a copy of the old bytes and mode, or "absent"), then replaces each file atomically or removes it,
+then retires the undo area with one rename. A failure inside the write restores exactly the recorded
+set, so the canon is byte-identical to before; an undo area a crashed writer left behind is restored
+by the next writer (or `data export-memory`) under the same locks before it proceeds. The undo area
+is outside `state/memory`, so it is never in the export allowlist, never in the canon and never in
+a commit; `memory verify` reports one that is left behind. Where a commit id used to be, the writer
+result (`commit`), the export manifest (`source.head`, `journal.commit`) and the pack result carry
+the **content revision**: `sha256:` over the sorted fact ids, each with the sha256 of its file's
+bytes (`memory.canon.content_revision`). The same canon gives the same revision, and any changed
+byte changes it. `memory verify` compares the canon, `export.ndjson` and `index.sqlite` by fact id
+set and per-fact content hash and names every missing, extra or changed id, not their counts. The
+memory service reads the canon files when no export is present.
+
+Because the memory writer no longer commits, the **legacy** tick (live root is a work tree) stages
+and commits `state/memory` in the same commit as `state/board` and `state/runs`, after scanning
+every file under it with the same redaction as the rest of the cut; a hit blocks the tick by path.
+Only `state/memory` joins: config and every other path stay out of that commit. In exporter mode the
+allowlisted `state/memory/**` reaches the next cut as before.
+
 Pathspecs do not overlap, and nobody uses `git add -A`, so uncommitted manual config edits are left
 alone. Every writer holds the shared repository lock while staging and committing. All writers except
-the tick writer commit synchronously; the next push carries their commits out. Explicit checkpoint
+the tick writer and the memory writer commit synchronously; the next push carries their commits out. Explicit checkpoint
 users (install, recover) are also synchronous and bypass the periodic cadence.
 
 ## Checkpoint readers and freshness
@@ -329,8 +356,9 @@ checkpoint, records the reason in status and retries next tick:
   `export.json` match the line counts, the generated `cards.json`/`cards.ndjson` pair is identical and
   card references are unique, all before local export or canonical files are replaced;
 - memory staging is empty;
-- the secret scan of `state/` is clean (for the snapshot exporter: of every file of the cut). The
-  memory and knowledge writers run the same scan over their own text before committing.
+- the secret scan of `state/` is clean, `state/memory` included in legacy mode (for the snapshot
+  exporter: of every file of the cut). The memory and knowledge writers run the same scan over their
+  own text before writing.
 
 ### Analytics checkpoint seal v2
 

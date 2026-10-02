@@ -1,13 +1,13 @@
 """The private instance repository as a shared commit target.
 
-Contract: docs/RECOVERY.md, sections "Layout" and "Writers". Six writers commit
-to the private instance repository: the tick writer (`state/board`, `state/runs`),
-the memory writer (`state/memory`), the knowledge writer (`state/knowledge`), the
-secret store (`secrets/`) and the local-configuration writer (`.gitignore` through
-:func:`ensure_ignored`). They own disjoint pathspecs and
-never `git add -A`, so none can pick up another's half-written tree, and
-`state_repo_lock` serializes the index operations git itself does not make
-concurrency-safe.
+Contract: docs/RECOVERY.md, sections "Layout" and "Writers". The tick writer
+(`state/board`, `state/runs`, and `state/memory` in legacy mode), the knowledge writer
+(`state/knowledge`), the secret store (`secrets/`) and the local-configuration writer
+(`.gitignore` through :func:`ensure_ignored`) commit to the private instance repository. They own
+disjoint pathspecs and never `git add -A`, so none can pick up another's half-written tree, and
+`state_repo_lock` serializes the index operations git itself does not make concurrency-safe. The
+memory writer makes no Git call: it writes `state/memory` as files under the same lock, which is all
+it takes from this module.
 """
 
 from __future__ import annotations

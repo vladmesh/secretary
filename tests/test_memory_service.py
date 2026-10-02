@@ -118,25 +118,34 @@ class IncrementalMemoryIndexTests(unittest.TestCase):
             self.update()
         self.assertEqual(self.rows(), before)
 
-    def test_git_snapshot_marks_every_command_safe_for_root_recovery(self):
-        commands = []
+    def test_without_an_export_the_canon_files_of_a_non_git_root_are_read(self):
+        (self.canon / "global").mkdir()
+        (self.canon / "global" / "a.md").write_text("---\nsource: test\n---\nalpha\n", encoding="utf-8")
+        (self.canon / "global" / "link.md").symlink_to(self.canon / "global" / "a.md")
+        (self.canon / "global" / ".a.md.123.tmp").write_text("partial\n", encoding="utf-8")
+        self.assertFalse(self.export.exists())
 
-        def run(command, **kwargs):
-            commands.append(command)
-            if "rev-parse" in command:
-                return mock.Mock(returncode=0, stdout=str(self.root) + "\n")
-            if "ls-tree" in command:
-                return mock.Mock(stdout=b"facts/example.md\0")
-            if "show" in command:
-                return mock.Mock(stdout="# example\n")
-            raise AssertionError(command)
+        with mock.patch("subprocess.run", side_effect=AssertionError("no Git child")):
+            facts = memory_service.load_canon_entries(self.canon, self.export)
 
-        with mock.patch.object(memory_service.subprocess, "run", side_effect=run):
-            facts = memory_service.load_git_head_snapshot(self.canon)
+        self.assertEqual([fact["id"] for fact in facts], ["global/a"])
+        self.assertEqual(facts[0]["text"], "alpha")
+        self.assertEqual(facts[0]["scope"], "global")
 
-        self.assertEqual(len(facts), 1)
-        for command in commands:
-            self.assertEqual(command[:3], ["git", "-c", "safe.directory=*"])
+    def test_the_canon_signature_follows_the_files_without_git(self):
+        (self.canon / "global").mkdir()
+        fact = self.canon / "global" / "a.md"
+        fact.write_text("alpha\n", encoding="utf-8")
+        with (
+            mock.patch.object(memory_service, "CANON", self.canon),
+            mock.patch.object(memory_service, "CANON_EXPORT", self.export),
+            mock.patch("subprocess.run", side_effect=AssertionError("no Git child")),
+        ):
+            before = memory_service.canon_signature()
+            fact.write_text("alpha, longer now\n", encoding="utf-8")
+            after = memory_service.canon_signature()
+
+        self.assertNotEqual(before, after)
 
     def test_bootstrap_reconciles_compatible_index_without_full_rebuild(self):
         self.write_export([("global/a", "alpha")])

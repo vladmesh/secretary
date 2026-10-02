@@ -248,3 +248,4 @@ unit tests/test_web_process_receipt.py
 unit tests/test_upgrade_state_receipts.py
 integration-board tests/test_retired_identity.py
 unit tests/test_resource_probe.py
+unit tests/test_memory_canon.py
