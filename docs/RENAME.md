@@ -430,61 +430,101 @@ parked cards are re-cut by the PO as `ummanu-N` with `supersedes` only if still 
 ### T3. One-shot migration code
 
 **Where.** `src/secretary/transition/` (renamed to `src/ummanu/transition/` by the rename card along with
-everything else) and CLI `ummanu transition from-secretary --instance … (--plan | --apply)`. A shell
-bootstrap `scripts/transition-from-secretary.sh` runs the steps that must happen before `~/ummanu/.venv`
-exists. Tests: `tests/test_transition_from_secretary.py`. After the sprint these are the **only** code that
-may contain `secretary` (class T). They are deleted in the packaging sprint, after rollback stops
-mattering.
+everything else) and CLI `ummanu transition from-secretary --instance … (--plan | --apply | --rollback)`.
+A shell bootstrap `scripts/transition-from-secretary.sh` runs the steps that must happen before
+`~/ummanu/.venv` exists. Tests: `tests/test_transition_from_secretary.py` (unit, fixture installs) and
+`tests/test_transition_board.py` (the board steps against PostgreSQL, CI integration shard; it takes every
+name from the transition's table, so it is not class T and the rename card rewrites it like any other file).
+After the sprint these are the **only** code that may contain `secretary` (class T). They are deleted in
+the packaging sprint, after rollback stops mattering.
+
+The module reaches the product only by relative imports of stable primitives (`board.postgres_recovery`,
+`board.provision`, `board.store`, `board.migrate`, `board.backend`), so the rename card moves it without
+rewriting it. Every old and new name (paths, unit and env prefixes, DB/role/Compose names, secret-store
+formats and constants, Claude keys) is in one literal table, `transition/names.py`.
 
 **Launched** by the PO from its session, the way NOTES.md describes `upgrade`:
 `XDG_RUNTIME_DIR=/run/user/$(id -u) systemd-run --user --unit ummanu-transition --collect /bin/bash -c '/home/dev/secretary/scripts/transition-from-secretary.sh > /home/dev/transition.log 2>&1'`.
-The log lives outside both data dirs. The PO session dies at step 2 and the log is read afterwards.
+The log lives outside both data dirs. The PO session dies at step 2 and the log is read afterwards. Read
+the plan first: `secretary transition from-secretary --plan --instance /home/dev/secretary-instance`.
 
-**Steps.** Each step is idempotent and journals to `~/ummanu-transition.json`, so a rerun resumes.
-`--plan` prints them and writes nothing.
+**Steps.** Each step is idempotent and journals to `~/ummanu-transition.json`, so a rerun resumes at the
+first unfinished step. `--plan` prints every step with the commands and paths it would touch and the
+result of each precondition, and writes nothing (no journal, no lock, no board write, no fetch).
+Rollback copies go to `~/ummanu-transition/`. Steps 1–4 run from the pre-rename tree (the bootstrap runs
+them with `--through move`), step 5 is the bootstrap's own, steps 6–12 run from the renamed tree.
 
-1. Preconditions: the rename commit is on `origin/main` and the production checkout is behind it (the
-   rename card is Blocked `entrypoint_moved`); `secretary pause-status` is a drain; no in-flight records in
-   `production-state.json`; no live heads; the doctor baseline and board counts comments are on the
-   sprint. Refuse otherwise.
-2. `secretary pause freeze`, then `sudo -n systemctl disable --now` every `secretary-*` timer and service
-   (this kills web, PO service and session). Save copies of the 18 unit files to
+1. Preconditions, after `git fetch origin` in the checkout:
+   - the checkout is on `main`, an ancestor of `origin/main` and behind it; a commit in between adds
+     `src/ummanu/dispatch/runtime_preflight.py`, and `origin/main` has the `ummanu` console script and no
+     `src/secretary/dispatch/runtime_preflight.py` (the rename card is Blocked `entrypoint_moved`);
+   - no Alembic revision is added in the gap. The rename moves every revision file, so a path diff is
+     never empty; the check compares the revision file *names* under `src/*/board/migrations/versions`;
+   - the first-parent merges in the gap are the rename's merge only, unless `--allow-extra-merge <sha>`
+     names each other one;
+   - `pause.json` is a drain (or already a freeze); `production-state.json` has no records, no
+     activation recovery and no post-merge watch; no worker or reviewer head socket of a record exists
+     (observer heads are allowed: step 2 stops them);
+   - the sprint (`--sprint`, or the one open sprint carrying it) has comments with the markers
+     `[transition:baseline]` (doctor baseline) and `[transition:counts]` (board counts).
+2. Stop the dispatcher timer and service, `secretary resume` if the pipeline is drained (a drain cannot
+   become a freeze), `secretary pause freeze`, then `sudo -n systemctl disable --now` every `secretary-*`
+   timer and service except the instance's `foreign_units` (this kills web, PO service and session).
+   Their enabled/active states and copies of the unit files go to the journal and
    `~/ummanu-transition/units/` for rollback.
 3. Dump the board (§T2.2), stop the old container (§T2.3).
-4. `mv /home/dev/secretary /home/dev/ummanu`, `mv /home/dev/secretary-data /home/dev/ummanu-data`,
-   `sudo mv /opt/secretary /opt/ummanu` and repoint `/usr/local/bin/orca`,
-   `mv ~/.secretary-tools ~/.ummanu-tools` and repoint `~/.local/bin/uv`.
-5. In `~/ummanu`: `git fetch && git merge --ff-only origin/main`; `git remote set-url origin
-   https://github.com/vladmesh/ummanu.git` (the owner has renamed the repo by now; before the rename the
-   old URL still works); `git worktree prune` and `repair` for the live worktrees; remove the old role
-   worktrees `~/orca/workspaces/secretary/*`; delete `src/secretary.egg-info`; recreate `.venv` with the
-   extras the old venv had (read from its installed distributions before the move), `pip install -e`. From here the script calls `~/ummanu/.venv/bin/ummanu transition
-   from-secretary --apply`.
-6. Data-plane fix-ups: `git worktree repair` for the observer-root and codegen worktrees;
-   `production-state.json` path prefix and `owner`; `data-manifest.json` `data_dir`; the live
-   `codex-home/config.toml` project keys; the `~/.codex/config.toml` MCP block.
+4. Record the old venv's extras, then `mv /home/dev/secretary /home/dev/ummanu`,
+   `mv /home/dev/secretary-data /home/dev/ummanu-data`, `sudo mv /opt/secretary /opt/ummanu` and repoint
+   `/usr/local/bin/orca`, `mv ~/.secretary-tools ~/.ummanu-tools` and repoint `~/.local/bin/uv`.
+5. Bootstrap, in `~/ummanu` on `main`: `git fetch && git merge --ff-only origin/main`; `git remote set-url
+   origin https://github.com/vladmesh/ummanu.git` (the owner has renamed the repo by now; before the
+   rename the old URL still works); delete `src/secretary.egg-info`; move the old `.venv` to
+   `~/ummanu-transition/old-venv` (its scripts name the old path, so it is kept whole for rollback) and
+   build a new one with the recorded extras, `pip install -e`. Then the script execs
+   `~/ummanu/.venv/bin/ummanu transition from-secretary --apply`, whose step 5 only verifies this.
+6. Data-plane fix-ups: `git worktree repair` in `~/ummanu` and, per repository, for every worktree that
+   moved with the data dir (product, observer root, codegen, instance), then `git worktree prune`;
+   `production-state.json` path prefixes and `owner`; `data-manifest.json` `data_dir`; the live
+   `codex-home/config.toml` project keys; the `~/.codex/config.toml` MCP block that runs the old checkout.
 7. Instance rewrite, committed to `secretary-instance` as one commit: `instance.yaml` (§4), rename
-   `projects/secretary.yaml` and `adapters/secretary.yaml` to `ummanu.yaml`; `runtime.env` and
-   `board-store.env` keys; `.secretary-tools` in adapters; probes in `heads/heads.toml`; `secrets/catalog.yaml`.
-   Re-wrap `secrets/installation-key.json` and re-encrypt the 4 values from the old AAD/KDF constants to
-   the new ones. Move `state/memory/facts/secretary` to `facts/ummanu` and remove `facts/product-secretary`
-   and `packs/product-secretary.json`.
-8. Board: provision, restore, translate (§T2.4–6).
+   `projects/secretary.yaml` and `adapters/secretary.yaml` to `ummanu.yaml`; `.secretary-tools` in
+   adapters; probes in `heads/heads.toml`; `secrets/catalog.yaml`. Re-wrap `secrets/installation-key.json`
+   and re-encrypt every value from the old AAD/KDF constants and formats to the new ones; each value is
+   opened under the new ones before any file is replaced, and the old files are kept under
+   `~/ummanu-transition/secrets/`. Move `state/memory/facts/secretary` to `facts/ummanu` and remove
+   `facts/product-secretary` and `packs/product-secretary.json`. Also rewrite the git-ignored
+   `runtime.env` keys and `board-store.env` (§T2.4 values), with copies kept for rollback.
+8. Board: move the old Compose file (moved to `/opt/ummanu` with step 4) aside, then provision, restore,
+   translate (§T2.4–6), print the before/after counts and refuse unless only the §T2.7 rows differ.
+   Translation touches open sprints (`status = 'open'`) only.
 9. Claude and Codex directories (§T4).
-10. `ummanu upgrade --instance /home/dev/secretary-instance`. This is the existing materializer:
+10. Remove the old role worktrees `~/orca/workspaces/secretary/*` (they stay usable until here, so a
+    rollback before this step needs no recreation), then
+    `sudo -n ~/ummanu/.venv/bin/python3 -P -m ummanu upgrade --instance /home/dev/secretary-instance
+    --no-pull --product-root /home/dev/ummanu --runtime-user dev`. This is the existing materializer:
     registries, memory pack `product-ummanu`, memory clients, codex home, PO workspace, worktrees under
     `~/orca/workspaces/ummanu`, role skills, units `ummanu-*` from `packaging/systemd`, memory, PO, web,
-    verify. Then `ummanu web-front render …` and restart `ummanu-web-front.service`, then
-    `ummanu-memory-reindex`.
+    verify. Then `ummanu web-front render` with the sites of the current Caddyfile, `web-front check`,
+    restart `ummanu-web-front.service`, then `ummanu memory reindex`.
 11. Remove the old unit files from `/etc/systemd/system` and `daemon-reload`. The copies stay in
     `~/ummanu-transition/units/`.
-12. `ummanu resume`; post a sprint comment with counts after, unit list, doctor result, and the old and
-    new checkout SHA.
+12. `ummanu resume`; `ummanu doctor`; write `~/ummanu-transition/report.md` (counts before/after, unit
+    list, doctor result, old and new checkout SHA, secrets verified, dirs moved) and post it as a sprint
+    comment marked `[transition:done]`, with `## What was done` / `## How to verify` for the PO to complete
+    the operation card the guard opened.
 
-**Rollback**, before step 12 or if verify fails: stop `ummanu-*`; `mv` the four paths back; restore the
-unit copies and enable them; `docker compose -p secretary-board-store … start` (the old volume is
-untouched); `git -C /home/dev/secretary-instance revert` the instance commit; `git -C ~/secretary checkout`
-the pre-rename SHA from the journal. The GitHub rename needs no rollback: the old URL still redirects.
+**Rollback**: `scripts/transition-from-secretary.sh --rollback` (or `… transition from-secretary --rollback`),
+driven by the journal, before step 12 or if verify fails. It stops `ummanu-*` and the new store
+container; moves the Claude directories back and drops the trust entries it added; reverts the instance
+commit (or, if step 7 stopped before it, restores those paths from `HEAD`) and puts back `runtime.env` and
+`board-store.env`; moves the Compose file and the four paths back and repoints the links; restores the
+code checkout with `mv` back, the old venv back into place, then `git -C ~/secretary reset --hard <SHA>` on
+branch `main` (the pre-transition SHA from the journal, never a detached checkout), the old `origin` URL
+and `git worktree repair`; restores the rewritten data-plane files; restores the unit copies,
+`docker compose -p secretary-board-store … start` (the old volume is untouched), and enables and starts
+the units as they were. The pipeline stays frozen until the operator runs `secretary resume`. The journal
+and the copies move to `~/ummanu-transition-rolled-back-<stamp>/`, so a later `--apply` starts fresh. The
+GitHub rename needs no rollback: the old URL still redirects.
 
 ### T4. PO and head continuity
 
@@ -498,7 +538,8 @@ the pre-rename SHA from the journal. The GitHub rename needs no rollback: the ol
     (observer memory);
   - `-home-dev-secretary-data-workspaces-observers-sprint-1475` → `…-ummanu-…`;
   - `-home-dev-secretary` → `-home-dev-ummanu` (interactive and worker memory);
-  - `-home-dev-orca-workspaces-secretary-*` → `…-ummanu-*`.
+  - `-home-dev-orca-workspaces-secretary-{curator,pipeline,retro,steward}` → `…-ummanu-…` (the role
+    agents only: card and `secretary-instance` worktrees under the same root are history, R/I).
 
   The two `~/.claude.json` trust entries are copied to their new keys. Session JSONL files keep their
   stale `cwd` lines (R). Claude finds a session by id in the directory of the current cwd.
