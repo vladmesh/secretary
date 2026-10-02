@@ -21,8 +21,12 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from secretary.board import owner_events, schema, schema_gate
-from secretary.board.owner_events import (
+from tests.owner_event_fakes import CheckViolation, FakeOwnerEvents
+from tests.po_card_fakes import DECISION_BODY, REF
+from tests.po_handover_fakes import REASON, HandedOverFixture, MemoryAudit, OneCardClient, decision_card
+from tests.web_fakes import Recording
+from ummanu.board import owner_events, schema, schema_gate
+from ummanu.board.owner_events import (
     CLASSES,
     KIND_CLASS,
     KINDS,
@@ -35,17 +39,13 @@ from secretary.board.owner_events import (
     record,
     settle,
 )
-from secretary.board.owner_handover import mark_values, waiting_owner
-from secretary.sprints import BUDGET_EVENT_TYPES
-from secretary.tasks import TaskWriter
-from secretary.web import pages
-from secretary.web.app import WebApp
-from secretary.webproto.errors import OwnerConflict, OwnerEventMissing, RuntimeUnavailable
-from secretary.webproto.owner_events import OwnerEventLayer
-from tests.owner_event_fakes import CheckViolation, FakeOwnerEvents
-from tests.po_card_fakes import DECISION_BODY, REF
-from tests.po_handover_fakes import REASON, HandedOverFixture, MemoryAudit, OneCardClient, decision_card
-from tests.web_fakes import Recording
+from ummanu.board.owner_handover import mark_values, waiting_owner
+from ummanu.sprints import BUDGET_EVENT_TYPES
+from ummanu.tasks import TaskWriter
+from ummanu.web import pages
+from ummanu.web.app import WebApp
+from ummanu.webproto.errors import OwnerConflict, OwnerEventMissing, RuntimeUnavailable
+from ummanu.webproto.owner_events import OwnerEventLayer
 
 SPRINT = "sprint:1"
 
@@ -89,13 +89,13 @@ class EntityTests(unittest.TestCase):
         self.assertEqual(set(re.findall(r"'([a-z_]+)'", checks["owner_event_class_in_vocabulary"])), set(CLASSES))
         needs = re.search(r"kind IN \(([^)]*)\)", checks["owner_event_class_follows_kind"]).group(1)
         self.assertEqual(set(re.findall(r"'([a-z0-9_]+)'", needs)), set(owner_events.NEEDS_OWNER_KINDS))
-        revision = importlib.import_module("secretary.board.migrations.versions.0018_owner_events")
+        revision = importlib.import_module("ummanu.board.migrations.versions.0018_owner_events")
         source = Path(revision.__file__).read_text(encoding="utf-8")
         # 0021 restated the kind vocabulary with `delegated_card_settled` (secretary-1792); 0023 restates
         # it and the class rule with `e2e_budget_spent`, a `needs_owner` kind (secretary-1796); 0024 restates
         # both again with `e2e_after_merge`, a `needs_owner` kind (secretary-1807). The class vocabulary is
         # still the one 0018 created.
-        restated = importlib.import_module("secretary.board.migrations.versions.0025_card_waits_for_person")
+        restated = importlib.import_module("ummanu.board.migrations.versions.0025_card_waits_for_person")
         restated_source = Path(restated.__file__).read_text(encoding="utf-8")
         restated_names = {"owner_event_kind_in_vocabulary", "owner_event_class_follows_kind"}
         for name, text in checks.items():
@@ -135,7 +135,7 @@ class EntityTests(unittest.TestCase):
         missing.missing_table = True
         broken = FakeOwnerEvents()
         broken.failing = RuntimeError("connection reset")
-        with self.assertLogs("secretary.board.owner_events", level="WARNING") as logged:
+        with self.assertLogs("ummanu.board.owner_events", level="WARNING") as logged:
             self.assertFalse(record("sprint_closed", SPRINT, "x", "k1", to=missing))
             self.assertFalse(record("sprint_closed", SPRINT, "x", "k2", to=broken))
             self.assertFalse(record("not_a_kind", SPRINT, "x", "k3", to=FakeOwnerEvents()))
@@ -160,7 +160,7 @@ class EntityTests(unittest.TestCase):
         missing.missing_table = True
         broken = FakeOwnerEvents()
         broken.failing = RuntimeError("connection reset")
-        with self.assertLogs("secretary.board.owner_events", level="WARNING"):
+        with self.assertLogs("ummanu.board.owner_events", level="WARNING"):
             for to, kind, key in (
                 (missing, "delegated_card_settled", "d2"),
                 (broken, "delegated_card_settled", "d3"),
@@ -170,11 +170,11 @@ class EntityTests(unittest.TestCase):
                 with self.subTest(kind=kind, key=key):
                     self.assertEqual(owner_events.record_strict(kind, REF, "x", key, to=to), "failed")
         # No board store configured at all: nothing to wait for, logged, never raised.
-        with self.assertLogs("secretary.board.owner_events", level="INFO"):
+        with self.assertLogs("ummanu.board.owner_events", level="INFO"):
             self.assertEqual(
                 owner_events.record_strict("delegated_card_settled", REF, "x", "d5", to=None), "not_applicable"
             )
-        with tempfile.TemporaryDirectory() as tmp, self.assertLogs("secretary.board.owner_events", level="INFO"):
+        with tempfile.TemporaryDirectory() as tmp, self.assertLogs("ummanu.board.owner_events", level="INFO"):
             self.assertEqual(
                 owner_events.record_strict("delegated_card_settled", REF, "x", "d6", to=Path(tmp)),
                 "not_applicable",
@@ -203,7 +203,7 @@ class EntityTests(unittest.TestCase):
                 store.unread_count()
             self.assertEqual(raised.exception.code, "schema_owed")
             self.assertEqual(raised.exception.pending[0], "0018_owner_events")
-            with self.assertLogs("secretary.board.owner_events", level="WARNING"):
+            with self.assertLogs("ummanu.board.owner_events", level="WARNING"):
                 self.assertFalse(record("sprint_closed", SPRINT, "x", "k", to=store))
 
     def test_a_long_text_is_cut_not_refused(self) -> None:
@@ -213,8 +213,8 @@ class EntityTests(unittest.TestCase):
         self.assertEqual(len(event.text), owner_events.TEXT_LIMIT)
 
     def test_the_needs_a_human_section_is_read_from_the_report(self) -> None:
-        report = "# Steward\n\n## Actions\nnone\n\n## Needs a human\n- pay the relay (secretary-12)\n\n## Next\nx"
-        self.assertEqual(needs_human_section(report), "- pay the relay (secretary-12)")
+        report = "# Steward\n\n## Actions\nnone\n\n## Needs a human\n- pay the relay (ummanu-12)\n\n## Next\nx"
+        self.assertEqual(needs_human_section(report), "- pay the relay (ummanu-12)")
         self.assertEqual(needs_human_section("**Needs a human:**\nrotate the key"), "rotate the key")
         for empty in ("## Needs a human\nnone", "## Needs a human\n\n## Next\n", "## Needs a human\n- None.", "no section"):
             with self.subTest(empty=empty):
@@ -252,7 +252,7 @@ class StayUnreadStoreTests(unittest.TestCase):
         self.assertIsNone(self.store.rows[self.closed.id].read_at, "a notice is not the card's to clear")
 
     def test_a_needs_owner_event_whose_card_carries_no_mark_is_read_by_a_click(self) -> None:
-        record("steward_needs_human", "secretary-77", "needs a human", "s", to=self.store)
+        record("steward_needs_human", "ummanu-77", "needs a human", "s", to=self.store)
         steward = self.store.of_kind("steward_needs_human")[0]
         self.assertIsNotNone(self.store.mark_read(steward.id).read_at)
 
@@ -279,7 +279,7 @@ class StayUnreadThroughTheCardTests(unittest.TestCase):
         self.writer = TaskWriter(self.client, data_dir=tmp)  # type: ignore[arg-type]
         self.writer.audit = MemoryAudit()
         self.writer.reader = mock.Mock(show=lambda reference: copy.deepcopy(self.card))
-        self.enterContext(mock.patch("secretary.tasks._task_number", return_value=1900))
+        self.enterContext(mock.patch("ummanu.tasks._task_number", return_value=1900))
         typed: dict[str, Any] = {}
         self.writer._typed_event = lambda request_id: typed.get(request_id)  # type: ignore[method-assign]
 
@@ -331,7 +331,7 @@ class StayUnreadThroughTheCardTests(unittest.TestCase):
         self.assertIsNone(self.events.of_kind("card_handed_to_owner")[0].read_at)
 
     def test_required_handover_and_completion_refuse_an_unavailable_wait_store(self) -> None:
-        from secretary.tasks import TaskError
+        from ummanu.tasks import TaskError
 
         self.events.missing_table = True
         with self.assertRaisesRegex(TaskError, "required owner wait.*retry the same request ID"):
@@ -354,11 +354,11 @@ class StewardProducerTests(unittest.TestCase):
     def setUp(self) -> None:
         tmp = self.enterContext(tempfile.TemporaryDirectory())
         self.card = {
-            "ref": "secretary-77",
+            "ref": "ummanu-77",
             "id": 77,
             "type": "research",
             "state": "in_progress",
-            "project": "secretary",
+            "project": "ummanu",
             "sprint": None,
             "extensions": {"extra": {"steward_report": "1"}},
             "comments": [],
@@ -369,7 +369,7 @@ class StewardProducerTests(unittest.TestCase):
         self.writer = TaskWriter(self.client, data_dir=tmp)  # type: ignore[arg-type]
         self.writer.audit = MemoryAudit()
         self.writer.reader = mock.Mock(show=lambda reference: copy.deepcopy(self.card))
-        self.enterContext(mock.patch("secretary.tasks._task_number", return_value=77))
+        self.enterContext(mock.patch("ummanu.tasks._task_number", return_value=77))
         self.writer._typed_event = lambda request_id: None  # type: ignore[method-assign]
         self.writer._guard_sprint_write = lambda **_: {}  # type: ignore[method-assign]
 
@@ -381,16 +381,16 @@ class StewardProducerTests(unittest.TestCase):
         self.writer._transition_card = transition  # type: ignore[method-assign]
 
     def move(self, reason: str, *, request_id: str = "m-1", **fields: Any) -> dict[str, Any]:
-        call = {"role": "steward", "actor": "steward", "reference": "secretary-77", "target": "blocked",
+        call = {"role": "steward", "actor": "steward", "reference": "ummanu-77", "target": "blocked",
                 "reason": reason, "request_id": request_id, **fields}
         return self.writer.move(**call)
 
     def test_a_report_card_blocked_with_needs_a_human_writes_one_needs_owner_event(self) -> None:
-        self.move("## Needs a human\n- rotate the relay key (secretary-12)\n")
+        self.move("## Needs a human\n- rotate the relay key (ummanu-12)\n")
         [event] = self.events.rows.values()
-        self.assertEqual((event.kind, event.event_class, event.subject_ref), ("steward_needs_human", NEEDS_OWNER, "secretary-77"))
+        self.assertEqual((event.kind, event.event_class, event.subject_ref), ("steward_needs_human", NEEDS_OWNER, "ummanu-77"))
         self.assertIn("rotate the relay key", event.text)
-        self.assertEqual(event.dedup_key, "steward_needs_human:secretary-77:evt-m-1")
+        self.assertEqual(event.dedup_key, "steward_needs_human:ummanu-77:evt-m-1")
 
     def test_no_section_another_card_or_another_role_writes_nothing(self) -> None:
         self.move("the preflight failed; no sweep ran", request_id="m-2")
@@ -403,7 +403,7 @@ class SprintProducerTests(unittest.TestCase):
     """`SprintWriter` writes the close, the budget signal and the hard stop, each once."""
 
     def writer(self) -> Any:
-        from secretary.sprints import SprintWriter
+        from ummanu.sprints import SprintWriter
 
         writer = SprintWriter.__new__(SprintWriter)
         writer.client = SimpleNamespace(owner_events=self.events, _depth=1)
@@ -473,7 +473,7 @@ class DispatcherProducerTests(unittest.TestCase):
         self.runtime = SimpleNamespace(reader=SimpleNamespace(client=SimpleNamespace(owner_events=self.events)))
 
     def test_a_dead_observer_the_tick_did_not_relaunch_writes_one_notice_per_dead_head(self) -> None:
-        from secretary.dispatch import observer
+        from ummanu.dispatch import observer
 
         runtime = SimpleNamespace(
             **vars(self.runtime), sprints=SimpleNamespace(list=lambda statuses: [{"ref": SPRINT}])
@@ -498,7 +498,7 @@ class DispatcherProducerTests(unittest.TestCase):
         self.assertIn("waiting out its backoff", event.text)
 
     def test_a_live_or_relaunched_observer_writes_nothing(self) -> None:
-        from secretary.dispatch import observer
+        from ummanu.dispatch import observer
 
         runtime = SimpleNamespace(
             **vars(self.runtime), sprints=SimpleNamespace(list=lambda statuses: [{"ref": SPRINT}])
@@ -513,7 +513,7 @@ class DispatcherProducerTests(unittest.TestCase):
         self.assertEqual(self.events.rows, {})
 
     def test_a_head_given_up_after_its_respawn_writes_one_head_dead(self) -> None:
-        from secretary.dispatch import wait_vitality
+        from ummanu.dispatch import wait_vitality
 
         record_ = SimpleNamespace(attempt_id="att-1", comment_baseline=4, worker_respawns=1, review_respawns=0)
         runtime = SimpleNamespace(
@@ -532,7 +532,7 @@ class DispatcherProducerTests(unittest.TestCase):
         self.assertIn("worker head", event.text)
 
     def test_doctor_writes_one_provider_red_per_provider_condition_and_day(self) -> None:
-        from secretary import cli
+        from ummanu import cli
 
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
@@ -555,7 +555,7 @@ class DispatcherProducerTests(unittest.TestCase):
         self.assertIn("expired", self.events.of_kind("provider_red")[0].text)
 
     def test_a_doctor_dry_run_records_nothing(self) -> None:
-        from secretary import cli
+        from ummanu import cli
 
         with mock.patch.object(cli, "record_provider_owner_events") as recorded, mock.patch.object(
             cli, "collect_host_inventory"
@@ -788,7 +788,7 @@ class CardCommentRoleTests(unittest.TestCase):
         )
 
     def test_the_role_follows_the_mark_and_a_replay_keeps_its_first_role(self) -> None:
-        from secretary.webproto.card_ops import _comment_role
+        from ummanu.webproto.card_ops import _comment_role
 
         marked = {"ref": REF, "extensions": {"extra": mark_values("2026-09-26T15:00:00Z", REASON, "po")}}
         plain = {"ref": REF, "extensions": {"extra": {}}}
@@ -800,7 +800,7 @@ class CardCommentRoleTests(unittest.TestCase):
         self.assertEqual(_comment_role(self.writer(marked), "observer", REF, "r-1"), "observer")
 
     def test_the_layer_writes_the_owners_comment_through_the_writer(self) -> None:
-        from secretary.webproto.card_ops import CardOperationLayer
+        from ummanu.webproto.card_ops import CardOperationLayer
 
         with tempfile.TemporaryDirectory() as tmp:
             card = {**decision_card(), "extensions": {"extra": mark_values("2026-09-26T15:00:00Z", REASON, "po")}}
@@ -811,8 +811,8 @@ class CardCommentRoleTests(unittest.TestCase):
             writer.reader = mock.Mock(show=lambda reference: copy.deepcopy(card))
             with (
                 mock.patch.object(CardOperationLayer, "report", return_value=SimpleNamespace(data_dir=Path(tmp))),
-                mock.patch("secretary.webproto.card_ops.TaskWriter", return_value=writer),
-                mock.patch("secretary.tasks._task_number", return_value=1900),
+                mock.patch("ummanu.webproto.card_ops.TaskWriter", return_value=writer),
+                mock.patch("ummanu.tasks._task_number", return_value=1900),
             ):
                 layer.task_comment(request_id="r-1", actor="web", reference=REF, body="Yes, pay it.")
         self.assertEqual(card["comments"][-1]["body"], "[owner]\nYes, pay it.")
@@ -829,13 +829,13 @@ class CardCommentRoleTests(unittest.TestCase):
 
 
 class OwnerEventsCliTests(unittest.TestCase):
-    """`secretary owner-events list`: the list page's read, through the read role, marking nothing."""
+    """`ummanu owner-events list`: the list page's read, through the read role, marking nothing."""
 
     def run_cli(self, *argv: str, store: Any) -> tuple[int, str, str]:
         import contextlib
         import io
 
-        from secretary.cli import main
+        from ummanu.cli import main
 
         out, err = io.StringIO(), io.StringIO()
         with (
@@ -880,7 +880,7 @@ class DispatcherRecordsLoadUnchangedTests(unittest.TestCase):
     """A dispatcher record of a PO card written before the bell loads and saves byte for byte."""
 
     def test_a_pre_bell_po_record_round_trips(self) -> None:
-        from secretary.dispatch.state import DispatcherRecord
+        from ummanu.dispatch.state import DispatcherRecord
 
         document = {
             "worker": "po", "workspace": "", "handle": "", "head": "", "review_head": "", "attempt_id": "a-1",

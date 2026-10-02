@@ -10,24 +10,34 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.board.sql_audit import SqlTaskAudit
-from secretary.dispatch.observer import (
+from tests.fakes.dispatcher import (
+    FakeCatalog,
+    FakeHost,
+    TwoOpenSprintAdmission,
+    dispatcher_seed,
+)
+from tests.fakes.observer import DEAD_PID, install_skill_registry
+from tests.fakes.sprints import SprintFixture
+from tests.sprint_close_fixtures import close_decisions
+from tests.sql_backend_fixtures import card_store
+from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.dispatch.observer import (
     ObserverRecord,
     load_observers,
     observer_alive,
     observer_decision,
     put_observers,
 )
-from secretary.dispatch.observer_fence import (
+from ummanu.dispatch.observer_fence import (
     REASON_DEAD,
     REASON_NO_RECORD,
     REASON_NOT_ADOPTED,
     fenced_task,
     observer_fence,
 )
-from secretary.dispatch.production import _reconcile_production
-from secretary.dispatch.runtime import DispatcherRuntime
-from secretary.sprint_observer import (
+from ummanu.dispatch.production import _reconcile_production
+from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.sprint_observer import (
     REASON_HISTORICAL,
     REASON_MALFORMED,
     REASON_MISSING,
@@ -42,17 +52,7 @@ from secretary.sprint_observer import (
     observer_choice,
     parse_observer,
 )
-from secretary.tasks import TaskError, TaskReader, TaskWriter, task_audit_for
-from tests.fakes.dispatcher import (
-    FakeCatalog,
-    FakeHost,
-    TwoOpenSprintAdmission,
-    dispatcher_seed,
-)
-from tests.fakes.observer import DEAD_PID, install_skill_registry
-from tests.fakes.sprints import SprintFixture
-from tests.sprint_close_fixtures import close_decisions
-from tests.sql_backend_fixtures import card_store
+from ummanu.tasks import TaskError, TaskReader, TaskWriter, task_audit_for
 
 
 def mark_observer_heartbeat_dead(record: ObserverRecord) -> None:
@@ -141,9 +141,9 @@ class SprintDeclarationTests(SprintFixture):
                 role="po",
                 actor="operator",
                 goal="no observer",
-                product="secretary",
+                product="ummanu",
                 issues=["issue:open"],
-                projects=["secretary"],
+                projects=["ummanu"],
             )
 
         self.assertEqual(SqlTaskAudit(self.client).events(), [])
@@ -311,10 +311,10 @@ class ObserverFenceFixture(unittest.TestCase):
         env = mock.patch.dict(
             os.environ,
             {
-                "SECRETARY_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
-                "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
-                "SECRETARY_ROLE_SKILLS_MANIFEST": str(self.data_dir / "registry" / "manifest.toml"),
-                "SECRETARY_INSTANCE": str(self.data_dir / "registry" / "instance"),
+                "UMMANU_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
+                "UMMANU_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
+                "UMMANU_ROLE_SKILLS_MANIFEST": str(self.data_dir / "registry" / "manifest.toml"),
+                "UMMANU_INSTANCE": str(self.data_dir / "registry" / "instance"),
             },
         )
         env.start()
@@ -336,11 +336,11 @@ class ObserverFenceFixture(unittest.TestCase):
             self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
-            owner="secretary-pilot",
+            owner="ummanu-pilot",
         )
 
     def declare(self, observer, *, reference: str = "sprint:1", **metadata) -> None:
-        values = {"sprint_reservations": '["secretary"]', **metadata}
+        values = {"sprint_reservations": '["ummanu"]', **metadata}
         if observer is not None:
             values["sprint_observer"] = observer
         self.board.add_sprint(reference, status="open", **values)
@@ -415,7 +415,7 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.board.move(13, "blocked")
         payload = self.runtime.production_state.load()
         payload["records"] = {
-            "secretary-511": {
+            "ummanu-511": {
                 "worker": "w1",
                 "workspace": "/tmp/w1",
                 "handle": "term_w",
@@ -437,7 +437,7 @@ class ObserverFenceTests(ObserverFenceFixture):
             ["observer-fenced"],
         )
         self.assertEqual([action for action in result["actions"] if action["step"] == "advance"], [])
-        self.assertIn("secretary-511", self.runtime.production_state.load()["records"])
+        self.assertIn("ummanu-511", self.runtime.production_state.load()["records"])
 
     def test_the_same_card_advances_once_the_declared_observer_is_adopted(self) -> None:
         """The control for the fence: without it the pass above proves nothing."""
@@ -510,9 +510,9 @@ class ObserverFenceTests(ObserverFenceFixture):
 
         fence = self.fence()
 
-        self.assertEqual(fence["projects"], {"secretary"})
-        self.assertTrue(fenced_task(fence, {"ref": "secretary-510", "project": "secretary"}))
-        self.assertFalse(fenced_task(fence, {"ref": "secretary-511", "project": "other"}))
+        self.assertEqual(fence["projects"], {"ummanu"})
+        self.assertTrue(fenced_task(fence, {"ref": "ummanu-510", "project": "ummanu"}))
+        self.assertFalse(fenced_task(fence, {"ref": "ummanu-511", "project": "other"}))
 
     def test_a_fence_that_cannot_stage_its_outcome_stops_the_whole_tick(self) -> None:
         """An empty fence is not "nothing may be decided", it is "everything may move".
@@ -526,7 +526,7 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.board.move(12, "in_progress")
 
         with mock.patch(
-            "secretary.dispatch.observer_fence.stage_event",
+            "ummanu.dispatch.observer_fence.stage_event",
             side_effect=OSError("disk full"),
         ):
             result = self.runtime.production_tick()
@@ -554,7 +554,7 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.board.move(13, "blocked")
         payload = self.runtime.production_state.load()
         payload["records"] = {
-            "secretary-511": {
+            "ummanu-511": {
                 "worker": "w1",
                 "workspace": "/tmp/w1",
                 "handle": "term_w",
@@ -581,7 +581,7 @@ class ObserverFenceTests(ObserverFenceFixture):
 
         self.assertEqual(result["status"], "critical")
         self.assertEqual(result["action"], "observer-fence-unavailable")
-        self.assertIn("secretary-511", self.runtime.production_state.load()["records"])
+        self.assertIn("ummanu-511", self.runtime.production_state.load()["records"])
         self.assertEqual(
             [action for action in result["actions"] if action.get("step") == "production-reconcile"],
             [],
@@ -594,7 +594,7 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.board.save_metadata(13, sprint_ref="sprint:1")
         payload = self.runtime.production_state.load()
         payload["records"] = {
-            "secretary-511": {
+            "ummanu-511": {
                 "worker": "w1",
                 "workspace": "/tmp/w1",
                 "handle": "term_w",
@@ -727,12 +727,12 @@ class ObserverFenceTests(ObserverFenceFixture):
             fence = self.fence()
 
         self.assertEqual(fence["sprints"], {"sprint:1"})
-        self.assertEqual(fence["projects"], {"secretary"})
+        self.assertEqual(fence["projects"], {"ummanu"})
         self.assertEqual(fence["outcomes"][0]["action"], "sprint_board_unavailable")
         self.assertEqual(fence["outcomes"][0]["status"], "critical")
         # Project-local even when blind: the reserved project stops, another project does not.
-        self.assertTrue(fenced_task(fence, {"ref": "secretary-510", "project": "secretary"}))
-        self.assertFalse(fenced_task(fence, {"ref": "secretary-511", "project": "other"}))
+        self.assertTrue(fenced_task(fence, {"ref": "ummanu-510", "project": "ummanu"}))
+        self.assertFalse(fenced_task(fence, {"ref": "ummanu-511", "project": "other"}))
 
     def test_a_blind_tick_still_fences_a_sprint_it_never_saw(self) -> None:
         """A sprint opened since the last snapshot is caught through its cards' own link."""
@@ -744,9 +744,9 @@ class ObserverFenceTests(ObserverFenceFixture):
         ):
             fence = self.fence()
 
-        self.assertIn("secretary-510", fence["refs"])
-        self.assertTrue(fenced_task(fence, {"ref": "secretary-510", "project": "secretary"}))
-        self.assertFalse(fenced_task(fence, {"ref": "secretary-511", "project": "other"}))
+        self.assertIn("ummanu-510", fence["refs"])
+        self.assertTrue(fenced_task(fence, {"ref": "ummanu-510", "project": "ummanu"}))
+        self.assertFalse(fenced_task(fence, {"ref": "ummanu-511", "project": "other"}))
 
     def test_an_unreadable_sprint_board_does_not_advance_the_sprints_cards(self) -> None:
         actions = self._tick_twice_with_an_active_card(encode_observer(head_choice("claude-observer")))
@@ -864,8 +864,8 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
         the other sprint's; the second tick, with the head adopted, claims `sprint:1`'s own.
         """
         self.open_pair()
-        self.assertEqual(self._claim(self.runtime.production_tick()), "secretary-511")
-        self.assertEqual(self._claim(self.runtime.production_tick()), "secretary-510")
+        self.assertEqual(self._claim(self.runtime.production_tick()), "ummanu-511")
+        self.assertEqual(self._claim(self.runtime.production_tick()), "ummanu-510")
 
     def _fence_steps(self, result: dict) -> list[dict]:
         return [action for action in result["actions"] if action["step"] == "observer-fence"]
@@ -888,13 +888,13 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
         )
         self.assertEqual(
             [action["pilot_ref"] for action in result["actions"] if action["step"] == "advance"],
-            ["secretary-511"],
+            ["ummanu-511"],
         )
         self.assertEqual(self._claim(result), "third-1")
         self.assertEqual(self._skipped(result), [{"ref": "fourth-1", "reason": self.HELD}])
         self.assertEqual(self.runtime.reader.show("fourth-1")["state"], "ready")
         self.assertEqual(self.runtime.reader.show("third-1")["state"], "in_progress")
-        self.assertEqual(self.runtime.reader.show("secretary-510")["state"], "in_progress")
+        self.assertEqual(self.runtime.reader.show("ummanu-510")["state"], "in_progress")
 
     def test_a_dead_declared_head_holds_its_own_sprint_and_leaves_the_other_running(self) -> None:
         self.in_flight_pair()
@@ -908,18 +908,18 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
 
         self.assert_only_the_first_sprint_is_held(result, REASON_DEAD)
         self.assertEqual(fence["sprints"], {self.FIRST})
-        self.assertEqual(fence["projects"], {"secretary", "fourth"})
-        self.assertEqual(fence["refs"], {"secretary-510", "fourth-1"})
+        self.assertEqual(fence["projects"], {"ummanu", "fourth"})
+        self.assertEqual(fence["refs"], {"ummanu-510", "fourth-1"})
         self.assertTrue(
             fenced_task(
                 fence,
-                {"ref": "secretary-510", "sprint": self.FIRST, "project": "secretary"},
+                {"ref": "ummanu-510", "sprint": self.FIRST, "project": "ummanu"},
             )
         )
         self.assertFalse(
             fenced_task(
                 fence,
-                {"ref": "secretary-511", "sprint": self.SECOND, "project": "other"},
+                {"ref": "ummanu-511", "sprint": self.SECOND, "project": "other"},
             )
         )
 
@@ -977,7 +977,7 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
 
         self.assertEqual(
             self.runtime.production_state.load()["observer_fence_snapshot"],
-            {self.FIRST: ["fourth", "secretary"], self.SECOND: ["other", "third"]},
+            {self.FIRST: ["fourth", "ummanu"], self.SECOND: ["other", "third"]},
         )
 
     def test_an_unreadable_sprint_board_fences_both_sprints_by_their_own_reservations(self) -> None:
@@ -993,7 +993,7 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
             fence = self.fence()
 
         self.assertEqual(fence["sprints"], {self.FIRST, self.SECOND})
-        self.assertEqual(fence["projects"], {"secretary", "fourth", "other", "third"})
+        self.assertEqual(fence["projects"], {"ummanu", "fourth", "other", "third"})
         self.assertEqual(fence["outcomes"][0]["action"], "sprint_board_unavailable")
         # The blind outcome names the sprints, which is what an operator has to act on. It
         # used to name the fenced cards there, because the linked-card index is keyed by card.
@@ -1018,7 +1018,7 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
                 "state": "adopted",
                 "claimed_at": time.time(),
             }
-            for reference in ("secretary-510", "secretary-511")
+            for reference in ("ummanu-510", "ummanu-511")
         }
         self.runtime.production_state.save(payload)
 
@@ -1033,11 +1033,11 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
         reconciled = [action for action in result["actions"] if action["step"] == "production-reconcile"]
         self.assertEqual(
             [(action["ref"], action["action"]) for action in reconciled],
-            [("secretary-511", "record-removed")],
+            [("ummanu-511", "record-removed")],
         )
         records = set(self.runtime.production_state.load()["records"])
-        self.assertIn("secretary-510", records)
-        self.assertNotIn("secretary-511", records)
+        self.assertIn("ummanu-510", records)
+        self.assertNotIn("ummanu-511", records)
 
     def test_the_same_pair_with_no_fence_settles_both_records(self) -> None:
         """The control: without the fence the pass above would have removed both."""
@@ -1048,11 +1048,11 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
 
         self.assertEqual(
             sorted(action["ref"] for action in result["actions"] if action["step"] == "production-reconcile"),
-            ["secretary-510", "secretary-511"],
+            ["ummanu-510", "ummanu-511"],
         )
         records = set(self.runtime.production_state.load()["records"])
-        self.assertNotIn("secretary-510", records)
-        self.assertNotIn("secretary-511", records)
+        self.assertNotIn("ummanu-510", records)
+        self.assertNotIn("ummanu-511", records)
 
     def test_one_sprints_broken_head_does_not_fence_the_other_sprints_head(self) -> None:
         """Both sprints declaring a head: the fence is still one sprint's, not the pair's.
@@ -1067,13 +1067,13 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
         fence = self.fence()
 
         self.assertEqual(fence["sprints"], {self.FIRST})
-        self.assertEqual(fence["projects"], {"secretary", "fourth"})
-        self.assertEqual(fence["refs"], {"secretary-510", "fourth-1"})
+        self.assertEqual(fence["projects"], {"ummanu", "fourth"})
+        self.assertEqual(fence["refs"], {"ummanu-510", "fourth-1"})
         self.assertEqual(fence["outcomes"][0]["observer_reason"], REASON_MALFORMED)
         self.assertFalse(
             fenced_task(
                 fence,
-                {"ref": "secretary-511", "sprint": self.SECOND, "project": "other"},
+                {"ref": "ummanu-511", "sprint": self.SECOND, "project": "other"},
             )
         )
         self.assertFalse(

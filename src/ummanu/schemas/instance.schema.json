@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "instance.schema.json",
+  "title": "Ummanu instance config",
+  "description": "Top-level instance.yaml for a single ummanu installation.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "name", "data_dir", "offsite"],
+  "properties": {
+    "version": {
+      "description": "Instance schema version.",
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human name of this installation, e.g. 'ummanu-home'."
+    },
+    "description": {
+      "type": "string"
+    },
+    "data_dir": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Nonempty absolute or relative path to the ummanu-data directory. Relative paths are resolved from this instance.yaml."
+    },
+    "offsite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instance_remote"],
+      "description": "Recovery-chain settings. The instance repo needs a private git remote off the VPS; it is the single recovery contract (docs/RECOVERY.md).",
+      "properties": {
+        "instance_remote": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Private git remote URL for this instance repo."
+        }
+      }
+    },
+    "persona": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Pointer to the installation persona. Rules live in persona/, not here.",
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "style": {"type": "string"}
+      }
+    },
+    "heads": {
+      "type": "array",
+      "description": "Model heads bound to orchestrator roles.",
+      "items": {"$ref": "#/$defs/head"}
+    },
+    "policies": {
+      "type": "object",
+      "description": "Free-form installation policies rendered by reconcile."
+    },
+    "sprint_budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Observed-card-event limits for open sprints.",
+      "properties": {
+        "signal": {"type": "integer", "minimum": 1},
+        "hard": {"type": "integer", "minimum": 1}
+      }
+    },
+    "open_sprint_limit": {
+      "type": "integer",
+      "enum": [1, 2],
+      "description": "How many sprints this installation may hold open at once. Absent means 1, which is the singleton every installation has by default. 2 is the pilot, and admits a second open sprint only when it is disjoint from the first."
+    },
+    "po": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The PO head in the dashboard (/po).",
+      "properties": {
+        "models": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Models a PO session may be opened with, per CLI. A CLI not named keeps the product default (claude: fable, claude-opus-5-5; codex: gpt-6-astra, gpt-6-sol, gpt-5.6-terra); an empty list offers that CLI no model.",
+          "properties": {
+            "claude": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+            "codex": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+          }
+        },
+        "efforts": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Reasoning efforts a PO session may be opened with, per CLI (Claude --effort, Codex -c model_reasoning_effort=). The first entry per CLI is preselected. A CLI not named keeps the product default (claude: high, low, medium, xhigh, max; codex: high, low, medium, xhigh). A new session's effort is always explicit: `default` (no flag) is dropped from the list and never accepted for a new session; it is only the stored value of sessions opened before that rule.",
+          "properties": {
+            "claude": {"type": "array", "uniqueItems": true, "items": {"enum": ["default", "low", "medium", "high", "xhigh", "max"]}},
+            "codex": {"type": "array", "uniqueItems": true, "items": {"enum": ["default", "minimal", "low", "medium", "high", "xhigh"]}}
+          }
+        }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Host ownership boundaries and inputs. Desired resources are derived by reconcile, not listed here.",
+      "properties": {
+        "projects_root": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Directory on the host that holds project repos, enumerated to find repos not described here."
+        },
+        "unit_prefix": {
+          "type": "string",
+          "minLength": 1,
+          "description": "systemd unit namespace ummanu manages, e.g. 'ummanu-'. Scopes which host units count as ours."
+        },
+        "units": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "pattern": "^[^\\s]+\\.(service|socket|device|mount|automount|swap|target|path|timer|slice|scope)$"},
+          "description": "Units this installation claims on the host. Read by host.build_expectations, the expectation set the host inventory is collected against for 'reconcile plan'/'reconcile apply', the host step of upgrade and 'restore-reconcile'. A non-empty list makes the live collector require host.unit_prefix, since without a namespace to enumerate it cannot report unmanaged-on-host and refuses rather than emit a partial diff. The units the plan installs come from packaging/systemd and host.components, not from here; doctor derives its own parity from the plan (host.build_doctor_expectations) and does not read this field."
+        },
+        "orca_repos": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "description": "Legacy and ignored. Orca repo registrations are no longer part of the host surface: reconcile, the host step of upgrade, 'restore-reconcile' and doctor neither read this field nor create, check or remove Orca repos. Kept so existing instance files still validate."
+        },
+        "components": {
+          "type": "object",
+          "description": "Opt-outs from the shipped runtime components. A component absent here is enabled; the key is the packaged unit name minus host.unit_prefix and the unit suffix, e.g. 'curator' or 'steward-deep-sweep'.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "enabled": {"type": "boolean"},
+              "reason": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "foreign_units": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1, "pattern": "^[^\\s]+\\.(service|socket|device|mount|automount|swap|target|path|timer|slice|scope)$"},
+          "description": "Units under host.unit_prefix that this installation knows are owned by something else. Without an entry here an unrecognised unit in our namespace is a conflict and reconcile refuses to write."
+        },
+        "memory_reindex_python": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Deprecated compatibility path for an external memory rebuild Python."
+        },
+        "memory_reindex_script": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Deprecated compatibility path for an external reindex script."
+        },
+        "memory_model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Embedding model for the ummanu-owned memory index."
+        },
+        "memory_dim": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Embedding dimension paired with host.memory_model."
+        },
+        "memory_threads": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Maximum ONNX Runtime inference threads for the memory embedding model. Defaults to 1 so one memory request does not monopolize the host."
+        }
+      },
+      "if": {"properties": {"units": {"type": "array", "minItems": 1}}, "required": ["units"]},
+      "then": {"required": ["unit_prefix"]}
+    }
+  },
+  "$defs": {
+    "head": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "model"],
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": ["worker", "reviewer", "curator", "ummanu", "steward"]
+        },
+        "model": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

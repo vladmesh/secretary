@@ -20,18 +20,18 @@ from argparse import Namespace
 from pathlib import Path
 from unittest import mock
 
-from secretary.board.sql_cards import BOARD_ID
-from secretary.config import validate
-from secretary.dispatch import pause_ops as dispatcher_pause_ops
-from secretary.dispatch.pause_ops import PauseCommandCompleted
-from secretary.dispatch.pause_ops import pause as dispatcher_pause
-from secretary.dispatch.pause_ops import resume as dispatcher_resume
-from secretary.dispatch.types import DispatcherError
-from secretary.webproto.errors import OwnerConflict, ReadError, ValidationRefused
-from secretary.webproto.pause_ops import PAUSE_ERRORS, PauseOperationLayer
-from secretary.webproto.pause_reads import DRAIN, PIPELINE_WIDE, PauseReadLayer
-from secretary.webproto.section import Section, SectionSet, sections
 from tests.webproto_pause_fixtures import EXISTING_CARD, PauseProtocolFixture
+from ummanu.board.sql_cards import BOARD_ID
+from ummanu.config import validate
+from ummanu.dispatch import pause_ops as dispatcher_pause_ops
+from ummanu.dispatch.pause_ops import PauseCommandCompleted
+from ummanu.dispatch.pause_ops import pause as dispatcher_pause
+from ummanu.dispatch.pause_ops import resume as dispatcher_resume
+from ummanu.dispatch.types import DispatcherError
+from ummanu.webproto.errors import OwnerConflict, ReadError, ValidationRefused
+from ummanu.webproto.pause_ops import PAUSE_ERRORS, PauseOperationLayer
+from ummanu.webproto.pause_reads import DRAIN, PIPELINE_WIDE, PauseReadLayer
+from ummanu.webproto.section import Section, SectionSet, sections
 
 #: Board methods that change something. A read may call none of them.
 BOARD_WRITES = ("createTask", "createProject", "saveTaskMetadata", "updateTask", "moveTaskPosition")
@@ -78,8 +78,8 @@ class ScopeReadTests(PauseProtocolFixture):
         """
         sprint = self.add_sprint_row("sprint:900", goal="a second open sprint")
         self.link_card(EXISTING_CARD, sprint, state="in_progress")
-        self.add_card("secretary-77", state="ready")
-        self.add_card("secretary-78", state="blocked", sprint="sprint:901")
+        self.add_card("ummanu-77", state="ready")
+        self.add_card("ummanu-78", state="blocked", sprint="sprint:901")
 
         document = self.pause_reads().pause_scope()
         self.assertEqual(
@@ -87,19 +87,19 @@ class ScopeReadTests(PauseProtocolFixture):
             [
                 {"ref": EXISTING_CARD, "sprint": sprint, "state": "in_progress"},
                 # No sprint holds it, and the relationship is null rather than absent or empty.
-                {"ref": "secretary-77", "sprint": None, "state": "ready"},
+                {"ref": "ummanu-77", "sprint": None, "state": "ready"},
                 # Held by a sprint that is not open: still a card a drain stops claiming.
-                {"ref": "secretary-78", "sprint": "sprint:901", "state": "blocked"},
+                {"ref": "ummanu-78", "sprint": "sprint:901", "state": "blocked"},
             ],
         )
         # And the Product and Issue records that live on the same board are not cards: the board's
         # own rule is that such a record never takes a claim, so a pause reaches none of them.
         listed = {item["ref"] for item in document["cards"]["items"]}
-        self.assertEqual(listed & {"product:secretary", "issue:open", "issue:foreign"}, set())
+        self.assertEqual(listed & {"product:ummanu", "issue:open", "issue:foreign"}, set())
 
     def test_the_card_list_costs_no_extra_board_pass(self) -> None:
         """Removing a filter, not adding a read: the Pipeline is listed once for the document."""
-        self.add_card("secretary-77")
+        self.add_card("ummanu-77")
         before = len(self.board.calls)
         self.pause_reads().pause_scope()
         listings = [
@@ -120,7 +120,7 @@ class ScopeReadTests(PauseProtocolFixture):
         """
         sprint = self.add_sprint_row("sprint:900", goal="an open sprint")
         self.link_card(EXISTING_CARD, sprint, state="in_progress")
-        self.add_card("secretary-77", state="ready")
+        self.add_card("ummanu-77", state="ready")
         document = self.pause_reads().pause_scope()
 
         # Every live card the board holds: Products and Issues are not cards (§3.1, §3.2).
@@ -380,7 +380,7 @@ class SourceIsolationTests(PauseProtocolFixture):
         step. This replaces the previous round's test that the two layers shared one tuple: the
         pause layer no longer has a tuple to share, which is strictly stronger than agreeing on one.
         """
-        from secretary.webproto import pause_reads
+        from ummanu.webproto import pause_reads
 
         source = Path(pause_reads.__file__).read_text(encoding="utf-8")
         module = ast.parse(source)
@@ -426,7 +426,7 @@ class SourceIsolationTests(PauseProtocolFixture):
         """
         with (
             mock.patch(
-                "secretary.webproto.pause_reads.extent", side_effect=ValueError("a defect of this layer")
+                "ummanu.webproto.pause_reads.extent", side_effect=ValueError("a defect of this layer")
             ),
             self.assertRaises(ValueError),
         ):
@@ -434,8 +434,8 @@ class SourceIsolationTests(PauseProtocolFixture):
 
     def test_the_sprint_layer_still_reads_its_failures_from_the_one_shared_place(self) -> None:
         """The sprint reads are not this card's to invert, and they keep one shared list."""
-        from secretary.webproto import sources as source_module
-        from secretary.webproto import sprint_reads
+        from ummanu.webproto import sources as source_module
+        from ummanu.webproto import sprint_reads
 
         self.assertIs(sprint_reads._SOURCE_FAILURES, source_module.SOURCE_FAILURES)
 
@@ -453,7 +453,7 @@ class SourceIsolationTests(PauseProtocolFixture):
 
     def test_no_section_of_this_document_is_assembled_outside_the_seam(self) -> None:
         """Every section is a builder of the set, and the set is what holds the invariant."""
-        from secretary.webproto import pause_reads
+        from ummanu.webproto import pause_reads
 
         self.assertTrue(issubclass(pause_reads.PauseSections, SectionSet))
         for name in sections(pause_reads.PauseSections):
@@ -530,7 +530,7 @@ class DrainOperationTests(PauseProtocolFixture):
         `freeze` in a test, and fail an operator the first time something else passed one down.
         """
         source = (
-            Path(__file__).resolve().parents[1] / "src" / "secretary" / "webproto" / "pause_ops.py"
+            Path(__file__).resolve().parents[1] / "src" / "ummanu" / "webproto" / "pause_ops.py"
         ).read_text(encoding="utf-8")
         tree = ast.parse(source)
         layer = next(
@@ -664,7 +664,7 @@ class LayerPropertyTests(PauseProtocolFixture):
         layer = PauseOperationLayer(self.instance, data_dir=self.data_dir, runtime=self.runtime)
         with (
             mock.patch(
-                "secretary.webproto.pause_ops._pause",
+                "ummanu.webproto.pause_ops._pause",
                 side_effect=OSError("the flag could not be written"),
             ),
             self.assertRaises(ReadError) as refused,
@@ -718,11 +718,11 @@ class ErrorContractTests(PauseProtocolFixture):
         )
 
         # backend_unavailable: the durable write the operation makes could not be made.
-        with mock.patch("secretary.webproto.pause_ops._pause", side_effect=OSError("no disk")):
+        with mock.patch("ummanu.webproto.pause_ops._pause", side_effect=OSError("no disk")):
             raised["pause_drain"].add(
                 self._code(lambda: self.pause_ops().pause_drain(actor="operator", reason="why"))
             )
-        with mock.patch("secretary.webproto.pause_ops._resume", side_effect=OSError("no disk")):
+        with mock.patch("ummanu.webproto.pause_ops._resume", side_effect=OSError("no disk")):
             raised["pause_resume"].add(self._code(lambda: self.pause_ops().pause_resume(actor="operator")))
 
         for operation, documented in PAUSE_ERRORS.items():
@@ -753,7 +753,7 @@ class CommandClientTests(PauseProtocolFixture):
         defaults = {
             "instance": str(self.instance),
             "data_dir": str(self.data_dir),
-            "owner": "secretary-dispatcher",
+            "owner": "ummanu-dispatcher",
             "actor": "operator",
             "host_mode": "noop",
             "reason": "host maintenance",
@@ -763,7 +763,7 @@ class CommandClientTests(PauseProtocolFixture):
         return Namespace(**{**defaults, **kwargs})
 
     def _run(self, handler, **kwargs) -> tuple[int, dict]:
-        from secretary.dispatch import commands as dispatcher_commands
+        from ummanu.dispatch import commands as dispatcher_commands
 
         with (
             mock.patch.object(dispatcher_commands, "_pause_operations", return_value=self.pause_ops()),
@@ -778,7 +778,7 @@ class CommandClientTests(PauseProtocolFixture):
         return status, json.loads(written) if written else {}
 
     def test_pause_drain_resume_and_the_two_reads_are_clients_of_the_operations(self) -> None:
-        from secretary.dispatch import commands as dispatcher_commands
+        from ummanu.dispatch import commands as dispatcher_commands
 
         status, document = self._run(dispatcher_commands.run_pause, mode="drain")
         self.assertEqual(status, 0)
@@ -803,7 +803,7 @@ class CommandClientTests(PauseProtocolFixture):
         The exit status is what a script branches on, so a pause that took must not answer with the
         status of a pause that did not.
         """
-        from secretary.dispatch import commands as dispatcher_commands
+        from ummanu.dispatch import commands as dispatcher_commands
 
         self.tracked_head(worker_retained_at=1)
         status, document = self._run(dispatcher_commands.run_pause, mode="drain")
@@ -812,7 +812,7 @@ class CommandClientTests(PauseProtocolFixture):
         self.assertEqual(self.pause_payload()["mode"], DRAIN)
 
     def test_the_conflict_keeps_the_exit_status_it_always_answered_with(self) -> None:
-        from secretary.dispatch import commands as dispatcher_commands
+        from ummanu.dispatch import commands as dispatcher_commands
 
         dispatcher_pause(self.runtime, mode="freeze", actor="steward", reason="a maintenance window")
         status, document = self._run(dispatcher_commands.run_pause, mode="drain")
@@ -820,7 +820,7 @@ class CommandClientTests(PauseProtocolFixture):
         self.assertEqual(document["error"]["code"], "owner_conflict")
 
     def test_a_pause_without_a_reason_keeps_its_usage_status(self) -> None:
-        from secretary.dispatch import commands as dispatcher_commands
+        from ummanu.dispatch import commands as dispatcher_commands
 
         status, document = self._run(dispatcher_commands.run_pause, mode="drain", reason=None)
         self.assertEqual(status, 2)
@@ -835,7 +835,7 @@ class CommandClientTests(PauseProtocolFixture):
         does not validate is `validation` and not `backend_unavailable`. No layer is substituted
         here: these run the real handlers over a real broken installation.
         """
-        from secretary.dispatch import commands as dispatcher_commands
+        from ummanu.dispatch import commands as dispatcher_commands
 
         broken = self.tmp / "broken-instance"
         broken.mkdir()
@@ -854,7 +854,7 @@ class CommandClientTests(PauseProtocolFixture):
 
     def test_pause_freeze_does_not_go_through_the_soft_path(self) -> None:
         """Criterion 5 at the command: the two spellings reach two implementations."""
-        from secretary.dispatch import commands as dispatcher_commands
+        from ummanu.dispatch import commands as dispatcher_commands
 
         with (
             mock.patch.object(dispatcher_commands, "_pause_operations") as operations,
@@ -964,7 +964,7 @@ class CompletedCommandTests(PauseProtocolFixture):
         self.tracked_head()
         dispatcher_pause(self.runtime, mode="freeze", actor="steward", reason="a maintenance window")
         with mock.patch(
-            "secretary.dispatch.pause_ops.pause_status",
+            "ummanu.dispatch.pause_ops.pause_status",
             side_effect=DispatcherError("unsupported_legacy_record", "the records do not convert", 1),
         ):
             document = self.pause_ops().pause_resume(actor="operator")
@@ -1115,7 +1115,7 @@ class DecidedUnderTheLockTests(PauseProtocolFixture):
         out; this fails the moment the assignment leaves the locked span.
         """
         tree = ast.parse(
-            (Path(__file__).resolve().parents[1] / "src" / "secretary" / "dispatch" / "pause_ops.py").read_text(
+            (Path(__file__).resolve().parents[1] / "src" / "ummanu" / "dispatch" / "pause_ops.py").read_text(
                 encoding="utf-8"
             )
         )
@@ -1151,7 +1151,7 @@ class DecidedUnderTheLockTests(PauseProtocolFixture):
     def test_no_operation_of_the_layer_reads_the_flag_to_decide_what_it_did(self) -> None:
         """Criterion 1 at the layer: there is no flag read here to infer an action from."""
         source = (
-            Path(__file__).resolve().parents[1] / "src" / "secretary" / "webproto" / "pause_ops.py"
+            Path(__file__).resolve().parents[1] / "src" / "ummanu" / "webproto" / "pause_ops.py"
         ).read_text(encoding="utf-8")
         tree = ast.parse(source)
         layer = next(
@@ -1174,7 +1174,7 @@ class DecidedUnderTheLockTests(PauseProtocolFixture):
             self.assertNotIn(spelling, source)
 
     def test_a_caller_that_does_not_know_the_decision_answers_exactly_as_before(self) -> None:
-        """`secretary pause freeze` and the tick's auto-resume are not clients of this, and stay put.
+        """`ummanu pause freeze` and the tick's auto-resume are not clients of this, and stay put.
 
         The completed command reaches them as the `DispatcherError` the render raised -- same code,
         same message, same exit status -- so a path that never asked what the command did cannot be
@@ -1182,7 +1182,7 @@ class DecidedUnderTheLockTests(PauseProtocolFixture):
         """
         refused = DispatcherError("unsupported_legacy_record", "the records do not convert", 1)
         with (
-            mock.patch("secretary.dispatch.pause_ops.pause_status", side_effect=refused),
+            mock.patch("ummanu.dispatch.pause_ops.pause_status", side_effect=refused),
             self.assertRaises(PauseCommandCompleted) as completed,
         ):
             dispatcher_pause(self.runtime, mode="drain", actor="operator", reason="host maintenance")

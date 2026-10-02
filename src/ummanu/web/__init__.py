@@ -1,0 +1,54 @@
+"""The second transport over `ummanu.webproto`, and deliberately nothing more.
+
+`ummanu web-read` and `ummanu web-run` were the first: argparse in, JSON out, a typed
+protocol code turned into an exit status in one table. This package is the same shape with a
+different vocabulary — a request line in, JSON or HTML out, and a protocol code turned into an HTTP
+status in one table (:mod:`ummanu.web.statuses`). It reads through
+:class:`~ummanu.webproto.reads.ReadLayer` and runs through
+:class:`~ummanu.webproto.ops.OperationLayer`, and it has no snapshot, no state derivation, no
+liveness rule and no mutation of its own. If a page needs a fact this installation does not already
+answer, the answer is a change to the layer, not a second collector here.
+
+Three properties are the point, and each has a test:
+
+**Only named operations are reachable.** The route table in :mod:`ummanu.web.app` is the whole
+surface, and every route is one layer call. There is no endpoint that takes a command, a script, a
+path or a module name to run, and `tests/test_web_transport.py` fails if the table grows one. The
+sprint form and the sprint page added by secretary-1570 are the same shape: three routes over
+`sprint_reads.sprint_options`, `sprint_ops.sprint_create` and `sprint_reads.sprint_state`, and not
+one rule about what a sprint may be lives here.
+
+**A mutation comes from a page this service served.** Every POST is checked once, in
+`WebApp.handle`, before a handler is chosen: a browser's `Origin` naming another authority is
+refused before any operation runs, and a client that sends no origin at all -- a CLI, `curl` -- is
+untouched. It is one check covering every mutating route rather than a rule each new route has to
+remember, which is the only version of it that stays true.
+
+**Loopback only, and it stayed that way once the pipeline was published.** This service has no
+password, no TLS and no authorisation of any kind, so anybody who can reach the port owns the
+pipeline: it starts runs. Binding it to anything but a loopback address is refused in code
+(:mod:`ummanu.web.server`), not merely discouraged in a document. It now runs as a unit on a live
+installation, and that refusal is exactly what makes the guarded front (:mod:`ummanu.webfront`)
+the only way in from off the host rather than one of two doors.
+"""
+
+from __future__ import annotations
+
+from ummanu.web.app import ROUTES, Response, WebApp, cross_origin_reason
+from ummanu.web.server import DEFAULT_HOST, DEFAULT_PORT, LOOPBACK_ONLY, build_server, serve
+from ummanu.web.statuses import HTTP_STATUS_BY_CODE, UNMAPPED_CODE_STATUS, status_for
+
+__all__ = [
+    "DEFAULT_HOST",
+    "DEFAULT_PORT",
+    "HTTP_STATUS_BY_CODE",
+    "LOOPBACK_ONLY",
+    "ROUTES",
+    "UNMAPPED_CODE_STATUS",
+    "Response",
+    "WebApp",
+    "build_server",
+    "cross_origin_reason",
+    "serve",
+    "status_for",
+]

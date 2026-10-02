@@ -9,20 +9,20 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.codex_provider_events import _range_digest, _read_source
-from secretary.dispatch.provider_failure import (
+from ummanu.codex_provider_events import _range_digest, _read_source
+from ummanu.dispatch.provider_failure import (
     is_provider_unavailable_return,
     provider_failure_for_persisted_run,
     provider_failure_for_run,
 )
-from secretary.dispatch.tui import (
+from ummanu.dispatch.tui import (
     bind_claude_provider_progress_source,
     prepare_claude_provider_progress_source,
 )
-from secretary.dispatch.worker_lifecycle import head_run_binding
-from secretary.runtime.claude_sessions import claude_project_dir_name
-from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
-from secretary.runtime.provider_errors import (
+from ummanu.dispatch.worker_lifecycle import head_run_binding
+from ummanu.runtime.claude_sessions import claude_project_dir_name
+from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef
+from ummanu.runtime.provider_errors import (
     KIND_AUTH,
     KIND_RATE_LIMIT,
     KIND_RECONNECT,
@@ -220,7 +220,7 @@ def _codex_run(workspace: Path, root: Path, path: Path) -> HeadRun:
         run_id="codex-bound",
         spec=HeadSpec(profile_id="codex-terra-high", adapter="codex", resource="openai-sub"),
         workspace=str(workspace),
-        task_ref=TaskRef.card("secretary-1799"),
+        task_ref=TaskRef.card("ummanu-1799"),
         role="reviewer",
     )
     parsed = _read_source(path)
@@ -282,7 +282,7 @@ class RunBoundReaderTests(unittest.TestCase):
             run_id="codex-unbound",
             spec=HeadSpec(profile_id="codex", adapter="codex"),
             workspace="/nonexistent",
-            task_ref=TaskRef.card("secretary-1799"),
+            task_ref=TaskRef.card("ummanu-1799"),
             role="worker",
         )
         self.assertEqual(provider_failure_for_run(run)["state"], "unavailable")
@@ -292,13 +292,13 @@ class RunBoundReaderTests(unittest.TestCase):
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
             root = Path(tmp) / "claude-projects"
-            with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(root)}):
+            with mock.patch.dict(os.environ, {"UMMANU_CLAUDE_PROJECTS": str(root)}):
                 run = prepare_claude_provider_progress_source(
                     HeadRun(
                         run_id="claude-bound",
                         spec=HeadSpec(profile_id="claude-opus-high", adapter="claude", resource="claude-sub"),
                         workspace=str(workspace),
-                        task_ref=TaskRef.card("secretary-1799"),
+                        task_ref=TaskRef.card("ummanu-1799"),
                         role="worker",
                     )
                 )
@@ -321,16 +321,16 @@ class RunBoundReaderTests(unittest.TestCase):
             run_id="claude-unbound",
             spec=HeadSpec(profile_id="claude", adapter="claude"),
             workspace="/nonexistent",
-            task_ref=TaskRef.card("secretary-1799"),
+            task_ref=TaskRef.card("ummanu-1799"),
             role="worker",
         )
         self.assertEqual(provider_failure_for_run(run)["state"], "unavailable")
 
     def test_the_ready_return_token_is_read_back_off_its_request_id(self) -> None:
         self.assertTrue(
-            is_provider_unavailable_return("dispatcher-a-provider-unavailable-ready-secretary-1-run")
+            is_provider_unavailable_return("dispatcher-a-provider-unavailable-ready-ummanu-1-run")
         )
-        self.assertFalse(is_provider_unavailable_return("dispatcher-a-worker-respawn-secretary-1"))
+        self.assertFalse(is_provider_unavailable_return("dispatcher-a-worker-respawn-ummanu-1"))
 
 
 if __name__ == "__main__":

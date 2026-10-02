@@ -23,9 +23,11 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary import sprint_commands
-from secretary.board.owner_handover import HANDED_TO_OWNER, waiting_owner
-from secretary.board.production_rights import (
+from tests.po_card_fakes import OPERATION_BODY, REF, SPRINT, DispatcherFixture, card
+from tests.po_fake_store import FakePoStore
+from ummanu import sprint_commands
+from ummanu.board.owner_handover import HANDED_TO_OWNER, waiting_owner
+from ummanu.board.production_rights import (
     CARD_INPUT,
     OWNER_ANSWER_INPUT,
     RIGHTS_HEADING,
@@ -36,24 +38,22 @@ from secretary.board.production_rights import (
     rights_note,
     touches_production,
 )
-from secretary.cli import main
-from secretary.dispatch.po_cards import (
+from ummanu.cli import main
+from ummanu.dispatch.po_cards import (
     ServicePoChannel,
     complete_command,
     handover_command,
     owner_answer_request_id,
 )
-from secretary.dispatch.state import DispatcherRecord
-from secretary.po import store as po_store
-from secretary.po.client import OutcomeUnknown
-from secretary.po.queue import PoQueue
-from secretary.po.sprints import BoardSprintSessions, SprintRecord
-from secretary.sprints import ALLOWED_PRODUCTIONS_FIELD, SprintWriter
-from secretary.tasks import TaskError, TaskReader, TaskWriter, admit_role
-from secretary.web import pages
-from secretary.webproto.reads import _card_value
-from tests.po_card_fakes import OPERATION_BODY, REF, SPRINT, DispatcherFixture, card
-from tests.po_fake_store import FakePoStore
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.po import store as po_store
+from ummanu.po.client import OutcomeUnknown
+from ummanu.po.queue import PoQueue
+from ummanu.po.sprints import BoardSprintSessions, SprintRecord
+from ummanu.sprints import ALLOWED_PRODUCTIONS_FIELD, SprintWriter
+from ummanu.tasks import TaskError, TaskReader, TaskWriter, admit_role
+from ummanu.web import pages
+from ummanu.webproto.reads import _card_value
 
 NOT_ALLOWED = f"touches production relay; sprint {SPRINT} allows []"
 DECIDE = "This is not a refusal: decide it under the owner's standing rule."
@@ -67,13 +67,13 @@ class CreateValidationTests(unittest.TestCase):
         self.tmp = self.enterContext(tempfile.TemporaryDirectory())
         registry = Path(self.tmp) / "projects"
         registry.mkdir()
-        (registry / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
+        (registry / "ummanu.yaml").write_text("id: ummanu\n", encoding="utf-8")
         self.client = mock.Mock(instance_dir=self.tmp)
         self.writer = TaskWriter(self.client, data_dir=self.tmp)
 
     def create(self, kind: str, **fields: Any) -> dict:
         return self.writer.create(
-            role="observer", actor="observer", project="secretary", task_type=kind, title="T", sprint=SPRINT,
+            role="observer", actor="observer", project="ummanu", task_type=kind, title="T", sprint=SPRINT,
             **fields,
         )
 
@@ -83,7 +83,7 @@ class CreateValidationTests(unittest.TestCase):
             ("operation", {"touches_production": "relay"}, "unknown registered project: relay"),
             ("operation", {"touches_production": "../relay"}, "unknown registered project: ../relay"),
             ("decision", {"touches_production": "none"}, "a decision card takes none"),
-            ("code", {"touches_production": "secretary"}, "a code card takes none"),
+            ("code", {"touches_production": "ummanu"}, "a code card takes none"),
             ("research", {"touches_production": "none"}, "a research card takes none"),
         ):
             with self.subTest(kind=kind, fields=fields), self.assertRaisesRegex(TaskError, reason) as raised:
@@ -92,18 +92,18 @@ class CreateValidationTests(unittest.TestCase):
         self.assertEqual(self.client.mock_calls, [])
 
     def test_without_a_project_registry_a_named_production_is_refused(self) -> None:
-        (Path(self.tmp) / "projects" / "secretary.yaml").unlink()
+        (Path(self.tmp) / "projects" / "ummanu.yaml").unlink()
         (Path(self.tmp) / "projects").rmdir()
         with self.assertRaisesRegex(TaskError, "project registry is unavailable"):
-            self.create("operation", touches_production="secretary")
+            self.create("operation", touches_production="ummanu")
         self.assertEqual(self.client.mock_calls, [])
 
     def test_a_registered_project_and_none_pass_to_the_board(self) -> None:
-        for value in ("secretary", "none"):
+        for value in ("ummanu", "none"):
             # Past the production check the create reads the sprint: the refusal is not ours.
             with (
                 self.subTest(value=value),
-                mock.patch("secretary.sprints.SprintReader.show", side_effect=RuntimeError("the board")),
+                mock.patch("ummanu.sprints.SprintReader.show", side_effect=RuntimeError("the board")),
                 self.assertRaisesRegex(RuntimeError, "the board"),
             ):
                 self.create("operation", touches_production=value)
@@ -112,31 +112,31 @@ class CreateValidationTests(unittest.TestCase):
         writer = mock.Mock()
         writer.return_value.create.return_value = {"action": "created"}
         with (
-            mock.patch("secretary.task_commands.TaskWriter", writer),
-            mock.patch("secretary.task_commands.card_client"),
+            mock.patch("ummanu.task_commands.TaskWriter", writer),
+            mock.patch("ummanu.task_commands.card_client"),
             contextlib.redirect_stdout(io.StringIO()),
         ):
             code = main(
                 ["task", "create", "--role", "observer", "--instance", self.tmp, "--data-dir", self.tmp,
-                 "--project", "secretary", "--type", "operation", "--title", "T", "--sprint", SPRINT,
-                 "--touches-production", "secretary"]
+                 "--project", "ummanu", "--type", "operation", "--title", "T", "--sprint", SPRINT,
+                 "--touches-production", "ummanu"]
             )
         self.assertEqual(code, 0)
-        self.assertEqual(writer.return_value.create.call_args.kwargs["touches_production"], "secretary")
+        self.assertEqual(writer.return_value.create.call_args.kwargs["touches_production"], "ummanu")
 
     def test_the_value_is_read_from_the_bag_and_shown_by_task_show_and_the_card_page(self) -> None:
         reader = TaskReader(mock.Mock())
         row = {"id": 1900, "reference": REF, "title": "Rotate the key", "column_id": 3, "is_active": 1}
-        meta = {"task_type": "operation", "sprint_ref": SPRINT, "touches_production": "secretary"}
+        meta = {"task_type": "operation", "sprint_ref": SPRINT, "touches_production": "ummanu"}
 
         shown = reader._normalize(row, {3: "Ready"}, {}, meta, comments=[])
         plain = reader._normalize(row, {3: "Ready"}, {}, {"task_type": "decision"}, comments=[])
 
-        self.assertEqual(shown["touches_production"], "secretary")
-        self.assertEqual(shown["extensions"]["extra"]["touches_production"], "secretary")
+        self.assertEqual(shown["touches_production"], "ummanu")
+        self.assertEqual(shown["extensions"]["extra"]["touches_production"], "ummanu")
         self.assertNotIn("touches_production", plain)
         value = _card_value(shown)
-        self.assertEqual(value["touches_production"], "secretary")
+        self.assertEqual(value["touches_production"], "ummanu")
         self.assertIsNone(_card_value(plain)["touches_production"])
         html = pages.task(
             {"ref": REF, "card": {"source": None, "value": value}, "project": {}, "events": {}, "agents": {}},
@@ -180,8 +180,8 @@ class CardFactsTests(unittest.TestCase):
     def test_the_rights_line_and_the_note(self) -> None:
         self.assertEqual(rights_line("relay", SPRINT, ()), NOT_ALLOWED)
         self.assertEqual(
-            rights_line("relay", SPRINT, ("secretary", "site")),
-            f"touches production relay; sprint {SPRINT} allows [secretary, site]",
+            rights_line("relay", SPRINT, ("ummanu", "site")),
+            f"touches production relay; sprint {SPRINT} allows [ummanu, site]",
         )
         allowed = rights_note("relay", SPRINT, ["relay"], request_id="s-1:allow-production")
         self.assertIn(f"touches production relay; sprint {SPRINT} allows [relay]", allowed)
@@ -194,7 +194,7 @@ class CardFactsTests(unittest.TestCase):
             RIGHTS_HEADING,
             NOT_ALLOWED,
             DECIDE,
-            "Production of secretary is allowed by default, because it is the development server",
+            "Production of ummanu is allowed by default, because it is the development server",
             "any other production only as agreed at sprint planning",
             "task handover --to owner",
         ):
@@ -202,12 +202,12 @@ class CardFactsTests(unittest.TestCase):
         self.assertIn(allow_production_command(SPRINT, "relay", "s-1:allow-production"), decide)
         self.assertEqual(
             allow_production_command(SPRINT, "relay", "s-1:allow-production"),
-            f"python3 -P -m secretary sprint allow-production --ref {SPRINT} --role po --project relay "
+            f"python3 -P -m ummanu sprint allow-production --ref {SPRINT} --role po --project relay "
             "--reason '<text>' --request-id s-1:allow-production",
         )
 
 
-REASON = "secretary is the development server; relay was agreed at planning"
+REASON = "ummanu is the development server; relay was agreed at planning"
 
 
 class RuleFixture(DispatcherFixture):
@@ -339,7 +339,7 @@ class PoDecidesTests(RuleFixture):
             RIGHTS_HEADING,
             NOT_ALLOWED,
             DECIDE,
-            "Production of secretary is allowed by default",
+            "Production of ummanu is allowed by default",
             allow_production_command(SPRINT, "relay", allow_id),
             "task handover --to owner",
             handover_command(REF, submission.handover_request_id),
@@ -372,7 +372,7 @@ class PoDecidesTests(RuleFixture):
         submission, prompt = self.card_turn(runtime)
         self.assertIn(DECIDE, prompt)
         # The PO may not decide it, so it hands the card over inside its turn.
-        why = "relay is not secretary and was not agreed at planning: may I rotate its key?"
+        why = "relay is not ummanu and was not agreed at planning: may I rotate its key?"
         self.cards.hand_over_as_po(why, request_id=submission.handover_request_id)
 
         self.assertEqual(self.tick(runtime)["action"], "po-card-waiting-owner")
@@ -413,12 +413,12 @@ class PoDecidesTests(RuleFixture):
         """An empty `allowed_productions` (every sprint opened before 0016) is a PO turn, never the owner."""
         self.start()
         self.assertEqual(self.po_sprints.records[SPRINT].allowed_productions, ())
-        runtime = self.runtime(self.operation("secretary"))
+        runtime = self.runtime(self.operation("ummanu"))
 
         submission, prompt = self.card_turn(runtime)
 
-        self.assertIn(f"touches production secretary; sprint {SPRINT} allows []", prompt)
-        self.assertIn("Production of secretary is allowed by default", prompt)
+        self.assertIn(f"touches production ummanu; sprint {SPRINT} allows []", prompt)
+        self.assertIn("Production of ummanu is allowed by default", prompt)
         self.assertEqual(self.settled(submission.session_id, 2).state, po_store.COMPLETED)
         self.assertIsNone(waiting_owner(self.cards.card))
         self.assertEqual(self.handovers(), [])
@@ -551,11 +551,11 @@ class AllowProductionWriterTests(unittest.TestCase):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.instance = self.root / "instance"
         (self.instance / "projects").mkdir(parents=True)
-        for project in ("secretary", "relay"):
+        for project in ("ummanu", "relay"):
             (self.instance / "projects" / f"{project}.yaml").write_text(f"id: {project}\n", encoding="utf-8")
         self.client = mock.MagicMock()
         self.writer = SprintWriter(self.client, data_dir=self.root / "data", instance=self.instance)
-        self.sprint = {"id": "sprint_postgres_1", "ref": SPRINT, "status": "open", "allowed_productions": ["secretary"]}
+        self.sprint = {"id": "sprint_postgres_1", "ref": SPRINT, "status": "open", "allowed_productions": ["ummanu"]}
         self.writer.reader = mock.Mock()
         self.writer.reader.show.side_effect = lambda _ref, **_: dict(self.sprint)
         self.writer.audit = mock.Mock()
@@ -577,7 +577,7 @@ class AllowProductionWriterTests(unittest.TestCase):
 
         self.assertEqual((answer["action"], answer["event_id"]), ("production_allowed", "evt-1"))
         [write] = self.writes()
-        self.assertEqual(json.loads(write.kwargs["values"][ALLOWED_PRODUCTIONS_FIELD]), ["secretary", "relay"])
+        self.assertEqual(json.loads(write.kwargs["values"][ALLOWED_PRODUCTIONS_FIELD]), ["ummanu", "relay"])
         self.assertEqual(set(write.kwargs["values"]), {ALLOWED_PRODUCTIONS_FIELD})
         request_id, event = self.writer.audit.append.call_args.args
         self.assertEqual(request_id, "allow-1")
@@ -587,7 +587,7 @@ class AllowProductionWriterTests(unittest.TestCase):
         )
 
     def test_a_project_already_allowed_writes_nothing(self) -> None:
-        answer = self.allow("secretary")
+        answer = self.allow("ummanu")
 
         self.assertEqual((answer["action"], answer["event_id"]), ("already_allowed", None))
         self.assertEqual(self.writes(), [])
@@ -598,7 +598,7 @@ class AllowProductionWriterTests(unittest.TestCase):
         committed = {"kind": "production_allowed", "ref": SPRINT, "request_id": "allow-1",
                      "payload": {"project": "relay", "reason": REASON}}
         self.writer.audit.committed_event.return_value = committed
-        self.sprint["allowed_productions"] = ["secretary", "relay"]
+        self.sprint["allowed_productions"] = ["ummanu", "relay"]
 
         answer = self.allow()
 
@@ -606,7 +606,7 @@ class AllowProductionWriterTests(unittest.TestCase):
         self.assertEqual(self.writes(), [])
         self.writer.audit.stage.assert_not_called()
         with self.assertRaises(TaskError) as raised:
-            self.allow("secretary")
+            self.allow("ummanu")
         self.assertEqual(raised.exception.code, "validation")
         self.assertIn("already belongs to another sprint write", raised.exception.message)
 
@@ -682,8 +682,8 @@ class SprintRecordTests(unittest.TestCase):
         document = {"ref": SPRINT, "status": "open", "po_session": None, "allowed_productions": ["relay"]}
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch("secretary.sprints.SprintReader.show", return_value=document),
-            mock.patch("secretary.board.backend.board_client"),
+            mock.patch("ummanu.sprints.SprintReader.show", return_value=document),
+            mock.patch("ummanu.board.backend.board_client"),
         ):
             record = BoardSprintSessions(tmp, tmp).sprint(SPRINT)
         self.assertEqual(record, SprintRecord(SPRINT, "open", None, ("relay",)))

@@ -5,7 +5,7 @@ trust before it takes a prompt. The product answers that question by writing `co
 `CODEX_HOME` the head will run with, before the pane exists — so from that card on, *any* test that
 reaches a worker, reviewer or service bring-up performs a write, whether or not it thought about
 trust. With no `codex_home` in the fixture registry and no `TA_CODEX_HOME` in the environment, that
-write lands in the installation's `<data_dir>/codex-home/config.toml` wherever `SECRETARY_DATA_DIR`
+write lands in the installation's `<data_dir>/codex-home/config.toml` wherever `UMMANU_DATA_DIR`
 names one (the legacy `~/.config/orca/...` home until secretary-1723): installation state shared
 by every Codex head on the host, where a permanent `trusted` grant for a since-deleted `/tmp`
 workspace would accumulate one entry per suite run with nothing to prune it.
@@ -24,11 +24,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.automations.agents.pipeline import codex_sessions as pipeline_codex_sessions
-from secretary.dispatch import tui as dispatcher_tui
-from secretary.dispatch.host import InstanceCatalog
-from secretary.runtime import codex_preflight
 from tests import _SUITE_CODEX_HOME
+from ummanu.automations.agents.pipeline import codex_sessions as pipeline_codex_sessions
+from ummanu.dispatch import tui as dispatcher_tui
+from ummanu.dispatch.host import InstanceCatalog
+from ummanu.runtime import codex_preflight
 
 # A registry in the shape the offending dispatcher tests use: a Codex profile that says nothing
 # about `codex_home`, because which home an installation runs its heads with is not something a
@@ -44,11 +44,11 @@ REGISTRY = {
 
 def _installation_homes() -> list[Path]:
     """The CODEX_HOMEs of this host's installation that a bring-up without the suite's seam could
-    write into: the data-dir home of an ambient `SECRETARY_DATA_DIR`, and the legacy Orca home the
+    write into: the data-dir home of an ambient `UMMANU_DATA_DIR`, and the legacy Orca home the
     resolver fell back to before secretary-1723 (still installation state, if nobody writes it now).
     """
     homes = [Path.home() / ".config" / "orca" / "codex-runtime-home" / "home"]
-    data_dir = os.environ.get("SECRETARY_DATA_DIR")
+    data_dir = os.environ.get("UMMANU_DATA_DIR")
     if data_dir:
         homes.append(Path(data_dir).expanduser() / codex_preflight.CODEX_HOME_DATA_DIRNAME)
     return homes
@@ -78,7 +78,7 @@ class HermeticCodexHomeTests(unittest.TestCase):
         self.assertEqual(codex_preflight.codex_home({}), str(suite_home))
         with mock.patch.dict(os.environ):
             os.environ.pop("TA_CODEX_SESSIONS", None)
-            os.environ.pop("SECRETARY_CODEX_SESSIONS", None)
+            os.environ.pop("UMMANU_CODEX_SESSIONS", None)
             self.assertEqual(dispatcher_tui._sessions_roots()[0], suite_home / "sessions")
             self.assertEqual(pipeline_codex_sessions.sessions_roots()[0], suite_home / "sessions")
 

@@ -22,18 +22,18 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary.board import migrate, owner_events, schema_gate
-from secretary.board.host import EntityKind
-from secretary.board.owner_events import OwnerEventsSchemaOwed, OwnerEventStore, OwnerEventsUnavailable
-from secretary.board.sql_cards import CardSchemaOwed, SqlCardClient
-from secretary.board.sql_host import SqlBoardHost
-from secretary.board.store import STORE_FILE, BoardStoreConfig
-from secretary.cli import main
-from secretary.po.store import PoSchemaOwed, PoStore, PoStoreError
-from secretary.product_issues import ProductIssueStore
-from secretary.sprints import SprintReader
-from secretary.tasks import TaskError, TaskReader, task_audit_for
 from tests.sql_backend_fixtures import OWNER, PostgresBoard
+from ummanu.board import migrate, owner_events, schema_gate
+from ummanu.board.host import EntityKind
+from ummanu.board.owner_events import OwnerEventsSchemaOwed, OwnerEventStore, OwnerEventsUnavailable
+from ummanu.board.sql_cards import CardSchemaOwed, SqlCardClient
+from ummanu.board.sql_host import SqlBoardHost
+from ummanu.board.store import STORE_FILE, BoardStoreConfig
+from ummanu.cli import main
+from ummanu.po.store import PoSchemaOwed, PoStore, PoStoreError
+from ummanu.product_issues import ProductIssueStore
+from ummanu.sprints import SprintReader
+from ummanu.tasks import TaskError, TaskReader, task_audit_for
 
 #: The earlier packaged revision the stale store stops at, and what it therefore owes.
 STALE = "0020_wait_card_kind"
@@ -212,7 +212,7 @@ class SchemaGateBackendTests(unittest.TestCase):
         client = self.client(config)
         entry_points = {
             "cards": lambda: TaskReader(client).list(),
-            "card show": lambda: TaskReader(client).show("secretary-1"),
+            "card show": lambda: TaskReader(client).show("ummanu-1"),
             "sprints": lambda: SprintReader(client).list(create=False),
             "products": lambda: ProductIssueStore(client, data_dir=self.scratch, instance=self.scratch).list_products(),
             "issues": lambda: ProductIssueStore(client, data_dir=self.scratch, instance=self.scratch).show_issue(
@@ -313,7 +313,7 @@ class SchemaGateBackendTests(unittest.TestCase):
         self.assertIsInstance(raised.exception, OwnerEventsUnavailable)
         self.assert_refused(raised.exception, actual="0017_po_card_kinds", pending=owed)
 
-        with self.assertLogs("secretary.board.owner_events", level="WARNING") as logged:
+        with self.assertLogs("ummanu.board.owner_events", level="WARNING") as logged:
             self.assertFalse(owner_events.record("sprint_closed", "sprint:1", "x", "k", to=store))
         self.assertIn("OwnerEventsSchemaOwed", "\n".join(logged.output))
         self.assertEqual(

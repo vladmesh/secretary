@@ -5,8 +5,8 @@ from __future__ import annotations
 import unittest
 from datetime import UTC, datetime
 
-from secretary.board.models import Actor, EntityKind, Event, EventKind
-from secretary.board.terminal_taxonomy import (
+from ummanu.board.models import Actor, EntityKind, Event, EventKind
+from ummanu.board.terminal_taxonomy import (
     TerminalTaxonomyValidationError,
     budget_event_type,
     normalize_terminal_taxonomy,
@@ -96,7 +96,7 @@ class TerminalTaxonomyTests(unittest.TestCase):
                 event_id="evt-bad-taxonomy",
                 kind=EventKind.CARD_BLOCKED,
                 entity_kind=EntityKind.CARD,
-                ref="secretary-1533",
+                ref="ummanu-1533",
                 actor=Actor("dispatcher", "dispatcher"),
                 reason="blocked",
                 occurred_at=datetime.now(UTC),

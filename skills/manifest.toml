@@ -1,8 +1,8 @@
 # The portable role-skill registry: the roles and skills every installation gets, delivered into
-# the shell roots below by `secretary role-skills sync`.
+# the shell roots below by `ummanu role-skills sync`.
 #
 # An installation may own a second manifest at `<instance>/skills/manifest.toml` whose skills sit
-# in the `roles/` tree beside it; those entries are layered over these (secretary/role_skills.py).
+# in the `roles/` tree beside it; those entries are layered over these (ummanu/role_skills.py).
 # Anything that only makes sense on one host belongs there, not here.
 #
 # Target roots are written home-relative on purpose: the product does not know which user runs it,
@@ -12,7 +12,7 @@
 # A skill entry `<role>/<skill>` delivers a skill another role declares, from that role's tree, so a
 # skill two roles share still has one source.
 
-[roles.secretary]
+[roles.ummanu]
 skills = [
   "open-sprint",
   "knowledge-doc",
@@ -26,7 +26,7 @@ skills = ["curate"]
 
 # The product owner head, which runs with its workspace in the data directory as cwd.
 [roles.po]
-skills = ["secretary/open-sprint", "open-issue", "secretary/grilling", "secretary/knowledge-doc"]
+skills = ["ummanu/open-sprint", "open-issue", "ummanu/grilling", "ummanu/knowledge-doc"]
 
 [roles.retro]
 skills = ["retro"]
@@ -40,37 +40,37 @@ skills = ["steward"]
 [roles.observer]
 skills = ["observe-sprint"]
 
-[targets.claude-secretary-global]
+[targets.claude-ummanu-global]
 shell = "claude"
 root = "~/.claude/skills"
-roles = ["secretary"]
+roles = ["ummanu"]
 
-[targets.codex-orca-secretary]
+[targets.codex-orca-ummanu]
 shell = "codex"
 root = "~/.config/orca/codex-runtime-home/home/skills"
-roles = ["secretary"]
+roles = ["ummanu"]
 
 [targets.hermes-secretary]
 shell = "hermes"
 root = "~/.hermes/skills/secretary"
-roles = ["secretary"]
+roles = ["ummanu"]
 
-[targets.claude-secretary-curator]
+[targets.claude-ummanu-curator]
 shell = "claude"
-root = "~/orca/workspaces/secretary/curator/.claude/skills"
+root = "~/orca/workspaces/ummanu/curator/.claude/skills"
 roles = ["curator"]
 
-[targets.claude-secretary-retro]
+[targets.claude-ummanu-retro]
 shell = "claude"
-root = "~/orca/workspaces/secretary/retro/.claude/skills"
+root = "~/orca/workspaces/ummanu/retro/.claude/skills"
 roles = ["retro"]
 
-[targets.claude-secretary-steward]
+[targets.claude-ummanu-steward]
 shell = "claude"
-root = "~/orca/workspaces/secretary/steward/.claude/skills"
+root = "~/orca/workspaces/ummanu/steward/.claude/skills"
 roles = ["steward"]
 
-[targets.claude-secretary-observer]
+[targets.claude-ummanu-observer]
 shell = "claude"
 # The observer's workspace is created per sprint, so its skill cannot be delivered into a fixed
 # workspace the way curator, retro and steward are. It goes to the shell-wide root instead, which
@@ -78,7 +78,7 @@ shell = "claude"
 root = "~/.claude/skills"
 roles = ["observer"]
 
-[targets.codex-secretary-roles]
+[targets.codex-ummanu-roles]
 shell = "codex"
 root = "~/.config/orca/codex-runtime-home/home/skills"
 roles = ["curator", "retro", "steward", "observer"]

@@ -15,25 +15,25 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary import sprint_commands
-from secretary.board.sprint_write import SprintCreateIntent
-from secretary.board.sql_sprints import SqlSprintRecords
-from secretary.cli import main
-from secretary.data import normalize_sprint_entity
-from secretary.dispatch.observer import render_observer_prompt
-from secretary.po import PO_SESSION_ENV
-from secretary.po.store import SESSION_CLOSED, SessionNotFound
-from secretary.restore import _restore_sprint_metadata, _sprint_core
-from secretary.sprint_observer import observer_choice
-from secretary.sprints import (
+from tests.po_fake_store import FakePoStore
+from ummanu import sprint_commands
+from ummanu.board.sprint_write import SprintCreateIntent
+from ummanu.board.sql_sprints import SqlSprintRecords
+from ummanu.cli import main
+from ummanu.data import normalize_sprint_entity
+from ummanu.dispatch.observer import render_observer_prompt
+from ummanu.po import PO_SESSION_ENV
+from ummanu.po.store import SESSION_CLOSED, SessionNotFound
+from ummanu.restore import _restore_sprint_metadata, _sprint_core
+from ummanu.sprint_observer import observer_choice
+from ummanu.sprints import (
     ALLOWED_PRODUCTIONS_FIELD,
     PO_SESSION_FIELD,
     SprintReader,
     SprintWriter,
 )
-from secretary.tasks import TaskError
-from secretary.webproto.sprint_reads import _identity, _sprint_value
-from tests.po_fake_store import FakePoStore
+from ummanu.tasks import TaskError
+from ummanu.webproto.sprint_reads import _identity, _sprint_value
 
 # The metadata of a sprint row as the SQL adapter answers it for a sprint opened before 0016.
 PRE_0016_META = {
@@ -90,11 +90,11 @@ class CreateCommandTests(unittest.TestCase):
                     "--goal",
                     "g",
                     "--product",
-                    "secretary",
+                    "ummanu",
                     "--issue",
                     "issue:open",
                     "--project",
-                    "secretary",
+                    "ummanu",
                     "--observer",
                     "none",
                     *extra,
@@ -107,7 +107,7 @@ class CreateCommandTests(unittest.TestCase):
         self.assertEqual(self.create("--po-session", "s-flag")["po_session"], "s-flag")
 
     def test_local_run_exceptions_json_file_and_default_reach_writer(self) -> None:
-        entries = [{"project": "secretary", "argv": ["docker", "run", "two words", ""], "rationale": "owner's probe"}]
+        entries = [{"project": "ummanu", "argv": ["docker", "run", "two words", ""], "rationale": "owner's probe"}]
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "exceptions.json"
             path.write_text(json.dumps(entries), encoding="utf-8")
@@ -120,8 +120,8 @@ class CreateCommandTests(unittest.TestCase):
             for value in ("not JSON", "null", "{}"):
                 path.write_text(value, encoding="utf-8")
                 with mock.patch.object(sprint_commands, "_write") as write, mock.patch("sys.stderr"):
-                    code = main(["sprint", "create", "--role", "po", "--goal", "g", "--product", "secretary",
-                                 "--issue", "issue:open", "--project", "secretary", "--observer", "none",
+                    code = main(["sprint", "create", "--role", "po", "--goal", "g", "--product", "ummanu",
+                                 "--issue", "issue:open", "--project", "ummanu", "--observer", "none",
                                  "--local-run-exceptions-file", str(path)])
                 self.assertEqual(code, 2)
                 write.assert_not_called()
@@ -139,10 +139,10 @@ class CreateCommandTests(unittest.TestCase):
     def test_productions_default_to_none_and_repeat(self) -> None:
         self.assertEqual(self.create()["allowed_productions"], [])
         self.assertEqual(
-            self.create("--allow-production", "secretary", "--allow-production", "site")[
+            self.create("--allow-production", "ummanu", "--allow-production", "site")[
                 "allowed_productions"
             ],
-            ["secretary", "site"],
+            ["ummanu", "site"],
         )
 
 
@@ -151,7 +151,7 @@ class WriterFixture(unittest.TestCase):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.instance = self.root / "instance"
         (self.instance / "projects").mkdir(parents=True)
-        for project in ("secretary", "site"):
+        for project in ("ummanu", "site"):
             (self.instance / "projects" / f"{project}.yaml").write_text(f"id: {project}\n", encoding="utf-8")
         self.po = FakePoStore()
         self.open_session = self.po.claim_session(
@@ -176,9 +176,9 @@ class WriterFixture(unittest.TestCase):
             goal="g",
             definition_of_done="",
             repositories=[],
-            product="secretary",
+            product="ummanu",
             issues=["issue:open"],
-            reservations=["secretary"],
+            reservations=["ummanu"],
             reference="",
             observer=observer_choice("none"),
             **options,
@@ -187,9 +187,9 @@ class WriterFixture(unittest.TestCase):
 
 class CreateCheckTests(WriterFixture):
     def test_an_open_session_and_registered_productions_pass(self) -> None:
-        intent = self.intent(po_session=" s-open ", allowed_productions=["site", "secretary", "site"])
+        intent = self.intent(po_session=" s-open ", allowed_productions=["site", "ummanu", "site"])
         self.writer._check_po_channel(intent)
-        self.assertEqual((intent.po_session, intent.allowed_productions), ("s-open", ("site", "secretary")))
+        self.assertEqual((intent.po_session, intent.allowed_productions), ("s-open", ("site", "ummanu")))
 
     def test_neither_is_nothing_to_check(self) -> None:
         intent = self.intent()
@@ -203,7 +203,7 @@ class CreateCheckTests(WriterFixture):
         for options, message in (
             ({"po_session": "s-nowhere"}, "there is no PO session s-nowhere"),
             ({"po_session": "s-closed"}, f"PO session s-closed is {SESSION_CLOSED}"),
-            ({"allowed_productions": ["secretary", "elsewhere"]}, "unknown registered project(s): elsewhere"),
+            ({"allowed_productions": ["ummanu", "elsewhere"]}, "unknown registered project(s): elsewhere"),
         ):
             with self.subTest(options=options):
                 with self.assertRaises(TaskError) as raised:
@@ -230,14 +230,14 @@ class CreateCheckTests(WriterFixture):
 
     def test_both_are_inputs_of_the_request_and_an_older_intent_still_replays(self) -> None:
         plain = self.intent()
-        chosen = self.intent(po_session="s-open", allowed_productions=["secretary"])
+        chosen = self.intent(po_session="s-open", allowed_productions=["ummanu"])
         self.assertNotIn("po_session", plain.to_document())
         self.assertNotIn("allowed_productions", plain.to_document())
         self.assertEqual(chosen.to_document()["po_session"], "s-open")
-        self.assertEqual(chosen.to_document()["allowed_productions"], ["secretary"])
+        self.assertEqual(chosen.to_document()["allowed_productions"], ["ummanu"])
         self.assertNotEqual(plain.to_document(), chosen.to_document())
         self.assertEqual(SprintCreateIntent.from_document(chosen.to_document()), chosen)
-        self.assertEqual(self.writer._create_values(chosen)[ALLOWED_PRODUCTIONS_FIELD], '["secretary"]')
+        self.assertEqual(self.writer._create_values(chosen)[ALLOWED_PRODUCTIONS_FIELD], '["ummanu"]')
         self.assertEqual(self.writer._create_values(chosen)[PO_SESSION_FIELD], "s-open")
 
 
@@ -255,29 +255,29 @@ class ReadTests(unittest.TestCase):
 
     def test_show_status_and_the_protocol_documents_carry_both(self) -> None:
         sprint = self.normalize(
-            {**PRE_0016_META, PO_SESSION_FIELD: "s-1", ALLOWED_PRODUCTIONS_FIELD: '["secretary","site"]'}
+            {**PRE_0016_META, PO_SESSION_FIELD: "s-1", ALLOWED_PRODUCTIONS_FIELD: '["ummanu","site"]'}
         )
         self.assertEqual(
-            (sprint["po_session"], sprint["allowed_productions"]), ("s-1", ["secretary", "site"])
+            (sprint["po_session"], sprint["allowed_productions"]), ("s-1", ["ummanu", "site"])
         )
         status = SprintReader(mock.MagicMock())._status({**sprint, "resume_freshness": {}}, None)
         self.assertEqual(
-            (status["po_session"], status["allowed_productions"]), ("s-1", ["secretary", "site"])
+            (status["po_session"], status["allowed_productions"]), ("s-1", ["ummanu", "site"])
         )
         value = _sprint_value(sprint)
-        self.assertEqual((value["po_session"], value["allowed_productions"]), ("s-1", ["secretary", "site"]))
+        self.assertEqual((value["po_session"], value["allowed_productions"]), ("s-1", ["ummanu", "site"]))
         identity = _identity(sprint, status)
         self.assertEqual(
-            (identity["po_session"], identity["allowed_productions"]), ("s-1", ["secretary", "site"])
+            (identity["po_session"], identity["allowed_productions"]), ("s-1", ["ummanu", "site"])
         )
 
     def test_the_observer_document_names_both(self) -> None:
         sprint = self.normalize(
-            {**PRE_0016_META, PO_SESSION_FIELD: "s-1", ALLOWED_PRODUCTIONS_FIELD: '["secretary"]'}
+            {**PRE_0016_META, PO_SESSION_FIELD: "s-1", ALLOWED_PRODUCTIONS_FIELD: '["ummanu"]'}
         )
         document = render_observer_prompt(sprint)
         self.assertIn("## PO session\n\ns-1\n", document)
-        self.assertIn("## Allowed productions\n\n- secretary\n", document)
+        self.assertIn("## Allowed productions\n\n- ummanu\n", document)
         older = render_observer_prompt(self.normalize(PRE_0016_META))
         self.assertIn("## PO session\n\n(none recorded)\n", older)
         self.assertIn(
@@ -331,9 +331,9 @@ class SqlAdapterTests(unittest.TestCase):
         self.assertEqual((sprint["po_session"], sprint["allowed_productions"]), (None, []))
 
     def test_a_row_with_both_reads_them_back(self) -> None:
-        meta = SqlSprintRecords(self.Client("s-1", ["secretary"])).metadata(7)
+        meta = SqlSprintRecords(self.Client("s-1", ["ummanu"])).metadata(7)
         self.assertEqual(meta[PO_SESSION_FIELD], "s-1")
-        self.assertEqual(json.loads(meta[ALLOWED_PRODUCTIONS_FIELD]), ["secretary"])
+        self.assertEqual(json.loads(meta[ALLOWED_PRODUCTIONS_FIELD]), ["ummanu"])
 
     def test_create_inserts_both_and_an_update_writes_them(self) -> None:
         client = self.Client(None, [])
@@ -355,7 +355,7 @@ class SqlAdapterTests(unittest.TestCase):
                     "sprint_definition_of_done": "",
                     "sprint_status": "open",
                     PO_SESSION_FIELD: "s-3",
-                    ALLOWED_PRODUCTIONS_FIELD: '["secretary"]',
+                    ALLOWED_PRODUCTIONS_FIELD: '["ummanu"]',
                 },
             }
         }
@@ -366,7 +366,7 @@ class SqlAdapterTests(unittest.TestCase):
         [(sql, params)] = client.executed
         self.assertIn("po_session, allowed_productions", sql)
         self.assertIn("s-3", params)
-        self.assertIn(["secretary"], params)
+        self.assertIn(["ummanu"], params)
 
 
 class CheckpointTests(unittest.TestCase):
@@ -377,11 +377,11 @@ class CheckpointTests(unittest.TestCase):
         self.assertNotIn("allowed_productions", older)
         self.assertNotIn(PO_SESSION_FIELD, _restore_sprint_metadata(older))
 
-        record = normalize_sprint_entity({**base, "po_session": "s-1", "allowed_productions": ["secretary"]})
-        self.assertEqual((record["po_session"], record["allowed_productions"]), ("s-1", ["secretary"]))
+        record = normalize_sprint_entity({**base, "po_session": "s-1", "allowed_productions": ["ummanu"]})
+        self.assertEqual((record["po_session"], record["allowed_productions"]), ("s-1", ["ummanu"]))
         values = _restore_sprint_metadata(record)
         self.assertEqual(
-            (values[PO_SESSION_FIELD], values[ALLOWED_PRODUCTIONS_FIELD]), ("s-1", '["secretary"]')
+            (values[PO_SESSION_FIELD], values[ALLOWED_PRODUCTIONS_FIELD]), ("s-1", '["ummanu"]')
         )
         self.assertNotEqual(_sprint_core(record), _sprint_core(older))
 

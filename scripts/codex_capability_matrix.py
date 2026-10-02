@@ -3,7 +3,7 @@
 
 The probe deliberately writes no raw rollout.  Raw events can include prompt and
 session material which is useful while the run is active but is not a durable
-Secretary record.  The JSON result preserves the provider-visible facts needed
+Ummanu record.  The JSON result preserves the provider-visible facts needed
 to audit a proposed launch guard: IDs and every collaboration item, plus a
 SHA-256 digest of each raw stream.
 
@@ -41,7 +41,7 @@ PROMPT = (
 # precisely what this live matrix must establish. Each `agents.default.*`
 # candidate includes a description: Codex otherwise ignores that malformed role
 # table, and an ignored role setting cannot be provider-capability evidence.
-ROLE_DESCRIPTION = 'agents.default.description="Secretary capability matrix role"'
+ROLE_DESCRIPTION = 'agents.default.description="Ummanu capability matrix role"'
 
 
 def _v2_role_flags(control: str) -> tuple[str, ...]:
@@ -130,7 +130,7 @@ def run_feature_inventory(*, codex: str) -> dict[str, Any]:
     )
     if version.returncode:
         raise RuntimeError("codex --version failed")
-    with tempfile.TemporaryDirectory(prefix="secretary-codex-feature-inventory-") as temporary_root:
+    with tempfile.TemporaryDirectory(prefix="ummanu-codex-feature-inventory-") as temporary_root:
         home = Path(temporary_root) / "codex-home"
         home.mkdir(mode=0o700)
         completed = subprocess.run(
@@ -424,7 +424,7 @@ def run_matrix(
     )
     if version.returncode:
         raise RuntimeError("codex --version failed")
-    with tempfile.TemporaryDirectory(prefix="secretary-codex-capability-") as temporary_root:
+    with tempfile.TemporaryDirectory(prefix="ummanu-codex-capability-") as temporary_root:
         root = Path(temporary_root)
         variants: list[dict[str, Any]] = []
         for name, flags in VARIANTS:

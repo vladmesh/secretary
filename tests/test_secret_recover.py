@@ -19,16 +19,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import installation, secret_recover, secret_store
-from secretary.cli import main
-from secretary.secret_store import (
+from tests.fakes.installation import PRODUCT_ROOT, _checkpoint, _git
+from tests.retired_board import LEGACY_ENV, LEGACY_SECRET_IDS, LEGACY_VALUES
+from ummanu import installation, secret_recover, secret_store
+from ummanu.cli import main
+from ummanu.secret_store import (
     RecoveryPhraseError,
     import_env_file,
     initialize_store,
 )
-from secretary.secret_words import RECOVERY_WORDS
-from tests.fakes.installation import PRODUCT_ROOT, _checkpoint, _git
-from tests.retired_board import LEGACY_ENV, LEGACY_SECRET_IDS, LEGACY_VALUES
+from ummanu.secret_words import RECOVERY_WORDS
 
 PHRASE = " ".join(RECOVERY_WORDS[:16])
 RUNTIME_ENV = (
@@ -117,16 +117,16 @@ class RecoveryCase(unittest.TestCase):
         ]
         output = io.StringIO()
         patches = (
-            mock.patch("secretary.installation._ensure_installation_user"),
-            mock.patch("secretary.installation.check_prerequisites"),
-            mock.patch("secretary.installation.import_normalized_board", return_value=1),
-            mock.patch("secretary.installation.rebuild_memory_index", return_value=1),
+            mock.patch("ummanu.installation._ensure_installation_user"),
+            mock.patch("ummanu.installation.check_prerequisites"),
+            mock.patch("ummanu.installation.import_normalized_board", return_value=1),
+            mock.patch("ummanu.installation.rebuild_memory_index", return_value=1),
             mock.patch(
-                "secretary.installation.materialize_host",
+                "ummanu.installation.materialize_host",
                 return_value=SimpleNamespace(steps=[SimpleNamespace(status="changed")]),
             ),
-            mock.patch("secretary.installation.materialize_pipeline_state", return_value=0),
-            mock.patch("secretary.installation.restore_findings", return_value=[]),
+            mock.patch("ummanu.installation.materialize_pipeline_state", return_value=0),
+            mock.patch("ummanu.installation.restore_findings", return_value=[]),
         )
         with contextlib.ExitStack() as stack:
             for patch in patches:
@@ -170,7 +170,7 @@ class LegacyBoardOnlyRecoveryTests(RecoveryCase):
         secret_store.key_path(root).unlink()
         runtime_env = root / "runtime.env"
 
-        with mock.patch.dict(os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(runtime_env)}):
+        with mock.patch.dict(os.environ, {"UMMANU_RUNTIME_ENV_FILE": str(runtime_env)}):
             locked = secret_recover.recover_secrets(root)
             opened = secret_recover.recover_secrets(root, phrase=PHRASE)
 
@@ -363,9 +363,9 @@ class NoStoreCase(unittest.TestCase):
 
             with (
                 mock.patch("sys.stdin", io.StringIO()),
-                mock.patch("secretary.installation._ensure_installation_user"),
-                mock.patch("secretary.installation.shutil.which", return_value="/usr/bin/orca"),
-                mock.patch("secretary.installation._run", side_effect=run_orca_version),
+                mock.patch("ummanu.installation._ensure_installation_user"),
+                mock.patch("ummanu.installation.shutil.which", return_value="/usr/bin/orca"),
+                mock.patch("ummanu.installation._run", side_effect=run_orca_version),
                 contextlib.redirect_stdout(output),
             ):
                 code = main(
@@ -397,7 +397,7 @@ class ReportCase(RecoveryCase):
             capture_output=True,
             text=True,
         )
-        with mock.patch.dict(os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(self.restored)}):
+        with mock.patch.dict(os.environ, {"UMMANU_RUNTIME_ENV_FILE": str(self.restored)}):
             locked = secret_recover.recover_secrets(self.target)
             opened = secret_recover.recover_secrets(self.target, phrase=PHRASE)
 

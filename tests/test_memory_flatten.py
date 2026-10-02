@@ -12,13 +12,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary import memory_journal, state_repo
-from secretary.checkpoint import CheckpointWriter
-from secretary.memory_errors import MemoryProtocolError
-from secretary.memory_journal import verify_memory_journal
-from secretary.memory_write import commit_memory_proposal, propose_memory_fact
 from tests.fakes.tasks import empty_seed
 from tests.sql_backend_fixtures import card_store
+from ummanu import memory_journal, state_repo
+from ummanu.checkpoint import CheckpointWriter
+from ummanu.memory_errors import MemoryProtocolError
+from ummanu.memory_journal import verify_memory_journal
+from ummanu.memory_write import commit_memory_proposal, propose_memory_fact
 
 
 def git(repo: Path, *args: str) -> str:
@@ -57,7 +57,7 @@ class NestedJournalTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         root = Path(self.tmpdir.name)
-        self.data_dir = root / "secretary-data"
+        self.data_dir = root / "ummanu-data"
         self.instance_dir = init_instance_repo(root / "secretary-instance")
 
     def tearDown(self) -> None:
@@ -120,7 +120,7 @@ class NestedJournalTests(unittest.TestCase):
         fact_file.write_text("a brand new fact\n", encoding="utf-8")
 
         with mock.patch(
-            "secretary.memory_write.init_memory_journal",
+            "ummanu.memory_write.init_memory_journal",
             wraps=memory_journal.init_memory_journal,
         ) as init:
             proposal = propose_memory_fact(
@@ -173,7 +173,7 @@ class MemorySecretGateTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         root = Path(self.tmpdir.name)
-        self.data_dir = root / "secretary-data"
+        self.data_dir = root / "ummanu-data"
         self.instance_dir = init_instance_repo(root / "secretary-instance")
 
     def tearDown(self) -> None:
@@ -210,7 +210,7 @@ class TwoWriterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         root = Path(self.tmpdir.name)
-        self.data_dir = root / "secretary-data"
+        self.data_dir = root / "ummanu-data"
         (self.data_dir / "board").mkdir(parents=True)
         (self.data_dir / "runs").mkdir(parents=True)
         self.instance_dir = init_instance_repo(root / "secretary-instance")
@@ -226,7 +226,7 @@ class TwoWriterTests(unittest.TestCase):
         # memory writer. Keep it a valid normalized board row under the publication contract:
         # a checkpoint card always has a non-empty, unique recovery reference.
         (board / "cards.ndjson").write_text(
-            '{"id": 1, "reference": "secretary-1"}\n', encoding="utf-8"
+            '{"id": 1, "reference": "ummanu-1"}\n', encoding="utf-8"
         )
         (board / "sprints.ndjson").write_text("", encoding="utf-8")
         (board / "audit.ndjson").write_text("", encoding="utf-8")

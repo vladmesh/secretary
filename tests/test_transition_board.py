@@ -17,16 +17,16 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary.board import migrate, provision, schema
-from secretary.board.sql_cards import SqlCardClient
-from secretary.board.store import BoardStoreConfig
-from secretary.data import init_layout
-from secretary.sprint_observer import none_choice
-from secretary.sprints import SprintWriter, sprint_client
-from secretary.tasks import TaskReader, TaskWriter
-from secretary.transition import board as transition_board
-from secretary.transition.names import BASELINE_MARKER, COUNTS_MARKER, INSTANCE_PROJECT, NEW, OLD
 from tests.container_cleanup import cleanup_test_project
+from ummanu.board import migrate, provision, schema
+from ummanu.board.sql_cards import SqlCardClient
+from ummanu.board.store import BoardStoreConfig
+from ummanu.data import init_layout
+from ummanu.sprint_observer import none_choice
+from ummanu.sprints import SprintWriter, sprint_client
+from ummanu.tasks import TaskReader, TaskWriter
+from ummanu.transition import board as transition_board
+from ummanu.transition.names import BASELINE_MARKER, COUNTS_MARKER, INSTANCE_PROJECT, NEW, OLD
 
 OPEN_SPRINT = "sprint:1475"
 CLOSED_SPRINT = "sprint:1400"

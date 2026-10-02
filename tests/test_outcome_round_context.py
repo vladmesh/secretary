@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from secretary.board.outcome_round_context import OutcomeRoundContext, OutcomeRoundPhase
+from ummanu.board.outcome_round_context import OutcomeRoundContext, OutcomeRoundPhase
 
 
 class OutcomeRoundContextTests(unittest.TestCase):

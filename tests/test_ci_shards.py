@@ -498,7 +498,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         return {
             "meta": {"branch_coverage": True},
             "files": {
-                "src/secretary/example.py": {
+                "src/ummanu/example.py": {
                     "executed_lines": [2, 4],
                     "missing_lines": [3],
                     "excluded_lines": [5],
@@ -513,7 +513,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         """coverage.py's functions/classes regions pushed the full product past the bound (secretary-1631)."""
         native = self._coverage_payload()
         region = {"executed_lines": [2, 4], "missing_lines": [3], "summary": {"num_statements": 3}}
-        entry = native["files"]["src/secretary/example.py"]
+        entry = native["files"]["src/ummanu/example.py"]
         entry["functions"] = {f"f{index}": region for index in range(400)}
         entry["classes"] = {"": region}
         native_text = json.dumps(native)
@@ -545,8 +545,8 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             self.assertLessEqual(combined_path.stat().st_size, bound)
 
         self.assertEqual(
-            published["coverage"]["files"]["src/secretary/example.py"],
-            self._coverage_payload()["files"]["src/secretary/example.py"],
+            published["coverage"]["files"]["src/ummanu/example.py"],
+            self._coverage_payload()["files"]["src/ummanu/example.py"],
         )
 
     def test_coverage_aggregate_combines_one_named_datum_per_suite(self) -> None:
@@ -582,8 +582,8 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             changed = json.loads((output / CHANGED_LINES_JSON_NAME).read_text(encoding="utf-8"))
 
         self.assertEqual(combined["candidate_sha"], CANDIDATE_SHA)
-        self.assertEqual(combined["source_roots"], ["src/secretary"])
-        self.assertIn("executed_branches", combined["coverage"]["files"]["src/secretary/example.py"])
+        self.assertEqual(combined["source_roots"], ["src/ummanu"])
+        self.assertIn("executed_branches", combined["coverage"]["files"]["src/ummanu/example.py"])
         self.assertEqual(
             combined_text,
             json.dumps(combined, sort_keys=True, separators=(",", ":")) + "\n",
@@ -639,7 +639,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
     def test_changed_line_report_classifies_coverage_and_non_executable_lines(self) -> None:
         report = _changed_line_report(
             self._coverage_payload(),
-            {"src/secretary/example.py": [2, 3, 5, 9]},
+            {"src/ummanu/example.py": [2, 3, 5, 9]},
             base_sha="b" * 40,
             candidate_sha=CANDIDATE_SHA,
         )
@@ -656,7 +656,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         self.assertIn("[tool.coverage.run]", config)
         self.assertIn("branch = true", config)
         self.assertIn("relative_files = true", config)
-        self.assertIn('source = ["src/secretary"]', config)
+        self.assertIn('source = ["src/ummanu"]', config)
         self.assertNotIn("fail_under", config)
 
     def _write_report(self, directory: Path, evidence: SuiteEvidence) -> None:
@@ -753,7 +753,7 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             "class MemoryAcceptance(unittest.TestCase):\n"
             "    @classmethod\n"
             "    def setUpClass(cls):\n"
-            "        require_integration_setup(None, 'secretary[memory] is not installed')\n"
+            "        require_integration_setup(None, 'ummanu[memory] is not installed')\n"
             "    def test_scope(self): pass\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -775,9 +775,9 @@ class CiTestSuiteManifestTests(unittest.TestCase):
         self.assertEqual(evidence.counts["skipped"], 0)
         self.assertEqual(evidence.counts["error"], 1)
         self.assertEqual(junit.attrib["errors"], "1")
-        self.assertIn("secretary[memory] is not installed", evidence.detail)
+        self.assertIn("ummanu[memory] is not installed", evidence.detail)
         self.assertIn("required integration setup unavailable", summary.getvalue())
-        self.assertIn("secretary[memory] is not installed", log)
+        self.assertIn("ummanu[memory] is not installed", log)
 
     def test_unavailable_disposable_board_fixture_is_infrastructure_failure_through_aggregate(self) -> None:
         source = (

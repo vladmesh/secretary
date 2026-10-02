@@ -15,10 +15,10 @@ import time
 import unittest
 from pathlib import Path
 
-from secretary.runtime.head.local_pty.client import HeadHandle, spawn_head
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
-from secretary.webproto import head_view as head_reads
 from tests.web_head_view_fixtures import REF, SECRET, TOKEN, WORKER, HeadViewFixture, _run
+from ummanu.runtime.head.local_pty.client import HeadHandle, spawn_head
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from ummanu.webproto import head_view as head_reads
 
 REPO = Path(__file__).resolve().parents[1]
 CHILD_COMMAND = f"{sys.executable} -u {REPO / 'tests' / 'fixtures' / 'local_pty_child.py'}"

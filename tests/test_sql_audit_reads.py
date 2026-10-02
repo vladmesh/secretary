@@ -27,12 +27,12 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary.board import sql_audit
-from secretary.board.models import EventKind
-from secretary.board.sql_audit import SqlTaskAudit
-from secretary.board.sql_cards import SqlCardClient
-from secretary.tasks import _event_action, _projection_slice
 from tests.sql_backend_fixtures import PostgresBoard
+from ummanu.board import sql_audit
+from ummanu.board.models import EventKind
+from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.board.sql_cards import SqlCardClient
+from ummanu.tasks import _event_action, _projection_slice
 
 BOARD: PostgresBoard
 
@@ -61,8 +61,8 @@ _READ_INDEXES = (
 )
 
 SPRINT = "sprint:7"
-CARDS = ("secretary-10", "secretary-11", "secretary-12")
-TASK = "secretary-11"
+CARDS = ("ummanu-10", "ummanu-11", "ummanu-12")
+TASK = "ummanu-11"
 USAGE = EventKind.ATTEMPT_USAGE.value
 OUTCOME = EventKind.ATTEMPT_OUTCOME.value
 REPORTED = EventKind.CARD_REPORTED.value

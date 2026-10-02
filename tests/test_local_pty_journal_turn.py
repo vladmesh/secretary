@@ -27,9 +27,9 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary.dispatch import review as dispatcher_review
-from secretary.dispatch import wait_vitality
-from secretary.dispatch.head_vitality import (
+from ummanu.dispatch import review as dispatcher_review
+from ummanu.dispatch import wait_vitality
+from ummanu.dispatch.head_vitality import (
     ProgressState,
     SnapshotSource,
     SourceAvailability,
@@ -37,7 +37,7 @@ from secretary.dispatch.head_vitality import (
     VitalitySnapshot,
     snapshots_from_status,
 )
-from secretary.dispatch.head_vitality_episode import (
+from ummanu.dispatch.head_vitality_episode import (
     CHILD_ACTIVITY_CEILING_DEFAULT,
     DEFAULT_VITALITY_THRESHOLDS,
     IDLE_TURN_ADAPTERS,
@@ -48,18 +48,18 @@ from secretary.dispatch.head_vitality_episode import (
     recovery_outlook,
     reduce_vitality,
 )
-from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatch.worker_lifecycle import head_run_binding
-from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
-from secretary.runtime.head.local_pty import protocol
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
-from secretary.runtime.local_pty_head import head_run_turn_reading
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.worker_lifecycle import head_run_binding
+from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef
+from ummanu.runtime.head.local_pty import protocol
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
+from ummanu.runtime.local_pty_head import head_run_turn_reading
 
 FIXTURE = Path(__file__).parent / "fixtures" / "local_pty_journals" / "secretary_1727_9c6b884b.jsonl.gz"
 RUN_1727 = "9c6b884b688e447faa10f811ce3b727c"
 SUSPECT_IDLE = DEFAULT_VITALITY_THRESHOLDS.idle_turn_suspect_after
 CONFIRM_IDLE = DEFAULT_VITALITY_THRESHOLDS.idle_turn_confirm_after
-REF = "secretary-9739"
+REF = "ummanu-9739"
 TICK = 65.0
 # 2026-09-24T23:34:39Z: the continuation's submit opens turn 4 (seq 2956).
 TURN_4_STARTED = 1790292879.669232
@@ -198,7 +198,7 @@ class SupervisorJournalSourceTests(unittest.TestCase):
 
     def test_an_infinite_sequence_is_a_malformed_record_for_every_reader(self) -> None:
         # `json.loads` reads a bare `Infinity`; `int(inf)` raised out of `read_tail` before.
-        from secretary.runtime.head import local_pty
+        from ummanu.runtime.head import local_pty
 
         journal = _JournalDir(self, "run-a")
         journal.write(
@@ -673,14 +673,14 @@ def _worker_record(
     run = HeadRun(
         run_id=run_id,
         spec=HeadSpec(profile_id=f"{adapter}-local-pty", adapter=adapter, runtime=runtime),
-        workspace="/tmp/secretary-9739",
+        workspace="/tmp/ummanu-9739",
         task_ref=TaskRef.card(REF),
         role="worker",
-        pid_file="/tmp/secretary-9739/worker.pid",
+        pid_file="/tmp/ummanu-9739/worker.pid",
     ).to_json()
     return DispatcherRecord(
         worker=f"{REF}-worker",
-        workspace="/tmp/secretary-9739",
+        workspace="/tmp/ummanu-9739",
         handle="",
         head="claude-opus-high-local-pty",
         review_head="claude-opus-high-local-pty",
@@ -792,7 +792,7 @@ class TerminalStatusCarriesTheJournalTests(unittest.TestCase):
         self.assertNotIn("supervisor_journal", _status(_JournalHost(legacy.worker_head_run, journal), legacy))
 
 
-class Secretary1727ReplayTests(unittest.TestCase):
+class Ummanu1727ReplayTests(unittest.TestCase):
     """The incident, tick by tick, through the production status function, builders and reducer.
 
     Ticks run every 65 s (the dispatcher's cadence that night) from the first tick after the

@@ -6,21 +6,21 @@ import hashlib
 import importlib
 import unittest
 
-from secretary import tasks
-from secretary.board.extension_bag import EXTENSION_BAG, EXTENSION_MARKERS, fold_extension_bags
+from ummanu import tasks
+from ummanu.board.extension_bag import EXTENSION_BAG, EXTENSION_MARKERS, fold_extension_bags
 
 
 class FoldExtensionBagsTests(unittest.TestCase):
     def test_a_record_already_on_the_current_key_reads_as_it_did(self) -> None:
-        record = {EXTENSION_BAG: {"swimlane": "Secretary", "note": "kept"}}
+        record = {EXTENSION_BAG: {"swimlane": "Ummanu", "note": "kept"}}
 
         self.assertEqual(fold_extension_bags(record), record)
 
     def test_an_older_key_folds_into_the_current_bag(self) -> None:
         # `retired_board` stands for the retired board's own key: the rule names no key but the current one.
         self.assertEqual(
-            fold_extension_bags({"retired_board": {"swimlane": "Secretary", "steward_report": "1"}}),
-            {EXTENSION_BAG: {"swimlane": "Secretary", "steward_report": "1"}},
+            fold_extension_bags({"retired_board": {"swimlane": "Ummanu", "steward_report": "1"}}),
+            {EXTENSION_BAG: {"swimlane": "Ummanu", "steward_report": "1"}},
         )
 
     def test_the_current_bag_wins_a_field_both_name(self) -> None:
@@ -49,7 +49,7 @@ class FoldExtensionBagsTests(unittest.TestCase):
 class NeutralKeyRevisionTests(unittest.TestCase):
     def test_the_revision_copies_the_key_and_markers_it_was_written_against(self) -> None:
         revision = importlib.import_module(
-            "secretary.board.migrations.versions.0014_neutral_extension_bag"
+            "ummanu.board.migrations.versions.0014_neutral_extension_bag"
         )
 
         self.assertEqual(revision.NEW_KEY, EXTENSION_BAG)

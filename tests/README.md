@@ -10,11 +10,11 @@ secretary-1726), so there is no Orca seam to patch.
 ## The pipeline pause flag is read from a state dir this run owns
 
 The result-must-not-depend-on-the-host rule covers the live pipeline's pause flag.
-`src/secretary/automations/agents/pipeline/state.py` resolves `STATE` at import time and
+`src/ummanu/automations/agents/pipeline/state.py` resolves `STATE` at import time and
 `agents/pipeline/pause.py` binds `PAUSE_FILE` off it, so the file every
 triggered-dispatch test runs against is fixed before any test body executes. At its
-default that file is the live `<workspaces>/secretary/pipeline/state/pipeline/pause.json`
-of the machine running the suite: an operator holding `secretary pause --mode freeze`
+default that file is the live `<workspaces>/ummanu/pipeline/state/pipeline/pause.json`
+of the machine running the suite: an operator holding `ummanu pause --mode freeze`
 while the suite runs makes `runtime/dispatch._pipeline_paused()` true, and every dispatch
 test takes the "pipeline paused — no dispatch" branch instead of the lifecycle branch it
 asserts about, and the suite appends its own `runs.jsonl` records into that live directory.
@@ -24,7 +24,7 @@ run and removes it at exit, set before any `test_*` module is imported and set
 unconditionally — an ambient `TA_PIPELINE_STATE_DIR` inherited from a worker, reviewer or
 operator shell names exactly the live directory that must not be touched.
 `tests/test_hermetic_pipeline_state.py` is the proof, in both directions: a hard freeze in
-a production-like `<workspaces>/secretary/pipeline/state/pipeline` (built under a
+a production-like `<workspaces>/ummanu/pipeline/state/pipeline` (built under a
 temporary root, never the live one) leaves a warm-reuse dispatch reusing rather than
 skipping, while a freeze written into the suite's *own* state dir still pauses — so the
 "not paused" half cannot pass by the reader having gone dead.
@@ -39,15 +39,15 @@ a resolved path, as `test_pipeline_paths.py:LegacyMirrorPathTests` does.
 ## The suite must have imported the checkout it lives in
 
 Every seam above keeps a *host* fact out of the run. This one checks which sources the run
-imported. A head's shell carries `PYTHONPATH=$TA_SECRETARY_REPO/src`
-(`src/secretary/runtime/launch_prefix.py`), and every worktree on the pipeline host runs on
+imported. A head's shell carries `PYTHONPATH=$UMMANU_REPO/src`
+(`src/ummanu/runtime/launch_prefix.py`), and every worktree on the pipeline host runs on
 one shared venv whose editable install points at the production checkout's `src`. Both outrank a
 worktree's own sources for a src-layout project, which has nothing importable at its root -- so a
-suite run inside a candidate worktree can pass while exercising production's `secretary` with
+suite run inside a candidate worktree can pass while exercising production's `ummanu` with
 the candidate's test files.
 
-`tests/test_hermetic_source_tree.py` asserts it: `secretary.__file__` and
-`secretary.automations.__file__` must resolve inside the checkout that contains `tests/`. It installs no
+`tests/test_hermetic_source_tree.py` asserts it: `ummanu.__file__` and
+`ummanu.automations.__file__` must resolve inside the checkout that contains `tests/`. It installs no
 seam and shadows nothing -- there is no default to patch here, only a fact about the process.
 
 It is also the one guard in this family that is legitimately red on a perfectly good checkout: run
@@ -61,7 +61,7 @@ PYTHONPATH=$PWD/src python3 -m unittest ...
 ## Board reads are hermetic by construction, not by a patch
 
 There is no default board fake to install, because there is nothing to shadow. A board client cannot be built from ambient environment variables at all: every
-client comes from `secretary.board.backend.board_client(<instance dir>)`, which resolves that
+client comes from `ummanu.board.backend.board_client(<instance dir>)`, which resolves that
 instance's local `board-store.env` and raises `backend_unavailable` when it is absent. Nothing
 selects a backend; there is one.
 A worker, reviewer or operator shell that inherits live-looking database variables therefore
@@ -75,7 +75,7 @@ accidental dial-out into a loud failure.
 
 A CLI test that needs a board injects it where the client is built — the
 `board_client`/`card_client` name the command or its layer binds (for example
-`secretary.task_commands.card_client`, or `board_injected()` on the sprint fixtures).
+`ummanu.task_commands.card_client`, or `board_injected()` on the sprint fixtures).
 
 A test with sprint content of its own injects it explicitly rather than patching a global:
 `collect_status(report, offline=True, sprint_client=sprint_store(self, status_seed()))` is the seam, and

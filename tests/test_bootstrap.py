@@ -7,15 +7,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import bootstrap as bootstrap_module
-from secretary.bootstrap import (
+from tests.retired_board import STALE_FILE
+from ummanu import bootstrap as bootstrap_module
+from ummanu.bootstrap import (
     BOOTSTRAP_STAMP,
     BootstrapError,
     _host_supported,
     _install_platform,
     bootstrap,
 )
-from tests.retired_board import STALE_FILE
 
 
 class BootstrapTests(unittest.TestCase):
@@ -23,17 +23,17 @@ class BootstrapTests(unittest.TestCase):
     # unowned matching unit, starting a foreign/legacy-CLI Orca ahead of ownership removal,
     # and a missing-executable error preceding any unit write) all called `_start_orca_service`,
     # which bootstrap no longer defines. Orca is host-owned and external (secretary-739/755):
-    # bootstrap never installs, starts, or owns a `secretary-orca.service` unit, so none of
+    # bootstrap never installs, starts, or owns a `ummanu-orca.service` unit, so none of
     # these scenarios has a current-contract equivalent. Deleted rather than rewritten.
 
     def test_platform_installs_docker_and_distribution_compose_and_nothing_of_orca(self) -> None:
         with (
-            mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
-            mock.patch("secretary.bootstrap.shutil.which", side_effect=lambda name: None),
-            mock.patch("secretary.bootstrap._docker_compose_available", return_value=False),
-            mock.patch("secretary.bootstrap._compose_package", return_value="docker-compose-v2"),
-            mock.patch("secretary.bootstrap._ensure_docker_ready"),
-            mock.patch("secretary.bootstrap._run") as run,
+            mock.patch("ummanu.bootstrap.os.geteuid", return_value=0),
+            mock.patch("ummanu.bootstrap.shutil.which", side_effect=lambda name: None),
+            mock.patch("ummanu.bootstrap._docker_compose_available", return_value=False),
+            mock.patch("ummanu.bootstrap._compose_package", return_value="docker-compose-v2"),
+            mock.patch("ummanu.bootstrap._ensure_docker_ready"),
+            mock.patch("ummanu.bootstrap._run") as run,
         ):
             _install_platform(dry_run=False)
 
@@ -51,11 +51,11 @@ class BootstrapTests(unittest.TestCase):
 
     def test_platform_with_docker_present_installs_nothing(self) -> None:
         with (
-            mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
-            mock.patch("secretary.bootstrap.shutil.which", return_value="/usr/bin/docker"),
-            mock.patch("secretary.bootstrap._docker_compose_available", return_value=True),
-            mock.patch("secretary.bootstrap._ensure_docker_ready") as ready,
-            mock.patch("secretary.bootstrap._run") as run,
+            mock.patch("ummanu.bootstrap.os.geteuid", return_value=0),
+            mock.patch("ummanu.bootstrap.shutil.which", return_value="/usr/bin/docker"),
+            mock.patch("ummanu.bootstrap._docker_compose_available", return_value=True),
+            mock.patch("ummanu.bootstrap._ensure_docker_ready") as ready,
+            mock.patch("ummanu.bootstrap._run") as run,
         ):
             _install_platform(dry_run=False, runtime_user="existing-dedicated-user")
 
@@ -85,7 +85,7 @@ class BootstrapTests(unittest.TestCase):
             "version: 1\nname: bootstrap\ndata_dir: "
             + str(directory.parent / "data")
             + "\noffsite:\n  instance_remote: git@example.invalid:bootstrap/instance\n"
-            + "host:\n  unit_prefix: secretary-\n",
+            + "host:\n  unit_prefix: ummanu-\n",
             encoding="utf-8",
         )
         return "cloned private instance remote"
@@ -106,16 +106,16 @@ class BootstrapTests(unittest.TestCase):
         )
         refuse_board_runtime = AssertionError("bootstrap ran a board runtime command")
         with (
-            mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
-            mock.patch("secretary.bootstrap._host_supported"),
-            mock.patch("secretary.bootstrap._ensure_installation_user"),
-            mock.patch("secretary.bootstrap._clone_or_reuse", clone),
-            mock.patch("secretary.bootstrap._install_platform", steps.install_platform),
-            mock.patch("secretary.bootstrap._set_installation_owner", steps.set_owner),
-            mock.patch("secretary.bootstrap.provision_board_store", steps.provision),
-            mock.patch("secretary.bootstrap.migrate_instance", steps.migrate),
-            mock.patch("secretary.bootstrap.verify_board_store_roles", steps.verify),
-            mock.patch("secretary.bootstrap._run", side_effect=refuse_board_runtime),
+            mock.patch("ummanu.bootstrap.os.geteuid", return_value=0),
+            mock.patch("ummanu.bootstrap._host_supported"),
+            mock.patch("ummanu.bootstrap._ensure_installation_user"),
+            mock.patch("ummanu.bootstrap._clone_or_reuse", clone),
+            mock.patch("ummanu.bootstrap._install_platform", steps.install_platform),
+            mock.patch("ummanu.bootstrap._set_installation_owner", steps.set_owner),
+            mock.patch("ummanu.bootstrap.provision_board_store", steps.provision),
+            mock.patch("ummanu.bootstrap.migrate_instance", steps.migrate),
+            mock.patch("ummanu.bootstrap.verify_board_store_roles", steps.verify),
+            mock.patch("ummanu.bootstrap._run", side_effect=refuse_board_runtime),
             mock.patch("builtins.print"),
         ):
             code = bootstrap(args)
@@ -192,8 +192,8 @@ class BootstrapTests(unittest.TestCase):
         it runs `_set_installation_owner` for real with root's view of the host and records the
         uid and gid each `chown` receives, and when, relative to the store steps.
         """
-        from secretary.board import provision as provision_module
-        from secretary.board import store
+        from ummanu.board import provision as provision_module
+        from ummanu.board import store
 
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "instance"
@@ -219,30 +219,30 @@ class BootstrapTests(unittest.TestCase):
             kwdefaults = dict(provision_module.provision.__kwdefaults__ or {})
             kwdefaults["compose_path"] = compose
             with (
-                mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
-                mock.patch("secretary.bootstrap._host_supported"),
-                mock.patch("secretary.bootstrap._ensure_installation_user"),
-                mock.patch("secretary.bootstrap._clone_or_reuse", side_effect=self._clone),
-                mock.patch("secretary.bootstrap._install_platform"),
+                mock.patch("ummanu.bootstrap.os.geteuid", return_value=0),
+                mock.patch("ummanu.bootstrap._host_supported"),
+                mock.patch("ummanu.bootstrap._ensure_installation_user"),
+                mock.patch("ummanu.bootstrap._clone_or_reuse", side_effect=self._clone),
+                mock.patch("ummanu.bootstrap._install_platform"),
                 # `provision` itself runs; only Docker is answered for it.
                 mock.patch.object(provision_module.provision, "__kwdefaults__", kwdefaults),
-                mock.patch("secretary.board.provision._exists", return_value=False),
-                mock.patch("secretary.board.provision._run", return_value="container-id"),
-                mock.patch("secretary.board.provision._inspect_container"),
-                mock.patch("secretary.board.provision._wait_ready"),
-                mock.patch("secretary.bootstrap.migrate_instance", side_effect=step("migrate")),
-                mock.patch("secretary.bootstrap.verify_board_store_roles", side_effect=step("verify")),
+                mock.patch("ummanu.board.provision._exists", return_value=False),
+                mock.patch("ummanu.board.provision._run", return_value="container-id"),
+                mock.patch("ummanu.board.provision._inspect_container"),
+                mock.patch("ummanu.board.provision._wait_ready"),
+                mock.patch("ummanu.bootstrap.migrate_instance", side_effect=step("migrate")),
+                mock.patch("ummanu.bootstrap.verify_board_store_roles", side_effect=step("verify")),
                 # `_set_installation_owner` runs for real, as root would, against a stand-in account.
-                mock.patch("secretary.upgrade.os.geteuid", return_value=0),
-                mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
-                mock.patch("secretary.upgrade.os.chown", side_effect=chown),
+                mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
+                mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=account),
+                mock.patch("ummanu.upgrade.os.chown", side_effect=chown),
                 mock.patch("builtins.print"),
             ):
                 self.assertEqual(bootstrap(args), 0)
 
             store_file = store.store_path(target)
             self.assertEqual(store_file.stat().st_mode & 0o777, 0o600)
-            self.assertIn("SECRETARY_DB_APP_PASSWORD=", store_file.read_text(encoding="utf-8"))
+            self.assertIn("UMMANU_DB_APP_PASSWORD=", store_file.read_text(encoding="utf-8"))
             names = [event[0] for event in events]
             handed = [event for event in events if event[0] == "chown" and event[1] == store_file]
             self.assertEqual(handed, [("chown", store_file, 4242, 4343)])
@@ -263,10 +263,10 @@ class BootstrapTests(unittest.TestCase):
             dry_run=False,
         )
         with (
-            mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
-            mock.patch("secretary.bootstrap._host_supported", side_effect=BootstrapError("unsupported")),
-            mock.patch("secretary.bootstrap._ensure_installation_user") as ensure_user,
-            mock.patch("secretary.bootstrap._clone_or_reuse") as clone,
+            mock.patch("ummanu.bootstrap.os.geteuid", return_value=0),
+            mock.patch("ummanu.bootstrap._host_supported", side_effect=BootstrapError("unsupported")),
+            mock.patch("ummanu.bootstrap._ensure_installation_user") as ensure_user,
+            mock.patch("ummanu.bootstrap._clone_or_reuse") as clone,
             mock.patch("builtins.print"),
         ):
             self.assertEqual(bootstrap(args), 1)

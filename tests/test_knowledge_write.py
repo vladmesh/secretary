@@ -7,19 +7,19 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.board.checkpoint_layout import open_checkpoint_board
-from secretary.checkpoint import CheckpointWriter
-from secretary.cli import main as cli_main
-from secretary.data import DataExport
-from secretary.knowledge_write import (
+from tests.fakes.tasks import empty_seed
+from tests.sql_backend_fixtures import card_store
+from ummanu.board.checkpoint_layout import open_checkpoint_board
+from ummanu.checkpoint import CheckpointWriter
+from ummanu.cli import main as cli_main
+from ummanu.data import DataExport
+from ummanu.knowledge_write import (
     KnowledgeValidationError,
     list_knowledge_documents,
     write_knowledge_directory,
     write_knowledge_document,
 )
-from secretary.state_repo import StateRepoError
-from tests.fakes.tasks import empty_seed
-from tests.sql_backend_fixtures import card_store
+from ummanu.state_repo import StateRepoError
 
 
 def git(repo: Path, *args: str) -> str:
@@ -29,7 +29,7 @@ def git(repo: Path, *args: str) -> str:
 
 CARD = {
     "id": 1,
-    "reference": "secretary-719",
+    "reference": "ummanu-719",
     "title": "Recoverable knowledge plane",
     "column": "Ready",
     "comments": [],
@@ -45,7 +45,7 @@ class KnowledgeRepoCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         root = Path(self.tmpdir.name)
-        self.data_dir = root / "secretary-data"
+        self.data_dir = root / "ummanu-data"
         self.instance_dir = root / "secretary-instance"
         (self.data_dir / "board").mkdir(parents=True)
         (self.data_dir / "runs").mkdir(parents=True)
@@ -108,8 +108,8 @@ class KnowledgeRepoCase(unittest.TestCase):
             lines = (Path(data_dir) / "runs" / "runs.ndjson").read_text(encoding="utf-8")
             return DataExport(path=Path(data_dir), count=len(lines.splitlines()), source="test")
 
-        with mock.patch("secretary.checkpoint.export_board", side_effect=board_export):
-            with mock.patch("secretary.checkpoint.export_runs", side_effect=runs_export):
+        with mock.patch("ummanu.checkpoint.export_board", side_effect=board_export):
+            with mock.patch("ummanu.checkpoint.export_runs", side_effect=runs_export):
                 return CheckpointWriter(
                     self.data_dir, self.instance_dir, client=self.checkpoint_client
                 ).write()
@@ -311,7 +311,7 @@ class KnowledgeCheckpointRaceTests(KnowledgeRepoCase):
             self.assertIn(f"round {round_index}", board)
 
 
-REPORT = "reports/secretary-1640"
+REPORT = "reports/ummanu-1640"
 
 
 class KnowledgeDirectoryWriteTests(KnowledgeRepoCase):
@@ -434,7 +434,7 @@ class KnowledgeDirectoryWriteTests(KnowledgeRepoCase):
             return real_replace(src, dst)
 
         with (
-            mock.patch("secretary.knowledge_write.os.replace", side_effect=crash_on_second),
+            mock.patch("ummanu.knowledge_write.os.replace", side_effect=crash_on_second),
             self.assertRaises(KeyboardInterrupt),
         ):
             self.write_dir(self.source({"report.md": "two\n"}))
@@ -475,7 +475,7 @@ class KnowledgeDirectoryWriteTests(KnowledgeRepoCase):
 
     def test_a_source_over_the_cap_is_refused(self):
         source = self.source({"report.md": "clean\n", "data.bin": b"\0" * 64})
-        with mock.patch("secretary.knowledge_write.KNOWLEDGE_DIRECTORY_CAP_BYTES", 32):
+        with mock.patch("ummanu.knowledge_write.KNOWLEDGE_DIRECTORY_CAP_BYTES", 32):
             self.assert_refused(source, "size_cap")
 
     def test_cli_takes_exactly_one_of_file_and_dir(self):

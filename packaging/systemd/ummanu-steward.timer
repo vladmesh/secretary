@@ -1,0 +1,11 @@
+[Unit]
+Description=Run ummanu steward every three hours
+
+[Timer]
+OnCalendar=00/3:00:00
+RandomizedDelaySec=150
+Persistent=true
+Unit=ummanu-steward.service
+
+[Install]
+WantedBy=timers.target

@@ -13,25 +13,25 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.automations.agents.steward import signals as steward_signals
-from secretary.automations.runtime import health, production_telemetry
-from secretary.cli import main as secretary_main
-from secretary.dispatch.production import record_tick_telemetry
-from secretary.dispatch.runtime_provenance import ProductionRuntime
-from secretary.runtime.role_env import runtime_env
-from secretary.runtime.state import AgentState
+from ummanu.automations.agents.steward import signals as steward_signals
+from ummanu.automations.runtime import health, production_telemetry
+from ummanu.cli import main as ummanu_main
+from ummanu.dispatch.production import record_tick_telemetry
+from ummanu.dispatch.runtime_provenance import ProductionRuntime
+from ummanu.runtime.role_env import runtime_env
+from ummanu.runtime.state import AgentState
 
-PREFLIGHT = Path(__file__).parents[1] / "src" / "secretary" / "dispatch" / "runtime_preflight.py"
+PREFLIGHT = Path(__file__).parents[1] / "src" / "ummanu" / "dispatch" / "runtime_preflight.py"
 
 
 def _fixture(root: Path, marker: str) -> None:
-    package = root / "secretary"
+    package = root / "ummanu"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text(f"MARKER = {marker!r}\n", encoding="utf-8")
     (package / "dispatcher_tick.py").write_text(
         "import json, sys\n"
         "from pathlib import Path\n"
-        "from secretary import MARKER\n"
+        "from ummanu import MARKER\n"
         "Path(sys.argv[1]).write_text(json.dumps({'action': 'normal', 'marker': MARKER}) + '\\n')\n",
         encoding="utf-8",
     )
@@ -43,12 +43,12 @@ def _fixture(root: Path, marker: str) -> None:
         "from pathlib import Path\n"
         "from zipfile import ZIP_DEFLATED, ZipFile\n\n"
         "def build_editable(wheel_directory, config_settings=None, metadata_directory=None):\n"
-        "    name = 'secretary-0.1-py3-none-any.whl'\n"
-        "    dist = 'secretary-0.1.dist-info/'\n"
+        "    name = 'ummanu-0.1-py3-none-any.whl'\n"
+        "    dist = 'ummanu-0.1.dist-info/'\n"
         "    with ZipFile(Path(wheel_directory) / name, 'w', ZIP_DEFLATED) as wheel:\n"
-        "        wheel.writestr('__editable__.secretary-0.1.pth', str(Path.cwd()) + '\\n')\n"
+        "        wheel.writestr('__editable__.ummanu-0.1.pth', str(Path.cwd()) + '\\n')\n"
         "        wheel.writestr(dist + 'METADATA', "
-        "'Metadata-Version: 2.1\\nName: secretary\\nVersion: 0.1\\nProvides-Extra: dev\\n')\n"
+        "'Metadata-Version: 2.1\\nName: ummanu\\nVersion: 0.1\\nProvides-Extra: dev\\n')\n"
         "        wheel.writestr(dist + 'WHEEL', "
         "'Wheel-Version: 1.0\\nGenerator: fixture\\nRoot-Is-Purelib: true\\nTag: py3-none-any\\n')\n"
         "        wheel.writestr(dist + 'RECORD', '')\n"
@@ -136,7 +136,7 @@ class ProductionRuntimeTests(unittest.TestCase):
     def test_offline_doctor_does_not_probe_an_unstarted_production_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            product = root / "secretary"
+            product = root / "ummanu"
             data_dir = root / "data"
             _fixture(product, "production")
             instance = _instance(root, product, data_dir)
@@ -145,19 +145,19 @@ class ProductionRuntimeTests(unittest.TestCase):
                 mock.patch.object(ProductionRuntime, "probe", side_effect=AssertionError("offline probe")),
                 contextlib.redirect_stdout(output),
             ):
-                self.assertEqual(secretary_main(["doctor", "--offline", "--instance", str(instance)]), 0)
+                self.assertEqual(ummanu_main(["doctor", "--offline", "--instance", str(instance)]), 0)
 
     def test_live_doctor_reports_an_unstarted_production_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            product = root / "secretary"
+            product = root / "ummanu"
             data_dir = root / "data"
             _fixture(product, "production")
             instance = _instance(root, product, data_dir)
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 self.assertEqual(
-                    secretary_main(["doctor", "--dry-run", "--json", "--instance", str(instance)]), 1
+                    ummanu_main(["doctor", "--dry-run", "--json", "--instance", str(instance)]), 1
                 )
             findings = json.loads(output.getvalue())["findings"]
             finding = next(item for item in findings if item["code"] == "production_runtime_provenance")
@@ -169,7 +169,7 @@ class ProductionRuntimeTests(unittest.TestCase):
             root = Path(tmp)
             observed = ProductionRuntime(
                 str(root / "missing-python"),
-                str(root / "secretary"),
+                str(root / "ummanu"),
                 workspaces_root=str(root / "workspaces"),
             ).probe()
         self.assertEqual(observed.classification, "interpreter_unavailable")
@@ -179,20 +179,20 @@ class ProductionRuntimeTests(unittest.TestCase):
             root = Path(tmp)
             python = _venv(root / ".venv")
             observed = ProductionRuntime(
-                str(python), str(root / "secretary"), workspaces_root=str(root / "workspaces")
+                str(python), str(root / "ummanu"), workspaces_root=str(root / "workspaces")
             ).probe()
         self.assertEqual(observed.classification, "missing_import")
 
     def test_representative_worker_install_cannot_retarget_production(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            production = root / "secretary"
-            task = root / "workspaces" / "secretary" / "task-1"
+            production = root / "ummanu"
+            task = root / "workspaces" / "ummanu" / "task-1"
             _fixture(production, "production")
             _fixture(task, "candidate")
             production_python = _venv(production / ".venv")
             _install(production_python, production)
-            _venv(task / ".secretary-task-env" / "venv")
+            _venv(task / ".ummanu-task-env" / "venv")
 
             env = runtime_env(
                 "worker",
@@ -207,7 +207,7 @@ class ProductionRuntimeTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             ).stdout.splitlines()
-            task_bin = task / ".secretary-task-env" / "venv" / "bin"
+            task_bin = task / ".ummanu-task-env" / "venv" / "bin"
             self.assertTrue(all(str(task_bin) in entry for entry in resolved))
             self.assertNotIn("PYTHONPATH", env)
 
@@ -236,7 +236,7 @@ class ProductionRuntimeTests(unittest.TestCase):
                     str(production_python),
                     "-I",
                     "-m",
-                    "secretary.dispatcher_tick",
+                    "ummanu.dispatcher_tick",
                     str(tick_record),
                 ],
                 check=True,
@@ -251,14 +251,14 @@ class ProductionRuntimeTests(unittest.TestCase):
     def test_workspace_metadata_is_refused_before_and_after_checkout_vanishes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            production = root / "secretary"
-            task = root / "workspaces" / "secretary" / "task-2"
+            production = root / "ummanu"
+            task = root / "workspaces" / "ummanu" / "task-2"
             _fixture(production, "production")
             _fixture(task, "candidate")
             python = _venv(production / ".venv")
             _install(python, task)
             site_packages = next((production / ".venv" / "lib").glob("python*/site-packages"))
-            dist_info = site_packages / "secretary-0.1.dist-info"
+            dist_info = site_packages / "ummanu-0.1.dist-info"
             dist_info.mkdir(exist_ok=True)
             (dist_info / "direct_url.json").write_text(
                 json.dumps({"url": task.as_uri(), "dir_info": {"editable": True}}),
@@ -277,20 +277,20 @@ class ProductionRuntimeTests(unittest.TestCase):
     def test_executable_editable_finder_is_refused_without_direct_url_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            production = root / "secretary"
-            task = root / "workspaces" / "secretary" / "task-finder"
+            production = root / "ummanu"
+            task = root / "workspaces" / "ummanu" / "task-finder"
             _fixture(production, "production")
             _fixture(task, "candidate")
             python = _venv(production / ".venv")
             _install(python, production)
             site_packages = next((production / ".venv" / "lib").glob("python*/site-packages"))
-            for direct in site_packages.glob("secretary-*.dist-info/direct_url.json"):
+            for direct in site_packages.glob("ummanu-*.dist-info/direct_url.json"):
                 direct.unlink()
-            finder_name = "__editable___secretary_finder"
+            finder_name = "__editable___ummanu_finder"
             (site_packages / f"{finder_name}.py").write_text(
-                f"MAPPING = {{'secretary': {str(task / 'secretary')!r}}}\n", encoding="utf-8"
+                f"MAPPING = {{'ummanu': {str(task / 'ummanu')!r}}}\n", encoding="utf-8"
             )
-            (site_packages / "__editable__.secretary.pth").write_text(
+            (site_packages / "__editable__.ummanu.pth").write_text(
                 f"import {finder_name}; {finder_name}.install()\n", encoding="utf-8"
             )
 
@@ -305,21 +305,21 @@ class ProductionRuntimeTests(unittest.TestCase):
         """secretary-1710: `<data_dir>/workspaces` holds card checkouts too, not only the Orca root."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            production = root / "secretary"
-            data_dir = root / "secretary-data"
-            task = data_dir / "workspaces" / "secretary" / "secretary-1710"
+            production = root / "ummanu"
+            data_dir = root / "ummanu-data"
+            task = data_dir / "workspaces" / "ummanu" / "ummanu-1710"
             _fixture(production, "production")
             _fixture(task, "candidate")
             python = _venv(production / ".venv")
             _install(python, production)
             site_packages = next((production / ".venv" / "lib").glob("python*/site-packages"))
-            for direct in site_packages.glob("secretary-*.dist-info/direct_url.json"):
+            for direct in site_packages.glob("ummanu-*.dist-info/direct_url.json"):
                 direct.unlink()
-            finder_name = "__editable___secretary_finder"
+            finder_name = "__editable___ummanu_finder"
             (site_packages / f"{finder_name}.py").write_text(
-                f"MAPPING = {{'secretary': {str(task / 'secretary')!r}}}\n", encoding="utf-8"
+                f"MAPPING = {{'ummanu': {str(task / 'ummanu')!r}}}\n", encoding="utf-8"
             )
-            (site_packages / "__editable__.secretary.pth").write_text(
+            (site_packages / "__editable__.ummanu.pth").write_text(
                 f"import {finder_name}; {finder_name}.install()\n", encoding="utf-8"
             )
             orca_root = root / "orca" / "workspaces"
@@ -334,7 +334,7 @@ class ProductionRuntimeTests(unittest.TestCase):
 
             # The packaged unit names only `--data-dir`; the fence derives the git root from it.
             with mock.patch.dict(os.environ):
-                os.environ.pop("SECRETARY_DATA_DIR", None)
+                os.environ.pop("UMMANU_DATA_DIR", None)
                 fenced = subprocess.run(
                     [
                         str(python),
@@ -360,9 +360,9 @@ class ProductionRuntimeTests(unittest.TestCase):
     def test_symlinks_are_normalized_without_lexical_prefix_confusion(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            production = root / "secretary"
-            linked_production = root / "registered-secretary"
-            similarly_named = root / "secretary-old"
+            production = root / "ummanu"
+            linked_production = root / "registered-ummanu"
+            similarly_named = root / "ummanu-old"
             workspaces = root / "real-workspaces"
             linked_workspaces = root / "workspaces"
             _fixture(production, "production")
@@ -386,14 +386,14 @@ class ProductionRuntimeTests(unittest.TestCase):
         """The 2026-09 failure sequence, before any candidate package code can execute."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            production = root / "secretary"
-            workspace = root / "workspaces" / "secretary" / "task-77"
+            production = root / "ummanu"
+            workspace = root / "workspaces" / "ummanu" / "task-77"
             data_dir = root / "data"
             _fixture(production, "production")
             _fixture(workspace, "candidate")
             # If the fence tried to verify provenance by importing the candidate, the test would
             # fail before it could leave the diagnostic a broken service needs.
-            (workspace / "secretary" / "__init__.py").write_text(
+            (workspace / "ummanu" / "__init__.py").write_text(
                 "raise RuntimeError('candidate package was imported')\n", encoding="utf-8"
             )
             python = _venv(production / ".venv")
@@ -417,13 +417,13 @@ class ProductionRuntimeTests(unittest.TestCase):
                 mock.patch.object(ProductionRuntime, "probe", side_effect=AssertionError("offline probe")),
                 contextlib.redirect_stdout(doctor_text),
             ):
-                self.assertEqual(secretary_main(["doctor", "--offline", "--instance", str(instance)]), 1)
+                self.assertEqual(ummanu_main(["doctor", "--offline", "--instance", str(instance)]), 1)
             self.assertIn("production runtime provenance refused", doctor_text.getvalue())
             self.assertIn(str(workspace.resolve()), doctor_text.getvalue())
             self.assertIn("pip install --no-deps -e", doctor_text.getvalue())
             doctor_json = io.StringIO()
             with contextlib.redirect_stdout(doctor_json):
-                self.assertEqual(secretary_main(["doctor", "--offline", "--json", "--instance", str(instance)]), 1)
+                self.assertEqual(ummanu_main(["doctor", "--offline", "--json", "--instance", str(instance)]), 1)
             findings = json.loads(doctor_json.getvalue())["findings"]
             finding = next(item for item in findings if item["code"] == "production_runtime_provenance")
             self.assertEqual(finding["offending_target"], str(workspace.resolve()))
@@ -471,7 +471,7 @@ class ProductionRuntimeTests(unittest.TestCase):
                 str(python),
                 "-I",
                 "-m",
-                "secretary.dispatcher_tick",
+                "ummanu.dispatcher_tick",
                 str(tick_record),
             )
             self.assertEqual(recovered.returncode, 0, recovered.stderr)

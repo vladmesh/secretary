@@ -13,11 +13,11 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 
-from secretary.dispatch.head_vitality_episode import (
+from ummanu.dispatch.head_vitality_episode import (
     VitalityEpisode,
     VitalityVerdict,
 )
-from secretary.dispatch.head_vitality_guard import (
+from ummanu.dispatch.head_vitality_guard import (
     GuardRefusal,
     assert_destructive_allowed,
 )
@@ -257,7 +257,7 @@ class MutationResistanceTests(unittest.TestCase):
         self.assertEqual(exercised, set(GuardRefusal))
 
     def test_the_refused_map_covers_every_non_destructive_verdict(self) -> None:
-        from secretary.dispatch.head_vitality_guard import _REFUSED_VERDICTS
+        from ummanu.dispatch.head_vitality_guard import _REFUSED_VERDICTS
 
         destructive = {VitalityVerdict.CONFIRMED_STALL, VitalityVerdict.DEAD}
         self.assertEqual(

@@ -18,13 +18,13 @@ import unittest
 from typing import ClassVar
 from unittest import mock
 
-os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
+os.environ.setdefault("UMMANU_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
-from secretary.dispatch import wait_vitality as wait_vitality_module
-from secretary.dispatch.types import HostError
-from secretary.dispatch.watchdog import idle_stall_seconds, stall_seconds
-from secretary.dispatch.worker_lifecycle import head_run_binding
 from tests.dispatcher_fixtures import CARD_REF, RUNNING_STATUS, STOPPED_STATUS, DispatcherRuntimeFixture
+from ummanu.dispatch import wait_vitality as wait_vitality_module
+from ummanu.dispatch.types import HostError
+from ummanu.dispatch.watchdog import idle_stall_seconds, stall_seconds
+from ummanu.dispatch.worker_lifecycle import head_run_binding
 
 
 def _suspension_comments(case) -> list[str]:
@@ -338,7 +338,7 @@ class UnobservableWaitEscalationTests(DispatcherRuntimeFixture, unittest.TestCas
         self.host.worker_status_error = HostError("orca terminal list failed")
 
     def test_ceiling_elapsed_escalates_to_the_operator_without_touching_the_head(self) -> None:
-        from secretary.dispatch.watchdog import stall_seconds
+        from ummanu.dispatch.watchdog import stall_seconds
 
         self.host.worker_status_result = self._unobservable_status()
         self.tick()  # stamps the fresh waiting window
@@ -380,7 +380,7 @@ class UnobservableWaitEscalationTests(DispatcherRuntimeFixture, unittest.TestCas
 
     def test_disabling_the_escalation_is_caught(self) -> None:
         """Mutation check: deleting the bound returns an unobservable head to silence."""
-        from secretary.dispatch.watchdog import stall_seconds
+        from ummanu.dispatch.watchdog import stall_seconds
 
         self.host.worker_status_result = self._unobservable_status()
         self.tick()
@@ -401,7 +401,7 @@ class UnobservableWaitEscalationTests(DispatcherRuntimeFixture, unittest.TestCas
 
     def test_a_turning_the_escalation_destructive_is_caught(self) -> None:
         """The escalation may not grow a stop: any host call fails this test."""
-        from secretary.dispatch.watchdog import stall_seconds
+        from ummanu.dispatch.watchdog import stall_seconds
 
         self.host.worker_status_result = self._unobservable_status()
         self.tick()
@@ -562,7 +562,7 @@ class VitalityVerdictCommentIdempotencyTests(DispatcherRuntimeFixture, unittest.
         )
 
 
-class Secretary1517WaitTickTests(DispatcherRuntimeFixture, unittest.TestCase):
+class Ummanu1517WaitTickTests(DispatcherRuntimeFixture, unittest.TestCase):
     """End to end, through the real wait tick: the shape `issue:7bff833fef6d9d9b404d` froze in.
 
     A Codex worker head whose provider source has no bound v1 baseline (so the cursor answers
@@ -756,7 +756,7 @@ class RejectedReportAnswerOwedTests(DispatcherRuntimeFixture, unittest.TestCase)
                 **declared,
             )
 
-        with mock.patch("secretary.dispatch.wait_vitality._reduce_vitality", spy):
+        with mock.patch("ummanu.dispatch.wait_vitality._reduce_vitality", spy):
             self._head_at_its_prompt()
             self.tick()
 
@@ -765,7 +765,7 @@ class RejectedReportAnswerOwedTests(DispatcherRuntimeFixture, unittest.TestCase)
 
 
 def _reduce_vitality_under_test():
-    from secretary.dispatch.head_vitality_episode import reduce_vitality
+    from ummanu.dispatch.head_vitality_episode import reduce_vitality
 
     return reduce_vitality
 
@@ -813,7 +813,7 @@ class ProviderLessStatusShapesTests(DispatcherRuntimeFixture, unittest.TestCase)
         Only the /proc heartbeat probe is stubbed. Everything that decides the shape is the
         production function.
         """
-        from secretary.dispatch import review as dispatcher_review
+        from ummanu.dispatch import review as dispatcher_review
 
         record = self._live_record()
         # These are the shapes of a head that was an Orca pane, which only a legacy record still
@@ -1004,7 +1004,7 @@ class IdleTurnOwedAnswerWaitTickTests(DispatcherRuntimeFixture, unittest.TestCas
     }
 
     def test_the_owed_answer_is_the_phase_start_or_a_bounced_report(self) -> None:
-        from secretary.dispatch.state import DispatcherRecord
+        from ummanu.dispatch.state import DispatcherRecord
 
         record = DispatcherRecord(
             worker="w",
@@ -1026,8 +1026,8 @@ class IdleTurnOwedAnswerWaitTickTests(DispatcherRuntimeFixture, unittest.TestCas
         self.assertEqual(wait_vitality_module.answer_owed_since_for_wait(record, "review"), 300.0)
 
     def test_the_wait_tick_confirms_an_idle_worker_and_the_gate_path_does_not(self) -> None:
-        from secretary.dispatch.head_vitality import SnapshotSource
-        from secretary.dispatch.head_vitality_episode import (
+        from ummanu.dispatch.head_vitality import SnapshotSource
+        from ummanu.dispatch.head_vitality_episode import (
             DEFAULT_VITALITY_THRESHOLDS,
             VitalityVerdict,
             reduce_vitality,
@@ -1071,7 +1071,7 @@ class IdleTurnOwedAnswerWaitTickTests(DispatcherRuntimeFixture, unittest.TestCas
                 adapter=adapter,
             )
 
-        with mock.patch("secretary.dispatch.wait_vitality._reduce_vitality", spy):
+        with mock.patch("ummanu.dispatch.wait_vitality._reduce_vitality", spy):
             self.tick()
         self.assertEqual(seen[0], asked)
         # The fixture's worker runs on the codex adapter: a head the idle-turn premise holds for.

@@ -2,7 +2,7 @@
 
 A skill is read by a head as instructions, so a command that names a removed module or subcommand
 fails only at run time, inside the head, long after the change that removed it was merged. The
-background agents moved from the top-level `triggered_agents` package into `secretary automations`
+background agents moved from the top-level `triggered_agents` package into `ummanu automations`
 (sprint:1459); these tests keep every skill on the product CLI's real tree.
 """
 
@@ -15,18 +15,18 @@ import unittest
 from importlib import import_module
 from pathlib import Path
 
-from secretary.automations import __main__ as automations_main
-from secretary.board.card_transitions import CARD_TRANSITIONS
-from secretary.board.roles import CREATE_ROLES, PROPOSAL_CREATE_ROLES, Role
-from secretary.cli import build_parser
+from ummanu.automations import __main__ as automations_main
+from ummanu.board.card_transitions import CARD_TRANSITIONS
+from ummanu.board.roles import CREATE_ROLES, PROPOSAL_CREATE_ROLES, Role
+from ummanu.cli import build_parser
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILLS = ROOT / "skills"
 RETRO_SKILL = SKILLS / "roles" / "retro" / "retro" / "SKILL.md"
 STEWARD_SKILL = SKILLS / "roles" / "steward" / "steward" / "SKILL.md"
 
-# `python3 -P -m secretary <words>`: the words up to the first flag, placeholder or punctuation.
-_COMMAND = re.compile(r"python3 -P -m secretary\b(?P<rest>[^\n`]*)")
+# `python3 -P -m ummanu <words>`: the words up to the first flag, placeholder or punctuation.
+_COMMAND = re.compile(r"python3 -P -m ummanu\b(?P<rest>[^\n`]*)")
 _WORD = re.compile(r"[a-z][a-z0-9-]*")
 
 
@@ -35,7 +35,7 @@ def _skill_files() -> list[Path]:
 
 
 def _commands(text: str) -> list[list[str]]:
-    """The subcommand words of every `python3 -P -m secretary ...` a text names."""
+    """The subcommand words of every `python3 -P -m ummanu ...` a text names."""
     commands: list[list[str]] = []
     for match in _COMMAND.finditer(text):
         words: list[str] = []
@@ -48,11 +48,11 @@ def _commands(text: str) -> list[list[str]]:
 
 
 def _task_blocks(text: str) -> list[str]:
-    """Each `secretary task` command of a text with its backslash-continued lines."""
+    """Each `ummanu task` command of a text with its backslash-continued lines."""
     blocks: list[str] = []
     lines = text.splitlines()
     for index, line in enumerate(lines):
-        if "python3 -P -m secretary task " not in line:
+        if "python3 -P -m ummanu task " not in line:
             continue
         block = [line]
         while block[-1].rstrip().endswith("\\") and index + len(block) < len(lines):
@@ -70,12 +70,12 @@ def _subcommands(parser: argparse.ArgumentParser) -> dict[str, argparse.Argument
 
 def _agent_commands(agent: str) -> set[str]:
     """The `<cmd>` words one background agent's CLI answers, plus the runner's own `dispatch`."""
-    source = inspect.getsource(import_module(f"secretary.automations.agents.{agent}.cli").main)
+    source = inspect.getsource(import_module(f"ummanu.automations.agents.{agent}.cli").main)
     return set(re.findall(r'"([a-z][a-z0-9-]*)"', source)) | {"dispatch"}
 
 
 def _unknown(words: list[str]) -> str | None:
-    """Why this word path is not a real `secretary` command, or None when it is."""
+    """Why this word path is not a real `ummanu` command, or None when it is."""
     if not words:
         return "names no subcommand"
     parser: argparse.ArgumentParser = build_parser()
@@ -120,18 +120,18 @@ class SkillCommandTests(unittest.TestCase):
         ]
         self.assertEqual(offenders, [])
 
-    def test_every_secretary_command_a_skill_names_is_a_real_subcommand(self) -> None:
+    def test_every_ummanu_command_a_skill_names_is_a_real_subcommand(self) -> None:
         offenders: list[str] = []
         for path in _skill_files():
             for words in _commands(path.read_text(encoding="utf-8")):
                 reason = _unknown(words)
                 if reason is not None:
-                    offenders.append(f"{path.relative_to(ROOT)}: secretary {' '.join(words)}: {reason}")
+                    offenders.append(f"{path.relative_to(ROOT)}: ummanu {' '.join(words)}: {reason}")
         self.assertEqual(offenders, [])
 
     def test_a_removed_command_is_caught(self) -> None:
         self.assertEqual(
-            _commands("run `python3 -P -m secretary task list --state issues`"), [["task", "list"]]
+            _commands("run `python3 -P -m ummanu task list --state issues`"), [["task", "list"]]
         )
         self.assertIsNone(_unknown(["task", "list"]))
         self.assertIsNone(_unknown(["automations", "curator", "precheck"]))

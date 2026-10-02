@@ -10,24 +10,24 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
-from secretary.board.analytics import AnalyticsProjectionError, project_analytics_checkpoint
-from secretary.board.models import TOKEN_DIMENSIONS, Actor, EntityKind, Event, EventKind
-from secretary.checkpoint import _write_analytics_manifest
+from ummanu.board.analytics import AnalyticsProjectionError, project_analytics_checkpoint
+from ummanu.board.models import TOKEN_DIMENSIONS, Actor, EntityKind, Event, EventKind
+from ummanu.checkpoint import _write_analytics_manifest
 
-CARD = "secretary-1535"
+CARD = "ummanu-1535"
 SPRINT = "sprint:1419"
 LEDGER_1418_ROUNDS = (
-    ("secretary-1418-01", "1418-round-01", 1, "rework"),
-    ("secretary-1418-02", "1418-round-02", 1, "rework"),
-    ("secretary-1418-03", "1418-round-03", 2, "rework"),
-    ("secretary-1418-04", "1418-round-04", 1, "rework"),
-    ("secretary-1418-05", "1418-round-05", 3, "rework"),
-    ("secretary-1418-06", "1418-round-06", 2, "rework"),
-    ("secretary-1418-07", "1418-round-07", 1, "reslice"),
-    ("secretary-1418-08", "1418-round-08", 2, "reslice"),
-    ("secretary-1418-09", "1418-round-09", 1, "reslice"),
-    ("secretary-1418-10", "1418-round-10", 4, "reslice"),
-    ("secretary-1418-11", "1418-round-11", 1, "reslice"),
+    ("ummanu-1418-01", "1418-round-01", 1, "rework"),
+    ("ummanu-1418-02", "1418-round-02", 1, "rework"),
+    ("ummanu-1418-03", "1418-round-03", 2, "rework"),
+    ("ummanu-1418-04", "1418-round-04", 1, "rework"),
+    ("ummanu-1418-05", "1418-round-05", 3, "rework"),
+    ("ummanu-1418-06", "1418-round-06", 2, "rework"),
+    ("ummanu-1418-07", "1418-round-07", 1, "reslice"),
+    ("ummanu-1418-08", "1418-round-08", 2, "reslice"),
+    ("ummanu-1418-09", "1418-round-09", 1, "reslice"),
+    ("ummanu-1418-10", "1418-round-10", 4, "reslice"),
+    ("ummanu-1418-11", "1418-round-11", 1, "reslice"),
 )
 
 
@@ -539,9 +539,9 @@ class AnalyticsProjectionTests(unittest.TestCase):
 
     def test_projection_has_no_live_board_provider_or_comment_dependency(self) -> None:
         self.seal(self.valid_records())
-        from secretary import tasks
-        from secretary.board import analytics
-        from secretary.dispatch import attempt_usage
+        from ummanu import tasks
+        from ummanu.board import analytics
+        from ummanu.dispatch import attempt_usage
 
         verifier = analytics.verify_analytics_checkpoint
         with (

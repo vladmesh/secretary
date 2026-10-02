@@ -12,13 +12,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.po.runner import PoRunner
-from secretary.runtime.head.local_pty.client import HeadHandle, LocalPtySpawnError
-from secretary.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, JournalWriter
-from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
-from secretary.runtime.head.memory import scope_unit
-from secretary.runtime.head.spec import HeadSpec
-from secretary.runtime.heads import Registry
+from ummanu.po.runner import PoRunner
+from ummanu.runtime.head.local_pty.client import HeadHandle, LocalPtySpawnError
+from ummanu.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, JournalWriter
+from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+from ummanu.runtime.head.memory import scope_unit
+from ummanu.runtime.head.spec import HeadSpec
+from ummanu.runtime.heads import Registry
 
 
 class PoScopedLaunchTests(unittest.TestCase):
@@ -30,8 +30,8 @@ class PoScopedLaunchTests(unittest.TestCase):
             registry = Registry({}, {"po-claude": {
                 "adapter": "claude", "model": "opus", "effort": "high", "memory_limit_mib": 3072,
             }})
-            with (mock.patch("secretary.po.runner.PoStore.for_instance", return_value=SimpleNamespace()),
-                  mock.patch("secretary.po.runner.load_registry", return_value=registry) as load):
+            with (mock.patch("ummanu.po.runner.PoStore.for_instance", return_value=SimpleNamespace()),
+                  mock.patch("ummanu.po.runner.load_registry", return_value=registry) as load):
                 runner = PoRunner.for_instance(instance, Path(temp) / "data")
             load.assert_called_once_with(instance / "heads" / "heads.yaml")
             spec = runner._head_spec(SimpleNamespace(cli="claude", model="opus", effort="high"))
@@ -55,7 +55,7 @@ class PoScopedLaunchTests(unittest.TestCase):
             def spawn(**kwargs):
                 self.assertEqual(kwargs["role"], "po")
                 self.assertEqual(kwargs["memory_limit_mib"], 4096)
-                self.assertEqual(kwargs["owner_unit"], "secretary-po.service")
+                self.assertEqual(kwargs["owner_unit"], "ummanu-po.service")
                 self.assertIn("po-codex", kwargs["task"])
                 self.assertIn("< ", kwargs["command"])
                 run_dir = root / "head"
@@ -70,7 +70,7 @@ class PoScopedLaunchTests(unittest.TestCase):
                     supervisor_pid=456, head_pid=123,
                 )
 
-            with mock.patch("secretary.po.runner.spawn_head", side_effect=spawn) as spawned:
+            with mock.patch("ummanu.po.runner.spawn_head", side_effect=spawn) as spawned:
                 process = runner._launch(session, 1, ["/bin/true"], files)
             self.assertEqual(process.pid, 123)
             self.assertEqual(process.wait(), -9)
@@ -121,12 +121,12 @@ class PoScopedLaunchTests(unittest.TestCase):
             client.__enter__.return_value.stop.side_effect = stop_head
 
             with (
-                mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen", side_effect=start),
-                mock.patch("secretary.runtime.head.local_pty.client._identity_written", return_value=False),
-                mock.patch("secretary.runtime.head.local_pty.client.SPAWN_TIMEOUT_SECONDS", 0.02),
-                mock.patch("secretary.runtime.head.local_pty.client.SupervisorClient.connect", return_value=client),
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=stop_scope),
+                mock.patch("ummanu.runtime.head.local_pty.client.subprocess.Popen", side_effect=start),
+                mock.patch("ummanu.runtime.head.local_pty.client._identity_written", return_value=False),
+                mock.patch("ummanu.runtime.head.local_pty.client.SPAWN_TIMEOUT_SECONDS", 0.02),
+                mock.patch("ummanu.runtime.head.local_pty.client.SupervisorClient.connect", return_value=client),
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=stop_scope),
             ):
                 with self.assertRaisesRegex(RuntimeError, "did not answer"):
                     runner._launch(session, 1, ["/bin/true"], files)
@@ -144,7 +144,7 @@ class PoScopedLaunchTests(unittest.TestCase):
             )
             files = runner.files("session", 1)
             with mock.patch(
-                "secretary.po.runner.spawn_head",
+                "ummanu.po.runner.spawn_head",
                 side_effect=LocalPtySpawnError(
                     "cleanup_failed", "scope is still alive", cleanup_complete=False,
                 ),
@@ -189,8 +189,8 @@ class PoScopedLaunchTests(unittest.TestCase):
 
             store.finish_turn.side_effect = finish
             with (
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=stop),
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=stop),
             ):
                 runner._abandon("session", 1, None, "launch failed")
             store.finish_turn.assert_called_once()
@@ -210,8 +210,8 @@ class PoScopedLaunchTests(unittest.TestCase):
             cgroup.mkdir(parents=True)
             (cgroup / "cgroup.events").write_text("populated 1\n", encoding="ascii")
             with (
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
                            return_value=SimpleNamespace(returncode=1, stderr=b"failed")),
             ):
                 with self.assertRaisesRegex(RuntimeError, "could not stop head scope"):
@@ -252,8 +252,8 @@ class PoScopedLaunchTests(unittest.TestCase):
 
                 store.finish_turn.side_effect = finish
                 with (
-                    mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
-                    mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=stop),
+                    mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                    mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=stop),
                 ):
                     if action == "stop":
                         self.assertIs(runner.stop_turn("session", 1), turn)

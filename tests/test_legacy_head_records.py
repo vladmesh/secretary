@@ -16,24 +16,24 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.memory import access as memory_access
-from secretary.runtime import head_runtime_backends
-from secretary.runtime.head import HeadRun, HeadSpec, HeadSpecError, TaskRef
-from secretary.runtime.head.command import HeadCommandError, validate_launch_shape
-from secretary.runtime.head_runtime_backends import (
+from ummanu.memory import access as memory_access
+from ummanu.runtime import head_runtime_backends
+from ummanu.runtime.head import HeadRun, HeadSpec, HeadSpecError, TaskRef
+from ummanu.runtime.head.command import HeadCommandError, validate_launch_shape
+from ummanu.runtime.head_runtime_backends import (
     LegacyHeadRecordError,
     UnknownHeadRuntimeError,
     build_head_runtime,
     is_legacy_record,
 )
-from secretary.runtime.head_runtimes import (
+from ummanu.runtime.head_runtimes import (
     DEFAULT_HEAD_RUNTIME,
     HEAD_RUNTIMES,
     LOCAL_PTY_RUNTIME,
     ORCA_LEGACY_RUNTIME,
     RECORD_RUNTIME_WHEN_ABSENT,
 )
-from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
+from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -48,23 +48,23 @@ GRANT = {
             "events": [],
             "model": "gpt-6-sol",
             "prompt_identity": {
-                "path": "/home/dev/secretary-data/artifacts/prompts/codegen-orchestrator-1363/review-4.md",
+                "path": "/home/dev/ummanu-data/artifacts/prompts/codegen-orchestrator-1363/review-4.md",
                 "version": "sha256:01d23cf608aa1f4212e30c0118f4552875c3e93ca4e36deb215c7b8afa7d7c1d",
             },
             "provider_schema_verdict": "",
             "provider_source": {
                 "baseline": [
-                    "/home/dev/secretary-data/codex-home/sessions/2026/09/24/"
+                    "/home/dev/ummanu-data/codex-home/sessions/2026/09/24/"
                     "rollout-2026-09-24T08-40-14-01a0d292-8b60-78e0-bdc1-9dbe28652227.jsonl"
                 ],
                 "head_run_fingerprint": "172529ff471f9a656fb02b0cc6df1c07",
                 "kind": "codex_session_event_jsonl",
                 "role": "reviewer",
-                "root": "/home/dev/secretary-data/codex-home/sessions",
+                "root": "/home/dev/ummanu-data/codex-home/sessions",
                 "run_id": "96df8f9876f04c539e52f8624e32b2d1",
                 "state": "unbound",
                 "task_ref": {
-                    "document": "/home/dev/secretary-data/artifacts/prompts/codegen-orchestrator-1363/review-4.md",
+                    "document": "/home/dev/ummanu-data/artifacts/prompts/codegen-orchestrator-1363/review-4.md",
                     "kind": "card",
                     "ref": "codegen-orchestrator-1363",
                 },
@@ -84,7 +84,7 @@ GRANT = {
         "head_runtime": "orca-legacy",
         "leaf": "",
         "lifecycle": "spawned",
-        "pid_file": "/tmp/secretary-review-pid-codegen-orchestrator-1363.pid",
+        "pid_file": "/tmp/ummanu-review-pid-codegen-orchestrator-1363.pid",
         "role": "reviewer",
         "run_id": "96df8f9876f04c539e52f8624e32b2d1",
         "spec": {
@@ -98,7 +98,7 @@ GRANT = {
         },
         "stopped_by": {},
         "task_ref": {
-            "document": "/home/dev/secretary-data/artifacts/prompts/codegen-orchestrator-1363/review-4.md",
+            "document": "/home/dev/ummanu-data/artifacts/prompts/codegen-orchestrator-1363/review-4.md",
             "kind": "card",
             "ref": "codegen-orchestrator-1363",
         },
@@ -207,7 +207,7 @@ class RecordTests(unittest.TestCase):
         """They were live producers of `orca-legacy` grants only because a hand-built spec defaults to it."""
         for module in ("memory/po_bridge.py", "memory/health.py"):
             with self.subTest(module=module):
-                source = (REPO / "src" / "secretary" / module).read_text(encoding="utf-8")
+                source = (REPO / "src" / "ummanu" / module).read_text(encoding="utf-8")
                 self.assertIn("runtime=LOCAL_PTY_RUNTIME", source)
 
 
@@ -263,7 +263,7 @@ class AccessGrantTests(unittest.TestCase):
 
 class ShippedRegistryTests(unittest.TestCase):
     def test_the_shipped_registry_names_no_runtime_but_local_pty(self) -> None:
-        from secretary.runtime import heads
+        from ummanu.runtime import heads
 
         shipped = heads.load_registry(heads.HEADS_TOML)
         self.assertTrue(shipped.profiles)

@@ -7,9 +7,9 @@ local mutable and derived runtime state.
 ## Checks and host ownership
 
 ```bash
-python3 -P -m secretary doctor --instance INSTANCE
-python3 -P -m secretary doctor --offline --instance INSTANCE
-python3 -P -m secretary doctor --instance INSTANCE --host-fixture DIR
+python3 -P -m ummanu doctor --instance INSTANCE
+python3 -P -m ummanu doctor --offline --instance INSTANCE
+python3 -P -m ummanu doctor --instance INSTANCE --host-fixture DIR
 ```
 
 `doctor` is read-only. A normal run checks config, data and live inventory; `--offline` keeps only
@@ -46,8 +46,8 @@ checked; a missing resource or unhealthy required state is a finding (exit `1`);
 may be inactive. Units in `foreign_units` are excluded from managed parity.
 
 ```bash
-python3 -P -m secretary reconcile plan --instance INSTANCE [--host-fixture DIR]
-python3 -P -m secretary reconcile adopt --instance INSTANCE --logical-id ID [--yes]
+python3 -P -m ummanu reconcile plan --instance INSTANCE [--host-fixture DIR]
+python3 -P -m ummanu reconcile adopt --instance INSTANCE --logical-id ID [--yes]
 ```
 
 `reconcile plan` reads desired state and inventory, applies nothing and writes no manifest;
@@ -61,7 +61,7 @@ resource kind has no verifiable adoption identity and is refused.
 
 ## Tasks
 
-The public path to the board is `secretary task`. A card carries a `ref`, project, type, state,
+The public path to the board is `ummanu task`. A card carries a `ref`, project, type, state,
 dependency, claim, routing, workspace, retry and audit metadata:
 
 ```text
@@ -174,13 +174,13 @@ reason `completion evidence missing` naming the absent marker, and its workspace
   ```
 
   The worker puts its report and every artifact (markdown, scripts, data, subdirectories) in one
-  declared directory of its workspace, `.secretary-report/`, with the report itself in a non-empty
-  `.secretary-report/report.md`. The directory is never committed to the project repository; bring-up
-  adds `/.secretary-report/` to the checkout's Git exclude. `task report --kind done` on a research
+  declared directory of its workspace, `.ummanu-report/`, with the report itself in a non-empty
+  `.ummanu-report/report.md`. The directory is never committed to the project repository; bring-up
+  adds `/.ummanu-report/` to the checkout's Git exclude. `task report --kind done` on a research
   card refuses, with a `validation` error, a workspace without that file.
 
   After the report is accepted and the review, if required, is done, and before the card parks in
-  Assessment or is released outside a parking sprint, the dispatcher copies `.secretary-report/` to
+  Assessment or is released outside a parking sprint, the dispatcher copies `.ummanu-report/` to
   `state/knowledge/reports/<card ref>/` through the knowledge directory writer (`knowledge write
   --dir`, actor `dispatcher`, one commit naming the card and the report generation), then writes one
   `[completion:research]` comment whose request id is keyed on the report generation. The observer
@@ -239,14 +239,14 @@ which counts heads. The dispatcher then:
    text the card's structured facts (`card`, below):
 
    ```text
-   python3 -P -m secretary task complete --ref <card> --role po --kind <kind> --body-file <file> --request-id <id>
+   python3 -P -m ummanu task complete --ref <card> --role po --kind <kind> --body-file <file> --request-id <id>
    ```
 
 The input also quotes the handover command, for a card only the owner can answer (see
 [Handover to the owner](#handover-to-the-owner)):
 
 ```text
-python3 -P -m secretary task handover --ref <card> --role po --to owner --reason-file <file> --request-id <id>
+python3 -P -m ummanu task handover --ref <card> --role po --to owner --reason-file <file> --request-id <id>
 ```
 
 The facts are `{card_ref, kind, touches_production, sprint_ref, input}`: `touches_production` is the
@@ -304,7 +304,7 @@ a comment the PO wrote, the way the infra record is read only from the dispatche
 id repeated with the same body is a replay that writes nothing; with another body it is
 `request_conflict`. `task complete` does not pass the sprint guard: it is the PO executing its
 sprint's card, not an override move. Run inside a PO turn it records that turn's session
-(`SECRETARY_PO_SESSION`) in the transition's data as `po_session`; a repeat keeps the recorded one. It
+(`UMMANU_PO_SESSION`) in the transition's data as `po_session`; a repeat keeps the recorded one. It
 permits nothing; a delegated card's result return reads it ([PO delegation](#po-delegation)).
 
 **Waiting.** After the submit the dispatcher checks the card once per tick, from the PO store and the
@@ -343,9 +343,9 @@ the session's feed, carry after the dispatcher's text:
   service's sprint port): the section gives the rights line `touches production <p>; sprint <ref> allows
   [<list>]` and says the sprint allows it. The PO runs the operation with no confirmation;
 - otherwise the section gives the same rights line (the list comma-separated, `[]` when empty) and the
-  instruction to decide under the owner's standing rule: production of secretary is allowed by default,
+  instruction to decide under the owner's standing rule: production of ummanu is allowed by default,
   because it is the development server; any other production only as agreed at sprint planning. If the
-  PO may allow it, it records the allowance with `python3 -P -m secretary sprint allow-production --ref
+  PO may allow it, it records the allowance with `python3 -P -m ummanu sprint allow-production --ref
   <sprint> --role po --project <p> --reason <text> --request-id <submit id>:allow-production` and runs
   the operation in the same turn. If it may not, it hands the card to the owner with `task handover
   --to owner` ([below](#handover-to-the-owner)), as for any card. The service journal says `<card>
@@ -362,7 +362,7 @@ each of its operations goes to the PO turn above, never straight to the owner.
 
 An operation cut outside every sprint (`sprint_ref` empty, [PO delegation](#po-delegation)) has no
 sprint allowance to read or to record. Its rights section says so, `touches production <p>; no sprint`,
-and tells the PO to decide it under the same standing rule: production of secretary is allowed by
+and tells the PO to decide it under the same standing rule: production of ummanu is allowed by
 default; any other production only when the owner agreed to it, in the session or on the card; if not,
 the PO hands the card to the owner. There is nothing for `sprint allow-production` to record, and the
 service journal says `<card> queued for the PO to decide: touches production <p>; no sprint`. Its
@@ -487,7 +487,7 @@ still cannot create a wait card:
 The form, as the PO instructions quote it:
 
 ```text
-python3 -P -m secretary task create --role po --project <project> --type wait --title <title> --wait-run <run URL>|--wait-card <ref> --wait-states <state>[,<state>]|--wait-until <UTC> --wait-deadline <UTC>|<duration> [--wait-return observer|po-session:<id>|dependents]... [--wait-transient-window <duration>] [--sprint <sprint>]
+python3 -P -m ummanu task create --role po --project <project> --type wait --title <title> --wait-run <run URL>|--wait-card <ref> --wait-states <state>[,<state>]|--wait-until <UTC> --wait-deadline <UTC>|<duration> [--wait-return observer|po-session:<id>|dependents]... [--wait-transient-window <duration>] [--sprint <sprint>]
 ```
 
 `--wait-return` is required everywhere except inside a PO turn with `--role po`: there, a wait with no
@@ -626,7 +626,7 @@ new input (secretary-1792). Nothing waits in the turn, and a background job is n
 long wait is a [wait card](#wait-cards).
 
 **Origin.** `task create --role po` inside a PO turn records the card's origin: the turn's session
-(`SECRETARY_PO_SESSION`) and the request id of the input the turn answers (`SECRETARY_PO_REQUEST`), both
+(`UMMANU_PO_SESSION`) and the request id of the input the turn answers (`UMMANU_PO_REQUEST`), both
 set by the PO service in every turn. There is no flag for it: the CLI reads the two variables for `--role
 po` only, any other role's create ignores them, and `TaskWriter.create(origin=...)` refuses an origin
 for any role but `po` (`validation`), with two dispatcher exceptions that carry an existing card's origin
@@ -707,7 +707,7 @@ an out-of-sprint card's execution, go to it, and a successor closed in turn gets
   then names the origin session.
 - A Done is skipped only on proof, carried by that Done's own transition, that the origin's line already
   has the result; it is decided per event.
-  `task complete` records the PO session whose turn ran it (`SECRETARY_PO_SESSION`, present in every PO
+  `task complete` records the PO session whose turn ran it (`UMMANU_PO_SESSION`, present in every PO
   turn; no flag) in the completion transition's data as `po_session`; `task handover` records it in the
   handover record's payload the same way. Neither restricts who may run the command. When the Done's
   recorded `po_session` is the origin session or one of its recorded successors (`po_return.successors`),
@@ -728,7 +728,7 @@ refused at create; a legacy one is Blocked at claim.
 
 What needs the owner, and what the owner should know, is one board entity: the table `owner_events`
 (revision `0018_owner_events`; `0021_delegated_card_settled`, `0023_sprint_e2e_budget` and `0024_e2e_after_merge_kind` add a kind), written and read only through
-`secretary.board.owner_events`. A row is
+`ummanu.board.owner_events`. A row is
 `id`, `kind`, `class`, `subject_ref` (a card, sprint or issue ref, `po-session:<id>`, or null), `text`,
 `created_at`, `read_at` (null while unread) and `dedup_key` (unique).
 
@@ -747,7 +747,7 @@ holds the kind vocabulary, the class vocabulary and that rule as CHECKs.
 | `observer_dead` | `notice` | the dispatcher's observer reconcile: a head positively dead at the start of the tick that the tick did not relaunch (backoff, drain, a failed bring-up) | the sprint | `observer_dead:<sprint>:<launch count>` |
 | `head_dead` | `notice` | the dispatcher's wait watchdog: a worker or reviewer head dead or stalled again after its one respawn, the card Blocked for the operator; or a worker respawn that failed | the card | `head_dead:<blocking request id>` |
 | `po_turn_failed` | `notice` | the PO service, when its runner settles a turn `failed` (`PoRunner._finish`); a stop by the owner is `interrupted` and writes nothing | the card when a dispatcher input started the turn, else `po-session:<id>` | `po_turn_failed:<session>:<seq>` |
-| `provider_red` | `notice` | `secretary doctor` (not `--dry-run`): a resource probe `unauthenticated` (expired key or missing login), `exhausted`, `unavailable`, `timed_out` or `probe_broken` | none | `provider_red:<resource>:<state>:<UTC day>` |
+| `provider_red` | `notice` | `ummanu doctor` (not `--dry-run`): a resource probe `unauthenticated` (expired key or missing login), `exhausted`, `unavailable`, `timed_out` or `probe_broken` | none | `provider_red:<resource>:<state>:<UTC day>` |
 | `delegated_card_settled` | `notice` | the dispatcher's result return ([PO delegation](#po-delegation)), after the origin session (or its successor) took a delegated card's result, through `record_strict`: a failed write is repeated next tick and the return is not recorded until it lands; its text names the card, its terminal state and the origin session, and the successor that took it | the card | `delegated_card_settled:<card>:<transition event id>` |
 
 **The writer never fails its caller.** Every producer calls `owner_events.record(kind, subject_ref, text,
@@ -770,7 +770,7 @@ newest first, each with its class badge and a link to its subject; `?all=1` list
 rows highlighted. `?unread=1` from an older link, or any other value, is the unread default. A
 notice's "Mark read" posts `/owner-events/{id}/read`; "Mark all notices read" posts
 `/owner-events/read-all`; both return to the view they were pressed from. A board without the table lists no events, with the source `unavailable`, and
-refuses the two writes (503). From a terminal: `secretary owner-events list`
+refuses the two writes (503). From a terminal: `ummanu owner-events list`
 ([Operations](OPERATIONS.md#owner-events)).
 
 ### Cards outside a sprint
@@ -812,7 +812,7 @@ an explicit instruction to do its turn in the current head without spawning or d
 children. A rare provider-internal child is acceptable. The launch policy is practical suppression,
 not capability isolation.
 
-`secretary.runtime.codex_preflight` is the one pre-launch preparation boundary. Its v1 record
+`ummanu.runtime.codex_preflight` is the one pre-launch preparation boundary. Its v1 record
 keeps `schema_absent`, `schema_unknown`, `allowed`, `unknown` and `violation` as diagnostics; none of
 these fan-out states permits or refuses a launch. Workspace trust is the hard pre-launch requirement.
 Launches proceed with `schema_absent`, an unbound structured journal source where available, and the
@@ -926,7 +926,7 @@ the project's default branch.
 
 A successor inherits its predecessor's content, never its branch as a target:
 
-    secretary task create --project <p> --type code --title '<t>' \
+    ummanu task create --project <p> --type code --title '<t>' \
       --seed-ref <predecessor candidate sha> --supersedes <predecessor card ref>
 
 A seed without `--supersedes` is refused, and `--supersedes` without a seed is refused. A seed may be
@@ -1036,7 +1036,7 @@ A gate that could not reach its backend gave no verdict. A timeout, TLS or DNS f
 connection or backend-served 5xx leaves the card where it is — no board move, no head stopped, no
 verdict or decision spent — and the question is asked again next tick. Each retry is one
 `gate-transport-retry` action carrying the attempt number and error. Retries are bounded by
-`SECRETARY_GATE_TRANSPORT_MAX_ATTEMPTS` (default 5) and count consecutive silence only; any answer
+`UMMANU_GATE_TRANSPORT_MAX_ATTEMPTS` (default 5) and count consecutive silence only; any answer
 (green, red, pending) resets the budget. When spent, the card moves to Blocked with a reason naming
 the transport and last error. This applies to the pre-review gate, the pre-merge re-check and the
 release re-check of a parked decision. An answer that did arrive decides as usual.
@@ -1057,7 +1057,7 @@ intent unwritable) is a review-stage failure, not a verdict. The card keeps its 
 candidate SHA, report round, request ids and suspended worker session, and the next tick relaunches
 the reviewer against the same evidence: no move through Ready, no worker launch, no gate or broad
 re-run, no regenerated candidate, no budget event. Each attempt is one `review-infrastructure-retry`
-action naming the held candidate. Retries are bounded by `SECRETARY_REVIEW_INFRA_RETRY_ATTEMPTS`
+action naming the held candidate. Retries are bounded by `UMMANU_REVIEW_INFRA_RETRY_ATTEMPTS`
 (default 10), consecutive failures only. At the ceiling the card moves to Blocked with a reason naming
 the infrastructure, the untouched receipt and the candidate SHA. An inventory that will not answer
 cannot prove whether a reviewer is live, so it keeps launch ambiguity and retries the inventory
@@ -1076,7 +1076,7 @@ boundary once; `unavailable`, malformed and stale-handle evidence keep their own
 
 A worker or reviewer head whose first turn ends on a provider error, with no report or verdict, has
 failed on its provider. That is a provider verdict, not a stall (secretary-1799,
-`src/secretary/dispatch/provider_failure.py`). The provider errors in scope are an HTTP 401/403, a 429,
+`src/ummanu/dispatch/provider_failure.py`). The provider errors in scope are an HTTP 401/403, a 429,
 any 5xx (529 included), and a connection the client gave up on after its own retries ("Reconnecting...
 5/5", "exceeded retry limit", "stream disconnected before completion"). A turn that ends on anything else
 (a context window, a tool failure, a refusal) keeps its old path.
@@ -1127,7 +1127,7 @@ report are not discarded.
 
 ### Resource probe statuses
 
-`secretary.head_health` owns the verdict on a head resource. A claim, a reviewer launch and a fallback
+`ummanu.head_health` owns the verdict on a head resource. A claim, a reviewer launch and a fallback
 walk launch only on `ready` or `unknown`; every other status walks the fallback chain.
 
 | Status | Meaning | Launch |
@@ -1146,12 +1146,12 @@ ChatGPT-mode login is the provider's fault, not the account's: the inner `openai
 `status=provider-unavailable` and it reads `unavailable`. A 401 with an API-key login, or no login at all,
 stays `unauthenticated`. Reasons carry no secret.
 
-Timeouts are per resource. The inner probe (`secretary.runtime.resource_probe.probe_timeout_s`) waits 75 s
+Timeouts are per resource. The inner probe (`ummanu.runtime.resource_probe.probe_timeout_s`) waits 75 s
 for `openai-sub`, whose client reconnects about ten times before it prints a refusal, and 20 s for the
 others. `TA_PROBE_TIMEOUT_S` moves the default and `TA_PROBE_TIMEOUT_S_<RESOURCE>` (id upper-cased, `-`
 as `_`, e.g. `TA_PROBE_TIMEOUT_S_OPENAI_SUB`) sets one resource. The outer timeout around the probe
 command (`head_health.probe_timeout_seconds`) is the inner one plus 10 s, so the inner classifier always
-answers first. `secretary doctor` shows `timed_out` like the other non-ready statuses: a
+answers first. `ummanu doctor` shows `timed_out` like the other non-ready statuses: a
 `resource_readiness` finding and a `provider_red` owner event.
 
 ### A settled head is not a delivered prompt
@@ -1184,7 +1184,7 @@ delivery boundary's evidence; a live pid and a transport's write acceptance (`se
 A bring-up that aborted with its head still running carries that receipt onto its launch intent. Adoption
 refuses an undelivered launch: no claim, no routing event, no `review_starting`, no `reviewing`, no
 `waiting-review-verdict`, no worker freeze, and the intent is **not spent**. The refusal is bounded by
-`SECRETARY_LAUNCH_DELIVERY_MAX_ATTEMPTS` (default 5). Inside it, a reviewer re-delivers the *same*
+`UMMANU_LAUNCH_DELIVERY_MAX_ATTEMPTS` (default 5). Inside it, a reviewer re-delivers the *same*
 immutable pointer at the same path over the exact recorded run (the document body never enters the
 terminal), so an interrupted tick resumes one delivery transaction. Past the ceiling the head is
 stopped through its own intent and the ordinary path launches again; a stop the host will not confirm
@@ -1223,7 +1223,7 @@ the refusal and relaunch comment are keyed on the episode too: the stamp written
 first observed plus the card's comment count at that moment. Within one episode a retried tick
 replays onto the same id; a second episode on the same card gets a second refusal.
 
-While unresolved, `secretary status` shows the card as degraded. The attempt row carries `headless`
+While unresolved, `ummanu status` shows the card as degraded. The attempt row carries `headless`
 (record state, that no handle and heartbeat are known, since when, retained workspace, branch, dirty
 flag, candidate SHA), and the sprint summary lists it under `degraded_cards`.
 
@@ -1231,13 +1231,13 @@ flag, candidate SHA), and the sprint summary lists it under `degraded_cards`.
 
 Workers use focused checks while developing and run at most one local broad suite per report
 generation/unchanged SHA unless they state why it was rerun. The broad run goes through
-`secretary check broad`, which streams output, returns the check's exit status and writes a
+`ummanu check broad`, which streams output, returns the check's exit status and writes a
 worker-local broad receipt under the ignored `state/checks/` path (in a dispatcher workspace, under the
-dispatcher-owned `.secretary-task-env/checks/`): command and check-set digest, cwd
+dispatcher-owned `.ummanu-task-env/checks/`): command and check-set digest, cwd
 and imported project provenance, start/end/duration, exit code, parsed verdict and counts (scanned off
 the stream), and a bounded diagnostic tail. The receipt records content as one git tree object id —
 the tree this worktree, with tracked edits and untracked files, would commit to — so
-`secretary check show` answers whether it still describes the code, and committing that content
+`ummanu check show` answers whether it still describes the code, and committing that content
 unchanged keeps it usable. While a usable receipt exists, rerunning the broad suite only because
 output scrolled away is prohibited; an edited worktree or a concrete red result being fixed justifies
 a new run, named in the report.
@@ -1261,22 +1261,22 @@ appropriate for a new blocker, uncovered external behaviour, or security/data-lo
 packets carry the previous reviewed SHA, previous blocker text/IDs, current SHA and changed-path
 delta.
 
-Worker and reviewer shells run with `workspace/.secretary-task-env/venv/bin` first. When an adapter
+Worker and reviewer shells run with `workspace/.ummanu-task-env/venv/bin` first. When an adapter
 declares `broad_check` without `broad_check.interpreter`, its candidate `.[dev]` install supplies the
 project runtime there. Adapter setup runs outside both virtualenvs, and an explicit relative
 broad-check interpreter may select the adapter's own `.venv`. The role environment removes the
 launcher's production `PYTHONPATH`. The module receipt records the actual interpreter, environment
 prefix and import origin; an origin outside the candidate is a refusal. One control-plane renderer
-makes every head-visible Secretary protocol, report, verdict, `check broad` and `check show` command
+makes every head-visible Ummanu protocol, report, verdict, `check broad` and `check show` command
 name the absolute production interpreter, `-P`, and registered production `src`. A fit broad contract
 may select an explicit candidate interpreter for its inner suite; missing, refused and module-less
 contracts keep the production wrapper reachable but infer no inner runtime from `PATH`.
 
 Observer, steward, retro and curator shells run the product's own CLI, so they run with the product's
 managed `<product root>/.venv/bin` first, where the product root is the checkout the role imports
-from (`TA_RUNTIME_PYTHONPATH`, else `TA_SECRETARY_REPO`). `role_env exec` refuses to start one of
+from (`TA_RUNTIME_PYTHONPATH`, else `UMMANU_REPO`). `role_env exec` refuses to start one of
 those heads when that `python3` is missing or not executable, naming the path and
-`secretary upgrade --no-pull --product-root <root>` as the repair, as the agent gate does.
+`ummanu upgrade --no-pull --product-root <root>` as the repair, as the agent gate does.
 
 One production-runtime provenance probe fences workspace prepare, worker/reviewer launch, both sides
 of a gate query, both sides of release, and worktree removal. It runs the fixed production
@@ -1288,7 +1288,7 @@ refusal becomes durable blocked evidence and keeps the checkout; installation me
 repaired implicitly.
 
 Before a card is given to a worker, the dispatcher asks whether the project's broad-check contract
-can attest the project, through the same implementation `secretary check broad --module` uses. It
+can attest the project, through the same implementation `ummanu check broad --module` uses. It
 reads only the project binding and adapter. The answer is one of three named states, and no caller
 treats an unrecognised answer as permission:
 
@@ -1329,7 +1329,7 @@ release, a new worker round and `assessment -> in_progress` for a rework, `asses
 a reslice.
 
 ```bash
-python3 -P -m secretary task decide --role observer --ref PROJECT-N \
+python3 -P -m ummanu task decide --role observer --ref PROJECT-N \
   --kind release --reason-file REASON.md --request-id REQUEST_ID
 ```
 
@@ -1350,21 +1350,21 @@ A release the dispatcher cannot carry out (merge rejected, or pre-merge re-check
 takes the card to Blocked with the failure. Deciding again on a partly failed release is a separate
 card.
 
-`secretary task move` is the one transition writer. Steward report cards, steward signals and retro
-Done retention go through Secretary's TaskReader/TaskWriter adapters with the same audit and sprint
+`ummanu task move` is the one transition writer. Steward report cards, steward signals and retro
+Done retention go through Ummanu's TaskReader/TaskWriter adapters with the same audit and sprint
 guards. `--target` is an alias of `--to`.
 
 ```bash
-python3 -P -m secretary task list --project PROJECT
-python3 -P -m secretary task show --ref PROJECT-N
-python3 -P -m secretary task list --sprint sprint:ID
-python3 -P -m secretary task create --role po --project PROJECT --type code \
+python3 -P -m ummanu task list --project PROJECT
+python3 -P -m ummanu task show --ref PROJECT-N
+python3 -P -m ummanu task list --sprint sprint:ID
+python3 -P -m ummanu task create --role po --project PROJECT --type code \
   --title TITLE --state ready --head codex-sol-high --sprint sprint:ID
-python3 -P -m secretary task archive --role po --ref PROJECT-N \
+python3 -P -m ummanu task archive --role po --ref PROJECT-N \
   --reason-file REASON.md --request-id REQUEST_ID
-python3 -P -m secretary task edit --role po --ref PROJECT-N \
+python3 -P -m ummanu task edit --role po --ref PROJECT-N \
   --body-file SPEC.md --head codex-terra-high --review-head claude-opus-high
-python3 -P -m secretary task create --role po --project PROJECT --type code --title HOTFIX \
+python3 -P -m ummanu task create --role po --project PROJECT --type code --title HOTFIX \
   --sprint sprint:ID --sprint-override --sprint-override-reason-file REASON.md
 ```
 
@@ -1394,7 +1394,7 @@ mode.
 history. PO-only, non-empty reason, append-only audit, idempotent through `--request-id`. Cards in
 In progress or Validate, or with an active claim, are rejected. A card archived from Done stays a
 satisfied dependency; from any other column it is not Done and unblocks nothing. It cannot close a
-Product or Issue (use `secretary issue close`).
+Product or Issue (use `ummanu issue close`).
 
 `edit` replaces a card's spec in place: `--title`, `--description`/`--body-file` (full new text),
 `--head`, `--review-head`. PO, dispatcher and observer may edit; an ordinary card is editable only in
@@ -1487,13 +1487,13 @@ details. The run is looked up among the workflow's runs by all of:
   dispatcher's).
 
 The lookup waits until that window has settled: until the intent + the margin + a settle period of 3
-minutes (`SECRETARY_E2E_RECOVERY_SETTLE_SECONDS`). Before then even a single visible match is not
+minutes (`UMMANU_E2E_RECOVERY_SETTLE_SECONDS`). Before then even a single visible match is not
 attached. After it:
 - exactly one match is attached as `recovered`: the entry records `identified_by: recovery` and the
   rule it matched, and a dispatcher comment says the run was identified by recovery, not by GitHub's
   answer (so does the green comment);
 - two or more matches are ambiguous and never guessed: the card is Blocked with every candidate listed;
-- no match within 15 minutes of the intent (`SECRETARY_E2E_IDENTIFY_SECONDS`) Blocks the card.
+- no match within 15 minutes of the intent (`UMMANU_E2E_IDENTIFY_SECONDS`) Blocks the card.
 
 With `dispatch_id_input` declared, the dispatch id is sent in that input, and recovery requires it in
 the run's title as well. That is exact for a workflow that puts the input in its `run-name`, and a run
@@ -1607,7 +1607,7 @@ answers nothing. An `e2e budget: no` comment moves nothing by itself: the PO com
 **Raising the budget.** Only on the owner's recorded word, and by the owner's recorded number:
 
 ```bash
-python3 -P -m secretary sprint e2e-budget --ref <sprint> --role po --authorized-by <event id> [--add <N>]
+python3 -P -m ummanu sprint e2e-budget --ref <sprint> --role po --authorized-by <event id> [--add <N>]
 ```
 
 `--role po` only (every other role is refused, `role_forbidden`), and `--authorized-by` the event id of
@@ -1778,18 +1778,18 @@ dispatch id, SHA, workflow, `ref` (the branch) and `ref_state` (`created`, `dele
 
 ## Products and issues
 
-`secretary product` and `secretary issue` use typed records in the existing Pipeline backend, so
+`ummanu product` and `ummanu issue` use typed records in the existing Pipeline backend, so
 board export, checkpoint and restore carry their metadata and comments.
 
 ```bash
-python3 -P -m secretary product create --role po --id secretary --project secretary --title Secretary
-python3 -P -m secretary issue create --role po --product secretary --kind feature --priority P2 --title TITLE
-python3 -P -m secretary issue create --role observer --kind improvement --priority P3 --title TITLE
-python3 -P -m secretary issue list --product secretary
-python3 -P -m secretary issue show --ref issue:123
-python3 -P -m secretary issue update-priority --role po --ref issue:123 --priority P1 --reason REASON
-python3 -P -m secretary issue append --role po --ref issue:123 --reason REASON --body-file BLOCK.md
-python3 -P -m secretary issue close --role po --ref issue:123 --reason resolved
+python3 -P -m ummanu product create --role po --id ummanu --project ummanu --title Ummanu
+python3 -P -m ummanu issue create --role po --product ummanu --kind feature --priority P2 --title TITLE
+python3 -P -m ummanu issue create --role observer --kind improvement --priority P3 --title TITLE
+python3 -P -m ummanu issue list --product ummanu
+python3 -P -m ummanu issue show --ref issue:123
+python3 -P -m ummanu issue update-priority --role po --ref issue:123 --priority P1 --reason REASON
+python3 -P -m ummanu issue append --role po --ref issue:123 --reason REASON --body-file BLOCK.md
+python3 -P -m ummanu issue close --role po --ref issue:123 --reason resolved
 ```
 
 Who writes what:
@@ -1845,8 +1845,8 @@ Rows placed otherwise (pre-existing, or restored into their checkpoint lane) are
 idempotent command that plans by default:
 
 ```bash
-python3 -P -m secretary product reconcile-lanes
-python3 -P -m secretary product reconcile-lanes --apply
+python3 -P -m ummanu product reconcile-lanes
+python3 -P -m ummanu product reconcile-lanes --apply
 ```
 
 The plan writes nothing and reports each misplaced row with its current and target lane, the lanes to
@@ -1866,10 +1866,10 @@ refusals before the first backend write also drop it.
 A staged write that reached the backend stays under its request id. Repair:
 
 ```bash
-python3 -P -m secretary product transaction list
-python3 -P -m secretary product transaction retry --request-id REQUEST_ID
-python3 -P -m secretary product transaction discard --request-id REQUEST_ID
-python3 -P -m secretary product transaction adopt --path FILE
+python3 -P -m ummanu product transaction list
+python3 -P -m ummanu product transaction retry --request-id REQUEST_ID
+python3 -P -m ummanu product transaction discard --request-id REQUEST_ID
+python3 -P -m ummanu product transaction adopt --path FILE
 ```
 
 `list` includes typed Product/Issue pending events (read-only: request id, event kind, subject ref) and
@@ -1883,29 +1883,29 @@ the journal back under its request id. One journal covers Product and Issue writ
 
 ## Sprints
 
-A sprint is a data entity on a separate `Secretary sprints` board: one board task per sprint, board
+A sprint is a data entity on a separate `Ummanu sprints` board: one board task per sprint, board
 created lazily and idempotently. References have the form `sprint:ID`, separate from `PROJECT-N`.
 
 ```bash
-python3 -P -m secretary sprint create --role po --goal GOAL --dod-file DOD.md \
+python3 -P -m ummanu sprint create --role po --goal GOAL --dod-file DOD.md \
   --product PRODUCT_ID --issue issue:ID --project PROJECT_ID \
   --observer HEAD_PROFILE --repository REPO --request-id REQUEST_ID \
   [--worker HEAD_PROFILE] [--reviewer HEAD_PROFILE] \
   [--po-session SESSION_ID] [--allow-production PROJECT_ID ...] [--e2e-budget N] \
   [--local-run-exceptions-file EXCEPTIONS.json]
-python3 -P -m secretary sprint list --status open
-python3 -P -m secretary sprint show --ref sprint:ID
-python3 -P -m secretary sprint status --ref sprint:ID
-python3 -P -m secretary sprint comment --role worker --ref sprint:ID --body-file NOTE.md
-python3 -P -m secretary sprint current-task --role dispatcher --ref sprint:ID --task PROJECT-N
-python3 -P -m secretary sprint budget --role dispatcher --ref sprint:ID --type red_ci
-python3 -P -m secretary sprint resume --role observer --ref sprint:ID --body-file RESUME.json
-python3 -P -m secretary sprint reopen --role po --ref sprint:ID --observer HEAD_PROFILE
-python3 -P -m secretary sprint allow-production --role po --ref sprint:ID --project PROJECT_ID --reason WHY
-python3 -P -m secretary sprint e2e-budget --role po --ref sprint:ID --authorized-by EVENT_ID [--add N]
-python3 -P -m secretary sprint close --role po --ref sprint:ID --reason WHY \
+python3 -P -m ummanu sprint list --status open
+python3 -P -m ummanu sprint show --ref sprint:ID
+python3 -P -m ummanu sprint status --ref sprint:ID
+python3 -P -m ummanu sprint comment --role worker --ref sprint:ID --body-file NOTE.md
+python3 -P -m ummanu sprint current-task --role dispatcher --ref sprint:ID --task PROJECT-N
+python3 -P -m ummanu sprint budget --role dispatcher --ref sprint:ID --type red_ci
+python3 -P -m ummanu sprint resume --role observer --ref sprint:ID --body-file RESUME.json
+python3 -P -m ummanu sprint reopen --role po --ref sprint:ID --observer HEAD_PROFILE
+python3 -P -m ummanu sprint allow-production --role po --ref sprint:ID --project PROJECT_ID --reason WHY
+python3 -P -m ummanu sprint e2e-budget --role po --ref sprint:ID --authorized-by EVENT_ID [--add N]
+python3 -P -m ummanu sprint close --role po --ref sprint:ID --reason WHY \
   --decisions-file DECISIONS.yaml --closeout-file CLOSEOUT.md
-python3 -P -m secretary sprint close-result --ref sprint:ID --event-id evt_ID
+python3 -P -m ummanu sprint close-result --ref sprint:ID --event-id evt_ID
 ```
 
 ### Control-host local runs
@@ -1935,7 +1935,7 @@ same JSON list. The default is `[]`, including released sprints and staged reque
 field. An entry has exactly three keys:
 
 ```json
-[{"project":"secretary","argv":["python3","-m","tests.integration","--case","two words"],"rationale":"Owner requires this exact local probe for this sprint"}]
+[{"project":"ummanu","argv":["python3","-m","tests.integration","--case","two words"],"rationale":"Owner requires this exact local probe for this sprint"}]
 ```
 
 `project` must be registered and reserved by the sprint. `argv` is a nonempty list of strings,
@@ -1977,7 +1977,7 @@ column, and writes nothing. The observer decides such a card with `task decide` 
 
 A write whose role is `po` and whose actor is `observer` is refused as `role_masquerade` (exit 3), with a
 message naming `--role observer`, before anything is read or written. It is one check,
-`secretary.tasks.admit_role`, the role admission every role-taking sprint, task and issue write makes
+`ummanu.tasks.admit_role`, the role admission every role-taking sprint, task and issue write makes
 first, so it covers every verb: `sprint` comment, close and the other sprint writes, every `task` write,
 `product create` and every `issue` write. The operation layer carries the code through unchanged, as
 it does `observer_identity_unbound` and `observer_sprint_mismatch` (exit 3 from the CLI, 403 over
@@ -2203,7 +2203,7 @@ operation, and not at all when every sprint has ended. Neither command reads an 
 The dispatcher records a durable delivery batch before it wakes or replaces an observer, coalesces
 pending semantic events to one high-water mark, and owns all waiting for workers, reviewers and CI. An
 observer acknowledges by passing the `--delivery-id` and `--through-event` from `status` to
-`sprint resume` (audit payload, not resume fields). `secretary status --json` exposes the same state
+`sprint resume` (audit payload, not resume fields). `ummanu status --json` exposes the same state
 for every sprint in `installation.sprints.items` (stopped status and reason, budget, resume freshness,
 observer state); an unreadable live board is reported in `installation.sprints.error`.
 
@@ -2235,7 +2235,7 @@ every required check present. The watch resolves to exactly one of:
   classification (`infrastructure` only when every failed run read is infrastructure, else `product`);
 - `absent` — the project validates without GitHub CI, or no workflow triggers on a push to the base
   (the gate's trigger analysis, read off the merged checkout); decided at once, without waiting;
-- `timeout` — no terminal result within `SECRETARY_POST_MERGE_CI_CEILING_SECONDS`, default 3600 (one
+- `timeout` — no terminal result within `UMMANU_POST_MERGE_CI_CEILING_SECONDS`, default 3600 (one
   hour).
 
 If any one condition fails, the whole reading is pending, whatever the other answer says: a transport
@@ -2364,12 +2364,12 @@ Two fields a sprint records at `sprint create` (board-store revision `0016`, col
 
 | field | set by | meaning |
 | --- | --- | --- |
-| `po_session` | `--po-session SESSION_ID`, default `$SECRETARY_PO_SESSION` | the PO session that opened the sprint; `null` when neither is given (a `--role steward` create outside a PO turn) |
+| `po_session` | `--po-session SESSION_ID`, default `$UMMANU_PO_SESSION` | the PO session that opened the sprint; `null` when neither is given (a `--role steward` create outside a PO turn) |
 | `allowed_productions` | `--allow-production PROJECT_ID`, repeatable | registered projects whose production the sprint's operations may touch; empty by default |
 
-The PO service gives every PO turn `SECRETARY_PO_SESSION=<session_id>` (new turns, re-runs and
+The PO service gives every PO turn `UMMANU_PO_SESSION=<session_id>` (new turns, re-runs and
 relaunches alike), so a `sprint create` inside a PO turn records its session with no flag. Beside it,
-`SECRETARY_PO_REQUEST=<request id>` names the request id of the input the turn answers (read from the
+`UMMANU_PO_REQUEST=<request id>` names the request id of the input the turn answers (read from the
 PO store, so a re-run names the same one; unset when the input carried none), which a card created in
 the turn records ([PO delegation](#po-delegation)). A session id
 that is not an existing, open PO session is refused (`validation`), and so is an `--allow-production`
@@ -2389,7 +2389,7 @@ PO only extends with `sprint allow-production` ([Production rights](#production-
 `production_allowed`).
 
 **The resolver.** `sprint_session(sprint_ref, request_id)` is an operation of the PO service
-(`secretary.po.client.PoServiceClient.sprint_session`, [Operations](OPERATIONS.md#the-po-service)). It
+(`ummanu.po.client.PoServiceClient.sprint_session`, [Operations](OPERATIONS.md#the-po-service)). It
 answers `{session_id, created, repeated}`:
 
 - the recorded `po_session` exists and is open: that session, `created: false`, nothing written;
@@ -2470,7 +2470,7 @@ grant record is separate from the operation's own record, with the same shape ac
 and `edit`.
 
 A write with role `observer` is authenticated against the sprint it names first. The dispatcher binds
-`SECRETARY_OBSERVER_SPRINT` and `SECRETARY_OBSERVER_GENERATION` into the head's command line;
+`UMMANU_OBSERVER_SPRINT` and `UMMANU_OBSERVER_GENERATION` into the head's command line;
 `runtime.env` cannot supply or replace them. A card linked to another sprint, or `sprint resume` /
 `sprint current-task` naming another sprint, is refused as `observer_sprint_mismatch`; a head with no
 binding is refused as `observer_identity_unbound`. Both are audited as `sprint_guard_denied` with that
@@ -2548,7 +2548,7 @@ in the one backend write the report makes; it is not card metadata. `--kind done
 classification. An observer moving a card out of Blocked must give a non-empty reason (as the steward
 must moving one in); it is a card comment carried by the transition event. The `reported` events are
 the authoritative copy of block classifications. The report vocabulary is defined once, in
-`secretary.tasks`.
+`ummanu.tasks`.
 
 ### Rejected SHAs and gate infrastructure reruns
 
@@ -2568,8 +2568,8 @@ classifies; a pytest assertion mentioning a registry or 503, or a broken workflo
 substantive. The SHA stays in Validate for an automatic retry with no worker round, no `gate-red`
 transition and no `red_ci` budget event: the gate asks GitHub to rerun the failed run and treats the
 rollup as pending until that run reaches a new terminal state. Reruns are SHA-scoped and bounded by
-`SECRETARY_GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS` (default 2); the rerun request uses the
-`SECRETARY_GATE_TRANSPORT_MAX_ATTEMPTS` ceiling. An exhausted ceiling, or a run GitHub cannot rerun,
+`UMMANU_GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS` (default 2); the rerun request uses the
+`UMMANU_GATE_TRANSPORT_MAX_ATTEMPTS` ceiling. An exhausted ceiling, or a run GitHub cannot rerun,
 moves the card to Blocked with the infrastructure class and count or unavailable-rerun cause. This
 applies to the pre-review and pre-merge gates and the release re-check; the pending-stall ceiling
 covers a rerun that never completes.
@@ -2582,7 +2582,7 @@ The gate classes (`substantive` vs infrastructure) and the bring-up classes (`ta
 the card in either.
 
 The audit trail is always written to the installation data directory: `--data-dir`, else
-`SECRETARY_DATA_DIR`, else `data_dir` from instance config. A relative `data_dir` resolves against the
+`UMMANU_DATA_DIR`, else `data_dir` from instance config. A relative `data_dir` resolves against the
 instance file. An unresolvable data directory is a usage error.
 
 ### The no-observer ceiling
@@ -2666,7 +2666,7 @@ request id includes a configuration digest, so relaunching the same head commits
 adapter, model, effort or resource adds an event and replaces the attempt's active head. The verdict
 carries the head that earned it.
 
-Reader: `secretary.routing_journal.attempts(events, ref)` returns a finished card's attempts with heads
+Reader: `ummanu.routing_journal.attempts(events, ref)` returns a finished card's attempts with heads
 and outcome. These events travel in the recovery checkpoint with the rest of the event log.
 
 ### Attempt outcome ledger v1
@@ -2726,7 +2726,7 @@ generation.
 
 ### Offline analytics projection v1
 
-`secretary.board.analytics.project_analytics_checkpoint(directory)` is the offline reader for one
+`ummanu.board.analytics.project_analytics_checkpoint(directory)` is the offline reader for one
 copied `state/board` checkpoint. It first calls `verify_analytics_checkpoint(directory)`, and only then
 parses the logical `cards.ndjson`, `sprints.ndjson` and `events.ndjson`, read through the checkpoint
 reader in either layout ([Recovery](RECOVERY.md#board-checkpoint-layout)). `export.json` is verified only as a count
@@ -3019,7 +3019,7 @@ and get no synthetic identity; they keep only the launch grace and output fallba
 A head is alive only by its own observation: a live matching heartbeat whose process is running or
 suspended, or an advancing provider cursor bound to the same `HeadRun`. Only the heartbeat may say a
 head is gone. Anything else is `unproven`, including a role with a head identity but no durable
-`HeadRun`. Terminal readings never enter the answer. `secretary head-status` shows the answer
+`HeadRun`. Terminal readings never enter the answer. `ummanu head-status` shows the answer
 and which source proved it; see [Head status in a live workspace](OPERATIONS.md#head-status-in-a-live-workspace).
 Stall ageing, rungs and the destructive guard are in [Head vitality](HEAD_VITALITY.md).
 
@@ -3138,9 +3138,9 @@ cannot yet be confirmed stays identity-fenced and never opens a second worker.
 ## Production dispatcher
 
 ```bash
-python3 -P -m secretary dispatcher production-tick --instance INSTANCE
-python3 -P -m secretary dispatcher production-observe --instance INSTANCE
-python3 -P -m secretary dispatcher production-run --instance INSTANCE
+python3 -P -m ummanu dispatcher production-tick --instance INSTANCE
+python3 -P -m ummanu dispatcher production-observe --instance INSTANCE
+python3 -P -m ummanu dispatcher production-run --instance INSTANCE
 ```
 
 The systemd timer runs the one-shot `production-tick`. The runtime handles only supported task
@@ -3148,23 +3148,23 @@ transitions, persists claim and review state, and checks the live board before r
 production owner is recorded in dispatcher state; an owner mismatch, a dirty workspace, a missing
 report or an unresolved audit state stops a transition rather than falling back.
 
-Before the unit invokes the `secretary` entry point, the configured production interpreter runs
-`src/secretary/dispatch/runtime_preflight.py` with `-I` (standard-library code executed by pathname).
+Before the unit invokes the `ummanu` entry point, the configured production interpreter runs
+`src/ummanu/dispatch/runtime_preflight.py` with `-I` (standard-library code executed by pathname).
 It binds the configured product root and production interpreter and inspects that interpreter's plain
-editable `.pth` files, executable editable finders and `direct_url.json` records for `secretary`. The
+editable `.pth` files, executable editable finders and `direct_url.json` records for `ummanu`. The
 result names the classification (`valid`, `wrong_root`, `workspace_targeted_editable`,
 `missing_import` or `interpreter_unavailable`), interpreter, product root, observable import origin,
 metadata source and offending target. Containment is decided on resolved paths, so a sibling such as
-`secretary-old` or a symlink escape does not pass.
+`ummanu-old` or a symlink escape does not pass.
 
-Only `valid` execs `secretary dispatcher production-tick`. A refusal exits `78` before candidate
+Only `valid` execs `ummanu dispatcher production-tick`. A refusal exits `78` before candidate
 package code, reconciliation or metadata change, and atomically writes the minimal `runtime_provenance`
 and unhealthy-tick diagnostic into the production-state file. The pipeline health line and steward
 incident reducer consume that telemetry, so repeated refusals are one incident and the first later
 healthy tick records one recovery. A valid preflight clears only a prior refusal; it does not claim the
 following tick completed.
 
-`secretary doctor` reports a failed check as the read-only `production_runtime_provenance` finding with
+`ummanu doctor` reports a failed check as the read-only `production_runtime_provenance` finding with
 the exact target and metadata source. Repair is manual and never automated; see
 [Operations](OPERATIONS.md#production-interpreter-provenance).
 
@@ -3215,10 +3215,10 @@ reads as zero.
 The pause is pipeline-wide and sits on top of the product dispatcher:
 
 ```bash
-python3 -P -m secretary pause-scope  --instance INSTANCE          # what a pause would reach
-python3 -P -m secretary pause drain|freeze --instance INSTANCE --reason "why"
-python3 -P -m secretary resume --instance INSTANCE
-python3 -P -m secretary pause-status --instance INSTANCE
+python3 -P -m ummanu pause-scope  --instance INSTANCE          # what a pause would reach
+python3 -P -m ummanu pause drain|freeze --instance INSTANCE --reason "why"
+python3 -P -m ummanu resume --instance INSTANCE
+python3 -P -m ummanu pause-status --instance INSTANCE
 ```
 
 `drain` stops claiming new cards and dispatching background roles; running cards finish their cycle.
@@ -3239,9 +3239,9 @@ due-push coordination. Runbooks: [Operations](OPERATIONS.md#pause-or-breakage).
 
 ### The pause as protocol operations
 
-The same pause through the transport-independent layer (`secretary.webproto.pause_ops`,
-`secretary.webproto.pause_reads`): two operations and two reads. Every rule stays in
-`secretary.dispatch.pause_ops`; the layer adds no rule, flag, lock or store.
+The same pause through the transport-independent layer (`ummanu.webproto.pause_ops`,
+`ummanu.webproto.pause_reads`): two operations and two reads. Every rule stays in
+`ummanu.dispatch.pause_ops`; the layer adds no rule, flag, lock or store.
 
 | operation | inputs | answers with | errors |
 | --- | --- | --- | --- |
@@ -3250,9 +3250,9 @@ The same pause through the transport-independent layer (`secretary.webproto.paus
 | `pause_state` | — | a `pause_state` document | `validation` (an installation whose config does not validate, with no data directory to fall back on) |
 | `pause_scope` | — | a `pause_scope` document | `validation` (the same) |
 
-The table is checked against `secretary.webproto.pause_ops.PAUSE_ERRORS`. Every operation of the
+The table is checked against `ummanu.webproto.pause_ops.PAUSE_ERRORS`. Every operation of the
 package can also answer `backend_unavailable` for an implementation failure caught by
-`secretary.webproto.boundary` (layer-wide, not listed per row).
+`ummanu.webproto.boundary` (layer-wide, not listed per row).
 
 Properties every document states as fields:
 
@@ -3277,7 +3277,7 @@ and files a command would write (`target.pause_file`, `target.state_file`,
 `target.legacy_mirror_file`), which sprints are open, which cards are on the Pipeline and which sprint
 holds each, which heads are running, and separately what a drain does not stop and what a freeze would.
 It sets no flag, takes no tick lock, stops or starts no head, and writes nothing. It lists every card
-from the one Pipeline listing, except Product and Issue records (`secretary.tasks._TYPED_RECORD_TYPES`),
+from the one Pipeline listing, except Product and Issue records (`ummanu.tasks._TYPED_RECORD_TYPES`),
 which a pause never reaches.
 
 **Repeat and conflict.** The pause is idempotent in its own mode, so these operations carry no request
@@ -3302,7 +3302,7 @@ observed before and after an unlocked command is not evidence of which command s
 Nothing is repaired or re-decided: a command that did not complete raises unchanged; a `validation` or
 `pause_conflict` refusal is never turned into an action; a freeze's resume whose own answer never
 arrived has `null` `restored` lists. `PauseCommandCompleted` carries the render failure's code, message
-and exit status, so `secretary pause freeze` and the tick's auto-resume answer as before. The tick's
+and exit status, so `ummanu pause freeze` and the tick's auto-resume answer as before. The tick's
 auto-resume names a failed recovery by exception class, so it unwraps the completed command and reports
 the render's own class; any wrapper added there must do the same.
 
@@ -3328,7 +3328,7 @@ reaches no claim:
 
 An unreadable pause flag is the `pause` source refusing, and its `reason` states the product's rule:
 every production tick reads an unreadable flag as a freeze (`ProductionPause.load`) until repaired.
-`paused` stays `null`. `secretary backup create` treats an unestablished pause state as paused.
+`paused` stays `null`. `ummanu backup create` treats an unestablished pause state as paused.
 
 A durable file that parses but cannot be converted (a pause flag whose `stopped_worker` is `1`, a
 production record whose `attempt_round` is `"not-an-integer"`) is also a refused source: conversions
@@ -3338,12 +3338,12 @@ documents (`PauseSections`) is outside every such span, so a layer defect travel
 semantically corrupt flag gets its own reason (the tick still parses and obeys it), not the
 unreadable-flag sentence.
 
-**The commands are clients.** `secretary pause drain`, `secretary resume`, `secretary pause-status` and
-`secretary pause-scope` call these operations, print the document, and map codes to exit status as
-`secretary web-run` does: `validation`/`not_found` → 2, `owner_conflict` → 3 (a `pause_conflict`),
+**The commands are clients.** `ummanu pause drain`, `ummanu resume`, `ummanu pause-status` and
+`ummanu pause-scope` call these operations, print the document, and map codes to exit status as
+`ummanu web-run` does: `validation`/`not_found` → 2, `owner_conflict` → 3 (a `pause_conflict`),
 `backend_unavailable` → 1. An installation whose config does not validate is `validation` (exit 2).
 With an explicit `--data-dir` and an invalid config, the two reads answer from the flag and dispatcher
-state and report `installation` unavailable. `secretary pause freeze` does not go through the layer and
+state and report `installation` unavailable. `ummanu pause freeze` does not go through the layer and
 keeps its own path.
 
 ## Connecting a project
@@ -3351,10 +3351,10 @@ keeps its own path.
 Low-level onboarding stages:
 
 ```bash
-python3 -P -m secretary project add ...
-python3 -P -m secretary project provision-start ...
-python3 -P -m secretary project provision-apply ...
-python3 -P -m secretary project gate ...
+python3 -P -m ummanu project add ...
+python3 -P -m ummanu project provision-start ...
+python3 -P -m ummanu project provision-apply ...
+python3 -P -m ummanu project gate ...
 ```
 
 A project's identity is set once by the top-level binding: `id`, `repo`, `adapter`, `default_branch`.
@@ -3388,22 +3388,22 @@ distilled markdown record per fact. The curator is the writer role; other agents
 `memory_search`, `memory_get` and `memory_list`.
 
 ```bash
-python3 -P -m secretary memory verify --instance INSTANCE
-python3 -P -m secretary memory propose --instance INSTANCE --actor ACTOR \
+python3 -P -m ummanu memory verify --instance INSTANCE
+python3 -P -m ummanu memory propose --instance INSTANCE --actor ACTOR \
   --scope SCOPE --slug SLUG --file FACT.md
-python3 -P -m secretary memory commit --instance INSTANCE --actor ACTOR --propose-id ID
-python3 -P -m secretary memory supersede --instance INSTANCE --actor ACTOR \
+python3 -P -m ummanu memory commit --instance INSTANCE --actor ACTOR --propose-id ID
+python3 -P -m ummanu memory supersede --instance INSTANCE --actor ACTOR \
   --scope SCOPE --slug SLUG --file FACT.md --supersedes OLD-ID
-python3 -P -m secretary memory reindex --instance INSTANCE
+python3 -P -m ummanu memory reindex --instance INSTANCE
 ```
 
 Write authority is split. `propose` stages a fact in the curator inbox
 (`<data_dir>/memory/.staging/<propose-id>`) and touches no canon; `commit` and `supersede` write
-`state/memory` in the instance repository. **Proposer** roles: `curator`, `secretary`, `operator`,
-`butler`. **Canonical writer** roles: `curator`, `secretary`, `operator`. A butler's `commit` or
+`state/memory` in the instance repository. **Proposer** roles: `curator`, `ummanu`, `operator`,
+`butler`. **Canonical writer** roles: `curator`, `ummanu`, `operator`. A butler's `commit` or
 `supersede` is refused with a permission error saying butler proposals await curator review. Every actor
 may use only a `source` of its own role, so a butler proposal stays butler-sourced through commit. An
-actor commits its own proposal; a `secretary` or `operator` actor may commit anyone's.
+actor commits its own proposal; a `ummanu` or `operator` actor may commit anyone's.
 
 Writer operations require an actor and go through the journal protocol; direct edits bypass the audit
 trail. `reindex` changes only the derived index and must not overlap another index writer. Model and
@@ -3453,22 +3453,22 @@ successfully without dispatch or cleanup.
 
 ### Project baseline settlement
 
-`python3 -P -m secretary automations curator baseline` settles existing curator input without running the
+`python3 -P -m ummanu automations curator baseline` settles existing curator input without running the
 curator, changing its schedule or writing facts. It takes one registered canonical project id or
 `review:po`, an explicit actor, a non-empty one-line reason, and exactly one evidence identity:
 
 ```bash
-python3 -P -m secretary automations curator backlog --project PROJECT --json
-python3 -P -m secretary automations curator baseline \
+python3 -P -m ummanu automations curator backlog --project PROJECT --json
+python3 -P -m ummanu automations curator baseline \
   --project PROJECT --actor OPERATOR --reason 'reviewed historical backlog' --cutoff-id CUTOFF_ID
 
 # The same audited flow settles manually reviewed multi-project observer input.
-python3 -P -m secretary automations curator backlog --project review:po --json
-python3 -P -m secretary automations curator baseline \
+python3 -P -m ummanu automations curator backlog --project review:po --json
+python3 -P -m ummanu automations curator baseline \
   --project review:po --actor OPERATOR --reason 'reviewed multi-project observer backlog' --cutoff-id CUTOFF_ID
 
 # Or settle the exact fact-bearing pending batch already returned by `harvest --json`.
-python3 -P -m secretary automations curator baseline \
+python3 -P -m ummanu automations curator baseline \
   --project PROJECT --actor OPERATOR --reason 'approved pending batch' --batch-id BATCH_ID
 ```
 
@@ -3480,7 +3480,7 @@ its `batch_id` is the alternative evidence. A baseline never accepts the all-bac
 bypass a pending record, and rejects a foreign, ambiguous, mismatched, malformed or stale source before
 state changes.
 
-The callable API is `secretary.automations.agents.curator.cli.baseline_settlement` with the same required
+The callable API is `ummanu.automations.agents.curator.cli.baseline_settlement` with the same required
 `project`, `actor`, `reason` and exactly one of `cutoff_id` or `batch_id`, under the same
 cursor-settlement lock. The transition writes the watermark, removes the selected pending record when
 settling that batch, and appends to `baseline-audit.ndjson` in the curator state directory, rolling back
@@ -3497,14 +3497,14 @@ heartbeat on every read. Missing, expired, malformed, foreign or stopped binding
 data-free denial. `caller`, `scope` and other tool arguments are never authority.
 
 Resolved read policy: an interactive PO has installation-wide read; a worker or reviewer has exactly its
-card's `project:<id>` plus `product:secretary` (also when the project is `secretary`); an observer has
-its sprint reservations plus `product:secretary`; the curator and retro standing duties have
-installation-wide read; steward has `project:secretary` and `product:secretary`. Other runtime roles
+card's `project:<id>` plus `product:ummanu` (also when the project is `ummanu`); an observer has
+its sprint reservations plus `product:ummanu`; the curator and retro standing duties have
+installation-wide read; steward has `project:ummanu` and `product:ummanu`. Other runtime roles
 have no grant. A requested scope only narrows the set; search never retries wider, and `memory_get` and
 `memory_list` use the same guard.
 
 An ordinary Claude or Codex session reaches the interactive identity through the installation-owned
-`secretary-memory-po-bridge` stdio MCP server in its user configuration. The bridge creates a PO
+`ummanu-memory-po-bridge` stdio MCP server in its user configuration. The bridge creates a PO
 HeadRun, keeps the bearer inside the bridge process, and deletes its heartbeat and grant on exit.
 Dispatcher-launched Claude heads use `--strict-mcp-config`; Codex heads disable `po_memory` with a
 command-line override. Both get only the direct HTTP `memory` server and their launch-bound bearer.
@@ -3526,33 +3526,33 @@ steward `HeadRun` and its launch-bound grant, hands the temporary bindings tree 
 account, and a dropped-privilege child of that account publishes the versioned heartbeat and performs
 `initialize` then `tools/call(memory_list)` over the MCP endpoint, so the service verifies bearer,
 heartbeat and read guard as for heads. The probe supplies neither `caller` nor `scope`, expects a
-Secretary/product-scoped row, and removes its temporary grant and heartbeat afterwards. An unavailable
+Ummanu/product-scoped row, and removes its temporary grant and heartbeat afterwards. An unavailable
 service, stale or denied identity, malformed MCP reply or missing expected row fails the `memory`
 upgrade step visibly; a denial is final, not retried into a timeout. The list tool may return one JSON
 text block per row or structured content; the probe normalizes every supported form to rows.
 
 ## Reading the pipeline
 
-`secretary.webproto` is one read layer for "what is running", "what is this card doing" and "what
+`ummanu.webproto` is one read layer for "what is running", "what is this card doing" and "what
 happened next", used by every transport. It knows nothing about HTTP, sockets, rendering or frameworks,
 and writes nothing (no board mutation, dispatcher state, repair or cache). Design:
 [Architecture](ARCHITECTURE.md#the-read-layer).
 
 ```bash
-python3 -P -m secretary web-read system --instance INSTANCE [--offline] [--json]
-python3 -P -m secretary web-read task --instance INSTANCE --ref REF [--events N] [--json]
-python3 -P -m secretary web-read events --instance INSTANCE --ref REF [--cursor C] [--limit N] [--json]
+python3 -P -m ummanu web-read system --instance INSTANCE [--offline] [--json]
+python3 -P -m ummanu web-read task --instance INSTANCE --ref REF [--events N] [--json]
+python3 -P -m ummanu web-read events --instance INSTANCE --ref REF [--cursor C] [--limit N] [--json]
 ```
 
 Every document validates against the packaged `web-read` schema and carries `schema_version`, a `kind`
 of `system`, `task` or `task_events`, and `observed_at`. Identities are the pipeline's own: a card is its
 reference, a project its registered id.
 
-**`system_snapshot()`** — installation health (`collect_status`, as `secretary status --json`), the
+**`system_snapshot()`** — installation health (`collect_status`, as `ummanu status --json`), the
 registered projects from validated bindings, the cards in `ready`, `in_progress`, `validate`,
 `assessment` and `blocked`, and every head the dispatcher holds with its card and project.
 
-**`task_snapshot(ref)`** — the card as `secretary task show` reads it, its project and whether that
+**`task_snapshot(ref)`** — the card as `ummanu task show` reads it, its project and whether that
 project is registered, what the dispatcher durably holds for it (attempt, round, gate state, workspace,
 heads, pause), the heads working it, what each role ran (`heads`, below), the tail of its history with a
 cursor, and its result: the worker's
@@ -3600,7 +3600,7 @@ joined to the agent by `run_id`.
 
 `task_snapshot(ref).heads` is one row per head run the card recorded, oldest first, read from the card's
 whole committed history and the dispatcher's record in the one traversal the history tail already makes
-(:mod:`secretary.webproto.head_view`), so it outlives the dispatcher's record and a finished card still
+(:mod:`ummanu.webproto.head_view`), so it outlives the dispatcher's record and a finished card still
 answers. A run is a `launch_id` a `routing` or `attempt.usage` event names, or a run the dispatcher record
 holds now (`current: true`). Each row joins three sources by that id:
 
@@ -3622,7 +3622,7 @@ row. A routing head recorded before launches carried an id is not a run and has 
 ### Continuing a read
 
 The cursor is a position in the committed board audit: the reader resolves the installation's card
-client and asks `secretary.tasks.task_audit_for` for its audit owner, the committed `requests`
+client and asks `ummanu.tasks.task_audit_for` for its audit owner, the committed `requests`
 traversal ([Board store](BOARD_STORE.md), §7.3). The file projection under `<data>/board` is never
 consulted.
 
@@ -3655,24 +3655,24 @@ Failures other than a source outage are typed exceptions with the task protocol'
 | `InvalidCursor` | `validation` | a cursor this layer did not issue, one belonging to another card, or one past the end of the journal — never silently reset to the beginning |
 | `InstallationUnavailable` | `backend_unavailable` | the instance config does not validate, so there is no data plane to read |
 
-`secretary.webproto.boundary.ProtocolBoundary` wraps every public method of the read and run layers at
+`ummanu.webproto.boundary.ProtocolBoundary` wraps every public method of the read and run layers at
 class creation and turns implementation exceptions (`RunStoreError`, `OSError`, an unparsable document)
 into `backend_unavailable`; a layer defect such as `TypeError` travels as itself. Every file the package
-writes goes through `secretary.webproto.store_io.write_document`, which turns the atomic writer's
+writes goes through `ummanu.webproto.store_io.write_document`, which turns the atomic writer's
 `RuntimeError` into `RunStoreError` and therefore `backend_unavailable`. Both are enforced by
 `tests/test_web_run_protocol.py` (`ErrorContractTests`, `FileWriteSeamTests`).
 
 ## Running the pipeline
 
-Three operations of `secretary.webproto` raise a real Codex worker for one card, raise a real Claude
+Three operations of `ummanu.webproto` raise a real Codex worker for one card, raise a real Claude
 reviewer on that worker's result, and read a run. No HTTP, sockets or framework; failures are typed
 codes. Design: [Architecture](ARCHITECTURE.md#the-product-runtime).
 
 ```bash
-python3 -P -m secretary web-run start  --instance I --ref REF --request-id ID --profile P [--instruction TEXT]
-python3 -P -m secretary web-run review --instance I --worker-run RUN --request-id ID --profile P
-python3 -P -m secretary web-run state  --instance I --run-id RUN
-python3 -P -m secretary web-run list   --instance I --ref REF
+python3 -P -m ummanu web-run start  --instance I --ref REF --request-id ID --profile P [--instruction TEXT]
+python3 -P -m ummanu web-run review --instance I --worker-run RUN --request-id ID --profile P
+python3 -P -m ummanu web-run state  --instance I --run-id RUN
+python3 -P -m ummanu web-run list   --instance I --ref REF
 ```
 
 Every document validates against the packaged `web-run` schema and carries `schema_version`, a `kind`
@@ -3692,7 +3692,7 @@ refuses while it is open, then raises a reviewer head in the same workspace with
 ### The lifecycle of a run, and the order it holds
 
 A run passes through `claimed → raising → raised → settled`, moved only by
-`secretary.webproto.lifecycle.RunLifecycle.advance`. Within `secretary.webproto`, the backend's `start`
+`ummanu.webproto.lifecycle.RunLifecycle.advance`. Within `ummanu.webproto`, the backend's `start`
 and `stop` and the run store's `settle` are called only from that module (test-enforced).
 
 1. **Write-ahead.** Before a spawn, the record carries what is needed to find and stop the head: run
@@ -3720,14 +3720,14 @@ PR. The head's process is held by the product's supervisor under `<data>/webprot
 `head.pid`, `journal.jsonl`, `supervisor.log`, the task document and `result.json`. The run record is
 `<data>/webproto/runs/<run-id>.json`. All paths are on the run document.
 
-A head receives `SECRETARY_RUN_RESULT` (the only place a result may appear), `SECRETARY_RUN_ID`,
-`SECRETARY_RUN_ROLE`, `SECRETARY_RUN_REF` and `SECRETARY_RUN_WORKSPACE`. A `run_state` that finds the
+A head receives `UMMANU_RUN_RESULT` (the only place a result may appear), `UMMANU_RUN_ID`,
+`UMMANU_RUN_ROLE`, `UMMANU_RUN_REF` and `UMMANU_RUN_WORKSPACE`. A `run_state` that finds the
 result file ends the head holding it. A run that publishes nothing is ended at its deadline
 (`--deadline-seconds`, default one hour).
 
 ### One owner of a card
 
-`secretary.webproto.admission.admit` is the single gate for both start paths, before anything is built
+`ummanu.webproto.admission.admit` is the single gate for both start paths, before anything is built
 or spawned. Order:
 
 1. the board holds the card — otherwise `not_found`;
@@ -3780,7 +3780,7 @@ directory is swept. A failed bring-up settles `process_failed` with its named ca
 ### Where a run is read back
 
 A run publishes exactly two events, `product_run.started` and `product_run.finished`, into the board's
-append-only journal, so `secretary web-read events --ref REF` and `web-read task` show them. There is no
+append-only journal, so `ummanu web-read events --ref REF` and `web-read task` show them. There is no
 separate run history store. Both are idempotent through the audit's request-id ownership. They are
 generic audit records, not typed Card events: a product run moves no card and wakes no observer.
 
@@ -3895,7 +3895,7 @@ sprint's fields and marks liveness unavailable. The sprint is read through `Spri
 `show` (which would create the sprint board).
 
 Liveness comes from the dispatcher's production state, classified by the same `observer_snapshot` rows
-`secretary sprint status` shows; no terminal screen is evidence. `observer.launch.state` is one of:
+`ummanu sprint status` shows; no terminal screen is evidence. `observer.launch.state` is one of:
 
 | state | what it means |
 | --- | --- |
@@ -3998,7 +3998,7 @@ and answers `kind: sprint_closed`. It takes the owner's reason, the decisions fi
 
 Every close rule (decisions, pre-write refusal, terminal phase order, admission lock, per-step request
 ids, `live_work`, `close_conflict`, confirmations, `audit_pending` with the staged plan retained, the
-knowledge closeout) belongs to `SprintWriter.close` and `secretary.sprint_close`; the operation adds no
+knowledge closeout) belongs to `SprintWriter.close` and `ummanu.sprint_close`; the operation adds no
 store, lock or scheduler.
 
 The closeout is required by this operation; its content is the caller's, verbatim.
@@ -4032,7 +4032,7 @@ that is no longer open.
 > another source already gave. Every section says which source answered it, and an answer is
 > attributed to the source that actually produced it.
 
-`secretary.webproto.section` enforces this; every section of every sprint document is assembled there:
+`ummanu.webproto.section` enforces this; every section of every sprint document is assembled there:
 
 * a **source is read once** per document, as a `Reading`, whose payload is unreadable when it did not
   answer;
@@ -4109,7 +4109,7 @@ One card may carry more than one entry (a run and a budget mark), but one run is
 the carrier's run record and its own `covered` mark are one entry, deduplicated by (card, run URL or
 dispatch id). A `green`, `red` or `declined` after-merge mark waits for nothing. The list is empty when nothing is
 waited for and for a closed sprint; it is null, never `[]`, when the sprint board or the listing did not
-answer. `secretary sprint status` prints it under `work.waiting_on`, every `sprint_list` item carries it,
+answer. `ummanu sprint status` prints it under `work.waiting_on`, every `sprint_list` item carries it,
 and the sprint page draws it as "Waiting on", each entry linking its card and any URL in its detail.
 
 **`waiting`**, in decision order:
@@ -4133,11 +4133,11 @@ Issues and Done. `checks` is `not_applicable` from the sprint row for an ended s
 current card, never under an unavailable production state.
 
 A closed sprint has no current card: `current_task.ref` (and `sprint.value.current_task`) is null
-whatever its row stores, and the reason names no card (`secretary.sprints.public_current_task`, the
-same rule `secretary sprint show` prints through). A stopped sprint may be resumed, so it keeps its
+whatever its row stores, and the reason names no card (`ummanu.sprints.public_current_task`, the
+same rule `ummanu sprint show` prints through). A stopped sprint may be resumed, so it keeps its
 card, and `current_task.live` qualifies it as the record of an ended sprint rather than work in
 progress. The watched sprint document carries the sprint's `status` as its first key, so
-`secretary sprint status` names it first. `cards.states` and `degraded_cards.items` are `null`, never `{}`, when their
+`ummanu sprint status` names it first. `cards.states` and `degraded_cards.items` are `null`, never `{}`, when their
 source is unreadable.
 
 **`current_card_state`** is where the current card stands and since when, and it is a section of its own
@@ -4146,7 +4146,7 @@ marks this section and never blanks the card's reference or the sprint's row. `s
 Pipeline listing holds the card in, and `title` the card's title from that same listing entry (null when
 the listing holds no such card, or the section is `not_applicable` or `unknown`). `since` is the card's **last state transition** on the committed
 audit -- read in both shapes history holds, a typed event's `transition.source`/`transition.target` and a
-legacy `moved` event's `payload.from`/`payload.to` (`secretary.tasks.recorded_card_transition`) -- and never
+legacy `moved` event's `payload.from`/`payload.to` (`ummanu.tasks.recorded_card_transition`) -- and never
 `updated_at`, which moves for a comment, a report or any other edit, and never the newest event of any
 kind. `age_seconds` is how old that moment was when the document was read. `transition` is `recorded`
 when the journal holds one, `absent` when it answered and holds none for this card (which is never
@@ -4184,9 +4184,9 @@ listing with batched metadata, one read of production state, at most one committ
 sprint comments, card opens, CI calls or terminals. `cards.source`, `journal.source`,
 `liveness.source` and `installation.source` carry document-level availability.
 
-`secretary sprint list` and `secretary sprint status` are clients of these two reads and map codes as
-`web-read` does (`not_found`/`validation` → 2, `backend_unavailable` → 1). `secretary sprint comment`
-and `secretary sprint comment-delivery` are clients of the comment operations the same way, with
+`ummanu sprint list` and `ummanu sprint status` are clients of these two reads and map codes as
+`web-read` does (`not_found`/`validation` → 2, `backend_unavailable` → 1). `ummanu sprint comment`
+and `ummanu sprint comment-delivery` are clients of the comment operations the same way, with
 `sprint comment` using `web-run`'s table so `owner_conflict` exits `3`. `sprint comment` on a `closed` or
 `stopped` sprint succeeds with exit status `0` and the saved comment on stdout
 ([A comment on a sprint that has ended](#a-comment-on-a-sprint-that-has-ended)); its delivery reads
@@ -4203,7 +4203,7 @@ The reads create nothing: sprints via `SprintReader.list(create=False)`, cards v
 
 ### Errors
 
-No new codes. The writer's `TaskError` codes are mapped once, in `secretary.webproto.sprint_ops`:
+No new codes. The writer's `TaskError` codes are mapped once, in `ummanu.webproto.sprint_ops`:
 
 | writer code | exception | code | when |
 | --- | --- | --- | --- |
@@ -4215,11 +4215,11 @@ No new codes. The writer's `TaskError` codes are mapped once, in `secretary.webp
 
 ## What has been commanded, and what became of a request
 
-`secretary.webproto.command_reads` adds two reads over the committed audit:
+`ummanu.webproto.command_reads` adds two reads over the committed audit:
 
 ```bash
-python3 -P -m secretary web-read commands --instance INSTANCE [--cursor C] [--limit N] [--json]
-python3 -P -m secretary web-read request  --instance INSTANCE --request-id ID [--json]
+python3 -P -m ummanu web-read commands --instance INSTANCE [--cursor C] [--limit N] [--json]
+python3 -P -m ummanu web-read request  --instance INSTANCE --request-id ID [--json]
 ```
 
 Both documents validate against the packaged `web-command` schema and carry `schema_version`, a `kind`
@@ -4244,12 +4244,12 @@ never performs, retries, resumes or repairs the operation. Both reads write noth
 
 ### Paging and honesty
 
-The cursor (`secretary.webproto.cursor`) is a position in the traversal's append-ordered sequence, bound
+The cursor (`ummanu.webproto.cursor`) is a position in the traversal's append-ordered sequence, bound
 to no entity; a card cursor and a history cursor are not interchangeable. `next_cursor` continues into
 older commands; `has_more` is true only when the limit cut the page. `DEFAULT_LIMIT` is 50 and
 `MAX_LIMIT` 500. Newest first is reversed append order, not a sort by `occurred_at`.
 
-Both reads go through `secretary.tasks.task_audit_for`, whose canon is the `requests` table
+Both reads go through `ummanu.tasks.task_audit_for`, whose canon is the `requests` table
 ([Board store](BOARD_STORE.md), §7.3); the file journal is never consulted.
 
 An unreadable audit is an unavailable source, never an empty history: `items` is `null` with a reason,
@@ -4260,7 +4260,7 @@ inferred.
 ### Operation identity, in one place
 
 Every mutation of the layer either takes a `request_id` or deliberately takes none. The table is
-published as `secretary.webproto.command_reads.OPERATION_IDENTITY`, travels on every `command_request`
+published as `ummanu.webproto.command_reads.OPERATION_IDENTITY`, travels on every `command_request`
 answer, and is derived from the operation signatures by `tests/test_web_command_protocol.py`, which holds
 this table to it.
 
@@ -4289,7 +4289,7 @@ Part-done and related failures:
 ### Errors
 
 Neither read has a code of its own; any other durable-source failure is `backend_unavailable` through
-`secretary.webproto.boundary`.
+`ummanu.webproto.boundary`.
 
 | read | code | when |
 | --- | --- | --- |
@@ -4298,13 +4298,13 @@ Neither read has a code of its own; any other durable-source failure is `backend
 
 ## Serving the pipeline locally
 
-The web transport is a caller of `secretary.webproto` beside `web-read` and `web-run`: one route is one
+The web transport is a caller of `ummanu.webproto` beside `web-read` and `web-run`: one route is one
 operation, with no snapshot, state derivation, liveness rule or mutation of its own. Design:
 [Architecture](ARCHITECTURE.md#the-web-transport); running it:
 [Operations](OPERATIONS.md#the-local-web-transport).
 
 ```bash
-python3 -P -m secretary web-serve --instance INSTANCE [--data-dir DIR] \
+python3 -P -m ummanu web-serve --instance INSTANCE [--data-dir DIR] \
   [--host 127.0.0.1] [--port 8787] [--heads-registry REGISTRY] [--offline]
 ```
 
@@ -4353,7 +4353,7 @@ unrouted method on a routed path is 405; neither reaches a handler.
 | POST | `/api/tasks/{ref}/comment` | `card_ops.task_comment` | one comment on a card, under role `po` and actor `web`, or role and actor `owner` on a card carrying `waiting_owner` (the owner's answer, which the dispatcher forwards to the PO; a repeated request id keeps its first role); body `{request_id, body}` |
 | POST | `/api/tasks/{ref}/move` | `card_ops.task_move` | move a card, the owner's intervention; body `{request_id, target, reason, sprint_override?, sprint_override_reason?}` |
 | POST | `/api/providers/codex/reset-limit` | `provider_ops.codex_reset_limit` | spend one Codex rate-limit reset credit, under role `po` and actor `web`; body `{request_id}`, sent to the provider as `redeem_request_id`. A committed record for the id is returned as it stands (`replayed: true`) and nothing is sent; otherwise the Codex usage is re-read past the cache, and no available credit is `refused` without a consume (whether a reset applies is the provider's call: `applicable_available_count` follows an undocumented rule and the provider's own client offers the reset on any available credit, so the consume is sent and the answer recorded); otherwise consume is POSTed (30 s) and its `outcome` recorded: `reset`, `nothing_to_reset`, `no_credit`, `already_redeemed`, or `error` with its `reason`. Every answer is a `codex_reset_limit` record of the board audit, so `/history` lists it and `/api/history/{request_id}` answers for it; a `reset` clears the provider cache |
-| POST | `/po/login` | `po_auth.po_login` | the PO token form; body `token`; 303 to `/po` with cookie `secretary_po`, or 401. The one `/po` route without the token |
+| POST | `/po/login` | `po_auth.po_login` | the PO token form; body `token`; 303 to `/po` with cookie `ummanu_po`, or 401. The one `/po` route without the token |
 | GET | `/po` | `po.po_overview` | open PO sessions (with `?closed=1` the closed ones, with `closed_at` and a link back; the open list links to them with `closed_count`), newest `last_activity_at` first (latest of creation, turn start/finish, feed entry), each row linked by its `title` when set (then the start of its first message on a line of its own), else by the start of its `first_message` (earliest owner entry, 80 characters, `no message yet` without one), with last activity, CLI, model, state, running turn, short id and a `close` form; and the new-session form (CLI and model from `po.models`) |
 | POST | `/po/sessions` | `po.po_create_session` | open a PO session; form `request_id, cli, model`; 303 to it, or the page with the refusal |
 | GET | `/po/sessions/{session}` | `po.po_session` (+ `reads.po_delegated`) | one PO session: its title heading the page when set and a rename form beside the header, feed, turn states, message box, stop while a turn runs, close while none does; a closed one shows `closed_at`/`closed_by` and no message box or close; and the **Delegated cards** it delegated or inherited as a successor, each with its ref linked, title, kind, column and last return state, from one board listing (a board that refused is said as itself) |
@@ -4378,7 +4378,7 @@ form (`application/x-www-form-urlencoded`) with `request_id`, `product`, `goal`,
 unknown field is refused.
 
 **`/po` is behind the PO token.** Every route whose path is `/po` or starts with `/po/` requires cookie
-`secretary_po` whose value matches the HMAC of `DATA_DIR/po-web-token`, checked once in
+`ummanu_po` whose value matches the HMAC of `DATA_DIR/po-web-token`, checked once in
 `WebApp.handle` after the cross-origin check and before any handler; the only exception is `POST
 /po/login`. Without it a page route answers 401 with the login form and a JSON route 401
 `po_token_required`; neither reaches the PO service or the board store. Token and cookie:
@@ -4386,7 +4386,7 @@ unknown field is refused.
 and its inputs installation-wide (`po_requests`): repeated with the same inputs it answers the recorded
 session, the turn, or the message still queued, and does nothing else; reused otherwise it is 409
 `request_conflict`. Reads come from the board store and the queue directory; every write goes to the PO
-service over its socket (`secretary.po.client`), and with the service stopped it is refused as 503
+service over its socket (`ummanu.po.client`), and with the service stopped it is refused as 503
 `backend_unavailable` whose message starts `the PO service is not running`; the web never runs a turn. A
 write that reached the service but lost its answer is 503 `backend_unavailable` with `data: {reason:
 "outcome_unknown", action: "repeat_same_request"}` (`PoOutcomeUnknown`): it may have been done; a stop or
@@ -4442,7 +4442,7 @@ the same sprint. Success is a **303** to `/sprints/{ref}`.
 | `OperationPending` | the same id and the same values, and the words "this sprint exists, submitting this form again is safe" | a sprint exists and only that id resumes it; a new form would open a second beside it |
 | any other refusal | a **new** id, every submitted value, and the words "nothing was created" | the id was claimed and refused while nothing durable was created, so the corrected submission is a new request |
 
-The browser form never offers `observer` `none`; use `secretary sprint create --observer none`, and
+The browser form never offers `observer` `none`; use `ummanu sprint create --observer none`, and
 such sprints render normally (`not_declared`). The sprint page renders `observer.launch.state` in words,
 not colour alone.
 
@@ -4452,7 +4452,7 @@ Every POST is checked once, in `WebApp.handle`, before a handler is chosen, cove
 A POST whose `Origin` names an authority other than the `Host` it was addressed to is refused **403**
 before any operation runs.
 
-* No `Origin` header is not a browser and is allowed (`secretary web-run`, `curl`, the diagnostics in
+* No `Origin` header is not a browser and is allowed (`ummanu web-run`, `curl`, the diagnostics in
   [Operations](OPERATIONS.md#the-local-web-transport)). `Origin: null` is refused.
 * The comparison is authority, never scheme (the front terminates TLS and proxies plain HTTP to
   `127.0.0.1`).
@@ -4462,7 +4462,7 @@ GETs are not checked; the front's password decides read access. `Content-Securit
 
 ### Protocol code to HTTP status
 
-One table, in `secretary.web.statuses`; no status number elsewhere in the transport.
+One table, in `ummanu.web.statuses`; no status number elsewhere in the transport.
 
 | code | status | when |
 | --- | --- | --- |
@@ -4507,9 +4507,9 @@ proxies to `127.0.0.1`. The product implements no authentication: `basicauth` ch
 against a bcrypt hash taken from the installation's secret store at render time.
 
 ```bash
-python3 -P -m secretary web-front set-password --instance INSTANCE (--stdin | --generate)
-python3 -P -m secretary web-front render --instance INSTANCE --site https://HOST [--site ...] [--bind ADDR]
-python3 -P -m secretary web-front check --instance INSTANCE [--config FILE]
+python3 -P -m ummanu web-front set-password --instance INSTANCE (--stdin | --generate)
+python3 -P -m ummanu web-front render --instance INSTANCE --site https://HOST [--site ...] [--bind ADDR]
+python3 -P -m ummanu web-front check --instance INSTANCE [--config FILE]
 ```
 
 | verb | what it does |
@@ -4520,8 +4520,8 @@ python3 -P -m secretary web-front check --instance INSTANCE [--config FILE]
 
 The front is the only listener on a public interface; the application refuses non-loopback addresses
 before a socket exists. The rendered upstream is checked with the same loopback predicate as `--host`.
-`basicauth *` covers every path. `secretary.webfront.guard` parses the rendered file and asks, for every
-entry of `secretary.web.app.ROUTES`, whether anything answers that path before a password check;
+`basicauth *` covers every path. `ummanu.webfront.guard` parses the rendered file and asks, for every
+entry of `ummanu.web.app.ROUTES`, whether anything answers that path before a password check;
 `tests/test_web_front.py` runs it over the shipped renderer and over counter-examples that must be
 reported.
 
@@ -4536,11 +4536,11 @@ Long recoverable documents live in `state/knowledge/<section>/<document>.md` for
 memory and the board: [Architecture](ARCHITECTURE.md#knowledge-planes).
 
 ```bash
-python3 -P -m secretary knowledge write --instance INSTANCE --actor ACTOR \
+python3 -P -m ummanu knowledge write --instance INSTANCE --actor ACTOR \
   --path decisions/2026-07-25-sprint-1.md --file DOC.md
-python3 -P -m secretary knowledge write --instance INSTANCE --actor ACTOR \
+python3 -P -m ummanu knowledge write --instance INSTANCE --actor ACTOR \
   --path projects/codegen-orchestrator/brainstorms/qa-node.md --file DOC.md
-python3 -P -m secretary knowledge list --instance INSTANCE
+python3 -P -m ummanu knowledge list --instance INSTANCE
 ```
 
 Path segments are ASCII letters, digits, `.`, `_` and `-`; an imported non-ASCII filename is renamed.
@@ -4555,7 +4555,7 @@ only that directory's pathspec is committed, in one commit. It is how the dispat
 report into `state/knowledge/reports/<card ref>/`.
 
 ```bash
-python3 -P -m secretary knowledge write --instance INSTANCE --actor ACTOR \
+python3 -P -m ummanu knowledge write --instance INSTANCE --actor ACTOR \
   --path reports/secretary-1640 --dir REPORT_DIR
 ```
 
@@ -4574,14 +4574,14 @@ repository lock: a previous directory whose target is gone is moved back, and th
 ## Secrets
 
 ```bash
-python3 -P -m secretary secret init --instance INSTANCE
-python3 -P -m secretary secret set --instance INSTANCE --id ID --scope SCOPE --purpose PURPOSE \
+python3 -P -m ummanu secret init --instance INSTANCE
+python3 -P -m ummanu secret set --instance INSTANCE --id ID --scope SCOPE --purpose PURPOSE \
   --stdin [--environment VAR] [--materialize runtime-env|file [--materialize-path PATH]]
-python3 -P -m secretary secret list --instance INSTANCE
-python3 -P -m secretary secret import --instance INSTANCE --file ENV_FILE --scope SCOPE \
+python3 -P -m ummanu secret list --instance INSTANCE
+python3 -P -m ummanu secret import --instance INSTANCE --file ENV_FILE --scope SCOPE \
   --purpose PURPOSE [--materialize runtime-env|file [--materialize-path PATH]]
-python3 -P -m secretary secret remove --instance INSTANCE --id ID
-python3 -P -m secretary secret materialize --instance INSTANCE [--target runtime-env|file]
+python3 -P -m ummanu secret remove --instance INSTANCE --id ID
+python3 -P -m ummanu secret materialize --instance INSTANCE [--target runtime-env|file]
 ```
 
 A secret value never travels through argv: `set` reads stdin or `--file`; `import` takes a `KEY=VALUE`

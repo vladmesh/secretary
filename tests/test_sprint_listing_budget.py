@@ -20,9 +20,9 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary.board.sql_audit import SqlTaskAudit
 from tests.fakes.sprints import SprintStoreClient
 from tests.webproto_sprint_fixtures import SprintProtocolFixture
+from ummanu.board.sql_audit import SqlTaskAudit
 
 #: Cards on the Pipeline, held equal between the two stores so that the only thing that moves is the
 #: number of sprints.
@@ -39,7 +39,7 @@ class SprintListingBudgetTests(SprintProtocolFixture):
         for index in range(CARDS):
             self.board.add_card(
                 5000 + index,
-                f"secretary-{9000 + index}",
+                f"ummanu-{9000 + index}",
                 title=f"card {index}",
                 metadata={"task_type": "code", "sprint_ref": f"sprint:{2000 + (index % max(sprints, 1))}"},
             )

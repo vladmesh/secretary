@@ -11,10 +11,10 @@ import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 
-from secretary.board.sql_cards import SqlCardClient
-from secretary.product_issues import ProductIssueStore
-from secretary.tasks import TaskError
 from tests.sql_backend_fixtures import PostgresBoard
+from ummanu.board.sql_cards import SqlCardClient
+from ummanu.product_issues import ProductIssueStore
+from ummanu.tasks import TaskError
 
 
 class ProductIssueFixture:
@@ -28,7 +28,7 @@ class ProductIssueFixture:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tmpdir.name)
         (self.root / "projects").mkdir()
-        (self.root / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
+        (self.root / "projects" / "ummanu.yaml").write_text("id: ummanu\n", encoding="utf-8")
         self._clients: dict[int, SqlCardClient] = {}
         self.store = self.make_store(root=self.root)
         self.client = self._client_for(self.store)
@@ -70,7 +70,7 @@ class ProductIssueFixture:
     def existing_project_lanes(self) -> list[dict[str, object]]:
         """The named lanes used when the product lane must be provisioned."""
         return [
-            {"id": 4, "name": "secretary", "position": 1},
+            {"id": 4, "name": "ummanu", "position": 1},
             {"id": 7, "name": "codegen-orchestrator", "position": 2},
             {"id": 9, "name": "service-template", "position": 3},
         ]

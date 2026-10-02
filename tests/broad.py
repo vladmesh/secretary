@@ -1,4 +1,4 @@
-"""The Secretary project's local broad suite: the `unit` and `component` CI suites, and nothing else.
+"""The Ummanu project's local broad suite: the `unit` and `component` CI suites, and nothing else.
 
 `python3 -m tests.broad` is the answer to the question the broad-check contract could not ask before
 issue:8b39e60e4df361c6138e — which suite IS this project's broad suite. Until it existed, the worker
@@ -55,7 +55,7 @@ def _shard_runner() -> ModuleType:
     manifest parsing here, which is the one thing this module exists to avoid. The runner is
     ``__main__``-guarded, so importing it defines constants and functions and runs nothing.
     """
-    spec = importlib.util.spec_from_file_location("secretary_ci_test_shards", SHARD_RUNNER)
+    spec = importlib.util.spec_from_file_location("ummanu_ci_test_shards", SHARD_RUNNER)
     if spec is None or spec.loader is None:  # pragma: no cover - a missing runner is a broken tree
         raise RuntimeError(f"the CI shard runner is unavailable at {SHARD_RUNNER}")
     cached = sys.modules.get(spec.name)

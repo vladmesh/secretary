@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import unittest
 
-from secretary.web import pages
+from ummanu.web import pages
 
 
 class LongTextTests(unittest.TestCase):

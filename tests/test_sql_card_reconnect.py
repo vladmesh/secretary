@@ -15,9 +15,9 @@ from unittest import mock
 
 import psycopg
 
-from secretary.board.migrate import EXPECTED_SCHEMA_REVISION
-from secretary.board.sql_cards import SqlCardClient
-from secretary.tasks import TaskError
+from ummanu.board.migrate import EXPECTED_SCHEMA_REVISION
+from ummanu.board.sql_cards import SqlCardClient
+from ummanu.tasks import TaskError
 
 _PASSWORD = "s3cret-board-password"
 

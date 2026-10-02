@@ -12,9 +12,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.config import validate_instance
-from secretary.status import collect_status
 from tests.fakes.sprints import sprint_store, status_seed
+from ummanu.config import validate_instance
+from ummanu.status import collect_status
 
 
 def _report(root: Path):

@@ -31,6 +31,8 @@ integration-board tests/test_board_schema_gate_backend.py
 integration-board tests/test_release_schema_boundary.py
 unit tests/test_entrypoint_guard.py
 unit tests/test_transition_from_secretary.py
+unit tests/test_old_name_guard.py
+unit tests/test_env_prefix.py
 integration-board tests/test_po_runner.py
 integration-board tests/test_web_po_operations.py
 integration-board tests/test_product_issues_sql_backend.py

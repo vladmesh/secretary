@@ -19,19 +19,19 @@ from pathlib import Path
 from typing import Any, ClassVar
 from unittest import mock
 
-from secretary import product_issue_commands, sprint_commands, task_commands
-from secretary.board.roles import BOARD_ROLES, Role
-from secretary.cli import build_parser, main
-from secretary.product_issues import ProductIssueStore
-from secretary.runtime import role_env
-from secretary.sprints import SprintWriter
-from secretary.tasks import TaskError, TaskWriter, admit_role, is_significant_observer_event
-from secretary.web.statuses import status_for
-from secretary.webproto import sprint_ops
-from secretary.webproto.errors import IdentityRefused, ValidationRefused
 from tests.observer_identity import as_observer, unbound_observer
+from ummanu import product_issue_commands, sprint_commands, task_commands
+from ummanu.board.roles import BOARD_ROLES, Role
+from ummanu.cli import build_parser, main
+from ummanu.product_issues import ProductIssueStore
+from ummanu.runtime import role_env
+from ummanu.sprints import SprintWriter
+from ummanu.tasks import TaskError, TaskWriter, admit_role, is_significant_observer_event
+from ummanu.web.statuses import status_for
+from ummanu.webproto import sprint_ops
+from ummanu.webproto.errors import IdentityRefused, ValidationRefused
 
-SRC = Path(__file__).resolve().parents[1] / "src" / "secretary"
+SRC = Path(__file__).resolve().parents[1] / "src" / "ummanu"
 SPRINT = "sprint:1465"
 OTHER_SPRINT = "sprint:9"
 # The client calls that change the board. A refused write makes none of them.
@@ -99,7 +99,7 @@ class AdmitRoleTests(unittest.TestCase):
 
     def test_every_other_pair_is_decided_by_membership_alone(self) -> None:
         self.assertIs(admit_role("po", "po", {Role.PO}), Role.PO)
-        self.assertIs(admit_role("po", "vladmesh-secretary", {"po"}), Role.PO)
+        self.assertIs(admit_role("po", "vladmesh-ummanu", {"po"}), Role.PO)
         self.assertIs(admit_role("observer", "observer", {"observer"}), Role.OBSERVER)
         self.assertIs(admit_role("dispatcher", "observer", {Role.DISPATCHER}), Role.DISPATCHER)
         self.assertIs(admit_role("worker", "claude-opus-high", BOARD_ROLES), Role.WORKER)
@@ -154,9 +154,9 @@ class CliMasqueradeTests(unittest.TestCase):
             mock.patch.object(product_issue_commands, "board_client", board),
             mock.patch.object(sprint_ops, "board_client", board),
             mock.patch.object(sprint_ops.SprintOperationLayer, "report", return_value=report),
-            mock.patch("secretary.tasks.task_audit_for", return_value=audit),
-            mock.patch("secretary.sprints.task_audit_for", return_value=audit),
-            mock.patch("secretary.product_issues.task_audit_for", return_value=audit),
+            mock.patch("ummanu.tasks.task_audit_for", return_value=audit),
+            mock.patch("ummanu.sprints.task_audit_for", return_value=audit),
+            mock.patch("ummanu.product_issues.task_audit_for", return_value=audit),
             mock.patch.dict(os.environ, {"BOARD_ACTOR": ""}),
         ):
             self.enterContext(patcher)
@@ -321,7 +321,7 @@ class ObserverSprintCommentTests(SprintWriterFixture):
         }
         self.assertFalse(is_significant_observer_event(event, linked_refs=set(), sprint_ref=SPRINT))
         # The PO's comment on the same sprint still does.
-        po = {**event, "actor": {"role": "po", "id": "vladmesh-secretary"}}
+        po = {**event, "actor": {"role": "po", "id": "vladmesh-ummanu"}}
         self.assertTrue(is_significant_observer_event(po, linked_refs=set(), sprint_ref=SPRINT))
 
 
@@ -371,7 +371,7 @@ class ObserverSprintCloseTests(SprintWriterFixture):
 
     def test_the_po_close_and_its_masquerade(self) -> None:
         with mock.patch.object(self.writer, "_close_atomic", return_value={}) as close:
-            self.writer.close(role="po", actor="vladmesh-secretary", reference=SPRINT, request_id="c")
+            self.writer.close(role="po", actor="vladmesh-ummanu", reference=SPRINT, request_id="c")
             with self.assertRaises(TaskError) as raised:
                 self.writer.close(role="po", actor="observer", reference=SPRINT, request_id="c2")
         self.assertEqual(raised.exception.code, "role_masquerade")
@@ -385,12 +385,12 @@ class ObserverSprintCloseTests(SprintWriterFixture):
             "event": {"ref": SPRINT, "payload": {}},
         }
         payload: dict[str, Any] = {}
-        from secretary.board.sprint_close import SprintCloseDecisions
+        from ummanu.board.sprint_close import SprintCloseDecisions
 
         decisions = SprintCloseDecisions.from_document(
             {
                 "issues": [{"ref": "issue:1", "verdict": "resolved", "reason": "done"}],
-                "cards": [{"ref": "secretary-2", "verdict": "drop", "reason": "later"}],
+                "cards": [{"ref": "ummanu-2", "verdict": "drop", "reason": "later"}],
             }
         )
         store = mock.MagicMock()
@@ -400,12 +400,12 @@ class ObserverSprintCloseTests(SprintWriterFixture):
             mock.patch.object(self.writer, "_close_step_status", return_value="todo"),
             mock.patch.object(self.writer, "_require_close_step_settled"),
             mock.patch.object(self.writer.transactions, "save"),
-            mock.patch("secretary.sprints.TaskWriter") as writer_class,
-            mock.patch("secretary.sprints.TaskReader") as reader_class,
+            mock.patch("ummanu.sprints.TaskWriter") as writer_class,
+            mock.patch("ummanu.sprints.TaskReader") as reader_class,
         ):
             reader_class.return_value.show.return_value = {"state": "in_progress"}
             self.writer._close_declared_issues(document, document["event"], payload, decisions)
-            targets = mock.MagicMock(remaining_state_map={"secretary-2": "in_progress"})
+            targets = mock.MagicMock(remaining_state_map={"ummanu-2": "in_progress"})
             self.writer._dispose_remaining_cards(document, document["event"], payload, decisions, targets)
         close_issue = store.close_issue.call_args.kwargs
         self.assertEqual((close_issue["role"], close_issue["actor"]), ("observer", "observer"))
@@ -421,7 +421,7 @@ class CloseDispositionPlanTests(SprintWriterFixture):
 
     DECISIONS: ClassVar[dict[str, list[dict[str, str]]]] = {
         "issues": [{"ref": "issue:1", "verdict": "resolved", "reason": "landed"}],
-        "cards": [{"ref": "secretary-3", "verdict": "done", "reason": "reviewed green"}],
+        "cards": [{"ref": "ummanu-3", "verdict": "done", "reason": "reviewed green"}],
     }
 
     def close(self, role: str, actor: str) -> tuple[Any, mock.MagicMock, mock.MagicMock, mock.MagicMock]:
@@ -429,15 +429,15 @@ class CloseDispositionPlanTests(SprintWriterFixture):
         store = mock.MagicMock(name="issues")
         store.show_issue.return_value = {"closed": False, "close_reason": ""}
         cards = [
-            {"ref": "secretary-2", "state": "done", "sprint": SPRINT},
-            {"ref": "secretary-3", "state": "assessment", "sprint": SPRINT},
+            {"ref": "ummanu-2", "state": "done", "sprint": SPRINT},
+            {"ref": "ummanu-3", "state": "assessment", "sprint": SPRINT},
         ]
-        sprint = {"id": "sprint_postgres_1465", "ref": SPRINT, "goal": "g", "issues": ["issue:1"], "reservations": ["secretary"]}
+        sprint = {"id": "sprint_postgres_1465", "ref": SPRINT, "goal": "g", "issues": ["issue:1"], "reservations": ["ummanu"]}
         committed = {"kind": "closed", "ref": SPRINT, "payload": {}}
         with (
             mock.patch.object(self.writer.reader, "show", return_value=sprint),
-            mock.patch("secretary.sprints.TaskReader") as reader_class,
-            mock.patch("secretary.sprints.TaskWriter") as writer_class,
+            mock.patch("ummanu.sprints.TaskReader") as reader_class,
+            mock.patch("ummanu.sprints.TaskWriter") as writer_class,
             mock.patch.object(self.writer, "_issue_store", return_value=store),
             mock.patch.object(self.writer.transactions, "existing", return_value=(None, None)),
             mock.patch.object(self.writer.transactions, "begin", return_value=(None, committed)) as begin,
@@ -459,7 +459,7 @@ class CloseDispositionPlanTests(SprintWriterFixture):
             refused, begin, store, writer = self.close("observer", "observer")
         self.assertIsInstance(refused, TaskError)
         self.assertEqual(refused.code, "close_plan_forbidden")
-        self.assertIn("secretary-3 (in assessment, done)", refused.message)
+        self.assertIn("ummanu-3 (in assessment, done)", refused.message)
         self.assertIn("task decide", refused.message)
         begin.assert_not_called()
         self.client.sprints.save_close.assert_not_called()
@@ -469,12 +469,12 @@ class CloseDispositionPlanTests(SprintWriterFixture):
         self.audit.stage.assert_not_called()
 
     def test_the_same_plan_as_a_po_close_under_the_override_is_staged(self) -> None:
-        answer, begin, _store, _writer = self.close("po", "vladmesh-secretary")
+        answer, begin, _store, _writer = self.close("po", "vladmesh-ummanu")
         self.assertEqual(answer, {"closed": True})
         begin.assert_called_once()
 
     def test_the_refusal_comes_from_the_transition_table_not_from_a_named_column(self) -> None:
-        from secretary.board import card_transitions
+        from ummanu.board import card_transitions
 
         allowed = card_transitions.CARD_TRANSITIONS
         widened = {**allowed, Role.OBSERVER: allowed[Role.PO]}
@@ -497,14 +497,14 @@ class ObserverIssueTests(unittest.TestCase):
         self.created: list[Any] = []
         self.host.create.side_effect = self.created.append
         for patcher in (
-            mock.patch("secretary.sprints.task_audit_for", return_value=self.audit),
+            mock.patch("ummanu.sprints.task_audit_for", return_value=self.audit),
             mock.patch.object(ProductIssueStore, "_host", return_value=self.host),
             mock.patch.object(ProductIssueStore, "_reject_other_pending_reference_operation"),
             mock.patch.object(ProductIssueStore, "_reject_other_pending_typed_operation"),
             mock.patch.object(ProductIssueStore, "show_issue", side_effect=lambda ref: {"ref": ref}),
             mock.patch(
-                "secretary.sprints.SprintReader.show",
-                side_effect=lambda ref, **_: {"ref": ref, "product": "secretary"},
+                "ummanu.sprints.SprintReader.show",
+                side_effect=lambda ref, **_: {"ref": ref, "product": "ummanu"},
             ),
         ):
             self.enterContext(patcher)
@@ -528,7 +528,7 @@ class ObserverIssueTests(unittest.TestCase):
         with as_observer(SPRINT):
             self.create()
         (operation,) = self.created
-        self.assertEqual(operation.entity.product_ref, "product:secretary")
+        self.assertEqual(operation.entity.product_ref, "product:ummanu")
         self.assertEqual((operation.actor.role, operation.actor.id), (Role.OBSERVER, "observer"))
         self.assertEqual(operation.related_refs.refs, (SPRINT,))
 
@@ -556,7 +556,7 @@ class ObserverIssueTests(unittest.TestCase):
                 reference="issue:1", body="b", reason="r", actor="observer", role="observer"
             ),
             "product create": lambda: self.store.create_product(
-                product_id="p", projects=["secretary"], title="t", description="", actor="observer", role="observer"
+                product_id="p", projects=["ummanu"], title="t", description="", actor="observer", role="observer"
             ),
         }
         with as_observer(SPRINT):
@@ -569,7 +569,7 @@ class ObserverIssueTests(unittest.TestCase):
 
     def test_the_po_masquerade_files_nothing(self) -> None:
         with self.assertRaises(TaskError) as raised:
-            self.create(role="po", product="secretary")
+            self.create(role="po", product="ummanu")
         self.assertEqual(raised.exception.code, "role_masquerade")
         self.assertEqual(self.created, [])
 
@@ -581,7 +581,7 @@ class ObserverTaskWriterTests(unittest.TestCase):
         self.writer.reader.show.return_value = {
             "ref": "issue:1",
             "record_type": "issue",
-            "project": "secretary",
+            "project": "ummanu",
             "state": "issues",
         }
 
@@ -597,13 +597,13 @@ class ObserverTaskWriterTests(unittest.TestCase):
     def test_archive_admits_the_observer_only_as_a_step_of_its_sprint_s_close(self) -> None:
         with as_observer(SPRINT):
             with self.assertRaises(TaskError) as raised:
-                self.writer.archive(role="observer", actor="observer", reference="secretary-2", reason="r")
+                self.writer.archive(role="observer", actor="observer", reference="ummanu-2", reason="r")
             self.assertEqual(raised.exception.code, "role_forbidden")
         self.writer.audit = mock.MagicMock()
         self.writer.audit.committed_event.return_value = None
         with as_observer(OTHER_SPRINT), self.assertRaises(TaskError) as raised:
             self.writer.archive(
-                role="observer", actor="observer", reference="secretary-2", reason="r", sprint_close=SPRINT
+                role="observer", actor="observer", reference="ummanu-2", reason="r", sprint_close=SPRINT
             )
         self.assertEqual(raised.exception.code, "observer_sprint_mismatch")
 

@@ -9,8 +9,8 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from secretary.web import provider_usage
-from secretary.web.provider_usage import CLAUDE_USAGE_URL, CODEX_USAGE_URL, ProviderUsageLayer
+from ummanu.web import provider_usage
+from ummanu.web.provider_usage import CLAUDE_USAGE_URL, CODEX_USAGE_URL, ProviderUsageLayer
 
 NOW = 1_800_000_000.0
 

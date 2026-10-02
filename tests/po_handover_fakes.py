@@ -11,10 +11,10 @@ import copy
 from datetime import UTC, datetime
 from typing import Any
 
-from secretary.board.audit_contract import require_claim
-from secretary.board.owner_handover import HANDED_TO_OWNER, mark_values, render_handover_comment
 from tests.owner_event_fakes import FakeOwnerEvents
 from tests.po_card_fakes import REF, DispatcherFixture, card
+from ummanu.board.audit_contract import require_claim
+from ummanu.board.owner_handover import HANDED_TO_OWNER, mark_values, render_handover_comment
 
 REASON = "Pay the relay provider: a card is needed and the owner holds it."
 SINCE = "2026-09-26T15:00:00Z"

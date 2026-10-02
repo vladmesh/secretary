@@ -12,9 +12,9 @@ import threading
 import unittest
 from pathlib import Path
 
-from secretary.board.sql_cards import SqlCardClient
-from secretary.tasks import TaskError
 from tests.sql_backend_fixtures import PostgresBoard, terminate_session
+from ummanu.board.sql_cards import SqlCardClient
+from ummanu.tasks import TaskError
 
 
 class TerminatedSessionTests(unittest.TestCase):

@@ -7,18 +7,18 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from secretary.runtime.prompt_document import (
+from ummanu.runtime.prompt_document import (
     NUDGE_MAX_BYTES,
     PromptDocumentError,
     nudge_for,
     write_prompt_document,
 )
-from secretary.runtime.agent_prompt_transport import prepare_agent_prompt
+from ummanu.runtime.agent_prompt_transport import prepare_agent_prompt
 
 # What a card description can carry into a prompt and what the composer failures were made of: an
 # escape, a bracketed-paste terminator, and the CRLF the board's own web form submits.
 HOSTILE_PROMPT = (
-    "# Review secretary-1409\r\n"
+    "# Review ummanu-1409\r\n"
     "\x1b[201~ terminator pasted into the description\r\n"
     "\x1b]0;retitle the pane\x07 and an OSC for good measure\r\n"
     "\x1b[200~ opener too\r\n"
@@ -30,11 +30,11 @@ class NudgeTests(unittest.TestCase):
     """The line that goes into the pane, and the only thing it is allowed to be."""
 
     def test_the_nudge_is_one_bounded_line_naming_the_document(self) -> None:
-        nudge = nudge_for("/var/lib/secretary/artifacts/prompts/secretary-1409/reviewer-0.md")
+        nudge = nudge_for("/var/lib/ummanu/artifacts/prompts/ummanu-1409/reviewer-0.md")
 
         self.assertLessEqual(len(nudge.encode("utf-8")), NUDGE_MAX_BYTES)
         self.assertEqual(nudge.splitlines(), [nudge], "a nudge is one line")
-        self.assertIn("/var/lib/secretary/artifacts/prompts/secretary-1409/reviewer-0.md", nudge)
+        self.assertIn("/var/lib/ummanu/artifacts/prompts/ummanu-1409/reviewer-0.md", nudge)
 
     def test_a_hostile_prompt_cannot_reach_the_pane_through_its_nudge(self) -> None:
         """The point of the whole seam: the document holds the content, the pane holds a path.
@@ -75,16 +75,16 @@ class NudgeTests(unittest.TestCase):
     def test_a_note_travels_in_the_same_line_as_the_path(self) -> None:
         """secretary-1413: a caller whose pointer has to discriminate — which round, what outranks
         what — hands its tail here instead of assembling a line past the only check there is."""
-        nudge = nudge_for("/var/lib/secretary/prompts/rework-2.md", "Generation 2: its own round.")
+        nudge = nudge_for("/var/lib/ummanu/prompts/rework-2.md", "Generation 2: its own round.")
 
-        self.assertIn("/var/lib/secretary/prompts/rework-2.md", nudge)
+        self.assertIn("/var/lib/ummanu/prompts/rework-2.md", nudge)
         self.assertTrue(nudge.endswith("Generation 2: its own round."))
         self.assertEqual(nudge.splitlines(), [nudge], "a nudge is one line")
 
     def test_the_ceiling_is_measured_over_the_path_and_the_note_together(self) -> None:
         """The line the pane receives is what the ceiling is about, so a note that pushes it over
         is refused whole rather than trimmed: a discriminator cut to length is not one."""
-        path = "/var/lib/secretary/prompts/rework-2.md"
+        path = "/var/lib/ummanu/prompts/rework-2.md"
         room = NUDGE_MAX_BYTES - len(nudge_for(path).encode("utf-8")) - 1
 
         self.assertEqual(len(nudge_for(path, "n" * room).encode("utf-8")), NUDGE_MAX_BYTES)
@@ -96,7 +96,7 @@ class NudgeTests(unittest.TestCase):
         the framing failure the whole seam exists to keep out of a composer."""
         for note in ("two\nlines", "esc\x1b[200~"):
             with self.subTest(note=note), self.assertRaises(PromptDocumentError):
-                nudge_for("/var/lib/secretary/prompts/rework-2.md", note)
+                nudge_for("/var/lib/ummanu/prompts/rework-2.md", note)
 
 
 class PromptDocumentTests(unittest.TestCase):

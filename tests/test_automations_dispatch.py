@@ -10,11 +10,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.automations.runtime import dispatch
-from secretary.runtime import codex_preflight
-from secretary.runtime import state as runtime_state
-from secretary.runtime.head import HeadSpec
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from ummanu.automations.runtime import dispatch
+from ummanu.runtime import codex_preflight
+from ummanu.runtime import state as runtime_state
+from ummanu.runtime.head import HeadSpec
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 
 
 class RecordingReports:
@@ -26,7 +26,7 @@ class RecordingReports:
 
     def create_report(self, *, project: str, title: str, slug: str) -> str:
         self.created.append((project, title, slug))
-        return "secretary-report-1"
+        return "ummanu-report-1"
 
     def move_report(self, *, reference: str, target: str, reason: str) -> None:
         self.moves.append((reference, target, reason))
@@ -75,15 +75,15 @@ class TriggeredDispatchTests(unittest.TestCase):
             run = dispatch._standing_memory_run("curator", spec, self.workspace, "curator-run")
             command = dispatch._memory_heartbeat(run, dispatch._memory_bound_launch("curator", run, "codex"))
 
-        self.assertIn("secretary.memory.grant_env", command)
+        self.assertIn("ummanu.memory.grant_env", command)
         self.assertIn(str(Path(run.pid_file)), command)
-        self.assertNotIn("SECRETARY_MEMORY_ACCESS_TOKEN=", command)
+        self.assertNotIn("UMMANU_MEMORY_ACCESS_TOKEN=", command)
 
     def test_unreadable_pause_state_blocks_dispatch_and_is_reported(self) -> None:
         output = io.StringIO()
         with (
             mock.patch(
-                "secretary.automations.agents.pipeline.pause.is_paused",
+                "ummanu.automations.agents.pipeline.pause.is_paused",
                 side_effect=OSError("pause.json: input/output error"),
             ),
             contextlib.redirect_stderr(output),
@@ -95,11 +95,11 @@ class TriggeredDispatchTests(unittest.TestCase):
     def test_injected_steward_report_port_owns_create_done_and_blocked(self) -> None:
         reports = RecordingReports()
         state = mock.Mock()
-        cmd = dispatch.DispatchCommand("/steward", "claude /steward", None, "secretary-report-1")
+        cmd = dispatch.DispatchCommand("/steward", "claude /steward", None, "ummanu-report-1")
 
         self.assertEqual(
             dispatch._steward_report_card("steward", "hourly", report_board=reports),
-            "secretary-report-1",
+            "ummanu-report-1",
         )
         dispatch._release_steward_report(state, "tick", cmd, "not dispatched", report_board=reports)
         dispatch._escalate_steward_preflight_failure(
@@ -111,7 +111,7 @@ class TriggeredDispatchTests(unittest.TestCase):
 
 
 class StandingHeadReadinessTests(unittest.TestCase):
-    """The resolution reads `secretary.head_health`'s one cache and vocabulary.
+    """The resolution reads `ummanu.head_health`'s one cache and vocabulary.
 
     The verdicts are planted in `<data>/dispatcher/resource_health.json` exactly as the production
     dispatcher leaves them, so no probe runs: a fresh cache entry answers within the TTL.
@@ -130,7 +130,7 @@ class StandingHeadReadinessTests(unittest.TestCase):
     }
 
     def setUp(self) -> None:
-        from secretary.runtime import heads as pipeline_heads
+        from ummanu.runtime import heads as pipeline_heads
 
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -139,7 +139,7 @@ class StandingHeadReadinessTests(unittest.TestCase):
             self.REGISTRY["resources"], self.REGISTRY["profiles"], self.REGISTRY["role_defaults"]
         )
         self.snapshot = dispatch.RegistrySnapshot(self.registry)
-        env = mock.patch.dict(os.environ, {"SECRETARY_DATA_DIR": str(self.data_dir)})
+        env = mock.patch.dict(os.environ, {"UMMANU_DATA_DIR": str(self.data_dir)})
         env.start()
         self.addCleanup(env.stop)
         spec = mock.patch.object(dispatch, "_load_spec", return_value={"skill": "/steward"})
@@ -194,15 +194,15 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.workspace = str(Path(self.tmp.name) / "workspace")
         Path(self.workspace).mkdir()
-        from secretary.runtime import heads as pipeline_heads
+        from ummanu.runtime import heads as pipeline_heads
 
         self.registry = pipeline_heads.Registry(
             self.REGISTRY["resources"], self.REGISTRY["profiles"], self.REGISTRY["role_defaults"]
         )
 
     def test_a_codex_service_head_is_launched_without_its_skill(self) -> None:
-        from secretary.head_health import HeadChoice, HeadReadiness
-        from secretary.runtime import heads as pipeline_heads
+        from ummanu.head_health import HeadChoice, HeadReadiness
+        from ummanu.runtime import heads as pipeline_heads
 
         chosen = HeadChoice("codex", "codex", HeadReadiness("openai-sub", "ready", "probe succeeded", 0.0))
         with (
@@ -251,7 +251,7 @@ class TriggeredCodexHeadTests(unittest.TestCase):
 
     def test_an_agent_spec_head_is_used_under_its_own_id(self) -> None:
         """The spec's last-resort head is an ordinary id: returned as-is when the registry has it."""
-        from secretary.runtime import heads as pipeline_heads
+        from ummanu.runtime import heads as pipeline_heads
 
         registry = pipeline_heads.Registry(self.REGISTRY["resources"], self.REGISTRY["profiles"], {})
 
@@ -264,7 +264,7 @@ class TriggeredCodexHeadTests(unittest.TestCase):
 
         The dispatch is refused by name rather than rendered as whatever profile looks closest.
         """
-        from secretary.runtime import heads as pipeline_heads
+        from ummanu.runtime import heads as pipeline_heads
 
         tiers = pipeline_heads.Registry(
             self.REGISTRY["resources"],
@@ -293,7 +293,7 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
 
     The interactive Codex heads a service tick brings up (curator, retro, steward) are asked about
     directory trust before they will take a prompt, and nobody is sitting in front of the head to
-    answer. So the tick answers it first, through the same preflight the Secretary dispatcher uses,
+    answer. So the tick answers it first, through the same preflight the Ummanu dispatcher uses,
     and a workspace it cannot prepare fails before the supervisor starts anything (secretary-1173).
     """
 
@@ -441,10 +441,10 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
             encoding="utf-8",
         )
         command = dispatch.DispatchCommand(
-            "/steward --card secretary-817",
+            "/steward --card ummanu-817",
             "codex",
             "codex",
-            "secretary-817",
+            "ummanu-817",
             prompt_after_start=True,
             head_profile=self.profile,
         )
@@ -466,15 +466,15 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
             )
 
         self.assertEqual(runtime.starts, [])
-        self.assertEqual(reports.moves[0][:2], ("secretary-817", "blocked"))
+        self.assertEqual(reports.moves[0][:2], ("ummanu-817", "blocked"))
         self.assertIn("no head was started", reports.moves[0][2])
         self.assertIn("trust_level 'untrusted'", reports.moves[0][2])
         self.assertNotIn("done", [call[1] for call in reports.moves])
-        state.clear_active_report.assert_called_once_with("secretary-817")
+        state.clear_active_report.assert_called_once_with("ummanu-817")
 
     def test_the_service_launcher_and_the_dispatcher_run_one_preflight(self) -> None:
         """Not two implementations that agree today: the same function object."""
-        from secretary.dispatch import launcher as dispatcher_launcher
+        from ummanu.dispatch import launcher as dispatcher_launcher
 
         self.assertIs(dispatch.preflight_codex_launch, codex_preflight.preflight_codex_launch)
         self.assertIs(

@@ -17,19 +17,19 @@ import json
 import re
 from typing import Any
 
-from secretary.board.backend import (
+from tests.fakes.sprints import SprintFixture
+from tests.observer_identity import as_observer
+from tests.retired_board import RETIRED_STORE
+from tests.sql_backend_fixtures import ensure_sprint_row
+from ummanu.board.backend import (
     BOARD_STORE_KIND,
     entity_id,
     entity_number,
     record_key,
     sprint_reference_number,
 )
-from secretary.board.sql_audit import SqlTaskAudit
-from secretary.tasks import TaskReader, TaskWriter
-from tests.fakes.sprints import SprintFixture
-from tests.observer_identity import as_observer
-from tests.retired_board import RETIRED_STORE
-from tests.sql_backend_fixtures import ensure_sprint_row
+from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.tasks import TaskReader, TaskWriter
 
 
 def _identity_fields(event: dict[str, Any]) -> list[str]:
@@ -59,8 +59,8 @@ class NewWritesNamePostgresTests(SprintFixture):
         self.assertNotIn(RETIRED_STORE, json.dumps(event), event)
 
     def test_every_event_of_the_four_mutations_names_postgres(self) -> None:
-        product = self.arrange_product("identity", projects=["secretary"])
-        issue = self.arrange_issue("identity", product="secretary")
+        product = self.arrange_product("identity", projects=["ummanu"])
+        issue = self.arrange_issue("identity", product="ummanu")
         sprint = self._create(goal="identity", request_id="identity-sprint")["sprint"]
         self.writer.comment(
             role="po", actor="operator", reference=sprint["ref"], body="hello", request_id="identity-comment"
@@ -69,7 +69,7 @@ class NewWritesNamePostgresTests(SprintFixture):
             card = TaskWriter(self.client, data_dir=self.tmp.name).create(  # type: ignore[arg-type]
                 role="observer",
                 actor="observer",
-                project="secretary",
+                project="ummanu",
                 task_type="code",
                 title="identity",
                 target="ready",
@@ -104,7 +104,7 @@ class NewWritesNamePostgresTests(SprintFixture):
         intent = {
             "record_type": "product",
             "product_id": "released",
-            "product_projects": '["secretary"]',
+            "product_projects": '["ummanu"]',
             "title": "Released",
             "description": "",
             "actor": "po",
@@ -150,13 +150,13 @@ class HistoricalStoreIdentityTests(SprintFixture):
         return event
 
     def test_a_card_s_pre_cutover_history_resolves_by_request_ref_and_number(self) -> None:
-        card = TaskReader(self.client).show("secretary-12")  # type: ignore[arg-type]
+        card = TaskReader(self.client).show("ummanu-12")  # type: ignore[arg-type]
         number = entity_number("task", card["id"])
-        seeded = self._seed_history("history-card", ref="secretary-12", kind="commented", number=number or 0)
+        seeded = self._seed_history("history-card", ref="ummanu-12", kind="commented", number=number or 0)
 
         audit = SqlTaskAudit(self.client)
         self.assertEqual(audit.committed_event("history-card"), seeded)
-        self.assertIn(seeded, audit.events(reference="secretary-12"))
+        self.assertIn(seeded, audit.events(reference="ummanu-12"))
         self.assertEqual(entity_number("task", seeded["task_id"]), number)
         self.assertTrue(card["id"].startswith("task_postgres_"), card)
 
@@ -200,13 +200,13 @@ class LiteralPreCutoverIdentityTests(SprintFixture):
         return event
 
     def test_retired_task_12_resolves_to_the_card_the_store_holds_under_12(self) -> None:
-        seeded = self._seed("literal-card", ref="secretary-12", task_id=f"task_{RETIRED_STORE}_12", number=12)
+        seeded = self._seed("literal-card", ref="ummanu-12", task_id=f"task_{RETIRED_STORE}_12", number=12)
 
         number = entity_number("task", f"task_{RETIRED_STORE}_12")
         self.assertEqual(number, 12)
         reader = TaskReader(self.client)  # type: ignore[arg-type]
         card = reader.show_id(number)
-        self.assertEqual(card["ref"], "secretary-12")
+        self.assertEqual(card["ref"], "ummanu-12")
         # The live row names the store, and it is the same number.
         self.assertEqual(card["id"], "task_postgres_12")
         self.assertEqual(entity_number("task", card["id"]), number)

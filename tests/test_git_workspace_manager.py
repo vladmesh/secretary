@@ -20,14 +20,14 @@ from pathlib import Path
 from typing import Any
 from types import SimpleNamespace
 
-from secretary.dispatch.cleanup import CleanupOwner
+from ummanu.dispatch.cleanup import CleanupOwner
 from unittest import mock
 
-from secretary.dispatch.host import CommandHostRuntime, LaunchedHead
-from secretary.dispatch.launch import CAUSE_WORKSPACE_CONTRACT
-from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatch.types import HostError, LegacyDispatcherRecord
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from ummanu.dispatch.host import CommandHostRuntime, LaunchedHead
+from ummanu.dispatch.launch import CAUSE_WORKSPACE_CONTRACT
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.types import HostError, LegacyDispatcherRecord
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 from tests.fakes.dispatcher import FakeCatalog
 from tests.production_runtime_fixtures import registered_production_runtime
 
@@ -191,7 +191,7 @@ class GitWorkspaceManagerTests(unittest.TestCase):
         self.root = Path(self.tmpdir.name).resolve()
         self.fixture = _Fixture(self.root)
         self.orca_root = self.root / "orca-workspaces"
-        env = mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.orca_root)})
+        env = mock.patch.dict(os.environ, {"UMMANU_DISPATCHER_WORKSPACES_ROOT": str(self.orca_root)})
         env.start()
         self.addCleanup(env.stop)
         self.data_dir = self.root / "data"
@@ -418,7 +418,7 @@ class GitWorkspaceRootTests(unittest.TestCase):
             host = CommandHostRuntime(FakeCatalog(), data, mode="real")  # type: ignore[arg-type]
             git_path = str(data / "workspaces" / PROJECT / WORKER)
             orca_path = str(data / "orca" / ORCA_BINDING / WORKER)
-            with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(data / "orca")}):
+            with mock.patch.dict(os.environ, {"UMMANU_DISPATCHER_WORKSPACES_ROOT": str(data / "orca")}):
                 self.assertTrue(host._is_git_workspace(git_path))
                 self.assertFalse(host._legacy_workspace(git_path))
                 self.assertFalse(host._is_git_workspace(orca_path))
@@ -431,7 +431,7 @@ class GitWorkspaceRootTests(unittest.TestCase):
             data = Path(tmp)
             host = CommandHostRuntime(FakeCatalog(), data, mode="real")  # type: ignore[arg-type]
             root = data / "workspaces"
-            with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(data / "orca")}):
+            with mock.patch.dict(os.environ, {"UMMANU_DISPATCHER_WORKSPACES_ROOT": str(data / "orca")}):
                 self.assertTrue(host._is_git_workspace(str(root / PROJECT / WORKER)))
                 for other in (root / WORKER, root / PROJECT / WORKER / "nested", root, data / "elsewhere"):
                     with self.subTest(path=other):

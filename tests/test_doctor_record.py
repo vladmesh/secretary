@@ -14,10 +14,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary import cli, status
-from secretary.cli import main
-from secretary.infra import doctor_record as records
-from secretary.infra.host_space_policy import ROOT_FREE_MIN_BYTES
+from ummanu import cli, status
+from ummanu.cli import main
+from ummanu.infra import doctor_record as records
+from ummanu.infra.host_space_policy import ROOT_FREE_MIN_BYTES
 
 
 class RootDiskFindingTests(unittest.TestCase):
@@ -86,7 +86,7 @@ class DoctorRecordTests(unittest.TestCase):
                         "https://github.com/example/fixture.git"], check=True)
         # No secret: the real ambient-helper predicate sees a declared helper name.
         (self.home / ".gitconfig").write_text("[credential]\n\thelper = fixture-helper\n")
-        command = [sys.executable, "-P", "-m", "secretary", "doctor-record", "--instance", str(self.instance),
+        command = [sys.executable, "-P", "-m", "ummanu", "doctor-record", "--instance", str(self.instance),
                    "--data-dir", str(self.data), "--offline"]
         environment = {**os.environ, "PYTHONPATH": str(Path(records.__file__).resolve().parents[2])}
         result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=50, check=False)
@@ -100,16 +100,16 @@ class DoctorRecordTests(unittest.TestCase):
         self.assertTrue(bypass, document)
         self.assertEqual(bypass[0]["capability"], "checkpoint-git-authentication")
         self.assertNotIn("fixture-helper", json.dumps(document))
-        direct = subprocess.run([sys.executable, "-P", "-m", "secretary", "doctor", "--instance", str(self.instance),
+        direct = subprocess.run([sys.executable, "-P", "-m", "ummanu", "doctor", "--instance", str(self.instance),
                                  "--offline", "--json"], env=environment, capture_output=True, text=True, timeout=50, check=False)
         self.assertEqual(direct.returncode, 1)
         self.assertEqual(document["result"]["findings"], json.loads(direct.stdout)["findings"])
         self.assertEqual(envelope["installation"], records.identity(self.instance, self.data))
         self.assertTrue(document["run_at"].endswith("Z"))
         self.assertIsNotNone(document["completed_at"])
-        from secretary.web.app import WebApp
-        from secretary.web.commands import health_layers
         from tests.web_fakes import Recording
+        from ummanu.web.app import WebApp
+        from ummanu.web.commands import health_layers
 
         reads, doctor = health_layers(str(self.instance), data_dir=str(self.data), offline=True)
         reads._status_reader = lambda: {}
@@ -322,9 +322,9 @@ class DoctorRecordTests(unittest.TestCase):
         self.assertIsNone(self.document()["completed"])
 
     def web_fixture(self):
-        from secretary.web.app import WebApp
-        from secretary.web.commands import health_layers
         from tests.web_fakes import Recording, system_snapshot
+        from ummanu.web.app import WebApp
+        from ummanu.web.commands import health_layers
 
         self.web_clock = 1_800_000_000
         self.web_status = {}
@@ -348,8 +348,8 @@ class DoctorRecordTests(unittest.TestCase):
         return app, doctor
 
     def assert_web_state(self, app, doctor, colour, *, codes):
-        from secretary.config import validate
         from tests.web_fakes import system_snapshot
+        from ummanu.config import validate
 
         document = doctor.doctor_snapshot()
         self.assertEqual(document["colour"], colour)
@@ -371,7 +371,7 @@ class DoctorRecordTests(unittest.TestCase):
         return document
 
     def test_actual_producer_transitions_share_cached_dashboard_lamp_and_doctor(self):
-        from secretary.web.doctor import CACHE_SECONDS
+        from ummanu.web.doctor import CACHE_SECONDS
         app, doctor = self.web_fixture()
         prior = self.baseline()
         records.publish(self.path, prior)
@@ -417,7 +417,7 @@ class DoctorRecordTests(unittest.TestCase):
                         problem = document["problems"][-1]
                         self.assertAlmostEqual(problem["elapsed_seconds"], elapsed)
                         self.assertEqual(problem["threshold_seconds"], records.STUCK_SECONDS)
-                        self.assertIn("secretary-doctor.service", problem["message"])
+                        self.assertIn("ummanu-doctor.service", problem["message"])
 
     def test_same_second_restart_keeps_current_progress_and_stuck_finding(self):
         app, doctor = self.web_fixture()

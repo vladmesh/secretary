@@ -33,7 +33,7 @@ STALE_HANDLE_WAIT_FAILURE = (
 
 
 def install_skill_registry(root: Path, *, delivered: bool = True) -> Path:
-    """A role-skill registry of this test's own, pointed at by SECRETARY_ROLE_SKILLS_MANIFEST.
+    """A role-skill registry of this test's own, pointed at by UMMANU_ROLE_SKILLS_MANIFEST.
 
     The launch gate reads the shell's skill directory, and the shells of the live installation are
     not a fixture: a test that let the tick look at them would pass or fail on whether somebody had

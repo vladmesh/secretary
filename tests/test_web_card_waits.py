@@ -17,21 +17,21 @@ import unittest
 from pathlib import Path
 from typing import Any, ClassVar
 
-from secretary.board.e2e_record import e2e_view
-from secretary.po import token as po_token
-from secretary.web import pages
-from secretary.web.app import WebApp
-from secretary.webproto.errors import RuntimeUnavailable
-from secretary.webproto.po_auth import PoTokenLayer
-from secretary.webproto.po_ops import PoLayer
-from secretary.webproto.sprint_reads import WAITING_ON_KINDS, card_waits
 from tests.po_fake_store import FakePoStore
 from tests.web_fakes import Recording
+from ummanu.board.e2e_record import e2e_view
+from ummanu.po import token as po_token
+from ummanu.web import pages
+from ummanu.web.app import WebApp
+from ummanu.webproto.errors import RuntimeUnavailable
+from ummanu.webproto.po_auth import PoTokenLayer
+from ummanu.webproto.po_ops import PoLayer
+from ummanu.webproto.sprint_reads import WAITING_ON_KINDS, card_waits
 
 SESSION = "3f0a6c2e-1111-4b4b-9c9c-000000000001"
 SUCCESSOR = "9b7d1e44-2222-4b4b-9c9c-000000000002"
 GONE = "deadbeef-3333-4b4b-9c9c-000000000003"
-RUN_URL = "https://github.com/vladmesh/secretary/actions/runs/4242"
+RUN_URL = "https://github.com/vladmesh/ummanu/actions/runs/4242"
 AVAILABLE = {
     "state": "available",
     "reason": None,
@@ -40,7 +40,7 @@ AVAILABLE = {
 }
 
 
-def snapshot(ref: str = "secretary-520", **value: Any) -> dict[str, Any]:
+def snapshot(ref: str = "ummanu-520", **value: Any) -> dict[str, Any]:
     """A task snapshot as `reads.task_snapshot` answers it, the card carrying `value`."""
     card = {
         "state": "in_progress",
@@ -57,7 +57,7 @@ def snapshot(ref: str = "secretary-520", **value: Any) -> dict[str, Any]:
         "observed_at": "2026-09-28T00:00:00Z",
         "ref": ref,
         "card": {"source": AVAILABLE, "value": card},
-        "project": {"id": "secretary", "registered": True},
+        "project": {"id": "ummanu", "registered": True},
         "attempt": {"source": AVAILABLE, "value": None},
         "agents": {"source": AVAILABLE, "items": []},
         "heads": {},
@@ -83,20 +83,20 @@ def wait(state: str = "waiting", **changes: Any) -> dict[str, Any]:
         "state": state,
         "target": {
             "kind": "github_run",
-            "repo": "vladmesh/secretary",
+            "repo": "vladmesh/ummanu",
             "run_id": 4242,
             "url": RUN_URL,
             "link": RUN_URL,
         },
         "waiting_since": "2026-09-27T12:00:00Z",
         "deadline": "2026-09-27T14:00:00Z",
-        "return_to": ["observer", f"po-session:{SESSION}", "card:secretary-600"],
+        "return_to": ["observer", f"po-session:{SESSION}", "card:ummanu-600"],
         "result": None,
         "delivery": "pending",
         "deliveries": {
             "observer": "pending",
             f"po-session:{SESSION}": "pending",
-            "card:secretary-600": "pending",
+            "card:ummanu-600": "pending",
         },
         "po_sessions": {f"po-session:{SESSION}": {"addressed": SESSION, "received_by": None}},
     }
@@ -240,15 +240,15 @@ class CardWaitTests(PageFixture):
         cases = {
             "run": (
                 wait()["target"],
-                f'<a href="{RUN_URL}" rel="noreferrer">GitHub run vladmesh/secretary#4242</a>',
+                f'<a href="{RUN_URL}" rel="noreferrer">GitHub run vladmesh/ummanu#4242</a>',
             ),
             "run with only its url": (
-                {"kind": "github_run", "repo": "vladmesh/secretary", "run_id": 4242, "url": RUN_URL},
+                {"kind": "github_run", "repo": "vladmesh/ummanu", "run_id": 4242, "url": RUN_URL},
                 f'href="{RUN_URL}"',
             ),
             "card": (
-                {"kind": "card", "ref": "secretary-600", "states": ["done", "blocked"]},
-                '<a class="ref" href="/tasks/secretary-600">secretary-600</a> reaching done or blocked',
+                {"kind": "card", "ref": "ummanu-600", "states": ["done", "blocked"]},
+                '<a class="ref" href="/tasks/ummanu-600">ummanu-600</a> reaching done or blocked',
             ),
             "time": ({"kind": "time", "at": "2026-10-01T09:00:00Z"}, "the time 2026-10-01T09:00:00Z"),
         }
@@ -293,7 +293,7 @@ class CardWaitTests(PageFixture):
             deliveries={
                 "observer": "accepted",
                 f"po-session:{SESSION}": "accepted",
-                "card:secretary-600": "pending",
+                "card:ummanu-600": "pending",
             },
             po_sessions={f"po-session:{SESSION}": {"addressed": SESSION, "received_by": SUCCESSOR}},
         )
@@ -304,7 +304,7 @@ class CardWaitTests(PageFixture):
         self.assertIn("accepted", rows[0][1])
         self.assertIn(f'/po/sessions/{SESSION}">Grill the waits', rows[1][0])
         self.assertIn(f'taken by its successor <a href="/po/sessions/{SUCCESSOR}">', rows[1][0])
-        self.assertIn("/tasks/secretary-600", rows[2][0])
+        self.assertIn("/tasks/ummanu-600", rows[2][0])
         self.assertIn("pending", rows[2][1])
 
     def test_a_malformed_wait_says_so(self) -> None:
@@ -324,11 +324,11 @@ class CardWaitTests(PageFixture):
 class CardE2eTests(PageFixture):
     RUN: ClassVar[dict[str, Any]] = {
         "sha": "0123456789abcdef0123",
-        "dispatch_id": "secretary-520-e2e-1",
+        "dispatch_id": "ummanu-520-e2e-1",
         "workflow": "e2e.yml",
         "state": "success",
         "run": RUN_URL,
-        "wait_card": "secretary-530",
+        "wait_card": "ummanu-530",
         "dispatched_at": "2026-09-27T12:00:00Z",
         "result": {"outcome": "target_reached", "conclusion": "success", "summary": "all stands green"},
     }
@@ -345,7 +345,7 @@ class CardE2eTests(PageFixture):
                     "sha": "fedcba9876543210",
                     "state": "waiting",
                     "result": None,
-                    "wait_card": "secretary-531",
+                    "wait_card": "ummanu-531",
                 },
             ],
         }
@@ -354,8 +354,8 @@ class CardE2eTests(PageFixture):
         self.assertIn("<code>0123456789ab</code>", body)
         self.assertIn(f'<a href="{RUN_URL}" rel="noreferrer">run</a>', body)
         self.assertIn("all stands green", body)
-        self.assertIn('href="/tasks/secretary-530"', body)
-        self.assertIn('href="/tasks/secretary-531"', body)
+        self.assertIn('href="/tasks/ummanu-530"', body)
+        self.assertIn('href="/tasks/ummanu-531"', body)
         self.assertIn("waiting", body)
 
     def test_the_budget_mark_and_the_sprint_it_is_charged_to(self) -> None:
@@ -364,13 +364,13 @@ class CardE2eTests(PageFixture):
             "run_cap": None,
             "budget": "sprint:1469",
             "runs": [self.RUN],
-            "mark": "e2e: budget spent, waiting on secretary-599",
-            "waiting_on": "secretary-599",
+            "mark": "e2e: budget spent, waiting on ummanu-599",
+            "waiting_on": "ummanu-599",
         }
         body = panel(self.card_page(snapshot(e2e=block)), "E2E")
         self.assertIn('charged to <a href="/sprints/sprint%3A1469">sprint:1469</a>', body)
         self.assertIn("budget spent", body)
-        self.assertIn('href="/tasks/secretary-599"', body)
+        self.assertIn('href="/tasks/ummanu-599"', body)
 
     def test_the_after_merge_state_and_its_runs(self) -> None:
         block = {
@@ -379,7 +379,7 @@ class CardE2eTests(PageFixture):
             "merge_sha": "aaaabbbbccccdddd",
             "run": RUN_URL,
             "covered_by": "d-1",
-            "carrier": "secretary-525",
+            "carrier": "ummanu-525",
             "runs_dispatched": 0,
             "run_cap": 3,
             "budget": None,
@@ -390,8 +390,8 @@ class CardE2eTests(PageFixture):
         self.assertIn("after merge", body)
         self.assertIn("covered by", body)
         self.assertIn("<code>aaaabbbbcccc</code>", body)
-        self.assertIn('href="/tasks/secretary-525"', body)
-        self.assertIn('href="/tasks/secretary-530"', body)
+        self.assertIn('href="/tasks/ummanu-525"', body)
+        self.assertIn('href="/tasks/ummanu-530"', body)
         self.assertNotIn("no e2e run has been dispatched", body)
 
 
@@ -402,7 +402,7 @@ class PoSessionPageTests(PageFixture):
         "source": AVAILABLE,
         "items": [
             {
-                "ref": "secretary-520",
+                "ref": "ummanu-520",
                 "title": "Decide the cap",
                 "type": "decision",
                 "state": "in_progress",
@@ -410,7 +410,7 @@ class PoSessionPageTests(PageFixture):
                 "last_return": None,
             },
             {
-                "ref": "secretary-521",
+                "ref": "ummanu-521",
                 "title": "Run the op",
                 "type": "operation",
                 "state": "done",
@@ -425,7 +425,7 @@ class PoSessionPageTests(PageFixture):
         response = self.po_get(f"/po/sessions/{SESSION}", reads)
         self.assertEqual(response.status, 200)
         body = panel(response.body.decode(), "Delegated cards")
-        self.assertIn('href="/tasks/secretary-520"', body)
+        self.assertIn('href="/tasks/ummanu-520"', body)
         self.assertIn("Decide the cap", body)
         self.assertIn("decision", body)
         self.assertIn("in progress", body)
@@ -437,7 +437,7 @@ class PoSessionPageTests(PageFixture):
         reads = Recording(po_delegated=self.DELEGATED)
         document = json.loads(self.po_get(f"/po/api/sessions/{SESSION}", reads).body)
         self.assertEqual(
-            [item["ref"] for item in document["delegated"]["items"]], ["secretary-520", "secretary-521"]
+            [item["ref"] for item in document["delegated"]["items"]], ["ummanu-520", "ummanu-521"]
         )
         self.assertEqual(len(reads.calls), 1)
 
@@ -470,13 +470,13 @@ class PoSessionPageTests(PageFixture):
     def test_the_summary_tallies_columns_and_hints_at_results_not_returned(self) -> None:
         items = [
             {
-                "ref": "secretary-530",
+                "ref": "ummanu-530",
                 "state": "done",
                 "last_return": {"state": "done", "status": "delivered"},
             },
-            {"ref": "secretary-531", "state": "done", "last_return": {"state": "done", "status": None}},
-            {"ref": "secretary-532", "state": "validate", "last_return": None},
-            {"ref": "secretary-533", "state": "blocked", "last_return": None},
+            {"ref": "ummanu-531", "state": "done", "last_return": {"state": "done", "status": None}},
+            {"ref": "ummanu-532", "state": "validate", "last_return": None},
+            {"ref": "ummanu-533", "state": "blocked", "last_return": None},
         ]
         reads = Recording(po_delegated={**self.DELEGATED, "items": items})
         _, summary = delegated_details(self.po_get(f"/po/sessions/{SESSION}", reads).body.decode())
@@ -520,11 +520,11 @@ class SprintPageTests(PageFixture):
         waiting_on = [
             {
                 "kind": "run",
-                "card": "secretary-540",
+                "card": "ummanu-540",
                 "detail": f"waits for {RUN_URL} since 2026-09-27T12:00:00Z",
             },
-            {"kind": "owner", "card": "secretary-542", "detail": "decision handed to the owner: pay"},
-            {"kind": "po", "card": "secretary-544", "detail": "operation card with the PO"},
+            {"kind": "owner", "card": "ummanu-542", "detail": "decision handed to the owner: pay"},
+            {"kind": "po", "card": "ummanu-544", "detail": "operation card with the PO"},
         ]
         body = panel(self.sprint_page(waiting_on), "Waiting on")
         rows = re.findall(r"<tr><td>(.*?)</td><td>(.*?)</td><td>(.*?)</td></tr>", body)
@@ -536,10 +536,10 @@ class SprintPageTests(PageFixture):
                 '<span class="chip chip-warn">the PO</span>',
             ],
         )
-        self.assertIn('href="/tasks/secretary-540"', rows[0][1])
+        self.assertIn('href="/tasks/ummanu-540"', rows[0][1])
         self.assertIn(f'<a href="{RUN_URL}" rel="noreferrer">{RUN_URL}</a>', rows[0][2])
-        self.assertIn('href="/tasks/secretary-542"', rows[1][1])
-        self.assertIn('href="/tasks/secretary-544"', rows[2][1])
+        self.assertIn('href="/tasks/ummanu-542"', rows[1][1])
+        self.assertIn('href="/tasks/ummanu-544"', rows[2][1])
 
     def test_an_empty_or_unknown_list_renders_nothing(self) -> None:
         for waiting_on in ([], None):
@@ -653,15 +653,15 @@ def merged(
     return card
 
 
-AM_RUN_URL = "https://github.com/vladmesh/secretary/actions/runs/5150"
+AM_RUN_URL = "https://github.com/vladmesh/ummanu/actions/runs/5150"
 
 
 def am_run(state: str = "waiting", **changes: Any) -> dict[str, Any]:
     """One after-merge run record as the carrier holds it (`E2eRun`, `placement: after_merge`)."""
     record = {
-        "dispatch_id": "secretary-561-e2e-am-1-0001",
+        "dispatch_id": "ummanu-561-e2e-am-1-0001",
         "sha": "cafe0000cafe0000cafe0000cafe0000cafe0000",
-        "repo": "vladmesh/secretary",
+        "repo": "vladmesh/ummanu",
         "branch": "e2e/after-merge/1",
         "workflow": "e2e.yml",
         "intent_at": "2026-09-28T10:00:00Z",
@@ -669,11 +669,11 @@ def am_run(state: str = "waiting", **changes: Any) -> dict[str, Any]:
         "run_id": 5150,
         "run_url": AM_RUN_URL,
         "head_sha": "cafe0000cafe0000cafe0000cafe0000cafe0000",
-        "wait_ref": "secretary-570",
+        "wait_ref": "ummanu-570",
         "placement": "after_merge",
         "covered": [
-            {"ref": "secretary-560", "merge_sha": "a" * 40},
-            {"ref": "secretary-561", "merge_sha": "b" * 40},
+            {"ref": "ummanu-560", "merge_sha": "a" * 40},
+            {"ref": "ummanu-561", "merge_sha": "b" * 40},
         ],
     }
     if state != "waiting":
@@ -685,7 +685,7 @@ def am_run(state: str = "waiting", **changes: Any) -> dict[str, Any]:
 def am_mark(state: str, merge: str = "a" * 40, **changes: Any) -> dict[str, Any]:
     mark = {"merge_sha": merge, "state": state}
     if state != "pending":
-        mark.update(dispatch_id="secretary-561-e2e-am-1-0001", run_url=AM_RUN_URL, carrier="secretary-561")
+        mark.update(dispatch_id="ummanu-561-e2e-am-1-0001", run_url=AM_RUN_URL, carrier="ummanu-561")
     mark.update(changes)
     return mark
 
@@ -694,34 +694,34 @@ class AfterMergeWaitsTests(unittest.TestCase):
     """secretary-1811 rework: every card a coalesced after-merge run covers waits on that run."""
 
     def test_a_covered_card_that_is_not_the_carrier_waits_on_the_run(self) -> None:
-        [entry] = card_waits(merged("secretary-560", am_mark("covered")))
+        [entry] = card_waits(merged("ummanu-560", am_mark("covered")))
         self.assertEqual(entry["kind"], "run")
         self.assertIn(AM_RUN_URL, entry["detail"])
-        self.assertIn("carried by secretary-561", entry["detail"])
+        self.assertIn("carried by ummanu-561", entry["detail"])
 
     def test_the_carrier_says_its_run_once(self) -> None:
-        carrier = merged("secretary-561", am_mark("covered", "b" * 40), carried=[am_run()])
+        carrier = merged("ummanu-561", am_mark("covered", "b" * 40), carried=[am_run()])
         [entry] = card_waits(carrier)
-        self.assertEqual((entry["kind"], entry["card"]), ("run", "secretary-561"))
+        self.assertEqual((entry["kind"], entry["card"]), ("run", "ummanu-561"))
         self.assertIn(AM_RUN_URL, entry["detail"])
 
     def test_a_covered_run_not_yet_identified_is_named_by_its_dispatch_id(self) -> None:
-        [entry] = card_waits(merged("secretary-560", am_mark("covered", run_url="")))
-        self.assertIn("secretary-561-e2e-am-1-0001 (not identified yet)", entry["detail"])
+        [entry] = card_waits(merged("ummanu-560", am_mark("covered", run_url="")))
+        self.assertIn("ummanu-561-e2e-am-1-0001 (not identified yet)", entry["detail"])
 
     def test_a_pending_card_is_queued_for_the_next_run(self) -> None:
-        [entry] = card_waits(merged("secretary-562", am_mark("pending")))
+        [entry] = card_waits(merged("ummanu-562", am_mark("pending")))
         self.assertEqual((entry["kind"], entry["detail"]), ("run", "queued for the next after-merge run"))
 
     def test_green_red_and_declined_wait_for_nothing(self) -> None:
         for state in ("green", "red", "declined"):
             with self.subTest(state=state):
                 self.assertEqual(
-                    card_waits(merged("secretary-560", am_mark(state, hotfix="secretary-590"))), []
+                    card_waits(merged("ummanu-560", am_mark(state, hotfix="ummanu-590"))), []
                 )
 
     def test_a_carrier_whose_run_answered_does_not_wait_on_it_while_its_mark_still_says_covered(self) -> None:
-        carrier = merged("secretary-561", am_mark("covered", "b" * 40), carried=[am_run("success")])
+        carrier = merged("ummanu-561", am_mark("covered", "b" * 40), carried=[am_run("success")])
         self.assertEqual(card_waits(carrier), [])
 
 
@@ -786,7 +786,7 @@ class HostileValueTests(PageFixture):
         },
         "a card target with no states": {
             "state": "waiting",
-            "target": {"kind": "card", "ref": "secretary-9"},
+            "target": {"kind": "card", "ref": "ummanu-9"},
         },
         "an unknown target kind": {"state": "waiting", "target": {"kind": "moon"}},
         "a target that is not a mapping": {"state": "waiting", "target": "run"},

@@ -20,42 +20,6 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from secretary.board.owner_handover import (
-    HANDED_TO_OWNER,
-    MARK_KEYS,
-    mark_values,
-    owner_answer_event_ids,
-    owner_comments_since_handover,
-    render_handover_comment,
-    waiting_owner,
-)
-from secretary.cli import main
-from secretary.dispatch.po_cards import (
-    PO_BLOCKED_ACTION,
-    ServicePoChannel,
-    advance_po_card,
-    complete_command,
-    handover_command,
-    owner_answer_request_id,
-)
-from secretary.dispatch.state import attempt_request_id
-from secretary.po import store as po_store
-from secretary.po.queue import PoQueue
-from secretary.po.sprints import SprintRecord
-from secretary.tasks import TaskError, TaskReader, TaskWriter
-from secretary.web import pages
-from secretary.webproto import sources
-from secretary.webproto.reads import _card_value
-from secretary.webproto.section import Reading, SourceSet, render
-from secretary.webproto.sprint_reads import (
-    SECTIONS,
-    SOURCE_CARDS,
-    SOURCE_LIVENESS,
-    SOURCE_SPRINTS,
-    WAITING_BLOCKED,
-    WAITING_WAITING,
-    _Production,
-)
 from tests.po_card_fakes import DECISION_BODY, REF, SPRINT, DispatcherFixture, card
 from tests.po_fake_store import FakePoStore
 from tests.po_handover_fakes import (
@@ -65,6 +29,42 @@ from tests.po_handover_fakes import (
     MemoryAudit,
     OneCardClient,
     decision_card,
+)
+from ummanu.board.owner_handover import (
+    HANDED_TO_OWNER,
+    MARK_KEYS,
+    mark_values,
+    owner_answer_event_ids,
+    owner_comments_since_handover,
+    render_handover_comment,
+    waiting_owner,
+)
+from ummanu.cli import main
+from ummanu.dispatch.po_cards import (
+    PO_BLOCKED_ACTION,
+    ServicePoChannel,
+    advance_po_card,
+    complete_command,
+    handover_command,
+    owner_answer_request_id,
+)
+from ummanu.dispatch.state import attempt_request_id
+from ummanu.po import store as po_store
+from ummanu.po.queue import PoQueue
+from ummanu.po.sprints import SprintRecord
+from ummanu.tasks import TaskError, TaskReader, TaskWriter
+from ummanu.web import pages
+from ummanu.webproto import sources
+from ummanu.webproto.reads import _card_value
+from ummanu.webproto.section import Reading, SourceSet, render
+from ummanu.webproto.sprint_reads import (
+    SECTIONS,
+    SOURCE_CARDS,
+    SOURCE_LIVENESS,
+    SOURCE_SPRINTS,
+    WAITING_BLOCKED,
+    WAITING_WAITING,
+    _Production,
 )
 
 
@@ -76,7 +76,7 @@ class WriterFixture(unittest.TestCase):
         self.writer = TaskWriter(self.client, data_dir=tmp)  # type: ignore[arg-type]
         self.writer.audit = MemoryAudit()
         self.writer.reader = mock.Mock(show=lambda reference: copy.deepcopy(self.card))
-        patcher = mock.patch("secretary.tasks._task_number", return_value=1900)
+        patcher = mock.patch("ummanu.tasks._task_number", return_value=1900)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -219,8 +219,8 @@ class OwnerCommentTests(WriterFixture):
         writer.return_value.handover.return_value = {"action": HANDED_TO_OWNER}
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch("secretary.task_commands.TaskWriter", writer),
-            mock.patch("secretary.task_commands.card_client"),
+            mock.patch("ummanu.task_commands.TaskWriter", writer),
+            mock.patch("ummanu.task_commands.card_client"),
             contextlib.redirect_stdout(io.StringIO()),
             contextlib.redirect_stderr(io.StringIO()),
         ):
@@ -318,7 +318,7 @@ class OwnerAnswerDispatchTests(HandedOverFixture):
         self.assertIn(handover_command(REF, submission.handover_request_id), submission.text)
         self.assertEqual(
             handover_command(REF, "h-1"),
-            f"python3 -P -m secretary task handover --ref {REF} --role po --to owner --reason-file <file> "
+            f"python3 -P -m ummanu task handover --ref {REF} --role po --to owner --reason-file <file> "
             "--request-id h-1",
         )
         self.assertIn("unless you handed it to the owner in this turn", submission.text)
@@ -382,7 +382,7 @@ class OwnerAnswerDispatchTests(HandedOverFixture):
             seen.append(fields["request_id"])
             real_submit(**fields)
             if len(seen) == 1:
-                from secretary.po.client import OutcomeUnknown
+                from ummanu.po.client import OutcomeUnknown
 
                 raise OutcomeUnknown("no answer from the PO service: connection reset")
             return {}

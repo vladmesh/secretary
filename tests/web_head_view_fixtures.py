@@ -13,24 +13,24 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
-from secretary.runtime.head.local_pty.journal import (
+from tests.web_fakes import Recording
+from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef
+from ummanu.runtime.head.local_pty.journal import (
     INPUT_ACCEPTED,
     RUN_STARTED,
     TURN_FINISHED,
     TURN_STARTED,
     JournalWriter,
 )
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
-from secretary.web.app import WebApp
-from secretary.webproto import sources
-from secretary.webproto.errors import TaskNotFound
-from secretary.webproto.journal import CommittedAudit
-from secretary.webproto.reads import ReadLayer
-from tests.web_fakes import Recording
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
+from ummanu.web.app import WebApp
+from ummanu.webproto import sources
+from ummanu.webproto.errors import TaskNotFound
+from ummanu.webproto.journal import CommittedAudit
+from ummanu.webproto.reads import ReadLayer
 
-REF = "secretary-9"
-OTHER = "secretary-8"
+REF = "ummanu-9"
+OTHER = "ummanu-8"
 #: The shape `memory.access.issue_grant` hands a head: a grant id, a dot, `token_urlsafe(32)`.
 SECRET = "Zq3xY7abCDefGhIJkLmNoPqRsTuVwXyZ012345678_9"
 TOKEN = "0f3c6f1e2d4b4a5c9e8d7c6b5a4f3e2d." + SECRET
@@ -52,8 +52,8 @@ def _instance(root: Path) -> Path:
         "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
         encoding="utf-8",
     )
-    (instance_dir / "projects" / "secretary.yaml").write_text(
-        "id: secretary\nrepo: /projects/secretary\nenabled: true\nadapter: secretary\ndefault_branch: main\n",
+    (instance_dir / "projects" / "ummanu.yaml").write_text(
+        "id: ummanu\nrepo: /projects/ummanu\nenabled: true\nadapter: ummanu\ndefault_branch: main\n",
         encoding="utf-8",
     )
     return instance_dir
@@ -131,7 +131,7 @@ class HeadViewFixture(unittest.TestCase):
 
         def card(_layer: ReadLayer, ref: str, _data_dir: Path, *, now: float):
             card_exists(_layer, ref)
-            return {"ref": ref, "state": "in_progress", "project": "secretary"}, sources.available(now)
+            return {"ref": ref, "state": "in_progress", "project": "ummanu"}, sources.available(now)
 
         self.enterContext(mock.patch.object(ReadLayer, "_events", events))
         self.enterContext(mock.patch.object(ReadLayer, "_card_exists", card_exists))
@@ -172,8 +172,8 @@ class HeadViewFixture(unittest.TestCase):
             journal.append(
                 RUN_STARTED,
                 head_pid=1,
-                command=f"env SECRETARY_MEMORY_ACCESS_TOKEN={TOKEN} claude --dangerously",
-                environment={"SECRETARY_MEMORY_ACCESS_TOKEN": TOKEN},
+                command=f"env UMMANU_MEMORY_ACCESS_TOKEN={TOKEN} claude --dangerously",
+                environment={"UMMANU_MEMORY_ACCESS_TOKEN": TOKEN},
                 role="worker",
                 task=f"card:{ref}",
             )

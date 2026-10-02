@@ -12,7 +12,7 @@ Two properties are what make the record worth anything.
 **Nothing live is touched.** The installation this walks is built in a temporary directory: its own
 instance, its own data plane, its own installed head registry, and the repository's in-process board
 fake in place of a board store. No socket leaves loopback, no live data directory is read or written,
-and the live `secretary-web.service` is neither restarted nor consulted. What this therefore does
+and the live `ummanu-web.service` is neither restarted nor consulted. What this therefore does
 *not* prove is stated in the same words wherever the record is quoted: the live board's behaviour on
 the new `sprint_worker` / `sprint_reviewer` keys, and the readability of a sprint row the moment it
 is written, are properties of the board store and are here only as a fake's.
@@ -42,23 +42,23 @@ from typing import Any
 from unittest import mock
 from urllib.parse import quote, urlencode
 
-from secretary.sprints import SPRINT_BOARD_NAME
-from secretary.web.app import WebApp
-from secretary.web.server import build_server
-from secretary.webproto.card_ops import CardOperationLayer
-from secretary.webproto.command_reads import CommandReadLayer
-from secretary.webproto.ops import OperationLayer
-from secretary.webproto.pause_ops import PauseOperationLayer
-from secretary.webproto.pause_reads import PauseReadLayer
-from secretary.webproto.reads import ReadLayer
-from secretary.webproto.runs import RunStoreError
-from secretary.webproto.sprint_requests import SprintRequestStore
 from tests.webproto_sprint_fixtures import (
     OBSERVER_PROFILE,
     REVIEWER_PROFILE,
     WORKER_PROFILE,
     SprintProtocolFixture,
 )
+from ummanu.sprints import SPRINT_BOARD_NAME
+from ummanu.web.app import WebApp
+from ummanu.web.server import build_server
+from ummanu.webproto.card_ops import CardOperationLayer
+from ummanu.webproto.command_reads import CommandReadLayer
+from ummanu.webproto.ops import OperationLayer
+from ummanu.webproto.pause_ops import PauseOperationLayer
+from ummanu.webproto.pause_reads import PauseReadLayer
+from ummanu.webproto.reads import ReadLayer
+from ummanu.webproto.runs import RunStoreError
+from ummanu.webproto.sprint_requests import SprintRequestStore
 
 GOAL = "Open a sprint from the browser"
 DEFINITION_OF_DONE = "the owner reaches a sprint page with an observer"
@@ -141,11 +141,11 @@ def submission(request_id: str, **overrides: Any) -> list[tuple[str, str]]:
     """What the form posts, as a browser flattens it: repeated names for the two multi-selects."""
     values: dict[str, Any] = {
         "request_id": request_id,
-        "product": "secretary",
+        "product": "ummanu",
         "goal": GOAL,
         "definition_of_done": DEFINITION_OF_DONE,
         "issues": ["issue:open"],
-        "projects": ["secretary"],
+        "projects": ["ummanu"],
         "observer": OBSERVER_PROFILE,
         "worker": "",
         "reviewer": "",
@@ -247,7 +247,7 @@ def _the_owners_path(browser: Browser, installation: Installation, record: list[
     one.expect("the form is served", status == 200)
     one.expect(f"it offers this installation's own observer {OBSERVER_PROFILE}", OBSERVER_PROFILE in markup)
     one.expect("it offers the open issue issue:open", "issue:open" in markup)
-    one.expect("it offers the registered project secretary", 'value="secretary"' in markup)
+    one.expect("it offers the registered project ummanu", 'value="ummanu"' in markup)
     observer_select = markup.split('<select id="observer"')[1].split("</select>")[0]
     one.expect("the observer select does not offer \u201cnone\u201d", 'value="none"' not in observer_select)
     one.expect(

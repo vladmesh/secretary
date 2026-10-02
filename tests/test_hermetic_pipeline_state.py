@@ -1,9 +1,9 @@
 """The unit suite reads its own pipeline state dir, never the live installation's.
 
-`secretary.automations.agents.pipeline.state` resolves `STATE` at import time and
+`ummanu.automations.agents.pipeline.state` resolves `STATE` at import time and
 `agents.pipeline.pause` binds `PAUSE_FILE` off it, so the pause path every
 triggered-dispatch test runs against is fixed before the first test body. If that path
-is the live `<workspaces>/secretary/pipeline/state/pipeline`, an operator holding a
+is the live `<workspaces>/ummanu/pipeline/state/pipeline`, an operator holding a
 freeze on the host running the suite turns `runtime/dispatch._pipeline_paused()` true
 and every dispatch test quietly takes the "pipeline paused — no dispatch" branch
 instead of the lifecycle branch it asserts about. `tests/__init__.py` closes that by
@@ -26,11 +26,11 @@ from pathlib import Path
 from unittest import mock
 
 import tests
-from secretary.automations.agents.pipeline import pause as pipeline_pause
-from secretary.automations.agents.pipeline import state as pipeline_state
-from secretary.automations.runtime import dispatch
-from secretary.runtime import shared_state
-from secretary.runtime import state as runtime_state
+from ummanu.automations.agents.pipeline import pause as pipeline_pause
+from ummanu.automations.agents.pipeline import state as pipeline_state
+from ummanu.automations.runtime import dispatch
+from ummanu.runtime import shared_state
+from ummanu.runtime import state as runtime_state
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -44,7 +44,7 @@ _HARD_FREEZE = {
 
 def _write_production_like_state_dir(root: Path) -> Path:
     """A frozen state dir laid out exactly where `resolve_pipeline_state_dir` looks without
-    the override: `<workspaces>/secretary/pipeline/state/pipeline`. Built under a temporary
+    the override: `<workspaces>/ummanu/pipeline/state/pipeline`. Built under a temporary
     workspaces root — the live one is read by running agents and is never written here."""
     state_dir = root / shared_state.AGENTS_PROJECT / "pipeline" / "state" / "pipeline"
     state_dir.mkdir(parents=True)
@@ -82,7 +82,7 @@ class SuitePipelineStateDirTests(unittest.TestCase):
             )
             probe = (
                 "import json, tests\n"
-                "from secretary.automations.agents.pipeline import pause\n"
+                "from ummanu.automations.agents.pipeline import pause\n"
                 "print(json.dumps({'paused': pause.is_paused(), 'file': str(pause.PAUSE_FILE)}))\n"
             )
             done = subprocess.run(

@@ -13,17 +13,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.broad_check import load_receipt, receipt_path, run_broad_check
-from secretary.dispatch import gate_lifecycle
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.cleanup import CleanupJournal, CleanupOwner
-from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
-from secretary.dispatch.runtime_provenance import RuntimeProvenance
-from secretary.dispatch.gate import GateResult
-from secretary.dispatch.gate_receipt import AcceptedGreenGate, mint_gate_receipt
-from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatch.types import HostError
+from ummanu.broad_check import load_receipt, receipt_path, run_broad_check
+from ummanu.dispatch import gate_lifecycle
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.cleanup import CleanupJournal, CleanupOwner
+from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from ummanu.dispatch.runtime_provenance import RuntimeProvenance
+from ummanu.dispatch.gate import GateResult
+from ummanu.dispatch.gate_receipt import AcceptedGreenGate, mint_gate_receipt
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.types import HostError
 from tests.fakes.dispatcher import FakeHost
 
 
@@ -31,8 +31,8 @@ def _observation(classification: str = "valid") -> RuntimeProvenance:
     return RuntimeProvenance(
         classification,
         sys.executable,
-        "/registered/secretary",
-        "/registered/secretary/src/secretary/__init__.py",
+        "/registered/ummanu",
+        "/registered/ummanu/src/ummanu/__init__.py",
         (),
     )
 
@@ -64,7 +64,7 @@ def _git_workspace(path: Path) -> None:
 
 class _Runtime:
     interpreter = sys.executable
-    product_root = "/registered/secretary"
+    product_root = "/registered/ummanu"
 
     def __init__(self, answers: list[RuntimeProvenance]) -> None:
         self.answers = answers
@@ -134,7 +134,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             runtime = _Runtime([_observation(), _observation()])
             host = _Host(Path(tmp), runtime)
             with mock.patch(
-                "secretary.dispatch.host._gate_check", return_value=GateResult("green", "fixture")
+                "ummanu.dispatch.host._gate_check", return_value=GateResult("green", "fixture")
             ) as gate:
                 result = host.gate_check({}, _record(str(Path(tmp) / "task")))
         self.assertEqual(result.status, "green")
@@ -148,12 +148,12 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             host = _Host(Path(tmp), runtime)
             record = _record(str(Path(tmp) / "task"))
             run = HeadRun(run_id="fixture-run", spec=HeadSpec(profile_id="fixture", adapter="unknown", runtime=LOCAL_PTY_RUNTIME),
-                          workspace=record.workspace, task_ref=TaskRef.card("secretary-1"))
+                          workspace=record.workspace, task_ref=TaskRef.card("ummanu-1"))
             backend = SimpleNamespace(stop=lambda run, initiator: (host.effects.append("stop") or SimpleNamespace(
                 ok=True, run=run.finishing(initiator).exited())))
             host.head_runtime_for = lambda run: backend
             owner = CleanupOwner(SimpleNamespace(data_dir=Path(tmp), host=host))
-            intent = {"task": {"ref": "secretary-1"}, "record": {"workspace": record.workspace}, "heads": [run.to_json()]}
+            intent = {"task": {"ref": "ummanu-1"}, "record": {"workspace": record.workspace}, "heads": [run.to_json()]}
             owner._stop(intent)
             with self.assertRaisesRegex(HostError, "workspace_targeted_editable"):
                 owner._remove_workspace(intent, Path(tmp))
@@ -166,13 +166,13 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             host = _Host(Path(tmp), runtime)
             host.catalog = SimpleNamespace(integration_base=lambda project, override: "main")
             with (
-                mock.patch("secretary.dispatch.host._validation_ci", return_value="github"),
+                mock.patch("ummanu.dispatch.host._validation_ci", return_value="github"),
                 mock.patch.object(
                     host, "_merge_github_pr", side_effect=lambda *args: host.effects.append("merge")
                 ),
             ):
                 host.complete_green(
-                    {"ref": "secretary-1", "project": "secretary", "workspace": {}},
+                    {"ref": "ummanu-1", "project": "ummanu", "workspace": {}},
                     _record(str(Path(tmp) / "task")),
                 )
         self.assertEqual(runtime.calls, 2)
@@ -188,7 +188,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
                 self.assertRaisesRegex(HostError, "wrong_root"),
             ):
                 host.complete_green(
-                    {"ref": "secretary-1", "project": "secretary", "workspace": {}},
+                    {"ref": "ummanu-1", "project": "ummanu", "workspace": {}},
                     _record(str(Path(tmp) / "task")),
                 )
         merge.assert_not_called()
@@ -200,7 +200,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             runtime = _Runtime([_observation()])
             host = _Host(Path(tmp), runtime)
             host._prepare_workspace_environment(str(workspace))
-            python = workspace / ".secretary-task-env" / "venv" / "bin" / "python3"
+            python = workspace / ".ummanu-task-env" / "venv" / "bin" / "python3"
             first = python.stat().st_ino
             host._prepare_workspace_environment(str(workspace))
             self.assertEqual(python.stat().st_ino, first)
@@ -217,9 +217,9 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
                 (source / name / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
             host = _Host(Path(tmp), _Runtime([_observation()]))
             host._prepare_workspace_environment(str(workspace))
-            environment = workspace / ".secretary-task-env" / "venv"
-            (startup,) = environment.glob("lib/python3*/site-packages/00-secretary-task-pycache.pth")
-            namespace_cache = workspace.resolve() / ".secretary-task-env" / "pycache"
+            environment = workspace / ".ummanu-task-env" / "venv"
+            (startup,) = environment.glob("lib/python3*/site-packages/00-ummanu-task-pycache.pth")
+            namespace_cache = workspace.resolve() / ".ummanu-task-env" / "pycache"
             python = str(environment / "bin" / "python3")
             elsewhere = Path(tmp) / "elsewhere"
 
@@ -246,8 +246,8 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             _git_workspace(workspace)
             host = _Host(Path(tmp), _Runtime([_observation()]))
             host._prepare_workspace_environment(str(workspace))
-            environment = workspace / ".secretary-task-env" / "venv"
-            (startup,) = environment.glob("lib/python3*/site-packages/00-secretary-task-pycache.pth")
+            environment = workspace / ".ummanu-task-env" / "venv"
+            (startup,) = environment.glob("lib/python3*/site-packages/00-ummanu-task-pycache.pth")
             body = startup.read_text(encoding="utf-8")
             startup.unlink()
             python = environment / "bin" / "python3"
@@ -274,11 +274,11 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
 
             host._prepare_workspace_environment(str(workspace))
 
-            dispatcher_python = workspace / ".secretary-task-env" / "venv" / "bin" / "python3"
+            dispatcher_python = workspace / ".ummanu-task-env" / "venv" / "bin" / "python3"
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "untouched\n")
-            self.assertFalse(any(adapter_environment.rglob("_secretary_production_dependencies.pth")))
+            self.assertFalse(any(adapter_environment.rglob("_ummanu_production_dependencies.pth")))
             imported = subprocess.run(
-                [str(dispatcher_python), "-I", "-c", "import secretary"],
+                [str(dispatcher_python), "-I", "-c", "import ummanu"],
                 cwd=tmp,
                 check=False,
                 capture_output=True,
@@ -290,7 +290,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "task"
             _git_workspace(workspace)
-            environment = workspace / ".secretary-task-env" / "venv"
+            environment = workspace / ".ummanu-task-env" / "venv"
             environment.mkdir(parents=True)
             sentinel = environment / "foreign"
             sentinel.write_text("untouched\n", encoding="utf-8")
@@ -314,7 +314,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
                 }
             )
             runtime = _Runtime([_observation()])
-            runtime.interpreter = "/opt/secretary/.venv/bin/python3"
+            runtime.interpreter = "/opt/ummanu/.venv/bin/python3"
             host = CommandHostRuntime(  # type: ignore[arg-type]
                 catalog, Path(tmp), mode="real", production_runtime=runtime
             )
@@ -323,7 +323,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             with (
                 mock.patch.dict(
                     os.environ,
-                    {"PATH": "/opt/secretary/.venv/bin:/usr/local/bin:/usr/bin"},
+                    {"PATH": "/opt/ummanu/.venv/bin:/usr/local/bin:/usr/bin"},
                     clear=True,
                 ),
                 mock.patch.object(
@@ -338,8 +338,8 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             for command in commands:
                 self.assertIn("PATH=/usr/local/bin:/usr/bin", command)
                 self.assertIn("unset VIRTUAL_ENV", command)
-                self.assertNotIn(".secretary-task-env", command)
-                self.assertNotIn("/opt/secretary/.venv/bin", command)
+                self.assertNotIn(".ummanu-task-env", command)
+                self.assertNotIn("/opt/ummanu/.venv/bin", command)
 
     def test_adapter_default_runtime_is_populated_from_candidate_dev_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -348,7 +348,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             (workspace / "pyproject.toml").write_text("[project]\nname = 'other-project'\n", encoding="utf-8")
             catalog = SimpleNamespace(
                 adapter=lambda project: {
-                    "broad_check": {"module": "tests.broad", "import_package": "secretary"}
+                    "broad_check": {"module": "tests.broad", "import_package": "ummanu"}
                 }
             )
             host = CommandHostRuntime(  # type: ignore[arg-type]
@@ -369,7 +369,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             ):
                 host._prepare_workspace_environment(str(workspace), project="other-project")
 
-            candidate_python = str(workspace / ".secretary-task-env" / "venv" / "bin" / "python3")
+            candidate_python = str(workspace / ".ummanu-task-env" / "venv" / "bin" / "python3")
             self.assertIn([candidate_python, "-m", "pip", "install", "-e", ".[dev]"], commands)
 
     def test_install_output_is_recorded_as_exact_generated_bytes_only_when_new(self) -> None:
@@ -442,7 +442,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
                     text=True,
                 ).stdout.strip()
             )
-            self.assertIn(".secretary-task-env/", exclude.read_text(encoding="utf-8").splitlines())
+            self.assertIn(".ummanu-task-env/", exclude.read_text(encoding="utf-8").splitlines())
             status = subprocess.run(
                 ["git", "-C", str(workspace), "status", "--porcelain"],
                 check=True,
@@ -501,7 +501,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
 
             host._prepare_workspace_environment(str(workspace))
 
-            for path in ("state/checks/broad-x.json", "TASK.md", ".secretary-task-env/owner.json"):
+            for path in ("state/checks/broad-x.json", "TASK.md", ".ummanu-task-env/owner.json"):
                 self.assertTrue(self._ignored(workspace, path), f"{path} must be excluded")
             (workspace / "TASK.md").write_text("task\n", encoding="utf-8")
             (workspace / "state" / "checks").mkdir(parents=True)
@@ -561,7 +561,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             _, workspace = self._clean_project_worktree(tmp)
             exclude = self._exclude_file(workspace)
             # A foreign rule, a set an earlier bring-up only partly wrote, and no final newline.
-            exclude.write_text("foreign-rule\n.secretary-task-env/", encoding="utf-8")
+            exclude.write_text("foreign-rule\n.ummanu-task-env/", encoding="utf-8")
             host = CommandHostRuntime(  # type: ignore[arg-type]
                 SimpleNamespace(), Path(tmp), mode="real", production_runtime=_Runtime([_observation()])
             )
@@ -570,7 +570,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
             first = exclude.read_text(encoding="utf-8")
             host._prepare_workspace_environment(str(workspace))
 
-            self.assertEqual(first, "foreign-rule\n.secretary-task-env/\n/TASK.md\n/state/checks/\n/.secretary-report/\n")
+            self.assertEqual(first, "foreign-rule\n.ummanu-task-env/\n/TASK.md\n/state/checks/\n/.ummanu-report/\n")
             self.assertEqual(exclude.read_text(encoding="utf-8"), first)
 
     def test_rework_prepares_a_missing_pre_upgrade_environment_before_launch(self) -> None:
@@ -584,7 +584,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
                 production_runtime=_Runtime([_observation()]),
             )
             order: list[str] = []
-            task = {"ref": "secretary-1", "project": "secretary", "workspace": {}, "routing": {}}
+            task = {"ref": "ummanu-1", "project": "ummanu", "workspace": {}, "routing": {}}
             record = _record(str(workspace))
 
             with (
@@ -617,7 +617,7 @@ class DispatcherRuntimeIsolationTests(unittest.TestCase):
                 SimpleNamespace(), Path(tmp), mode="real", production_runtime=_Runtime([_observation()])
             )
             order: list[str] = []
-            task = {"ref": "secretary-1", "project": "secretary", "routing": {}}
+            task = {"ref": "ummanu-1", "project": "ummanu", "routing": {}}
             record = _record(str(workspace))
             document = Path(tmp) / "review.md"
 

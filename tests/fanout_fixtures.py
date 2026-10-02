@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 
 
 def accepted_transport_run(

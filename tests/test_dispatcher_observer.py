@@ -18,14 +18,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.board.sql_audit import SqlTaskAudit
-from secretary.board.sql_cards import BOARD_ID
-from secretary.dispatch import observer_fence as dispatcher_observer_fence
-from secretary.dispatch.cleanup import CleanupOwner
-from secretary.dispatch.heartbeat import heartbeat_identity
-from secretary.dispatch.host import CommandHostRuntime, InstanceCatalog
-from secretary.dispatch.launch import infrastructure_action
-from secretary.dispatch.observer import (
+from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.board.sql_cards import BOARD_ID
+from ummanu.dispatch import observer_fence as dispatcher_observer_fence
+from ummanu.dispatch.cleanup import CleanupOwner
+from ummanu.dispatch.heartbeat import heartbeat_identity
+from ummanu.dispatch.host import CommandHostRuntime, InstanceCatalog
+from ummanu.dispatch.launch import infrastructure_action
+from ummanu.dispatch.observer import (
     EVENT_DEFERRED,
     EVENT_LAUNCHED,
     EVENT_RELAUNCHED,
@@ -49,26 +49,26 @@ from secretary.dispatch.observer import (
     render_observer_prompt,
     stop_observer_head,
 )
-from secretary.dispatch.observer_fence import EVENT_CLEARED, EVENT_FENCED
-from secretary.dispatch.production import (
+from ummanu.dispatch.observer_fence import EVENT_CLEARED, EVENT_FENCED
+from ummanu.dispatch.production import (
     _budget_event_type,
     _production_claim_ready,
     _reconcile_sprint_budget,
 )
-from secretary.dispatch.runtime import DispatcherRuntime
-from secretary.dispatch.tui import (
+from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.dispatch.tui import (
     DeliveryEvidence,
     claude_project_dir_name,
     prepare_claude_provider_progress_source,
     provider_progress_for_run,
 )
-from secretary.dispatch.types import HostError, LegacyDispatcherRecord
-from secretary.dispatch.watchdog import initial_output_stall_seconds
-from secretary.dispatch.worker_lifecycle import head_run_binding
-from secretary.head_health import HeadReadiness
-from secretary.head_registry import canonical_heads
-from secretary.infra import git_worktree
-from secretary.runtime.role_env import (
+from ummanu.dispatch.types import HostError, LegacyDispatcherRecord
+from ummanu.dispatch.watchdog import initial_output_stall_seconds
+from ummanu.dispatch.worker_lifecycle import head_run_binding
+from ummanu.head_health import HeadReadiness
+from ummanu.head_registry import canonical_heads
+from ummanu.infra import git_worktree
+from ummanu.runtime.role_env import (
     OBSERVER_GENERATION_ENV,
     OBSERVER_SPRINT_ENV,
     ROLE_ALLOWLIST,
@@ -76,14 +76,14 @@ from secretary.runtime.role_env import (
     observer_binding,
     runtime_env,
 )
-from secretary.sprint_observer import encode_observer, head_choice
-from secretary.sprints import (
+from ummanu.sprint_observer import encode_observer, head_choice
+from ummanu.sprints import (
     BUDGET_UNCHARGED_INFRASTRUCTURE,
     SprintReader,
     SprintWriter,
 )
-from secretary.status import _observers as status_observers
-from secretary.tasks import TaskError, TaskReader, TaskWriter, _now, task_audit_for
+from ummanu.status import _observers as status_observers
+from ummanu.tasks import TaskError, TaskReader, TaskWriter, _now, task_audit_for
 from tests.fakes.dispatcher import (
     FakeCatalog,
     FakeHost,
@@ -101,11 +101,11 @@ from tests.production_runtime_fixtures import registered_production_runtime
 from tests.retired_board import LEGACY_ENV, legacy_runtime_lines
 from tests.sprint_close_fixtures import close_decisions, settle_dispatcher_work
 from tests.sql_backend_fixtures import card_store
-from secretary.runtime import codex_preflight
-from secretary.runtime.codex_preflight import ensure_codex_workspace_trusted
-from secretary.observer_root import observer_root_repo
-from secretary.runtime.head import HEAD_BUSY, HEAD_GONE, DeliverReceipt, HeadCommand, HeadRun, HeadSpec, TaskRef
-from secretary.runtime.head import operations as head_ops
+from ummanu.runtime import codex_preflight
+from ummanu.runtime.codex_preflight import ensure_codex_workspace_trusted
+from ummanu.observer_root import observer_root_repo
+from ummanu.runtime.head import HEAD_BUSY, HEAD_GONE, DeliverReceipt, HeadCommand, HeadRun, HeadSpec, TaskRef
+from ummanu.runtime.head import operations as head_ops
 
 
 @contextlib.contextmanager
@@ -118,7 +118,7 @@ def unfiltered_audit_reads_raise() -> Iterator[list[str]]:
     audit owners are patched at the class, so a read by any instance under the scope is seen; a
     violation is recorded (the tick swallows some exceptions into its own outcomes) and raised.
     """
-    from secretary.board.sql_audit import SqlTaskAudit
+    from ummanu.board.sql_audit import SqlTaskAudit
 
     violations: list[str] = []
     patches = []
@@ -172,10 +172,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         env = mock.patch.dict(
             os.environ,
             {
-                "SECRETARY_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
-                "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
-                "SECRETARY_ROLE_SKILLS_MANIFEST": str(self.data_dir / "registry" / "manifest.toml"),
-                "SECRETARY_INSTANCE": str(self.data_dir / "registry" / "instance"),
+                "UMMANU_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
+                "UMMANU_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
+                "UMMANU_ROLE_SKILLS_MANIFEST": str(self.data_dir / "registry" / "manifest.toml"),
+                "UMMANU_INSTANCE": str(self.data_dir / "registry" / "instance"),
             },
         )
         env.start()
@@ -198,7 +198,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
-            owner="secretary-pilot",
+            owner="ummanu-pilot",
         )
         self._board_comment = self.writer.comment
         self.writer.comment = self._comment_with_semantic_test_event  # type: ignore[method-assign]
@@ -405,7 +405,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-510",
+            reference="ummanu-510",
             kind="red",
             body="guarded budget event",
             request_id="guard-red-review",
@@ -416,7 +416,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.writer.comment(
                 role="dispatcher",
                 actor="dispatcher",
-                reference="secretary-510",
+                reference="ummanu-510",
                 body="card changed",
                 request_id="guard-event",
             )
@@ -436,7 +436,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             )
 
     def test_links_that_keep_changing_leave_the_observer_state_unestablished(self) -> None:
-        from secretary.dispatch.observer import _observer_event_state
+        from ummanu.dispatch.observer import _observer_event_state
 
         self.open_sprint()
         self.board.save_metadata(12, sprint_ref="sprint:1")
@@ -463,7 +463,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         )
 
     def test_a_cursor_outside_the_slice_is_found_by_its_own_key(self) -> None:
-        from secretary.dispatch.observer import _observer_event_state
+        from ummanu.dispatch.observer import _observer_event_state
 
         self.open_sprint()
         self.board.save_metadata(12, sprint_ref="sprint:1")
@@ -474,7 +474,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             with self.subTest(cursor=event_id):
                 record = {
                     "request_id": request_id,
-                    "ref": "secretary-9-unlinked",
+                    "ref": "ummanu-9-unlinked",
                     "kind": "routing",
                     "outcome": "success",
                     "actor": {"role": "dispatcher", "id": "dispatcher"},
@@ -501,7 +501,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
                 self.assertEqual(violations, [], "\n\n".join(violations))
                 self.assertTrue(state["known"], state)
-                self.assertIn("secretary-9-unlinked", read[-1]["references"])
+                self.assertIn("ummanu-9-unlinked", read[-1]["references"])
 
     # lifecycle ---------------------------------------------------------------
 
@@ -543,7 +543,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="replacement needed",
             request_id="replacement-event",
         )
@@ -572,7 +572,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="replacement needed",
             request_id="replacement-event",
         )
@@ -595,7 +595,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="replacement needed",
             request_id="replacement-event",
         )
@@ -621,7 +621,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="replacement needed",
             request_id="dead-head-event",
         )
@@ -649,7 +649,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="stuck-head-event",
         )
@@ -694,7 +694,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="stalled-busy-head-event",
         )
@@ -727,7 +727,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="replacement needed",
             request_id="late-activity-event",
         )
@@ -1152,7 +1152,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="claude-observer-event",
         )
@@ -1173,7 +1173,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "read board",
             "selected_why": "card changed",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510",
+            "current_task": "ummanu-510",
             "dod_state": "open",
             "next_safe_step": "resume",
         }
@@ -1198,7 +1198,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="swallowed-wake-event",
         )
@@ -1259,7 +1259,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="evidence-first-event",
         )
@@ -1296,7 +1296,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "read board",
             "selected_why": "card changed",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510",
+            "current_task": "ummanu-510",
             "dod_state": "open",
             "next_safe_step": "resume",
         }
@@ -1338,7 +1338,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="closeout-evidence-event",
         )
@@ -1420,7 +1420,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="busy-wake-event",
         )
@@ -1471,7 +1471,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="post-send-refusal-event",
         )
@@ -1487,7 +1487,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "read board",
             "selected_why": "card changed",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510",
+            "current_task": "ummanu-510",
             "dod_state": "open",
             "next_safe_step": "resume",
         }
@@ -1524,7 +1524,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="unaddressable-head-event",
         )
@@ -1558,7 +1558,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="unreadable-terminal-event",
         )
@@ -1587,7 +1587,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="failed-replacement-event",
         )
@@ -1638,7 +1638,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="observer-no-source-event",
         )
@@ -1660,7 +1660,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="observer-event",
         )
@@ -1690,7 +1690,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed while observer was working",
             request_id="event-during-active-turn",
         )
@@ -1718,7 +1718,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="ack-event",
         )
@@ -1729,7 +1729,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "check board",
             "selected_why": "card changed",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510",
+            "current_task": "ummanu-510",
             "dod_state": "open",
             "next_safe_step": "resume",
         }
@@ -1755,7 +1755,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="marker-event",
         )
@@ -1765,7 +1765,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "read board",
             "selected_why": "card changed",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510",
+            "current_task": "ummanu-510",
             "dod_state": "open",
             "next_safe_step": "resume",
         }
@@ -1820,7 +1820,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="crash-before-nudge-event",
         )
@@ -1840,7 +1840,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "wait",
             "selected_why": "the board is quiet",
             "rejected_alternatives": "relaunch",
-            "current_task": "secretary-510",
+            "current_task": "ummanu-510",
             "dod_state": "open",
             "next_safe_step": "wait",
         }
@@ -1870,7 +1870,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "wait",
             "selected_why": "board is quiet",
             "rejected_alternatives": "relaunch",
-            "current_task": "secretary-510",
+            "current_task": "ummanu-510",
             "dod_state": "open",
             "next_safe_step": "wait",
             "recorded_at": same_second,
@@ -1887,7 +1887,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             {
                 "event_id": "evt_same_second_card",
                 "request_id": "same-second-card-event",
-                "ref": "secretary-510",
+                "ref": "ummanu-510",
                 "kind": "moved",
                 "outcome": "success",
                 "actor": {"role": "dispatcher"},
@@ -1912,7 +1912,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="first",
             request_id="first-wake-event",
         )
@@ -1921,7 +1921,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "read board",
             "selected_why": "first event",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510",
+            "current_task": "ummanu-510",
             "dod_state": "open",
             "next_safe_step": "wait",
         }
@@ -1929,7 +1929,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="second",
             request_id="second-wake-event",
         )
@@ -1948,7 +1948,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="first",
             request_id="burst-first",
         )
@@ -1957,7 +1957,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="coalesced",
             request_id="burst-second",
         )
@@ -1973,7 +1973,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "read board",
             "selected_why": "coalesced burst",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510",
+            "current_task": "ummanu-510",
             "dod_state": "open",
             "next_safe_step": "wait",
         }
@@ -1981,7 +1981,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="after resume",
             request_id="after-burst-resume",
         )
@@ -2002,15 +2002,15 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         sprint_writer = SprintWriter(self.board, data_dir=self.data_dir)  # type: ignore[arg-type]
         stale = {
-            "selected_step": "cut secretary-1592 next",
+            "selected_step": "cut ummanu-1592 next",
             "selected_why": "the previous card is nearly done",
             "rejected_alternatives": "closing before the remaining cut",
-            "current_task": "secretary-1591",
+            "current_task": "ummanu-1591",
             "dod_state": "one cut remains",
-            "next_safe_step": "create secretary-1592",
+            "next_safe_step": "create ummanu-1592",
             "recorded_at": "2099-01-01T00:00:00Z",
         }
-        with mock.patch("secretary.sprints._now", return_value="2099-01-01T00:00:00Z"):
+        with mock.patch("ummanu.sprints._now", return_value="2099-01-01T00:00:00Z"):
             sprint_writer.resume(
                 role="observer",
                 actor="observer",
@@ -2018,9 +2018,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 entry=stale,
                 request_id="sprint-1432-old-plan",
             )
-        cutoff = "After secretary-1591, close the sprint. Do not create any new cards."
+        cutoff = "After ummanu-1591, close the sprint. Do not create any new cards."
         # The wall clock goes backwards. Audit append order, not timestamps, defines the cursor.
-        with mock.patch("secretary.sprints._now", return_value="2000-01-01T00:00:00Z"):
+        with mock.patch("ummanu.sprints._now", return_value="2000-01-01T00:00:00Z"):
             cutoff_result = sprint_writer.comment(
                 role="po",
                 actor="owner",
@@ -2038,7 +2038,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(change, "sprint-entity")
         self.assertEqual(
             [comment["body"] for comment in wake_sprint["comments"]],
-            ["[sprint:resume]\ncut secretary-1592 next", "[po]\n" + cutoff],
+            ["[sprint:resume]\ncut ummanu-1592 next", "[po]\n" + cutoff],
         )
 
         # The stale turn proves receipt of the cutoff batch without changing its old semantic plan.
@@ -2051,7 +2051,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         prompt = (Path(self.observers()["sprint:1"].workspace) / "SPRINT.md").read_text(encoding="utf-8")
         self.assertIn("### Comment 2 (applicable PO/owner decision)", prompt)
         self.assertIn(cutoff, prompt)
-        self.assertIn('"next_safe_step": "create secretary-1592"', prompt)
+        self.assertIn('"next_safe_step": "create ummanu-1592"', prompt)
         self.assertLess(prompt.index(cutoff), prompt.index('"next_safe_step"'))
         self.assertIn("continuity context, not authority over an owner decision", prompt)
 
@@ -2063,7 +2063,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="replacement needed",
             request_id="replacement-event",
         )
@@ -2098,7 +2098,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.writer.comment(
                 role="dispatcher",
                 actor="dispatcher",
-                reference="secretary-510",
+                reference="ummanu-510",
                 body=request_id,
                 request_id=request_id,
             )
@@ -2112,7 +2112,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         # are not what the delivery is cut through.
         batch_events = [
             event["event_id"]
-            for event in self.audit.events("secretary-510")
+            for event in self.audit.events("ummanu-510")
             if event["event_id"].startswith("evt_burst-two")
         ]
         self.assertEqual(
@@ -2123,7 +2123,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "read board",
             "selected_why": "coalesced batch",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510",
+            "current_task": "ummanu-510",
             "dod_state": "open",
             "next_safe_step": "wait",
         }
@@ -2151,7 +2151,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="crash boundary",
             request_id="crash-boundary-event",
         )
@@ -2193,7 +2193,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="retry delivery",
             request_id="retry-delivery-event",
         )
@@ -2238,7 +2238,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             {
                 "event_id": "evt_old_event",
                 "request_id": "old-event",
-                "ref": "secretary-510",
+                "ref": "ummanu-510",
                 "kind": "moved",
                 "outcome": "success",
                 "actor": {"role": "dispatcher"},
@@ -2266,7 +2266,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="idle-redelivery-event",
         )
@@ -2304,7 +2304,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="mid-sentence-event",
         )
@@ -2332,14 +2332,14 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed while the observer was working",
             request_id="turn-ceiling-event",
         )
         waiting = self.runtime.production_tick()
         self.assertEqual([row["action"] for row in self.actions(waiting)], ["observer-wake-waiting"])
 
-        with mock.patch.dict(os.environ, {"SECRETARY_OBSERVER_TURN_CEILING_SECONDS": "1"}):
+        with mock.patch.dict(os.environ, {"UMMANU_OBSERVER_TURN_CEILING_SECONDS": "1"}):
             self.age_delivery(60)
             ceiling = self.runtime.production_tick()
 
@@ -2374,7 +2374,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="observer-progress-precedence-event",
         )
@@ -2403,7 +2403,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="rollout complete",
             request_id="observer-precontract-unbound-event",
         )
@@ -2448,7 +2448,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "read board",
             "selected_why": "rollout complete",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510",
+            "current_task": "ummanu-510",
             "dod_state": "open",
             "next_safe_step": "resume",
         }
@@ -2475,7 +2475,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="observer-stalled-composer-event",
         )
@@ -2514,7 +2514,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="observer-foreign-provider-event",
         )
@@ -2545,7 +2545,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="provider journal disappeared",
             request_id="observer-unavailable-reload-event",
         )
@@ -2604,7 +2604,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed while the observer looked busy",
             request_id="unbound-source-ceiling-event",
         )
@@ -2638,7 +2638,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         """A current Claude descriptor cannot fall back to a workspace-wide transcript scan."""
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(Path(tmp) / "claude-projects")}),
+            mock.patch.dict(os.environ, {"UMMANU_CLAUDE_PROJECTS": str(Path(tmp) / "claude-projects")}),
         ):
             self.open_sprint()
             self.board.save_metadata(12, sprint_ref="sprint:1")
@@ -2654,7 +2654,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.writer.comment(
                 role="dispatcher",
                 actor="dispatcher",
-                reference="secretary-510",
+                reference="ummanu-510",
                 body="two Claude transcripts appeared after observer launch",
                 request_id="ambiguous-claude-source-event",
             )
@@ -2694,7 +2694,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed while the observer was really working",
             request_id="admitted-cursor-ceiling-event",
         )
@@ -2717,7 +2717,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="a long card to work through",
             request_id="long-turn-event",
         )
@@ -2751,7 +2751,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card changed",
             request_id="redelivery-ack-event",
         )
@@ -2768,7 +2768,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "selected_step": "read board",
             "selected_why": "card changed",
             "rejected_alternatives": "wait",
-            "current_task": "secretary-510",
+            "current_task": "ummanu-510",
             "dod_state": "open",
             "next_safe_step": "resume",
         }
@@ -2818,7 +2818,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             {
                 "event_id": "evt_routing_only",
                 "request_id": "routing-only",
-                "ref": "secretary-510",
+                "ref": "ummanu-510",
                 "kind": "routing",
                 "outcome": "success",
                 "occurred_at": "2026-07-29T12:00:00Z",
@@ -2847,7 +2847,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         moved = self.writer.move(
             role="po",
             actor="operator",
-            reference="secretary-510",
+            reference="ummanu-510",
             target="issues",
             reason="return this cut to triage",
             sprint_override=True,
@@ -2865,7 +2865,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             {
                 "event_id": "evt_dispatcher_routine_routing",
                 "request_id": "dispatcher-routine-routing",
-                "ref": "secretary-510",
+                "ref": "ummanu-510",
                 "kind": "moved",
                 "outcome": "success",
                 "actor": {"role": "dispatcher", "id": "dispatcher"},
@@ -2896,7 +2896,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 {
                     "event_id": "evt_" + request_id,
                     "request_id": request_id,
-                    "ref": "secretary-510",
+                    "ref": "ummanu-510",
                     "kind": kind,
                     "outcome": outcome,
                     "occurred_at": "2099-01-01T00:00:00Z",
@@ -2922,7 +2922,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 {
                     "event_id": "evt_" + request,
                     "request_id": request,
-                    "ref": "secretary-510",
+                    "ref": "ummanu-510",
                     "kind": kind,
                     "outcome": "success",
                     "actor": {"role": "dispatcher"},
@@ -3041,7 +3041,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         sprint_writer = SprintWriter(self.board, data_dir=self.data_dir)  # type: ignore[arg-type]
         real_events = SqlTaskAudit.events
         inserted = [False]
-        cutoff = "Close after secretary-1591 and create no more cards."
+        cutoff = "Close after ummanu-1591 and create no more cards."
 
         def events_after_owner_comment(audit: SqlTaskAudit, *args: object, **kwargs: object) -> list[dict]:
             if not inserted[0]:
@@ -3069,7 +3069,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="assessment changed",
             request_id="single-sprint-snapshot-event",
         )
@@ -3096,7 +3096,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="assessment changed",
             request_id="missing-live-comments-event",
         )
@@ -3122,7 +3122,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="card entered assessment",
             request_id="single-audit-snapshot-event",
         )
@@ -3145,7 +3145,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 side_effect=accept_while_ready,
             ),
             mock.patch(
-                "secretary.dispatch.production._reconcile_sprint_budget",
+                "ummanu.dispatch.production._reconcile_sprint_budget",
                 return_value=[],
             ),
         ):
@@ -3164,7 +3164,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         # A declared row is fenced until its head is adopted, so the card joins the sprint
         # once the observer is up, the way a card does in production.
         self.board.save_metadata(12, sprint_ref="sprint:1")
-        self.board.save_sprint_metadata("sprint:1", sprint_current_task="secretary-510")
+        self.board.save_sprint_metadata("sprint:1", sprint_current_task="ummanu-510")
         self.host.observer_status_result = {
             "last_activity": time.time() - 2,
             "idle": True,
@@ -3260,7 +3260,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-510",
+            reference="ummanu-510",
             kind="red",
             body="fix it",
             request_id="red-review",
@@ -3275,7 +3275,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.move(
             role="po",
             actor="operator",
-            reference="secretary-510",
+            reference="ummanu-510",
             target="blocked",
             reason="operator stop",
             sprint_override=True,
@@ -3304,7 +3304,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.move(
             role="po",
             actor="operator",
-            reference="secretary-510",
+            reference="ummanu-510",
             target="blocked",
             reason="the worker head never came up",
             sprint_override=True,
@@ -3331,7 +3331,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertFalse(sprint["budget"]["signal_reached"])
         self.assertEqual(sprint["status"], "open")
         # The card itself is untouched by the budget decision: it stays Blocked for the observer.
-        self.assertEqual(self.reader.show("secretary-510")["state"], "blocked")
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "blocked")
 
     def test_budget_event_classification_excludes_green_card_cycle(self) -> None:
         cases = {
@@ -3401,7 +3401,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.move(
             role="po",
             actor="operator",
-            reference="secretary-510",
+            reference="ummanu-510",
             target="blocked",
             reason="reslice",
             sprint_override=True,
@@ -3421,7 +3421,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             {
                 "event_id": "evt_malformed_taxonomy",
                 "request_id": "malformed-taxonomy",
-                "ref": "secretary-510",
+                "ref": "ummanu-510",
                 "record_type": "board.protocol_event",
                 "kind": "card.blocked",
                 "transition": {"target": "blocked"},
@@ -3431,7 +3431,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-510",
+            reference="ummanu-510",
             kind="red",
             body="later budget event",
             request_id="later-red-review",
@@ -3452,14 +3452,14 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.claim(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             worker="worker",
             request_id="green-claim",
         )
         self.writer.move(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             target="validate",
             reason="worker completed",
             request_id="green-validate",
@@ -3467,7 +3467,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-510",
+            reference="ummanu-510",
             kind="green",
             body="looks good",
             request_id="green-verdict",
@@ -3475,7 +3475,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.move(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             target="done",
             reason="review passed",
             request_id="green-done",
@@ -3489,7 +3489,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_unlinked_historical_budget_events_are_not_reread_on_every_tick(self) -> None:
         for index in range(20):
             task_id = 1000 + index
-            reference = f"secretary-historical-{index}"
+            reference = f"ummanu-historical-{index}"
             self.board.add_card(
                 task_id,
                 reference,
@@ -3499,7 +3499,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 position=task_id,
                 created=1720000000,
                 project=None,
-                metadata={"project": "secretary", "task_type": "code"},
+                metadata={"project": "ummanu", "task_type": "code"},
             )
             self.audit.append(
                 f"historical-red-{index}",
@@ -3542,14 +3542,14 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             {"ref": "claimable", "sprint": None, "type": "code", "project": "three"},
         ]
         with (
-            mock.patch("secretary.dispatch.production._production_tasks", side_effect=[[], ready]),
+            mock.patch("ummanu.dispatch.production._production_tasks", side_effect=[[], ready]),
             mock.patch.object(
                 self.runtime.sprints,
                 "show",
                 side_effect=TaskError("backend_error", "sprint board is down", 1),
             ) as show,
             mock.patch(
-                "secretary.dispatch.production.claim_ready_task",
+                "ummanu.dispatch.production.claim_ready_task",
                 return_value={"action": "claimed"},
             ) as claim,
         ):
@@ -4502,11 +4502,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         result = self.runtime.production_tick()
 
         claim = [action for action in result["actions"] if action.get("step") == "claim"]
-        self.assertEqual(claim[0]["pilot_ref"], "secretary-510")
-        self.assertEqual(self.reader.show("secretary-510")["state"], "in_progress")
+        self.assertEqual(claim[0]["pilot_ref"], "ummanu-510")
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "in_progress")
         # The observer holds no card record and does not occupy the per-project claim gate.
         records = self.runtime.production_state.records(self.runtime.production_state.load())
-        self.assertEqual(sorted(records), ["secretary-510"])
+        self.assertEqual(sorted(records), ["ummanu-510"])
         self.assertNotIn("sprint:1", records)
 
     def test_the_observer_workspace_is_not_a_card_workspace(self) -> None:
@@ -4515,8 +4515,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         record = self.observers()["sprint:1"]
         card = self.runtime.production_state.records(self.runtime.production_state.load())
-        self.assertNotEqual(record.workspace, card["secretary-510"].workspace)
-        self.assertNotEqual(record.handle, card["secretary-510"].handle)
+        self.assertNotEqual(record.workspace, card["ummanu-510"].workspace)
+        self.assertNotEqual(record.handle, card["ummanu-510"].handle)
 
     # observability -----------------------------------------------------------
 
@@ -4577,7 +4577,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.observed_pair()
         self.assertEqual(
             self.claimed(self.runtime.production_tick())[0]["pilot_ref"],
-            "secretary-511",
+            "ummanu-511",
         )
 
     def budget_of(self, reference: str) -> dict:
@@ -4625,11 +4625,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.open_disjoint_pair()
         self.assertEqual(
             self.claimed(self.runtime.production_tick())[0]["pilot_ref"],
-            "secretary-511",
+            "ummanu-511",
         )
         self.assertEqual(
             self.claimed(self.runtime.production_tick())[0]["pilot_ref"],
-            "secretary-510",
+            "ummanu-510",
         )
 
     def test_a_card_event_charges_the_sprint_it_is_linked_to_and_no_other(self) -> None:
@@ -4638,7 +4638,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-510",
+            reference="ummanu-510",
             kind="red",
             body="fix it",
             request_id="red-review-first-sprint",
@@ -4664,17 +4664,17 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.open_disjoint_pair()
         self.assertEqual(
             self.claimed(self.runtime.production_tick())[0]["pilot_ref"],
-            "secretary-511",
+            "ummanu-511",
         )
         # Through the command in the checkout: that id is what attributes the report to the round
         # the dispatcher is waiting for (secretary-1063).
-        workspace = self.runtime.production_state.load()["records"]["secretary-511"]["workspace"]
+        workspace = self.runtime.production_state.load()["records"]["ummanu-511"]["workspace"]
         document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
         done_command = next(line for line in document.splitlines() if "--kind done" in line)
         self.writer.report(
             role="worker",
             actor="worker",
-            reference="secretary-511",
+            reference="ummanu-511",
             kind="done",
             body="ready for validation",
             request_id=done_command.split("--request-id ", 1)[1].split()[0],
@@ -4691,7 +4691,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-511",
+            reference="ummanu-511",
             kind="red",
             body="needs work",
             request_id="rework-red-verdict",
@@ -4721,12 +4721,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-510",
+            reference="ummanu-510",
             kind="red",
             body="fix it",
             request_id="red-first-sprint",
         )
-        self.charge("secretary-510", "blocked-first-sprint")
+        self.charge("ummanu-510", "blocked-first-sprint")
 
         result = self.runtime.production_tick()
 
@@ -4775,7 +4775,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.skipped(result), [])
         self.assertEqual([card["ref"] for card in self.runtime.sprints.show(self.FIRST)["cards"]], [])
         # The open sprint's card in flight keeps riding its cycle.
-        self.assertIn("secretary-511", self.advanced(result))
+        self.assertIn("ummanu-511", self.advanced(result))
 
     def test_a_po_comment_after_the_close_wakes_nothing_and_the_tick_still_ends_the_head(self) -> None:
         """Criteria 4 and 5 of secretary-1578, against the production tick itself.
@@ -4846,7 +4846,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertTrue(observer_alive(self.observers()[self.FIRST])["alive"])
         self.assertEqual(self.runtime.sprints.show(self.FIRST)["status"], "open")
         self.assertEqual(self.claimed(result)[0]["pilot_ref"], "fourth-1")
-        self.assertIn("secretary-510", self.advanced(result))
+        self.assertIn("ummanu-510", self.advanced(result))
         # The closed sprint's own Ready card is not left alone on the board any more: its
         # disposition archived it with the close, so no later pass reaches it at all.
         self.assertEqual(self.skipped(self.runtime.production_tick()), [])
@@ -4891,7 +4891,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-510",
+            reference="ummanu-510",
             body="the first sprint's card changed",
             request_id="event-of-first-sprint",
         )
@@ -4913,7 +4913,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.writer.comment(
             role="dispatcher",
             actor="dispatcher",
-            reference="secretary-511",
+            reference="ummanu-511",
             body="the second sprint's card changed",
             request_id="event-of-second-sprint",
         )
@@ -4941,8 +4941,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         """Each cursor is closed by its own sprint's resume, and by no other."""
         self.observed_pair()
         for reference, body, request in (
-            ("secretary-510", "first changed", "cursor-event-first"),
-            ("secretary-511", "second changed", "cursor-event-second"),
+            ("ummanu-510", "first changed", "cursor-event-first"),
+            ("ummanu-511", "second changed", "cursor-event-second"),
         ):
             self.writer.comment(
                 role="dispatcher",
@@ -4960,7 +4960,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 "selected_step": "read the board",
                 "selected_why": "a card changed",
                 "rejected_alternatives": "wait",
-                "current_task": "secretary-510",
+                "current_task": "ummanu-510",
                 "dod_state": "open",
                 "next_safe_step": "resume",
             },
@@ -4998,7 +4998,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         # The second sprint reconciles and claims inside the same tick the first is held in.
         self.assertEqual(
             [action["pilot_ref"] for action in result["actions"] if action["step"] == "advance"],
-            ["secretary-511"],
+            ["ummanu-511"],
         )
         self.assertEqual(self.claimed(result)[0]["pilot_ref"], "third-1")
         self.assertEqual(
@@ -5029,8 +5029,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         """
         self.observed_pair_in_flight()
         for reference, request in (
-            ("secretary-510", "hung-event-first"),
-            ("secretary-511", "hung-event-second"),
+            ("ummanu-510", "hung-event-first"),
+            ("ummanu-511", "hung-event-second"),
         ):
             self.writer.comment(
                 role="dispatcher",
@@ -5065,7 +5065,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         )
         self.assertEqual(
             sorted(action["pilot_ref"] for action in result["actions"] if action["step"] == "advance"),
-            ["secretary-510", "secretary-511"],
+            ["ummanu-510", "ummanu-511"],
         )
 
 
@@ -5073,7 +5073,7 @@ class ClaudeObserverProviderContractTests(unittest.TestCase):
     def test_current_launch_retains_its_pre_pane_baseline_and_records_progress(self) -> None:
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(Path(tmp) / "claude-projects")}),
+            mock.patch.dict(os.environ, {"UMMANU_CLAUDE_PROJECTS": str(Path(tmp) / "claude-projects")}),
         ):
             root = Path(tmp)
             catalog = FakeCatalog()
@@ -5156,12 +5156,12 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertEqual(
             ROLE_ALLOWLIST["observer"],
             (
-                "SECRETARY_INSTANCE",
-                "SECRETARY_DATA_DIR",
-                "TA_SECRETARY_REPO",
+                "UMMANU_INSTANCE",
+                "UMMANU_DATA_DIR",
+                "UMMANU_REPO",
                 OBSERVER_SPRINT_ENV,
                 OBSERVER_GENERATION_ENV,
-                "SECRETARY_MEMORY_ACCESS_TOKEN",
+                "UMMANU_MEMORY_ACCESS_TOKEN",
             ),
         )
 
@@ -5222,9 +5222,9 @@ class ObserverConfigurationTests(unittest.TestCase):
                 "ref": "sprint:9",
                 "goal": "make the pipeline autonomous",
                 "definition_of_done": "an operator sleeps through a sprint",
-                "repositories": ["secretary", "codegen"],
+                "repositories": ["ummanu", "codegen"],
                 "status": "open",
-                "current_task": "secretary-800",
+                "current_task": "ummanu-800",
                 "budget": {"total": 3},
                 "comments": [
                     {"created_at": "same", "body": "[dispatcher]\nfirst"},
@@ -5241,11 +5241,11 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertIn("sprint:9", prompt)
         self.assertIn("make the pipeline autonomous", prompt)
         self.assertIn("an operator sleeps through a sprint", prompt)
-        self.assertIn("- secretary", prompt)
+        self.assertIn("- ummanu", prompt)
         self.assertIn("- codegen", prompt)
-        self.assertIn("secretary-800", prompt)
+        self.assertIn("ummanu-800", prompt)
         self.assertIn("/shell/skills/observe-sprint/SKILL.md", prompt)
-        self.assertIn("python3 -P -m secretary sprint show --ref sprint:9", prompt)
+        self.assertIn("python3 -P -m ummanu sprint show --ref sprint:9", prompt)
         self.assertIn("### Comment 2 (applicable PO/owner decision)", prompt)
         self.assertLess(prompt.index("[dispatcher]\nfirst"), prompt.index("[po]\nowner cutoff"))
         self.assertLess(prompt.index("[po]\nowner cutoff"), prompt.index('"next_safe_step"'))
@@ -5338,7 +5338,7 @@ class ObserverConfigurationTests(unittest.TestCase):
                     through_event="evt-card-1",
                 ),
             )
-            owner_decision = "[po]\nclose after secretary-1591; create no new cards\n" + "x" * 70_000
+            owner_decision = "[po]\nclose after ummanu-1591; create no new cards\n" + "x" * 70_000
             seen_at_delivery: list[str] = []
             backend.on_deliver = lambda: seen_at_delivery.append(
                 (workspace / "SPRINT.md").read_text(encoding="utf-8")
@@ -5354,7 +5354,7 @@ class ObserverConfigurationTests(unittest.TestCase):
                             "body": owner_decision,
                         }
                     ],
-                    "resume": {"next_safe_step": "create secretary-1592"},
+                    "resume": {"next_safe_step": "create ummanu-1592"},
                 },
                 change="sprint-entity",
             )
@@ -5377,7 +5377,7 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertIn("### Comment 1 (applicable PO/owner decision)", document_text)
         self.assertIn(owner_decision, document_text)
         self.assertLess(
-            document_text.index("close after secretary-1591"), document_text.index('"next_safe_step"')
+            document_text.index("close after ummanu-1591"), document_text.index('"next_safe_step"')
         )
         broad = "worker-local broad receipt"
         gate = "dispatcher-owned exact-SHA gate receipt"
@@ -5597,10 +5597,10 @@ class RealHostStopObserverTests(unittest.TestCase):
         nothing is left pointing at it to clean it up."""
         runtime = mock.Mock()
         runtime.host = self.host
-        with mock.patch("secretary.dispatch.cleanup.git_worktree.remove", return_value=False):
+        with mock.patch("ummanu.dispatch.cleanup.git_worktree.remove", return_value=False):
             self.assertFalse(stop_observer_head(runtime, self.record))
 
-        self.assertEqual(self.backend.stops, [("observer-run-1", "secretary-dispatcher")])
+        self.assertEqual(self.backend.stops, [("observer-run-1", "ummanu-dispatcher")])
         self.assertEqual(self.record.workspace, str(self.workspace))
         self.assert_workspace_retained()
         intent = next(iter(self.host.cleanup_owner.journal.read()["intents"].values()))
@@ -5622,13 +5622,13 @@ class RealHostStopObserverTests(unittest.TestCase):
         self.assertFalse(stop_observer_head(runtime, self.record))
         self.backend.stops.clear()
         self.backend.stop_refusal = ""
-        with mock.patch("secretary.dispatch.cleanup._registered",
+        with mock.patch("ummanu.dispatch.cleanup._registered",
                         side_effect=HostError("cleanup worktree registrations are unreadable")):
             self.assertFalse(stop_observer_head(runtime, self.record))
 
         self.assertTrue(self.record.head_possible)
         self.assertEqual(self.record.workspace, str(self.workspace))
-        self.assertEqual(self.backend.stops, [("observer-run-1", "secretary-dispatcher")])
+        self.assertEqual(self.backend.stops, [("observer-run-1", "ummanu-dispatcher")])
         self.assert_workspace_retained()
         intent = next(iter(self.host.cleanup_owner.journal.read()["intents"].values()))
         self.assertEqual(intent["status"], "pending")
@@ -5656,11 +5656,11 @@ class RealHostObserverTeardownTests(unittest.TestCase):
         env = mock.patch.dict(
             os.environ,
             {
-                "SECRETARY_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
-                "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
-                "SECRETARY_ROLE_SKILLS_MANIFEST": str(self.data_dir / "registry" / "manifest.toml"),
-                "SECRETARY_INSTANCE": str(self.data_dir / "registry" / "instance"),
-                "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.data_dir / "orca-workspaces"),
+                "UMMANU_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
+                "UMMANU_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
+                "UMMANU_ROLE_SKILLS_MANIFEST": str(self.data_dir / "registry" / "manifest.toml"),
+                "UMMANU_INSTANCE": str(self.data_dir / "registry" / "instance"),
+                "UMMANU_DISPATCHER_WORKSPACES_ROOT": str(self.data_dir / "orca-workspaces"),
             },
         )
         env.start()
@@ -5682,7 +5682,7 @@ class RealHostObserverTeardownTests(unittest.TestCase):
             self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
-            owner="secretary-pilot",
+            owner="ummanu-pilot",
         )
         self.worktree_create_fails = False
         self.removal_refused = False
@@ -5691,7 +5691,7 @@ class RealHostObserverTeardownTests(unittest.TestCase):
         create = mock.patch.object(self.host, "_create_git_observer_workspace", side_effect=self._create)
         create.start()
         self.addCleanup(create.stop)
-        remove = mock.patch("secretary.dispatch.cleanup.git_worktree.remove", side_effect=self._remove)
+        remove = mock.patch("ummanu.dispatch.cleanup.git_worktree.remove", side_effect=self._remove)
         remove.start()
         self.addCleanup(remove.stop)
 
@@ -5755,7 +5755,7 @@ class RealHostObserverTeardownTests(unittest.TestCase):
 
         self.runtime.production_tick()
         self.close_sprint()
-        with mock.patch("secretary.dispatch.cleanup.git_worktree.remove") as remove:
+        with mock.patch("ummanu.dispatch.cleanup.git_worktree.remove") as remove:
             stopped = self.runtime.production_tick()
 
         self.assertEqual(self.actions(stopped), ["observer-stopped"])
@@ -5809,8 +5809,8 @@ class RealHostTuiObserverLaunchTests(unittest.TestCase):
         env = mock.patch.dict(
             os.environ,
             {
-                "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "orca-workspaces"),
-                "SECRETARY_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
+                "UMMANU_DISPATCHER_WORKSPACES_ROOT": str(self.root / "orca-workspaces"),
+                "UMMANU_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
             },
         )
         env.start()
@@ -5890,9 +5890,9 @@ class ObserverCodexTrustTests(unittest.TestCase):
         env = mock.patch.dict(
             os.environ,
             {
-                "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "workspaces"),
+                "UMMANU_DISPATCHER_WORKSPACES_ROOT": str(self.root / "workspaces"),
                 "TA_CODEX_HOME": str(self.codex_home),
-                "SECRETARY_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
+                "UMMANU_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
             },
         )
         env.start()
@@ -5945,7 +5945,7 @@ class ObserverCodexTrustTests(unittest.TestCase):
     def test_sprint_project_declarations_do_not_gate_its_observer_repository(self) -> None:
         sprint = {
             "ref": "sprint:1425",
-            "repositories": [str((self.root / "projects" / "secretary").resolve())],
+            "repositories": [str((self.root / "projects" / "ummanu").resolve())],
             "reservations": ["unavailable-project"],
         }
 

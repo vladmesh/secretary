@@ -17,19 +17,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.dispatch import worker_report
-from secretary.dispatch.heartbeat import run_heartbeat_identity
-from secretary.dispatch.runtime_provenance import ProductionRuntime
-from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatch.worker_comments import (
-    WORKER_COMMENTS_HEADING,
-    WORKER_COMMENTS_RULE,
-    select_worker_comments,
-    task_doc_comment_keys,
-)
-from secretary.dispatch.worker_lifecycle import WorkerContinuation, WorkerContinuationStage
-from secretary.runtime.head import operations as head_ops
-from secretary.tasks import _digest
 from tests.dispatcher_fixtures import (
     PromptAfterStartCatalog,
     RecordingReviewHost,
@@ -37,8 +24,21 @@ from tests.dispatcher_fixtures import (
     write_heartbeat,
 )
 from tests.dispatcher_fixtures import clear_env as _clear_env
+from ummanu.dispatch import worker_report
+from ummanu.dispatch.heartbeat import run_heartbeat_identity
+from ummanu.dispatch.runtime_provenance import ProductionRuntime
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.worker_comments import (
+    WORKER_COMMENTS_HEADING,
+    WORKER_COMMENTS_RULE,
+    select_worker_comments,
+    task_doc_comment_keys,
+)
+from ummanu.dispatch.worker_lifecycle import WorkerContinuation, WorkerContinuationStage
+from ummanu.runtime.head import operations as head_ops
+from ummanu.tasks import _digest
 
-REF = "secretary-1768"
+REF = "ummanu-1768"
 DESCRIPTION = "Build the frobnicator."
 EXCLUDED_ROLES = ("dispatcher", "worker", "reviewer", "steward", "retro")
 
@@ -60,7 +60,7 @@ class Card:
         self.audit = CardAudit()
         self.task = {
             "ref": REF,
-            "project": "secretary",
+            "project": "ummanu",
             "type": "code",
             "description": DESCRIPTION,
             "workspace": {"base_branch": "main"},
@@ -132,10 +132,10 @@ class HostCase(unittest.TestCase):
         self.root = Path(tmp.name)
         self.workspace = self.root / "ws"
         self.workspace.mkdir()
-        _clear_env(self, "SECRETARY_DISPATCHER_WORKER_COMMAND")
-        os.environ["SECRETARY_DISPATCHER_BODY_DIR"] = str(self.root)
-        os.environ["SECRETARY_CODEX_SESSIONS"] = str(self.root / "sessions")
-        os.environ["SECRETARY_CLAUDE_PROJECTS"] = str(self.root / "claude-projects")
+        _clear_env(self, "UMMANU_DISPATCHER_WORKER_COMMAND")
+        os.environ["UMMANU_DISPATCHER_BODY_DIR"] = str(self.root)
+        os.environ["UMMANU_CODEX_SESSIONS"] = str(self.root / "sessions")
+        os.environ["UMMANU_CLAUDE_PROJECTS"] = str(self.root / "claude-projects")
         self.card = Card()
         self.host = RecordingReviewHost(self.root, catalog=PromptAfterStartCatalog())
         self.host.audit = self.card.audit
@@ -414,14 +414,14 @@ class MidRoundContinuationTests(HostCase):
 
     def test_a_health_probe_never_delivers_a_comment(self) -> None:
         """The probe walks the tick with effects aborted; typing into a live worker is one."""
-        from secretary.dispatch.production import ProbeAbort, _ProbeHost
+        from ummanu.dispatch.production import ProbeAbort, _ProbeHost
 
         with self.assertRaises(ProbeAbort):
             _ProbeHost(self.host).deliver_worker_comments(self.card.task, self.live_worker())
         self.assertEqual(self.host.backend.deliveries, [])
 
     def test_the_tick_offers_comments_after_the_report_and_headless_checks_and_before_the_wait(self) -> None:
-        source = (Path(__file__).resolve().parents[1] / "src" / "secretary" / "dispatch" / "runtime.py").read_text(
+        source = (Path(__file__).resolve().parents[1] / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(
             encoding="utf-8"
         )
         advance = next(

@@ -45,7 +45,7 @@ SLOWEST_TEST_LIMIT = 10
 MAX_STATUS_CHANGE_SAMPLES = 10
 MAX_STATUS_CHANGE_CHARS = 200
 EVIDENCE_FILES = ("report.json", "junit.xml", "test-output.log")
-COVERAGE_SOURCE_ROOTS = ("src/secretary",)
+COVERAGE_SOURCE_ROOTS = ("src/ummanu",)
 COVERAGE_RAW_PREFIX = "coverage."
 COVERAGE_JSON_NAME = "combined-coverage.json"
 CHANGED_LINES_JSON_NAME = "changed-lines.json"
@@ -831,7 +831,7 @@ def aggregate_coverage(
         for path in raw_data:
             _validate_coverage_datum(path)
         output_dir.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="secretary-coverage-") as work:
+        with tempfile.TemporaryDirectory(prefix="ummanu-coverage-") as work:
             # coverage combine recognizes inputs by the basename set through
             # --data-file. Keep that basename aligned with coverage.<suite>,
             # while keeping its intermediate SQLite data outside the published
@@ -1002,7 +1002,7 @@ def fast_environment(root: Path, fixture_root: Path) -> dict[str, str]:
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONNOUSERSITE": "1",
         "PYTHONPATH": os.pathsep.join((str(guard), str(root), str(root / "src"))),
-        "TA_SECRETARY_REPO": str(root),
+        "UMMANU_REPO": str(root),
     }
 
 
@@ -1042,7 +1042,7 @@ def run_fast(root: Path) -> int:
     except ManifestError as exc:
         print(f"Fast test profile is invalid: {exc}", file=sys.stderr)
         return 2
-    with tempfile.TemporaryDirectory(prefix="secretary-fast-tests.") as temporary:
+    with tempfile.TemporaryDirectory(prefix="ummanu-fast-tests.") as temporary:
         environment = fast_environment(root, Path(temporary))
         return run_bounded(
             [sys.executable, "-P", "-m", "unittest", "-v", *FAST_MODULES],

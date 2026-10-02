@@ -10,26 +10,26 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary import state_repo
-from secretary.board.sql_audit import SqlTaskAudit
-from secretary.cli import main
-from secretary.config import validate, validate_instance
-from secretary.head_registry import (
+from tests.fakes.sprints import sprint_store, status_seed
+from ummanu import state_repo
+from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.cli import main
+from ummanu.config import validate, validate_instance
+from ummanu.head_registry import (
     materialize_snapshot,
     product_revision,
     record_source,
 )
-from secretary.host import (
+from ummanu.host import (
     CollectResult,
     HostInventory,
     build_doctor_expectations,
     packaging_root,
 )
-from secretary.host_apply import resolve_packaged
-from secretary.secret_store import initialize_store, set_secret
-from secretary.sprints import SprintWriter
-from secretary.status import collect_status
-from tests.fakes.sprints import sprint_store, status_seed
+from ummanu.host_apply import resolve_packaged
+from ummanu.secret_store import initialize_store, set_secret
+from ummanu.sprints import SprintWriter
+from ummanu.status import collect_status
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -66,9 +66,9 @@ class StatusCliTests(unittest.TestCase):
             )
             (data_dir / "memory" / "index.sqlite").write_text("index", encoding="utf-8")
             (data_dir / "board").mkdir()
-            (data_dir / "board" / "cards.ndjson").write_text('{"ref":"secretary-727"}\n', encoding="utf-8")
+            (data_dir / "board" / "cards.ndjson").write_text('{"ref":"ummanu-727"}\n', encoding="utf-8")
             (data_dir / "dispatcher" / "pause.json").write_text(
-                json.dumps({"mode": "freeze", "actor": "secretary", "since": "2999-01-01T00:00:00Z"}),
+                json.dumps({"mode": "freeze", "actor": "ummanu", "since": "2999-01-01T00:00:00Z"}),
                 encoding="utf-8",
             )
             (data_dir / "dispatcher" / "production-state.json").write_text(
@@ -92,7 +92,7 @@ class StatusCliTests(unittest.TestCase):
                             },
                         },
                         "records": {
-                            "secretary-727": {
+                            "ummanu-727": {
                                 "attempt_id": "a1",
                                 "head": "codex",
                                 "workspace": "/work",
@@ -105,7 +105,7 @@ class StatusCliTests(unittest.TestCase):
                             {
                                 "id": "div_open0000000000",
                                 "at": "2026-07-25T00:00:00Z",
-                                "pilot_ref": "secretary-730",
+                                "pilot_ref": "ummanu-730",
                                 "step": "production-recovery",
                                 "reason": "active_claim_mismatch",
                                 "status": "open",
@@ -113,7 +113,7 @@ class StatusCliTests(unittest.TestCase):
                             {
                                 "id": "div_closed00000000",
                                 "at": "2026-07-01T00:00:00Z",
-                                "pilot_ref": "secretary-716",
+                                "pilot_ref": "ummanu-716",
                                 "step": "production-recovery",
                                 "reason": "active_claim_mismatch",
                                 "status": "closed",
@@ -131,7 +131,7 @@ class StatusCliTests(unittest.TestCase):
                 f"data_dir: {data_dir}\n"
                 "offsite:\n  instance_remote: git@example.invalid:x/y.git\n"
                 "heads:\n  - role: worker\n    model: codex\n"
-                "host:\n  projects_root: /projects\n  unit_prefix: secretary-\n"
+                "host:\n  projects_root: /projects\n  unit_prefix: ummanu-\n"
                 "  orca_repos:\n    - demo\n",
                 encoding="utf-8",
             )
@@ -176,7 +176,7 @@ class StatusCliTests(unittest.TestCase):
             }
             with (
                 contextlib.redirect_stdout(output),
-                mock.patch("secretary.status.checkpoint_snapshot", return_value=checkpoint),
+                mock.patch("ummanu.status.checkpoint_snapshot", return_value=checkpoint),
             ):
                 code = main(["status", "--json", "--host-fixture", str(fixture), "--instance", str(instance)])
 
@@ -198,13 +198,13 @@ class StatusCliTests(unittest.TestCase):
         self.assertEqual(payload["checkpoint"]["lag_commits"], 9)
         self.assertTrue(payload["dispatcher"]["pause"]["paused"])
         self.assertEqual(payload["dispatcher"]["pause"]["mode"], "freeze")
-        self.assertEqual(payload["dispatcher"]["pause"]["actor"], "secretary")
+        self.assertEqual(payload["dispatcher"]["pause"]["actor"], "ummanu")
         self.assertEqual(payload["dispatcher"]["pause"]["auto_resume"]["reason"], "fresh")
         self.assertEqual(payload["memory"]["fact_count"], 2)
         self.assertIsNotNone(payload["memory"]["last_reindex_at"])
         self.assertEqual(payload["dispatcher"]["divergences"]["open_count"], 1)
         self.assertEqual(payload["dispatcher"]["divergences"]["total_count"], 2)
-        self.assertEqual(payload["dispatcher"]["divergences"]["open"][0]["pilot_ref"], "secretary-730")
+        self.assertEqual(payload["dispatcher"]["divergences"]["open"][0]["pilot_ref"], "ummanu-730")
         self.assertIsNotNone(payload["dispatcher"]["reconciliation"]["last_tick_finished_at"])
         self.assertEqual(payload["dispatcher"]["reconciliation"]["records_tracked"], 1)
         # This fixture's state predates the reconciliation pass (no "last_reconciled_at" key was
@@ -233,7 +233,7 @@ class StatusCliTests(unittest.TestCase):
                 json.dumps(
                     {
                         "records": {
-                            "secretary-727": {"head": "codex", "worker_progress_at": 1, "worker_respawns": 2}
+                            "ummanu-727": {"head": "codex", "worker_progress_at": 1, "worker_respawns": 2}
                         }
                     }
                 ),
@@ -243,7 +243,7 @@ class StatusCliTests(unittest.TestCase):
             instance.write_text(
                 "version: 1\nname: test\ndata_dir: " + str(data_dir) + "\n"
                 "offsite:\n  instance_remote: git@example.invalid:x/y.git\n"
-                "host:\n  unit_prefix: secretary-\n",
+                "host:\n  unit_prefix: ummanu-\n",
                 encoding="utf-8",
             )
             output = io.StringIO()
@@ -251,23 +251,23 @@ class StatusCliTests(unittest.TestCase):
             panel = {"known": True, "live": True, "reason": "pane-active"}
             with (
                 contextlib.redirect_stdout(output),
-                mock.patch("secretary.status.LiveHostSource.collect", return_value=CollectResult(inventory)),
-                mock.patch("secretary.status.command_terminal_status", return_value=panel),
-                mock.patch("secretary.status.checkpoint_snapshot", return_value={"lag_minutes": 4}),
+                mock.patch("ummanu.status.LiveHostSource.collect", return_value=CollectResult(inventory)),
+                mock.patch("ummanu.status.command_terminal_status", return_value=panel),
+                mock.patch("ummanu.status.checkpoint_snapshot", return_value={"lag_minutes": 4}),
             ):
                 code = main(["status", "--instance", str(instance)])
             report = validate_instance(instance)
             with (
-                mock.patch("secretary.status.LiveHostSource.collect", return_value=CollectResult(inventory)),
-                mock.patch("secretary.status.command_terminal_status", return_value=panel),
-                mock.patch("secretary.status.checkpoint_snapshot", return_value={"lag_minutes": 4}),
+                mock.patch("ummanu.status.LiveHostSource.collect", return_value=CollectResult(inventory)),
+                mock.patch("ummanu.status.command_terminal_status", return_value=panel),
+                mock.patch("ummanu.status.checkpoint_snapshot", return_value={"lag_minutes": 4}),
             ):
-                from secretary.status import collect_status
+                from ummanu.status import collect_status
 
                 snapshot = collect_status(report)
 
         self.assertEqual(code, 0)
-        self.assertIn("Secretary status:", output.getvalue())
+        self.assertIn("Ummanu status:", output.getvalue())
         self.assertTrue(snapshot["dispatcher"]["active_attempts"][0]["watchdogs"]["worker"]["panel"]["live"])
 
     def test_status_json_includes_stopped_sprint_and_its_frozen_resume(self):
@@ -284,7 +284,7 @@ class StatusCliTests(unittest.TestCase):
                 "version: 1\nname: test\n"
                 f"data_dir: {data_dir}\n"
                 "offsite:\n  instance_remote: git@example.invalid:x/y.git\n"
-                "host:\n  unit_prefix: secretary-\n"
+                "host:\n  unit_prefix: ummanu-\n"
                 "sprint_budget:\n  signal: 20\n  hard: 40\n",
                 encoding="utf-8",
             )
@@ -297,7 +297,7 @@ class StatusCliTests(unittest.TestCase):
                         "selected_step": "fix",
                         "selected_why": "blocked",
                         "rejected_alternatives": "wait",
-                        "current_task": "secretary-510",
+                        "current_task": "ummanu-510",
                         "dod_state": "pending",
                         "next_safe_step": "test",
                         "recorded_at": "2020-01-01T00:00:00Z",
@@ -317,7 +317,7 @@ class StatusCliTests(unittest.TestCase):
                 {
                     "event_id": "evt_later_card_event",
                     "request_id": "later-card-event",
-                    "ref": "secretary-510",
+                    "ref": "ummanu-510",
                     "kind": "moved",
                     "outcome": "success",
                     "payload": {"to": "assessment"},
@@ -329,7 +329,7 @@ class StatusCliTests(unittest.TestCase):
             with (
                 contextlib.redirect_stdout(output),
                 mock.patch(
-                    "secretary.status.checkpoint_snapshot",
+                    "ummanu.status.checkpoint_snapshot",
                     return_value={
                         "last_commit": None,
                         "lag_minutes": None,
@@ -339,7 +339,7 @@ class StatusCliTests(unittest.TestCase):
                     },
                 ),
             ):
-                from secretary.status import collect_status
+                from ummanu.status import collect_status
 
                 snapshot = collect_status(report, offline=True, sprint_client=board)
 
@@ -357,7 +357,7 @@ class StatusCliTests(unittest.TestCase):
         self.assertIsNone(sprint["resume_freshness"]["last_event_at"])
 
     def test_status_json_reads_the_task_audit_once_however_many_sprints_exist(self):
-        """`secretary status --json` costs one audit traversal, not one per sprint."""
+        """`ummanu status --json` costs one audit traversal, not one per sprint."""
 
         def snapshot(sprint_count: int, *, open_first: bool = True) -> tuple[dict, int]:
             with tempfile.TemporaryDirectory() as tmp:
@@ -372,7 +372,7 @@ class StatusCliTests(unittest.TestCase):
                     "version: 1\nname: test\n"
                     f"data_dir: {data_dir}\n"
                     "offsite:\n  instance_remote: git@example.invalid:x/y.git\n"
-                    "host:\n  unit_prefix: secretary-\n",
+                    "host:\n  unit_prefix: ummanu-\n",
                     encoding="utf-8",
                 )
                 board = sprint_store(self, status_seed())
@@ -385,7 +385,7 @@ class StatusCliTests(unittest.TestCase):
                                 "selected_step": "fix",
                                 "selected_why": "blocked",
                                 "rejected_alternatives": "wait",
-                                "current_task": "secretary-510",
+                                "current_task": "ummanu-510",
                                 "dod_state": "pending",
                                 "next_safe_step": "test",
                                 "recorded_at": "2020-01-01T00:00:00Z",
@@ -398,7 +398,7 @@ class StatusCliTests(unittest.TestCase):
                     {
                         "event_id": "evt_later_card_event",
                         "request_id": "later-card-event",
-                        "ref": "secretary-510",
+                        "ref": "ummanu-510",
                         "kind": "moved",
                         "outcome": "success",
                         "payload": {"to": "assessment"},
@@ -416,7 +416,7 @@ class StatusCliTests(unittest.TestCase):
 
                 with (
                     mock.patch(
-                        "secretary.status.checkpoint_snapshot",
+                        "ummanu.status.checkpoint_snapshot",
                         return_value={
                             "last_commit": None,
                             "lag_minutes": None,
@@ -539,7 +539,7 @@ class StatusCliTests(unittest.TestCase):
         # the product the installation is configured with, not the module's own directory.
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(root)}),
+            mock.patch.dict(os.environ, {"UMMANU_REPO": str(root)}),
         ):
             fixture = Path(tmp)
             report = validate_instance(root / "examples" / "instance")
@@ -674,12 +674,12 @@ class StatusCliTests(unittest.TestCase):
                 json.dumps(
                     {
                         "phase": "production",
-                        "owner": "secretary-production",
+                        "owner": "ummanu-production",
                         "records": {},
                         "controlled_divergences": [
                             {
                                 "id": "div_open0000000001",
-                                "pilot_ref": "secretary-730",
+                                "pilot_ref": "ummanu-730",
                                 "step": "production-recovery",
                                 "reason": "active_claim_mismatch",
                                 "status": "open",
@@ -704,7 +704,7 @@ class StatusCliTests(unittest.TestCase):
         dispatcher_findings = [f for f in payload["findings"] if f["code"] == "dispatcher"]
         self.assertTrue(
             any(
-                "unresolved controlled divergence" in f["message"] and "secretary-730" in f["message"]
+                "unresolved controlled divergence" in f["message"] and "ummanu-730" in f["message"]
                 for f in dispatcher_findings
             ),
             dispatcher_findings,
@@ -744,7 +744,7 @@ class HeadRegistrySourceTests(unittest.TestCase):
         self.assertEqual(registry["canonical_owner"], "product")
         self.assertEqual(
             registry["canonical"],
-            str(product_root / "src" / "secretary" / "runtime" / "heads.toml"),
+            str(product_root / "src" / "ummanu" / "runtime" / "heads.toml"),
         )
 
     def test_status_credits_the_installation_for_a_registry_it_owns(self):
@@ -787,7 +787,7 @@ class HeadRegistrySourceTests(unittest.TestCase):
 
         registry = snapshot["installation"]["head_registry"]
         self.assertIsNone(registry["product_root"])
-        self.assertIn("secretary upgrade", registry["error"])
+        self.assertIn("ummanu upgrade", registry["error"])
 
     def test_status_names_a_broken_installation_snapshot(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1107,7 +1107,7 @@ class HeadlessWorkStatusTests(unittest.TestCase):
         "record_state": "adopted",
         "handle_known": False,
         "heartbeat": "absent",
-        "workspace": "/work/secretary-1232",
+        "workspace": "/work/ummanu-1232",
         "branch": "pipeline/codegen-orchestrator-1232",
         "expected_branch": "pipeline/codegen-orchestrator-1232",
         "dirty": False,
@@ -1117,7 +1117,7 @@ class HeadlessWorkStatusTests(unittest.TestCase):
     }
 
     def test_the_attempt_row_says_headless_with_the_evidence_a_recovery_holds(self) -> None:
-        from secretary.status import _attempts
+        from ummanu.status import _attempts
 
         rows = _attempts(
             {"records": {"codegen-orchestrator-1232": {"state": "adopted", "worker_headless": self.EPISODE}}},
@@ -1131,7 +1131,7 @@ class HeadlessWorkStatusTests(unittest.TestCase):
         self.assertEqual(headless["state"], "adopted")
         self.assertFalse(headless["handle_known"])
         self.assertEqual(headless["heartbeat"], "absent")
-        self.assertEqual(headless["workspace"], "/work/secretary-1232")
+        self.assertEqual(headless["workspace"], "/work/ummanu-1232")
         self.assertEqual(headless["branch"], "pipeline/codegen-orchestrator-1232")
         self.assertEqual(headless["candidate_sha"], "6cc7ca0c8cdf0719629e1e01bb5c72614983d7ef")
         self.assertFalse(headless["dirty"])
@@ -1139,17 +1139,17 @@ class HeadlessWorkStatusTests(unittest.TestCase):
         self.assertGreater(headless["waiting_seconds"], 0)
 
     def test_a_card_with_a_worker_is_not_degraded(self) -> None:
-        from secretary.status import _attempts
+        from ummanu.status import _attempts
 
         rows = _attempts(
-            {"records": {"secretary-1": {"state": "claimed", "handle": "term:1"}}}, probe_panels=False
+            {"records": {"ummanu-1": {"state": "claimed", "handle": "term:1"}}}, probe_panels=False
         )
 
         self.assertIsNone(rows[0]["headless"])
         self.assertFalse(rows[0]["degraded"])
 
     def test_the_sprint_summary_names_only_its_own_degraded_cards(self) -> None:
-        from secretary.sprints import SprintReader
+        from ummanu.sprints import SprintReader
 
         sprint = {
             "ref": "sprint:1416",
@@ -1166,7 +1166,7 @@ class HeadlessWorkStatusTests(unittest.TestCase):
         headless = {
             "codegen-orchestrator-1232": dict(self.EPISODE),
             # A headless card belonging to some other sprint is not this sprint's degradation.
-            "secretary-9999": dict(self.EPISODE),
+            "ummanu-9999": dict(self.EPISODE),
         }
 
         summary = SprintReader._status(  # type: ignore[misc]

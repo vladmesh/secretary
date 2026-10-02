@@ -9,12 +9,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import upgrade
-from secretary.backup_policy import FULL_POLICY, should_skip_data_entry
-from secretary.host_apply import HostCommandError, SystemdUnitInstaller, UnitProcessIdentity
 from tests.fakes.upgrade import FakeUnitInstaller
+from ummanu import upgrade
+from ummanu.backup_policy import FULL_POLICY, should_skip_data_entry
+from ummanu.host_apply import HostCommandError, SystemdUnitInstaller, UnitProcessIdentity
 
-WEB_UNIT = "secretary-web.service"
+WEB_UNIT = "ummanu-web.service"
 UNIT_TEXT = b"[Service]\nExecStart=/x --host 127.0.0.1 --port 8787\n"
 
 
@@ -36,8 +36,8 @@ class WebProcessReceiptTests(unittest.TestCase):
         )
         self.units = FakeUnitInstaller(present={WEB_UNIT: UNIT_TEXT}, active={WEB_UNIT})
         self.report = SimpleNamespace(
-            host={"unit_prefix": "secretary-"},
-            instance={"host": {"unit_prefix": "secretary-"}, "data_dir": str(self.data)},
+            host={"unit_prefix": "ummanu-"},
+            instance={"host": {"unit_prefix": "ummanu-"}, "data_dir": str(self.data)},
             data_dir=self.data,
             bindings=[],
         )
@@ -54,13 +54,13 @@ class WebProcessReceiptTests(unittest.TestCase):
 
     def _write_product(self) -> None:
         for relative, text in {
-            "src/secretary/__init__.py": "",
-            "src/secretary/app.py": "VERSION = 'A'\n",
-            "src/secretary/schemas/contract.json": '{"type":"object"}\n',
-            "src/secretary/automations/__init__.py": "",
-            "pyproject.toml": "[project]\nname = 'secretary'\n",
-            "packaging/systemd/secretary-web.service": UNIT_TEXT.decode(),
-            "packaging/systemd/secretary-web-front.service": "[Unit]\nPartOf=secretary-web.service\n",
+            "src/ummanu/__init__.py": "",
+            "src/ummanu/app.py": "VERSION = 'A'\n",
+            "src/ummanu/schemas/contract.json": '{"type":"object"}\n',
+            "src/ummanu/automations/__init__.py": "",
+            "pyproject.toml": "[project]\nname = 'ummanu'\n",
+            "packaging/systemd/ummanu-web.service": UNIT_TEXT.decode(),
+            "packaging/systemd/ummanu-web-front.service": "[Unit]\nPartOf=ummanu-web.service\n",
         }.items():
             path = self.product / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,7 +76,7 @@ class WebProcessReceiptTests(unittest.TestCase):
         )
         return result.stdout.strip()
 
-    def _advance_checkout(self, relative: str = "src/secretary/app.py") -> None:
+    def _advance_checkout(self, relative: str = "src/ummanu/app.py") -> None:
         path = self.product / relative
         path.write_text("VERSION = 'B'\n", encoding="utf-8")
         self._git("add", "-A")
@@ -251,8 +251,8 @@ class SystemdProcessIdentityTests(unittest.TestCase):
         )
         installer = SystemdUnitInstaller(sudo=False)
         with (
-            mock.patch("secretary.host_apply._proc.run", return_value=shown) as run,
-            mock.patch("secretary.host_apply._process_start_ticks", return_value=987654),
+            mock.patch("ummanu.host_apply._proc.run", return_value=shown) as run,
+            mock.patch("ummanu.host_apply._process_start_ticks", return_value=987654),
         ):
             identity = installer.process_identity(WEB_UNIT)
 
@@ -270,8 +270,8 @@ class SystemdProcessIdentityTests(unittest.TestCase):
         )
         installer = SystemdUnitInstaller(sudo=False)
         with (
-            mock.patch("secretary.host_apply._proc.run", side_effect=(first, second)),
-            mock.patch("secretary.host_apply._process_start_ticks", return_value=987654),
+            mock.patch("ummanu.host_apply._proc.run", side_effect=(first, second)),
+            mock.patch("ummanu.host_apply._process_start_ticks", return_value=987654),
         ):
             identity = installer.process_identity(WEB_UNIT)
 

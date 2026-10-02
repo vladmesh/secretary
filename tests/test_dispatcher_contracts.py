@@ -36,39 +36,45 @@ from types import SimpleNamespace
 from typing import ClassVar
 from unittest import mock
 
-from secretary import upgrade
-from secretary.automations.runtime import dispatch
-from secretary.dispatch import attempt_accounting as dispatcher_attempt_accounting
-from secretary.dispatch import claim as dispatcher_claim
-from secretary.dispatch import gate_lifecycle as dispatcher_gate_lifecycle
-from secretary.dispatch import host as dispatcher_host_module
-from secretary.dispatch import launcher as dispatcher_launcher
-from secretary.dispatch import observer as dispatcher_observer
-from secretary.dispatch import production as dispatcher_production
-from secretary.dispatch import release_lifecycle as dispatcher_release_lifecycle
-from secretary.dispatch import review as dispatcher_review
-from secretary.dispatch import runtime as dispatcher_module
-from secretary.dispatch import wait_vitality as dispatcher_wait_vitality
-from secretary.dispatch import worker_continuation as dispatcher_worker_continuation
-from secretary.dispatch import worker_launch as dispatcher_worker_launch
-from secretary.dispatch import worker_report as dispatcher_worker_report
-from secretary.dispatch.gate import GateResult
-from secretary.dispatch.git_workspace import GitWorkspaceManager
-from secretary.dispatch.host import CommandHostRuntime, InstanceCatalog
-from secretary.dispatch.runtime import DispatcherRuntime
-from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatch.types import DispatcherError, HostError, LegacyDispatcherRecord
-from secretary.head_registry import (
+from tests.dispatcher_fixtures import card_audit
+from tests.fakes.dispatcher import FakeCatalog, FakeHost
+from tests.fanout_fixtures import accepted_transport_run
+from tests.production_runtime_fixtures import registered_production_runtime
+from tests.retired_board import legacy_runtime_lines
+from tests.support.managed_venv import guarded_product_env, managed_product_root
+from ummanu import upgrade
+from ummanu.automations.runtime import dispatch
+from ummanu.dispatch import attempt_accounting as dispatcher_attempt_accounting
+from ummanu.dispatch import claim as dispatcher_claim
+from ummanu.dispatch import gate_lifecycle as dispatcher_gate_lifecycle
+from ummanu.dispatch import host as dispatcher_host_module
+from ummanu.dispatch import launcher as dispatcher_launcher
+from ummanu.dispatch import observer as dispatcher_observer
+from ummanu.dispatch import production as dispatcher_production
+from ummanu.dispatch import release_lifecycle as dispatcher_release_lifecycle
+from ummanu.dispatch import review as dispatcher_review
+from ummanu.dispatch import runtime as dispatcher_module
+from ummanu.dispatch import wait_vitality as dispatcher_wait_vitality
+from ummanu.dispatch import worker_continuation as dispatcher_worker_continuation
+from ummanu.dispatch import worker_launch as dispatcher_worker_launch
+from ummanu.dispatch import worker_report as dispatcher_worker_report
+from ummanu.dispatch.gate import GateResult
+from ummanu.dispatch.git_workspace import GitWorkspaceManager
+from ummanu.dispatch.host import CommandHostRuntime, InstanceCatalog
+from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.types import DispatcherError, HostError, LegacyDispatcherRecord
+from ummanu.head_registry import (
     canonical_heads,
     installed_heads,
     materialize_snapshot,
     record_source,
     snapshot_header,
 )
-from secretary.host import SHIPPED_PACKAGING_ROOT, SystemdLayout, render_systemd_unit
-from secretary.host_apply import resolve_packaged
-from secretary.runtime import heads, role_env
-from secretary.runtime.head import (
+from ummanu.host import SHIPPED_PACKAGING_ROOT, SystemdLayout, render_systemd_unit
+from ummanu.host_apply import resolve_packaged
+from ummanu.runtime import heads, role_env
+from ummanu.runtime.head import (
     HEAD_ALIVE,
     HEAD_OK,
     STANDING_BINDING,
@@ -81,21 +87,15 @@ from secretary.runtime.head import (
     render_head_command,
     wrap_role_command,
 )
-from secretary.runtime.head_runtimes import (
+from ummanu.runtime.head_runtimes import (
     DEFAULT_HEAD_RUNTIME,
     HEAD_RUNTIMES,
     LOCAL_PTY_RUNTIME,
     ORCA_LEGACY_RUNTIME,
     RECORD_RUNTIME_WHEN_ABSENT,
 )
-from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
-from secretary.runtime.role_env import observer_binding
-from tests.dispatcher_fixtures import card_audit
-from tests.fakes.dispatcher import FakeCatalog, FakeHost
-from tests.fanout_fixtures import accepted_transport_run
-from tests.production_runtime_fixtures import registered_production_runtime
-from tests.retired_board import legacy_runtime_lines
-from tests.support.managed_venv import guarded_product_env, managed_product_root
+from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
+from ummanu.runtime.role_env import observer_binding
 
 # Modules that reach through a runtime into the host/catalog collaborators.
 _RUNTIME_MODULES = (
@@ -276,11 +276,11 @@ class HostBehaviourContractTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.root = Path(self.tmpdir.name)
-        self.shared_body_dir = Path(os.environ.get("SECRETARY_DISPATCHER_BODY_DIR", "/tmp"))
+        self.shared_body_dir = Path(os.environ.get("UMMANU_DISPATCHER_BODY_DIR", "/tmp"))
         self.shared_body_files = self._body_files(self.shared_body_dir)
         env = mock.patch.dict(
             os.environ,
-            {"SECRETARY_DISPATCHER_BODY_DIR": str(self.root / "bodies")},
+            {"UMMANU_DISPATCHER_BODY_DIR": str(self.root / "bodies")},
         )
         env.start()
         self.addCleanup(env.stop)
@@ -304,15 +304,15 @@ class HostBehaviourContractTests(unittest.TestCase):
         """Snapshot only dispatcher-managed files, including ones that existed before this test."""
         return {
             path.name: path.read_bytes()
-            for pattern in ("secretary-*.md", "secretary-*-pid-*.pid")
+            for pattern in ("ummanu-*.md", "ummanu-*-pid-*.pid")
             for path in root.glob(pattern)
             if path.is_file()
         }
 
     def _task(self) -> dict:
         return {
-            "ref": "secretary-635",
-            "project": "secretary",
+            "ref": "ummanu-635",
+            "project": "ummanu",
             "description": "contract",
             "workspace": {"base_branch": "main"},
             "routing": {},
@@ -320,7 +320,7 @@ class HostBehaviourContractTests(unittest.TestCase):
 
     def _record(self, workspace: str) -> DispatcherRecord:
         return DispatcherRecord(
-            worker="secretary-635-worker",
+            worker="ummanu-635-worker",
             workspace=workspace,
             handle="term:1",
             head="codex",
@@ -380,13 +380,13 @@ class HostBehaviourContractTests(unittest.TestCase):
 
     def _supervised_record(self) -> DispatcherRecord:
         """A card in its git workspace whose worker is a recorded `local-pty` head."""
-        workspace = self.root / "data" / "workspaces" / "secretary" / "secretary-635-worker"
+        workspace = self.root / "data" / "workspaces" / "ummanu" / "ummanu-635-worker"
         record = self._record(str(workspace))
         record.worker_head_run = HeadRun(
             run_id="run-w",
             spec=HeadSpec(profile_id="codex", adapter="codex", runtime=LOCAL_PTY_RUNTIME),
             workspace=str(workspace),
-            task_ref=TaskRef.card("secretary-635"),
+            task_ref=TaskRef.card("ummanu-635"),
             role="worker",
         ).to_json()
         return record
@@ -412,7 +412,7 @@ class HostBehaviourContractTests(unittest.TestCase):
             FakeCatalog(), self.root / "data", mode="real", production_runtime=registered_production_runtime(self.root)
         )
         record = self._supervised_record()
-        task = {"ref": "secretary-635"}
+        task = {"ref": "ummanu-635"}
         cleanup = mock.Mock(return_value={"status": "pending", "reason": "scope stop failed", "progress": {}})
         real.cleanup_owner = SimpleNamespace(runtime=SimpleNamespace(reader=SimpleNamespace(show=lambda ref: task)),
                                              cleanup=cleanup)
@@ -430,13 +430,13 @@ class RuntimeWiringContractTests(unittest.TestCase):
         the unit must carry one that contains the install dir, or every host call fails at runtime
         while the whole unit test suite stays green."""
         product_root = Path(__file__).resolve().parents[1]
-        unit = product_root / "packaging" / "systemd" / "secretary-dispatcher-production.service"
+        unit = product_root / "packaging" / "systemd" / "ummanu-dispatcher-production.service"
         rendered = render_systemd_unit(
             unit.read_bytes(),
             SystemdLayout(
                 product_root,
                 Path("/srv/secretary-instance"),
-                Path("/srv/secretary-data"),
+                Path("/srv/ummanu-data"),
                 "operator",
                 Path("/home/operator"),
             ),
@@ -450,29 +450,29 @@ class RuntimeWiringContractTests(unittest.TestCase):
         self.assertIn("/home/operator/.local/bin", lines[0].split("PATH=", 1)[1])
 
     def test_production_unit_executes_the_stdlib_preflight_before_the_console_entry_point(self) -> None:
-        """A broken editable install must be diagnosed before ``secretary`` can be imported."""
-        product_root = Path("/srv/secretary")
+        """A broken editable install must be diagnosed before ``ummanu`` can be imported."""
+        product_root = Path("/srv/ummanu")
         rendered = render_systemd_unit(
-            (SHIPPED_PACKAGING_ROOT / "secretary-dispatcher-production.service").read_bytes(),
+            (SHIPPED_PACKAGING_ROOT / "ummanu-dispatcher-production.service").read_bytes(),
             SystemdLayout(
                 product_root,
                 Path("/srv/secretary-instance"),
-                Path("/srv/secretary-data"),
+                Path("/srv/ummanu-data"),
                 "operator",
                 Path("/home/operator"),
             ),
         ).decode("utf-8")
         exec_start = next(line for line in rendered.splitlines() if line.startswith("ExecStart="))
         expected_prefix = (
-            "ExecStart=/srv/secretary/.venv/bin/python3 -I "
-            "/srv/secretary/src/secretary/dispatch/runtime_preflight.py "
-            "--product-root /srv/secretary --interpreter /srv/secretary/.venv/bin/python3 "
-            "--data-dir /srv/secretary-data -- "
+            "ExecStart=/srv/ummanu/.venv/bin/python3 -I "
+            "/srv/ummanu/src/ummanu/dispatch/runtime_preflight.py "
+            "--product-root /srv/ummanu --interpreter /srv/ummanu/.venv/bin/python3 "
+            "--data-dir /srv/ummanu-data -- "
         )
         self.assertTrue(exec_start.startswith(expected_prefix), exec_start)
         self.assertEqual(
             exec_start[len(expected_prefix) :],
-            "/srv/secretary/.venv/bin/secretary dispatcher production-tick "
+            "/srv/ummanu/.venv/bin/ummanu dispatcher production-tick "
             "--instance /srv/secretary-instance",
         )
         self.assertNotIn("PYTHONPATH", exec_start)
@@ -490,7 +490,7 @@ class HeadRegistrySourceContractTests(unittest.TestCase):
             "version: 1\nname: contract\ndata_dir: "
             + str(root / "data")
             + "\noffsite:\n  instance_remote: git@example.invalid:x/y.git\n"
-            + "host:\n  unit_prefix: secretary-\n",
+            + "host:\n  unit_prefix: ummanu-\n",
             encoding="utf-8",
         )
         (root / "heads").mkdir()
@@ -573,7 +573,7 @@ class RoleRoutingGenerationTests(unittest.TestCase):
             "version: 1\nname: routing\ndata_dir: "
             + str(self.instance / "data")
             + "\noffsite:\n  instance_remote: git@example.invalid:x/y.git\n"
-            + "host:\n  unit_prefix: secretary-\n",
+            + "host:\n  unit_prefix: ummanu-\n",
             encoding="utf-8",
         )
         (self.instance / "heads").mkdir()
@@ -590,7 +590,7 @@ class RoleRoutingGenerationTests(unittest.TestCase):
         self.materialize(self.CANON)
         catalog = InstanceCatalog(self.instance)
 
-        with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(self.instance)}):
+        with mock.patch.dict(os.environ, {"UMMANU_INSTANCE": str(self.instance)}):
             self.assertEqual(heads.registry_path(), self.instance / "heads" / "heads.yaml")
             self.assertEqual(catalog.worker_head({}), "owned-worker")
             self.assertEqual(catalog.review_head({}), "owned-reviewer")
@@ -605,7 +605,7 @@ class RoleRoutingGenerationTests(unittest.TestCase):
         product = canonical_heads(upgrade.running_product_root())["role_defaults"]
         catalog = InstanceCatalog(self.instance)
 
-        with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(self.instance)}):
+        with mock.patch.dict(os.environ, {"UMMANU_INSTANCE": str(self.instance)}):
             self.assertEqual(catalog.worker_head({}), product["new_card"])
             self.assertEqual(catalog.review_head({}), product["reviewer"])
             self.assertEqual(catalog.observer_head(), product["observer"])
@@ -614,8 +614,8 @@ class RoleRoutingGenerationTests(unittest.TestCase):
                     self.assertEqual(dispatch._preferred_head(agent, {}), product[agent])
 
     def test_a_checkout_with_no_installation_reads_the_shipped_registry(self) -> None:
-        """No `SECRETARY_INSTANCE` means no installation to read — never the host's own."""
-        env = {key: value for key, value in os.environ.items() if key != "SECRETARY_INSTANCE"}
+        """No `UMMANU_INSTANCE` means no installation to read — never the host's own."""
+        env = {key: value for key, value in os.environ.items() if key != "UMMANU_INSTANCE"}
         with mock.patch.dict(os.environ, env, clear=True):
             self.assertEqual(heads.registry_path(), heads.HEADS_TOML)
 
@@ -668,7 +668,7 @@ class RoleRoutingGenerationTests(unittest.TestCase):
                 snapshot = instance / "heads" / "heads.yaml"
                 build(snapshot)
 
-                with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(instance)}):
+                with mock.patch.dict(os.environ, {"UMMANU_INSTANCE": str(instance)}):
                     heads._load_registry.cache_clear()
                     self.assertEqual(heads.registry_path(), snapshot)
                     with self.assertRaises(heads.HeadRegistryError) as caught:
@@ -680,17 +680,17 @@ class RoleRoutingGenerationTests(unittest.TestCase):
 class PackagedRoleUnitInstanceTests(unittest.TestCase):
     """Every packaged role process resolves the instance its unit was rendered for.
 
-    A role that is handed no `SECRETARY_INSTANCE` falls back to the default installation path, so
+    A role that is handed no `UMMANU_INSTANCE` falls back to the default installation path, so
     on a host with a real installation a unit rendered for another instance would quietly route
     off `~/secretary-instance`'s heads instead of its own.
     """
 
     UNITS = (
-        "secretary-dispatcher-production.service",
-        "secretary-curator.service",
-        "secretary-retro.service",
-        "secretary-steward.service",
-        "secretary-steward-deep-sweep.service",
+        "ummanu-dispatcher-production.service",
+        "ummanu-curator.service",
+        "ummanu-retro.service",
+        "ummanu-steward.service",
+        "ummanu-steward-deep-sweep.service",
     )
 
     # The layout resolves a home directory through `pwd`, so the account has to exist wherever
@@ -734,12 +734,12 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
     def test_every_role_unit_carries_the_rendered_instance_path(self) -> None:
         for name in self.UNITS:
             with self.subTest(unit=name):
-                self.assertEqual(self.unit_env(name)["SECRETARY_INSTANCE"], str(self.instance))
+                self.assertEqual(self.unit_env(name)["UMMANU_INSTANCE"], str(self.instance))
 
     def test_the_units_apply_would_install_carry_it_too(self) -> None:
         """Through `resolve_packaged`, the compile step `reconcile apply` actually installs from."""
         packaged = resolve_packaged(
-            {"host": {"unit_prefix": "secretary-"}, "data_dir": str(self.root / "data")},
+            {"host": {"unit_prefix": "ummanu-"}, "data_dir": str(self.root / "data")},
             SHIPPED_PACKAGING_ROOT,
             product_root=self.root / "product",
             instance_path=self.instance,
@@ -751,16 +751,16 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         self.assertLessEqual(set(self.UNITS), set(compiled))
         for name in self.UNITS:
             with self.subTest(unit=name):
-                self.assertIn(f"Environment=SECRETARY_INSTANCE={self.instance}".encode(), compiled[name])
+                self.assertIn(f"Environment=UMMANU_INSTANCE={self.instance}".encode(), compiled[name])
 
     def test_the_role_process_resolves_that_instances_registry(self) -> None:
         """Through role_env, the way the unit actually starts the process."""
         for name, role in (
-            ("secretary-curator.service", "curator"),
-            ("secretary-retro.service", "retro"),
-            ("secretary-steward.service", "steward"),
-            ("secretary-steward-deep-sweep.service", "steward"),
-            ("secretary-dispatcher-production.service", "pipeline"),
+            ("ummanu-curator.service", "curator"),
+            ("ummanu-retro.service", "retro"),
+            ("ummanu-steward.service", "steward"),
+            ("ummanu-steward-deep-sweep.service", "steward"),
+            ("ummanu-dispatcher-production.service", "pipeline"),
         ):
             with self.subTest(unit=name):
                 env = role_env.runtime_env(
@@ -786,8 +786,8 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         for name in self.UNITS:
             with self.subTest(unit=name):
                 env = self.unit_env(name)
-                if name == "secretary-dispatcher-production.service":
-                    self.assertEqual(env["SECRETARY_RUNTIME_ENV_FILE"], expected)
+                if name == "ummanu-dispatcher-production.service":
+                    self.assertEqual(env["UMMANU_RUNTIME_ENV_FILE"], expected)
                 self.assertEqual(env["TA_RUNTIME_ENV_FILE"], expected)
 
     def test_the_runtime_env_file_cannot_hand_a_role_another_instance(self) -> None:
@@ -795,16 +795,16 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         self.decoy_runtime_env()
         for role in ("worker", "steward"):
             with self.subTest(role):
-                base = self.unit_env("secretary-dispatcher-production.service")
+                base = self.unit_env("ummanu-dispatcher-production.service")
                 env = role_env.runtime_env(role, base_env=base, env_file=self.instance / "runtime.env")
 
-                self.assertEqual(env["SECRETARY_INSTANCE"], str(self.instance))
+                self.assertEqual(env["UMMANU_INSTANCE"], str(self.instance))
 
     def test_every_background_unit_carries_the_product_root_it_was_rendered_for(self) -> None:
         """An upgrade from an alternate checkout renders these units against that checkout.
 
         Nothing else tells a launched process which product to import: the gate resolves
-        ``$HOME/secretary`` when neither name is set, which on an upgraded host is the checkout
+        ``$HOME/ummanu`` when neither name is set, which on an upgraded host is the checkout
         the installation was moved off. Every one of these services launches something further —
         heads through the dispatcher, task commands and curator memory writes through the deferred
         product lookup — so the binding has to be on the unit, not only on the dispatcher.
@@ -813,7 +813,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             with self.subTest(unit=name):
                 env = self.unit_env(name)
 
-                self.assertEqual(env["TA_SECRETARY_REPO"], str(self.root / "product"))
+                self.assertEqual(env["UMMANU_REPO"], str(self.root / "product"))
                 # The gate-launched services also import from it directly; the dispatcher runs the
                 # checkout's own venv entry point and needs no PYTHONPATH of its own.
                 self.assertEqual(
@@ -824,24 +824,24 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
     def test_rendered_gate_units_name_the_same_checkout_the_gate_resolves(self) -> None:
         """A materialized alternate checkout cannot bind a role unit to one root and its gate to another."""
         for name in (
-            "secretary-curator.service",
-            "secretary-retro.service",
-            "secretary-steward.service",
-            "secretary-steward-deep-sweep.service",
+            "ummanu-curator.service",
+            "ummanu-retro.service",
+            "ummanu-steward.service",
+            "ummanu-steward-deep-sweep.service",
         ):
             with self.subTest(unit=name):
                 rendered = render_systemd_unit(
                     (SHIPPED_PACKAGING_ROOT / name).read_bytes(), self.layout
                 ).decode()
                 self.assertIn(f"Environment=TA_RUNTIME_PYTHONPATH={self.root / 'product'}", rendered)
-                self.assertIn(f"Environment=TA_SECRETARY_REPO={self.root / 'product'}", rendered)
-                self.assertIn(f"ExecStart={self.root / 'product'}/scripts/secretary-agent-gate.sh", rendered)
+                self.assertIn(f"Environment=UMMANU_REPO={self.root / 'product'}", rendered)
+                self.assertIn(f"ExecStart={self.root / 'product'}/scripts/ummanu-agent-gate.sh", rendered)
 
     def test_the_launched_head_command_names_that_checkout_rather_than_a_home(self) -> None:
         with mock.patch.dict(
             os.environ,
             {
-                **self.unit_env("secretary-dispatcher-production.service"),
+                **self.unit_env("ummanu-dispatcher-production.service"),
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 "HOME": str(self.root / "home"),
             },
@@ -849,19 +849,19 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         ):
             command = wrap_role_command("worker", "true")
 
-        self.assertIn(f"TA_SECRETARY_REPO={self.root / 'product'}", command)
+        self.assertIn(f"UMMANU_REPO={self.root / 'product'}", command)
         self.assertIn(f"PYTHONPATH={self.root / 'product'}", command)
-        self.assertNotIn("$HOME/secretary", command)
+        self.assertNotIn("$HOME/ummanu", command)
 
     def test_a_dispatcher_launched_head_imports_the_checkout_the_unit_named(self) -> None:
-        """End to end, in a terminal that has no ``TA_SECRETARY_REPO`` of its own.
+        """End to end, in a terminal that has no ``UMMANU_REPO`` of its own.
 
         The rendered checkout has to be the real one here, because the wrapper runs
-        ``secretary.runtime.role_env`` out of it; the layout points at it the way an alternate upgrade
+        ``ummanu.runtime.role_env`` out of it; the layout points at it the way an alternate upgrade
         would, and the launching shell is given a home where no checkout exists at all.
         """
         product_env = guarded_product_env(self.root)
-        product = Path(product_env["TA_SECRETARY_REPO"])
+        product = Path(product_env["UMMANU_REPO"])
         layout = SystemdLayout(
             product_root=product,
             instance_path=self.instance,
@@ -870,7 +870,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             runtime_home=self.root / "home",
         )
         rendered = render_systemd_unit(
-            (SHIPPED_PACKAGING_ROOT / "secretary-dispatcher-production.service").read_bytes(),
+            (SHIPPED_PACKAGING_ROOT / "ummanu-dispatcher-production.service").read_bytes(),
             layout,
         ).decode()
         unit_env = dict(
@@ -881,10 +881,10 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         with mock.patch.dict(
             os.environ, {**unit_env, "PATH": product_env["PATH"]}, clear=True
         ):
-            workspace_python = self.root / ".secretary-task-env" / "venv" / "bin" / "python3"
+            workspace_python = self.root / ".ummanu-task-env" / "venv" / "bin" / "python3"
             workspace_python.parent.mkdir(parents=True)
             workspace_python.symlink_to(sys.executable)
-            command = wrap_role_command("worker", "printenv TA_SECRETARY_REPO", workspace=str(self.root))
+            command = wrap_role_command("worker", "printenv UMMANU_REPO", workspace=str(self.root))
 
         result = subprocess.run(
             ["/bin/sh", "-c", command],
@@ -907,22 +907,22 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
 
         Orca creates the head's terminal, so it inherits nothing the dispatcher unit exported:
         the binding has to travel inside the command string. The subprocess here is given an
-        environment with no `SECRETARY_*` in it at all, which is what the reviewer's reproduction
+        environment with no `UMMANU_*` in it at all, which is what the reviewer's reproduction
         found routing heads back to `/home/dev/secretary-instance`.
         """
         self.decoy_runtime_env()
-        bound = self.unit_env("secretary-dispatcher-production.service")
+        bound = self.unit_env("ummanu-dispatcher-production.service")
         product_env = guarded_product_env(self.root)
         bound.update(product_env)
         with mock.patch.dict(os.environ, bound, clear=True):
-            workspace_python = self.root / ".secretary-task-env" / "venv" / "bin" / "python3"
+            workspace_python = self.root / ".ummanu-task-env" / "venv" / "bin" / "python3"
             workspace_python.parent.mkdir(parents=True)
             workspace_python.symlink_to(sys.executable)
-            command = wrap_role_command("worker", "printenv SECRETARY_INSTANCE", workspace=str(self.root))
+            command = wrap_role_command("worker", "printenv UMMANU_INSTANCE", workspace=str(self.root))
 
         # The role wrapper starts in a worktree.  A package there must not shadow the selected
         # control plane merely because Python's default path would put the cwd first.
-        shadow = self.root / "secretary"
+        shadow = self.root / "ummanu"
         shadow.mkdir()
         (shadow / "__init__.py").write_text("raise RuntimeError('shadow package imported')\n")
 
@@ -936,7 +936,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             env={
                 "PATH": product_env["PATH"],
                 "HOME": str(self.root),
-                "TA_SECRETARY_REPO": product_env["TA_SECRETARY_REPO"],
+                "UMMANU_REPO": product_env["UMMANU_REPO"],
             },
         )
 
@@ -947,13 +947,13 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
     def decoy_runtime_env(self) -> None:
         """The selected instance's runtime.env, carrying the default installation's own name.
 
-        A copied or inherited `SECRETARY_INSTANCE` line is exactly how a non-default installation
+        A copied or inherited `UMMANU_INSTANCE` line is exactly how a non-default installation
         loses its heads, so the fixture keeps one in the file the roles read.
         """
         (self.instance / "runtime.env").write_text(
-            legacy_runtime_lines() + "SECRETARY_INSTANCE=/home/dev/secretary-instance\n"
-            "SECRETARY_OBSERVER_SPRINT=sprint:somebody-else\n"
-            "SECRETARY_OBSERVER_GENERATION=forged\n",
+            legacy_runtime_lines() + "UMMANU_INSTANCE=/home/dev/secretary-instance\n"
+            "UMMANU_OBSERVER_SPRINT=sprint:somebody-else\n"
+            "UMMANU_OBSERVER_GENERATION=forged\n",
             encoding="utf-8",
         )
 
@@ -966,14 +966,14 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         """
         self.decoy_runtime_env()
         identity = observer_binding("sprint:1126", "abc123def456")
-        bound = self.unit_env("secretary-dispatcher-production.service")
+        bound = self.unit_env("ummanu-dispatcher-production.service")
         # An observer head starts only under the product's managed venv.
         product = managed_product_root(self.root)
-        bound["TA_SECRETARY_REPO"] = str(product)
+        bound["UMMANU_REPO"] = str(product)
         with mock.patch.dict(os.environ, bound, clear=True):
             command = wrap_role_command(
                 "observer",
-                "printenv SECRETARY_OBSERVER_SPRINT; printenv SECRETARY_OBSERVER_GENERATION",
+                "printenv UMMANU_OBSERVER_SPRINT; printenv UMMANU_OBSERVER_GENERATION",
                 identity=identity,
             )
 
@@ -986,7 +986,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             env={
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 "HOME": str(self.root),
-                "TA_SECRETARY_REPO": str(product),
+                "UMMANU_REPO": str(product),
             },
         )
 
@@ -995,7 +995,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
 
     def test_a_worker_head_is_never_given_an_observer_binding(self) -> None:
         """The binding is one role's, and a launcher asking for it elsewhere is a defect."""
-        with self.assertRaisesRegex(HeadCommandError, "SECRETARY_OBSERVER_SPRINT"):
+        with self.assertRaisesRegex(HeadCommandError, "UMMANU_OBSERVER_SPRINT"):
             wrap_role_command(
                 "worker",
                 "true",
@@ -1145,17 +1145,17 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
 
     def test_the_preflight_is_shared_with_the_automations_launcher(self) -> None:
         """One implementation reachable from both sides, and the dependency direction that forces
-        where it lives: the runtime module imports nothing else of `secretary`."""
-        from secretary.automations.runtime import dispatch as ta_dispatch
-        from secretary.runtime import codex_preflight
+        where it lives: the runtime module imports nothing else of `ummanu`."""
+        from ummanu.automations.runtime import dispatch as ta_dispatch
+        from ummanu.runtime import codex_preflight
 
         self.assertIs(
             dispatcher_launcher._preflight_codex_workspace, codex_preflight.ensure_codex_workspace_trusted
         )
         self.assertIs(ta_dispatch.preflight_codex_launch, codex_preflight.preflight_codex_launch)
         source = Path(codex_preflight.__file__).read_text(encoding="utf-8")
-        self.assertNotIn("import secretary", source)
-        self.assertNotIn("from secretary", source)
+        self.assertNotIn("import ummanu", source)
+        self.assertNotIn("from ummanu", source)
 
     def test_an_ordinary_id_resolves_to_itself(self) -> None:
         """Whatever family an id names, the registry that defines it is the one answer."""
@@ -1468,8 +1468,8 @@ class PerProfileRuntimeTests(unittest.TestCase):
         upgrade turns every persisted provider source into a foreign one and relaunches the heads
         reading them. So the two fingerprints have to be indifferent to it, and this is that.
         """
-        from secretary.dispatch.worker_lifecycle import head_run_binding
-        from secretary.runtime import codex_preflight
+        from ummanu.dispatch.worker_lifecycle import head_run_binding
+        from ummanu.runtime import codex_preflight
 
         def run_on(runtime: str) -> HeadRun:
             return HeadRun(
@@ -1540,7 +1540,7 @@ class PerProfileRuntimeTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         product = Path(tmp.name) / "product"
-        canon = product / "src" / "secretary" / "runtime"
+        canon = product / "src" / "ummanu" / "runtime"
         canon.mkdir(parents=True)
         (canon / "heads.toml").write_text(
             '[resources.acct]\naccount = "acct"\n\n'
@@ -1615,7 +1615,7 @@ class WorkspaceCleanupChoosesTheBackendTheHeadIsHeldByTests(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
-        env = mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "orca")})
+        env = mock.patch.dict(os.environ, {"UMMANU_DISPATCHER_WORKSPACES_ROOT": str(self.root / "orca")})
         env.start()
         self.addCleanup(env.stop)
         self.host = CommandHostRuntime(  # type: ignore[arg-type]
@@ -1623,7 +1623,7 @@ class WorkspaceCleanupChoosesTheBackendTheHeadIsHeldByTests(unittest.TestCase):
         )
         self.supervised = _RecordingBackend(LOCAL_PTY_RUNTIME)
         self.host._head_runtimes[LOCAL_PTY_RUNTIME] = self.supervised
-        self.workspace = self.root / "data" / "workspaces" / "secretary" / "secretary-1467-worker"
+        self.workspace = self.root / "data" / "workspaces" / "ummanu" / "ummanu-1467-worker"
         self.removed: list[str] = []
         removal = mock.patch.object(GitWorkspaceManager, "teardown", side_effect=self.removed.append)
         removal.start()
@@ -1634,13 +1634,13 @@ class WorkspaceCleanupChoosesTheBackendTheHeadIsHeldByTests(unittest.TestCase):
             run_id=run_id,
             spec=HeadSpec(profile_id="head", adapter="claude", runtime=runtime),
             workspace=str(self.workspace),
-            task_ref=TaskRef.card("secretary-1467"),
+            task_ref=TaskRef.card("ummanu-1467"),
             role=role,
         ).to_json()
 
     def _record(self, **fields) -> DispatcherRecord:
         return DispatcherRecord(
-            worker="secretary-1467-worker",
+            worker="ummanu-1467-worker",
             workspace=str(self.workspace),
             handle="term:1",
             head="claude",
@@ -1723,7 +1723,7 @@ class WorkspaceCleanupChoosesTheBackendTheHeadIsHeldByTests(unittest.TestCase):
         self.assertEqual(self.supervised.calls, [])
 
     def test_a_record_in_an_orca_worktree_is_refused_even_with_supervised_runs(self) -> None:
-        orca = self.root / "orca" / "sample_orca" / "secretary-1467-worker"
+        orca = self.root / "orca" / "sample_orca" / "ummanu-1467-worker"
         record = self._record(worker_head_run=self._run("worker", LOCAL_PTY_RUNTIME, "run-w"))
         record.workspace = str(orca)
 

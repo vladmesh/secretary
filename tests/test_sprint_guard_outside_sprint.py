@@ -18,11 +18,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.sprints import SprintReader, SprintWriter, refresh_active_sprint_projects
-from secretary.tasks import TaskError, TaskWriter, task_audit_for
 from tests.fakes.sprints import ProductSprintSeed, SprintBackendFixture
 from tests.observer_identity import bind_observer
 from tests.sql_backend_fixtures import card_store
+from ummanu.sprints import SprintReader, SprintWriter, refresh_active_sprint_projects
+from ummanu.tasks import TaskError, TaskWriter, task_audit_for
 
 
 class OutOfSprintWriteGuardTests(SprintBackendFixture, unittest.TestCase):
@@ -41,12 +41,12 @@ class OutOfSprintWriteGuardTests(SprintBackendFixture, unittest.TestCase):
         self.ref = self.sprints.restore_create(
             reference="sprint:guard",
             goal="single writer",
-            repositories=["secretary", "other"],
+            repositories=["ummanu", "other"],
             request_id="seed-guard-sprint",
         )["sprint"]["ref"]
         self.sprints.restore(
             reference=self.ref,
-            values={"sprint_reservations": json.dumps(["secretary", "other"])},
+            values={"sprint_reservations": json.dumps(["ummanu", "other"])},
             request_id="seed-guard-reservations",
         )
         refresh_active_sprint_projects(self.tmp.name, SprintReader(self.client))  # type: ignore[arg-type]
@@ -64,7 +64,7 @@ class OutOfSprintWriteGuardTests(SprintBackendFixture, unittest.TestCase):
                 card = self.tasks.create(
                     role="po",
                     actor="operator",
-                    project="secretary",
+                    project="ummanu",
                     task_type=kind,
                     title=f"outside {kind}",
                     request_id=f"outside-create-{kind}",
@@ -99,7 +99,7 @@ class OutOfSprintWriteGuardTests(SprintBackendFixture, unittest.TestCase):
         card = self.tasks.create(
             role="observer",
             actor="observer",
-            project="secretary",
+            project="ummanu",
             task_type="research",
             title="owned",
             sprint=self.ref,
@@ -114,7 +114,7 @@ class OutOfSprintWriteGuardTests(SprintBackendFixture, unittest.TestCase):
             "link": lambda: self.tasks.create(
                 role="po",
                 actor="operator",
-                project="secretary",
+                project="ummanu",
                 task_type="research",
                 title="linked",
                 sprint=self.ref,
@@ -128,7 +128,7 @@ class OutOfSprintWriteGuardTests(SprintBackendFixture, unittest.TestCase):
 
     def test_an_unverifiable_index_still_fails_closed_for_a_card_outside_the_sprint(self) -> None:
         card = self.tasks.create(
-            role="po", actor="operator", project="secretary", task_type="code", title="outside"
+            role="po", actor="operator", project="ummanu", task_type="code", title="outside"
         )["task"]
         (Path(self.tmp.name) / "sprints" / "active-repositories.json").unlink()
         original = self.client.call
@@ -142,7 +142,7 @@ class OutOfSprintWriteGuardTests(SprintBackendFixture, unittest.TestCase):
 
         writes = {
             "create": lambda: self.tasks.create(
-                role="po", actor="operator", project="secretary", task_type="infra", title="blocked"
+                role="po", actor="operator", project="ummanu", task_type="infra", title="blocked"
             ),
             "edit": lambda: self.tasks.edit(
                 role="po", actor="operator", reference=card["ref"], description="blocked"

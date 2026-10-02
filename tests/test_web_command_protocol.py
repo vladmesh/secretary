@@ -22,14 +22,15 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary.board.events import BoardEventCanon
-from secretary.board.models import Actor, EntityKind, Event, EventKind
-from secretary.board.sql_audit import SqlTaskAudit
-from secretary.config import validate
-from secretary.tasks import task_audit_for
-from secretary.webproto import command_reads
-from secretary.webproto.boundary import operations
-from secretary.webproto.command_reads import (
+from tests.webproto_sprint_fixtures import SprintProtocolFixture
+from ummanu.board.events import BoardEventCanon
+from ummanu.board.models import Actor, EntityKind, Event, EventKind
+from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.config import validate
+from ummanu.tasks import task_audit_for
+from ummanu.webproto import command_reads
+from ummanu.webproto.boundary import operations
+from ummanu.webproto.command_reads import (
     COMMAND_ERRORS,
     HISTORY_SCOPE,
     OPERATION_IDENTITY,
@@ -39,20 +40,19 @@ from secretary.webproto.command_reads import (
     STATE_UNKNOWN,
     CommandReadLayer,
 )
-from secretary.webproto.commands import (
+from ummanu.webproto.commands import (
     EXIT_CONFLICT,
     EXIT_PENDING,
     run_web_read_commands,
     run_web_read_request,
 )
-from secretary.webproto.cursor import Cursor
-from secretary.webproto.errors import InvalidCursor, OperationPending, ReadError, ValidationRefused
-from secretary.webproto.journal import MAX_LIMIT
-from secretary.webproto.ops import OperationLayer
-from secretary.webproto.pause_ops import PauseOperationLayer
-from secretary.webproto.section import Section, SectionSet, sections
-from secretary.webproto.sprint_ops import SprintOperationLayer
-from tests.webproto_sprint_fixtures import SprintProtocolFixture
+from ummanu.webproto.cursor import Cursor
+from ummanu.webproto.errors import InvalidCursor, OperationPending, ReadError, ValidationRefused
+from ummanu.webproto.journal import MAX_LIMIT
+from ummanu.webproto.ops import OperationLayer
+from ummanu.webproto.pause_ops import PauseOperationLayer
+from ummanu.webproto.section import Section, SectionSet, sections
+from ummanu.webproto.sprint_ops import SprintOperationLayer
 
 DOCS = Path(__file__).resolve().parents[1] / "docs"
 
@@ -95,9 +95,9 @@ class CommandProtocolFixture(SprintProtocolFixture):
         event_id: str,
         kind: EventKind = EventKind.CARD_STARTED,
         entity: EntityKind = EntityKind.CARD,
-        ref: str = "secretary-12",
+        ref: str = "ummanu-12",
         role: str = "dispatcher",
-        actor: str = "secretary-production",
+        actor: str = "ummanu-production",
         reason: str = "claimed for the worker",
         minute: int = 0,
         transition: tuple[str, str] | None = ("ready", "in_progress"),
@@ -135,7 +135,7 @@ class CommandProtocolFixture(SprintProtocolFixture):
         self,
         request_id: str,
         *,
-        ref: str = "secretary-12",
+        ref: str = "ummanu-12",
         kind: str = "commented",
         event_id: str = "evt_generic",
     ) -> None:
@@ -195,7 +195,7 @@ class HistoryReadTests(CommandProtocolFixture):
     """Criterion 1: a page of recent commands across entities, with this layer's paging."""
 
     def test_the_history_crosses_entities_and_is_not_one_card_slice(self) -> None:
-        self.commit("req-card", event_id="evt_1", ref="secretary-12", minute=1)
+        self.commit("req-card", event_id="evt_1", ref="ummanu-12", minute=1)
         self.commit(
             "req-sprint",
             event_id="evt_2",
@@ -206,16 +206,16 @@ class HistoryReadTests(CommandProtocolFixture):
             transition=None,
             minute=2,
         )
-        self.generic("req-generic", ref="secretary-99")
+        self.generic("req-generic", ref="ummanu-99")
         document = self.history()
-        self.assertEqual(sorted(self.refs(document)), ["secretary-12", "secretary-99", "sprint:1431"])
+        self.assertEqual(sorted(self.refs(document)), ["ummanu-12", "ummanu-99", "sprint:1431"])
 
     def test_every_row_carries_the_initiator_the_action_the_entity_and_the_result(self) -> None:
         self.commit("req-card", event_id="evt_1", reason="claimed for the worker")
         row = self.history()["commands"]["items"][0]
-        self.assertEqual(row["actor"], {"id": "secretary-production", "role": "dispatcher"})
+        self.assertEqual(row["actor"], {"id": "ummanu-production", "role": "dispatcher"})
         self.assertEqual(row["action"], EventKind.CARD_STARTED.value)
-        self.assertEqual(row["entity"], {"ref": "secretary-12", "kind": "card"})
+        self.assertEqual(row["entity"], {"ref": "ummanu-12", "kind": "card"})
         self.assertEqual(row["result"], {"outcome": None, "reason": "claimed for the worker"})
         self.assertEqual(row["request_id"], "req-card")
 
@@ -266,7 +266,7 @@ class HistoryReadTests(CommandProtocolFixture):
         """The ref binding is what keeps the two positions in this journal apart."""
         self.commit("req-1", event_id="evt_1")
         with self.assertRaises(InvalidCursor):
-            self.history(cursor=Cursor(ref="secretary-12", offset=0).encode())
+            self.history(cursor=Cursor(ref="ummanu-12", offset=0).encode())
 
     def test_a_cursor_past_the_end_of_a_journal_that_only_grows_is_refused(self) -> None:
         self.commit("req-1", event_id="evt_1")
@@ -294,7 +294,7 @@ class RequestReadTests(CommandProtocolFixture):
         self.commit("req-1", event_id="evt_1", reason="claimed for the worker")
         operation = self.layer().command_request("req-1")["operation"]
         self.assertEqual(operation["state"], STATE_COMMITTED)
-        self.assertEqual(operation["entity"], {"ref": "secretary-12", "kind": "card"})
+        self.assertEqual(operation["entity"], {"ref": "ummanu-12", "kind": "card"})
         self.assertEqual(operation["result"]["reason"], "claimed for the worker")
         self.assertEqual(operation["event_id"], "evt_1")
         self.assertFalse(operation["staged"])
@@ -307,7 +307,7 @@ class RequestReadTests(CommandProtocolFixture):
         operation = self.layer().command_request("req-staged")["operation"]
         self.assertEqual(operation["state"], STATE_PENDING)
         self.assertTrue(operation["staged"])
-        self.assertEqual(operation["entity"], {"ref": "secretary-12", "kind": "card"})
+        self.assertEqual(operation["entity"], {"ref": "ummanu-12", "kind": "card"})
         continuation = operation["continuation"]
         self.assertTrue(continuation["repeat_request"])
         self.assertEqual(continuation["request_id"], "req-staged")
@@ -339,11 +339,11 @@ class RequestReadTests(CommandProtocolFixture):
     def test_no_writer_is_reachable_from_either_read(self) -> None:
         """Criterion 2, structurally: the reads perform no operation, so none is even called."""
         with (
-            mock.patch("secretary.sprints.SprintWriter.create") as created,
-            mock.patch("secretary.board.sql_audit.SqlTaskAudit.append") as appended,
-            mock.patch("secretary.board.sql_audit.SqlTaskAudit.claim") as claimed,
-            mock.patch("secretary.board.sql_audit.SqlTaskAudit.reconcile") as reconciled,
-            mock.patch("secretary.board.sql_audit.SqlTaskAudit.discard") as discarded,
+            mock.patch("ummanu.sprints.SprintWriter.create") as created,
+            mock.patch("ummanu.board.sql_audit.SqlTaskAudit.append") as appended,
+            mock.patch("ummanu.board.sql_audit.SqlTaskAudit.claim") as claimed,
+            mock.patch("ummanu.board.sql_audit.SqlTaskAudit.reconcile") as reconciled,
+            mock.patch("ummanu.board.sql_audit.SqlTaskAudit.discard") as discarded,
         ):
             self.layer().command_history()
             self.layer().command_request("req-1")
@@ -420,9 +420,9 @@ class HonestyTests(CommandProtocolFixture):
         self.assertIsNone(document["operation"]["continuation"])
 
     def test_an_entity_kind_the_record_does_not_carry_is_null_and_never_inferred(self) -> None:
-        self.generic("req-generic", ref="secretary-99")
+        self.generic("req-generic", ref="ummanu-99")
         row = self.history()["commands"]["items"][0]
-        self.assertEqual(row["entity"], {"ref": "secretary-99", "kind": None})
+        self.assertEqual(row["entity"], {"ref": "ummanu-99", "kind": None})
 
     def test_a_config_that_does_not_validate_takes_only_what_it_owns(self) -> None:
         """With an explicit data directory the audit still answers; without one nothing can be located."""
@@ -549,7 +549,7 @@ class IdentityContractTests(CommandProtocolFixture):
         to repeat; the caller, or somebody else entirely, then asks this read what became of that id
         and is told the same thing without re-sending anything.
         """
-        from secretary.webproto import store_io
+        from ummanu.webproto import store_io
 
         real = store_io.write_text_atomic
 
@@ -601,7 +601,7 @@ class IdentityContractTests(CommandProtocolFixture):
                 call()
             raised[name].add(refused.exception.code)
         raised["command_history"].add(
-            self._refused(lambda: self.history(cursor=Cursor(ref="secretary-12", offset=0).encode()))
+            self._refused(lambda: self.history(cursor=Cursor(ref="ummanu-12", offset=0).encode()))
         )
         raised["command_request"].add(self._refused(lambda: self.layer().command_request("")))
         for name, documented in COMMAND_ERRORS.items():
@@ -723,7 +723,7 @@ class CommandClientTests(CommandProtocolFixture):
         broken = self.tmp / "not-an-installation"
         broken.mkdir(exist_ok=True)
         (broken / "instance.yaml").write_text("version: 1\nname: broken\n", encoding="utf-8")
-        # `validation` keeps the status `secretary web-read` already answers it with.
+        # `validation` keeps the status `ummanu web-read` already answers it with.
         self.assertEqual(run_web_read_commands(self._args(instance=str(broken), data_dir=None)), 2)
         self.assertEqual(run_web_read_request(self._args(instance=str(broken), data_dir=None)), 2)
 

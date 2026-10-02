@@ -3,7 +3,7 @@
 ## Shared memory
 
 Shared memory lives in the `memory` MCP server. Before answering or acting on context that has been
-discussed before, call `memory_search`. Do not pass `caller`: Secretary derives read authority from
+discussed before, call `memory_search`. Do not pass `caller`: Ummanu derives read authority from
 the launch-bound identity. Pass `scope` only to narrow the scopes already granted to the session.
 
 ## Git

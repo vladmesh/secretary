@@ -10,9 +10,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import secretary.data as data_module
-from secretary import memory_journal
-from secretary.data import (
+import ummanu.data as data_module
+from tests.fakes.tasks import empty_seed
+from tests.sql_backend_fixtures import card_store
+from ummanu import memory_journal
+from ummanu.data import (
     export_all,
     export_artifacts,
     export_board,
@@ -23,8 +25,8 @@ from secretary.data import (
     manifest_for,
     normalize_board_card,
 )
-from secretary.memory_journal import verify_memory_journal
-from secretary.memory_write import (
+from ummanu.memory_journal import verify_memory_journal
+from ummanu.memory_write import (
     MEMORY_PROPOSAL_ACTIVE_MARKER,
     MemoryExportPublishError,
     MemoryLockError,
@@ -36,10 +38,8 @@ from secretary.memory_write import (
     propose_memory_fact,
     supersede_memory_fact,
 )
-from secretary.sprints import SPRINT_BOARD_NAME
-from secretary.tasks import TaskError
-from tests.fakes.tasks import empty_seed
-from tests.sql_backend_fixtures import card_store
+from ummanu.sprints import SPRINT_BOARD_NAME
+from ummanu.tasks import TaskError
 
 
 class TaskExportReader:
@@ -49,7 +49,7 @@ class TaskExportReader:
     """
 
     def __init__(self, cards: list[dict] | None = None, *, client: object = None) -> None:
-        self.cards = cards if cards is not None else [{"id": 1, "reference": "secretary-1", "title": "One"}]
+        self.cards = cards if cards is not None else [{"id": 1, "reference": "ummanu-1", "title": "One"}]
         self.calls = 0
         self.client = client
 
@@ -61,7 +61,7 @@ class TaskExportReader:
 class DataLayoutTests(unittest.TestCase):
     def test_init_layout_creates_target_dirs_and_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
 
             layout = init_layout(data_dir)
 
@@ -76,7 +76,7 @@ class DataLayoutTests(unittest.TestCase):
 
     def test_init_layout_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
 
             first = init_layout(data_dir)
             second = init_layout(data_dir)
@@ -94,12 +94,12 @@ class DataLayoutTests(unittest.TestCase):
             return original_write_text(path, text, *args, **kwargs)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             manifest_path = data_dir / "data-manifest.json"
             original_manifest = manifest_path.read_text(encoding="utf-8")
 
-            with mock.patch("secretary.data.Path.write_text", new=partial_manifest_write):
+            with mock.patch("ummanu.data.Path.write_text", new=partial_manifest_write):
                 with self.assertRaises(RuntimeError):
                     init_layout(data_dir)
 
@@ -108,12 +108,12 @@ class DataLayoutTests(unittest.TestCase):
 
     def test_init_layout_preserves_manifest_when_publish_write_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             manifest_path = data_dir / "data-manifest.json"
             original_manifest = manifest_path.read_text(encoding="utf-8")
 
-            with mock.patch("secretary.data.Path.write_text", side_effect=OSError("full")):
+            with mock.patch("ummanu.data.Path.write_text", side_effect=OSError("full")):
                 with self.assertRaises(RuntimeError):
                     init_layout(data_dir)
 
@@ -122,18 +122,18 @@ class DataLayoutTests(unittest.TestCase):
 
     def test_init_layout_wraps_directory_prepare_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             data_dir.write_text("not a directory", encoding="utf-8")
 
-            with self.assertRaisesRegex(RuntimeError, "cannot prepare secretary-data layout"):
+            with self.assertRaisesRegex(RuntimeError, "cannot prepare ummanu-data layout"):
                 init_layout(data_dir)
 
     def test_init_layout_wraps_manifest_tempfile_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
 
             with (
-                mock.patch("secretary.data.tempfile.mkstemp", side_effect=PermissionError("denied")),
+                mock.patch("ummanu.data.tempfile.mkstemp", side_effect=PermissionError("denied")),
                 self.assertRaisesRegex(RuntimeError, "could not write data manifest"),
             ):
                 init_layout(data_dir)
@@ -146,31 +146,31 @@ class ExportTests(unittest.TestCase):
     def test_normalize_board_card_keeps_required_surface(self):
         card = {
             "id": "7",
-            "reference": "secretary-353",
+            "reference": "ummanu-353",
             "title": "Export data",
             "column": "In progress",
-            "swimlane": "secretary",
+            "swimlane": "ummanu",
             "position": "2",
             "date_moved": "1783635890",
             "task_type": "code",
-            "project": "secretary",
+            "project": "ummanu",
         }
         shown = {
             "id": 7,
-            "reference": "secretary-353",
+            "reference": "ummanu-353",
             "title": "Export data",
             "description": "body",
             "column": "In progress",
-            "metadata": {"project": "secretary", "task_type": "code"},
+            "metadata": {"project": "ummanu", "task_type": "code"},
             "comments": [{"ts": "1", "text": "[worker]\nok"}],
         }
 
         normalized = normalize_board_card(card, shown)
 
-        self.assertEqual(normalized["reference"], "secretary-353")
-        self.assertEqual(normalized["swimlane"], "secretary")
+        self.assertEqual(normalized["reference"], "ummanu-353")
+        self.assertEqual(normalized["swimlane"], "ummanu")
         self.assertEqual(normalized["column"], "In progress")
-        self.assertEqual(normalized["metadata"], {"project": "secretary", "task_type": "code"})
+        self.assertEqual(normalized["metadata"], {"project": "ummanu", "task_type": "code"})
         self.assertEqual(normalized["comments"], [{"ts": "1", "text": "[worker]\nok"}])
 
     def test_export_board_writes_normalized_cards_and_is_idempotent(self):
@@ -179,20 +179,20 @@ class ExportTests(unittest.TestCase):
             cards=[
                 {
                     "id": 1,
-                    "reference": "secretary-353",
+                    "reference": "ummanu-353",
                     "title": "Export",
                     "description": "spec",
                     "column": "Ready",
-                    "swimlane": "secretary",
+                    "swimlane": "ummanu",
                     "position": 1,
-                    "metadata": {"project": "secretary"},
+                    "metadata": {"project": "ummanu"},
                     "comments": [{"ts": "10", "text": "[po]\nbody"}],
                 }
             ]
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             first = export_board(
                 data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=self.store
             )
@@ -212,19 +212,19 @@ class ExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             with mock.patch("subprocess.run", side_effect=AssertionError("no subprocess")):
                 result = export_board(
-                    Path(tmpdir) / "secretary-data",
+                    Path(tmpdir) / "ummanu-data",
                     instance_dir=Path(tmpdir),
                     reader=reader,  # type: ignore[arg-type]
                     sprint_client=self.store,
                 )
 
-        self.assertEqual(result.source, "secretary task")
+        self.assertEqual(result.source, "ummanu task")
         self.assertEqual(reader.calls, 1)
 
     def test_task_reader_failure_preserves_the_previous_board_snapshot(self):
         reader = TaskExportReader(client=self.store)
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             export_board(
                 data_dir,
                 instance_dir=Path(tmpdir),
@@ -235,7 +235,7 @@ class ExportTests(unittest.TestCase):
             failed_reader = mock.Mock(client=self.store)
             failed_reader.export.side_effect = TaskError("backend_error", "backend refused export", 1)
 
-            with self.assertRaisesRegex(RuntimeError, "secretary task export failed: backend refused export"):
+            with self.assertRaisesRegex(RuntimeError, "ummanu task export failed: backend refused export"):
                 export_board(
                     data_dir,
                     instance_dir=Path(tmpdir),
@@ -249,7 +249,7 @@ class ExportTests(unittest.TestCase):
 
     def test_export_board_writes_an_empty_sprint_set_without_a_sprint_board(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             export_board(
                 data_dir, instance_dir=Path(tmpdir), reader=TaskExportReader(client=self.store), sprint_client=self.store
             )
@@ -273,7 +273,7 @@ class ExportTests(unittest.TestCase):
             return original(method, **params)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             with (
                 mock.patch.object(self.store, "call", side_effect=broken),
                 self.assertRaisesRegex(RuntimeError, "sprint board is unreachable"),
@@ -291,16 +291,16 @@ class ExportTests(unittest.TestCase):
 
     def test_export_board_preserves_previous_snapshot_on_publish_error(self):
         cards_by_run = [
-            [{"id": 1, "reference": "secretary-1", "title": "One"}],
+            [{"id": 1, "reference": "ummanu-1", "title": "One"}],
             [
-                {"id": 1, "reference": "secretary-1", "title": "One"},
-                {"id": 2, "reference": "secretary-2", "title": "Two"},
+                {"id": 1, "reference": "ummanu-1", "title": "One"},
+                {"id": 2, "reference": "ummanu-2", "title": "Two"},
             ],
         ]
         reader = TaskExportReader(cards_by_run[0], client=self.store)
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             board_dir = data_dir / "board"
 
             export_board(data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=self.store)
@@ -319,7 +319,7 @@ class ExportTests(unittest.TestCase):
                     raise OSError("full")
                 return original_replace(source, destination)
 
-            with mock.patch("secretary.data.os.replace", side_effect=fail_on_ndjson_publish):
+            with mock.patch("ummanu.data.os.replace", side_effect=fail_on_ndjson_publish):
                 with self.assertRaisesRegex(RuntimeError, "could not publish board export"):
                     export_board(
                         data_dir, instance_dir=Path(tmpdir), reader=reader, sprint_client=self.store
@@ -338,16 +338,16 @@ class ExportTests(unittest.TestCase):
             root = Path(tmpdir)
             instance_dir = init_instance_repo(root / "instance")
             source = memory_facts_dir(instance_dir)
-            (source / "secretary").mkdir(parents=True)
-            (source / "secretary" / "one.md").write_text(
-                "---\ntags: [secretary, memory]\nsource: test\ncreated: 2026-07-11\n---\nfact one\n",
+            (source / "ummanu").mkdir(parents=True)
+            (source / "ummanu" / "one.md").write_text(
+                "---\ntags: [ummanu, memory]\nsource: test\ncreated: 2026-07-11\n---\nfact one\n",
                 encoding="utf-8",
             )
             (source / "global").mkdir()
             (source / "global" / "two.md").write_text("fact two\n", encoding="utf-8")
             git(instance_dir, "add", "-A", ".")
             git(instance_dir, "commit", "-m", "facts")
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
 
             first = export_memory(data_dir, instance_dir)
             first_payload = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
@@ -358,7 +358,7 @@ class ExportTests(unittest.TestCase):
 
         self.assertEqual(first.count, 2)
         self.assertEqual(second.count, 2)
-        self.assertIn("secretary/one.md", first_payload)
+        self.assertIn("ummanu/one.md", first_payload)
         self.assertIn('"metadata": {"created": "2026-07-11"', first_payload)
         self.assertFalse(facts_dir_exists)
         self.assertEqual(manifest["source"]["head"], source_head)
@@ -368,7 +368,7 @@ class ExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance_dir = init_instance_repo(root / "instance")
-            fact = memory_facts_dir(instance_dir) / "secretary" / "one.md"
+            fact = memory_facts_dir(instance_dir) / "ummanu" / "one.md"
             fact.parent.mkdir(parents=True)
             fact.write_text("fact one\n", encoding="utf-8")
             original_copy_tree = memory_journal._copy_tree
@@ -377,9 +377,9 @@ class ExportTests(unittest.TestCase):
                 original_copy_tree(source_memory, snapshot)
                 fact.write_text("changed after snapshot\n", encoding="utf-8")
 
-            with mock.patch("secretary.memory_journal._copy_tree", side_effect=copy_then_mutate):
-                export_memory(root / "secretary-data", instance_dir)
-            exported = (root / "secretary-data" / "memory" / "export.ndjson").read_text(encoding="utf-8")
+            with mock.patch("ummanu.memory_journal._copy_tree", side_effect=copy_then_mutate):
+                export_memory(root / "ummanu-data", instance_dir)
+            exported = (root / "ummanu-data" / "memory" / "export.ndjson").read_text(encoding="utf-8")
 
         self.assertIn("fact one", exported)
         self.assertNotIn("changed after snapshot", exported)
@@ -390,14 +390,14 @@ class ExportTests(unittest.TestCase):
             instance_dir = init_instance_repo(root / "instance")
             secret = root / "secret.env"
             secret.write_text("TOKEN=do-not-export\n", encoding="utf-8")
-            facts = memory_facts_dir(instance_dir) / "secretary"
+            facts = memory_facts_dir(instance_dir) / "ummanu"
             facts.mkdir(parents=True)
             (facts / "one.md").write_text("fact one\n", encoding="utf-8")
             (facts / "secret.md").symlink_to(secret)
 
-            result = export_memory(root / "secretary-data", instance_dir)
-            exported = (root / "secretary-data" / "memory" / "export.ndjson").read_text(encoding="utf-8")
-            mirrored_secret = root / "secretary-data" / "memory" / "facts" / "secretary" / "secret.md"
+            result = export_memory(root / "ummanu-data", instance_dir)
+            exported = (root / "ummanu-data" / "memory" / "export.ndjson").read_text(encoding="utf-8")
+            mirrored_secret = root / "ummanu-data" / "memory" / "facts" / "ummanu" / "secret.md"
 
         self.assertEqual(result.count, 1)
         self.assertIn("fact one", exported)
@@ -408,21 +408,21 @@ class ExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance_dir = init_instance_repo(root / "instance")
-            fact = memory_facts_dir(instance_dir) / "secretary" / "bad.md"
+            fact = memory_facts_dir(instance_dir) / "ummanu" / "bad.md"
             fact.parent.mkdir(parents=True)
             fact.write_bytes(b"\xff\xfe")
 
             with self.assertRaisesRegex(RuntimeError, "could not decode memory fact"):
-                export_memory(root / "secretary-data", instance_dir)
+                export_memory(root / "ummanu-data", instance_dir)
 
     def test_export_memory_preserves_previous_snapshot_on_decode_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance_dir = init_instance_repo(root / "instance")
-            facts = memory_facts_dir(instance_dir) / "secretary"
+            facts = memory_facts_dir(instance_dir) / "ummanu"
             facts.mkdir(parents=True)
             (facts / "good.md").write_text("good fact\n", encoding="utf-8")
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             export_memory(data_dir, instance_dir)
             old_export = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
 
@@ -440,7 +440,7 @@ class ExportTests(unittest.TestCase):
     def test_memory_protocol_commit_writes_one_journal_commit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             instance_dir = init_instance_repo(root / "instance")
             fact = root / "fact.md"
             fact.write_text("new durable fact\n", encoding="utf-8")
@@ -448,11 +448,11 @@ class ExportTests(unittest.TestCase):
             proposal = propose_memory_fact(
                 data_dir,
                 actor="curator:claude/session",
-                scope="project:secretary",
+                scope="project:ummanu",
                 slug="new-fact",
                 fact_file=fact,
                 source="curator:claude/session",
-                tags=["secretary", "memory"],
+                tags=["ummanu", "memory"],
             )
             result = commit_memory_proposal(
                 data_dir,
@@ -465,26 +465,26 @@ class ExportTests(unittest.TestCase):
             status = memory_status(instance_dir)
             exported = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
 
-        self.assertEqual(result.fact, "secretary/new-fact")
+        self.assertEqual(result.fact, "ummanu/new-fact")
         self.assertEqual(log_count, "1")
         self.assertIn("Op: commit", message)
         self.assertIn("Principal: curator:claude/session", message)
         self.assertIn("Source: curator:claude/session", message)
-        self.assertIn("Changed-Facts: secretary/new-fact", message)
+        self.assertIn("Changed-Facts: ummanu/new-fact", message)
         self.assertEqual(status, "")
         self.assertIn("new durable fact", exported)
 
     def test_memory_verify_checks_export_and_index_parity(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             fact = root / "fact.md"
             fact.write_text("verified durable fact\n", encoding="utf-8")
             instance_dir = init_instance_repo(root / "instance")
             proposal = propose_memory_fact(
                 data_dir,
                 actor="curator:claude/session",
-                scope="project:secretary",
+                scope="project:ummanu",
                 slug="verified",
                 fact_file=fact,
                 source="curator:claude/session",
@@ -511,14 +511,14 @@ class ExportTests(unittest.TestCase):
     def test_memory_protocol_export_failure_after_commit_is_retryable(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             fact = root / "fact.md"
             fact.write_text("retryable fact\n", encoding="utf-8")
             instance_dir = init_instance_repo(root / "instance")
             proposal = propose_memory_fact(
                 data_dir,
                 actor="curator:claude/session",
-                scope="project:secretary",
+                scope="project:ummanu",
                 slug="retryable",
                 fact_file=fact,
                 source="curator:claude/session",
@@ -526,7 +526,7 @@ class ExportTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "secretary.memory_write._publish_memory_export",
+                    "ummanu.memory_write._publish_memory_export",
                     side_effect=RuntimeError("disk full"),
                 ),
                 self.assertRaises(MemoryExportPublishError) as raised,
@@ -557,7 +557,7 @@ class ExportTests(unittest.TestCase):
             staging_exists_after_retry = completed_marker.parent.exists()
 
         self.assertEqual(failed_result.commit, after_failure_head)
-        self.assertEqual(failed_result.fact, "secretary/retryable")
+        self.assertEqual(failed_result.fact, "ummanu/retryable")
         self.assertEqual(log_count_after_failure, "1")
         self.assertTrue(completed_exists_after_failure)
         self.assertFalse(export_exists_after_failure)
@@ -570,7 +570,7 @@ class ExportTests(unittest.TestCase):
     def test_memory_protocol_errors_share_base_class(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             fact = root / "fact.md"
             fact.write_text("fact\n", encoding="utf-8")
             memory_dir = data_dir / "memory"
@@ -589,8 +589,8 @@ class ExportTests(unittest.TestCase):
             errors: list[MemoryProtocolError] = []
             for actor, scope, source in (
                 ("curator:claude/session", "bad", "curator:claude/session"),
-                ("worker:codex/session", "project:secretary", "worker:codex/session"),
-                ("curator:claude/session", "project:secretary", "curator:claude/session"),
+                ("worker:codex/session", "project:ummanu", "worker:codex/session"),
+                ("curator:claude/session", "project:ummanu", "curator:claude/session"),
             ):
                 try:
                     propose_memory_fact(
@@ -612,13 +612,13 @@ class ExportTests(unittest.TestCase):
     def test_memory_protocol_gc_removes_only_stale_uncommitted_proposals(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             fact = root / "fact.md"
             fact.write_text("fact\n", encoding="utf-8")
             stale = propose_memory_fact(
                 data_dir,
                 actor="curator:claude/session",
-                scope="project:secretary",
+                scope="project:ummanu",
                 slug="stale",
                 fact_file=fact,
                 source="curator:claude/session",
@@ -626,7 +626,7 @@ class ExportTests(unittest.TestCase):
             fresh = propose_memory_fact(
                 data_dir,
                 actor="curator:claude/session",
-                scope="project:secretary",
+                scope="project:ummanu",
                 slug="fresh",
                 fact_file=fact,
                 source="curator:claude/session",
@@ -634,7 +634,7 @@ class ExportTests(unittest.TestCase):
             active = propose_memory_fact(
                 data_dir,
                 actor="curator:claude/session",
-                scope="project:secretary",
+                scope="project:ummanu",
                 slug="active",
                 fact_file=fact,
                 source="curator:claude/session",
@@ -671,7 +671,7 @@ class ExportTests(unittest.TestCase):
 
             with self.assertRaises(MemoryValidationError):
                 propose_memory_fact(
-                    root / "secretary-data",
+                    root / "ummanu-data",
                     actor="curator:claude/session",
                     scope="bad",
                     slug="new-fact",
@@ -680,9 +680,9 @@ class ExportTests(unittest.TestCase):
                 )
             with self.assertRaises(MemoryPermissionError):
                 propose_memory_fact(
-                    root / "secretary-data",
+                    root / "ummanu-data",
                     actor="worker:codex/session",
-                    scope="project:secretary",
+                    scope="project:ummanu",
                     slug="new-fact",
                     fact_file=fact,
                     source="worker:codex/session",
@@ -691,7 +691,7 @@ class ExportTests(unittest.TestCase):
     def test_memory_protocol_publishes_po_review_bucket_without_project_aliasing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             fact = root / "fact.md"
             fact.write_text(
                 "---\ntags: pending-review,multi-project\n---\nNeeds PO ownership review.\n",
@@ -722,7 +722,7 @@ class ExportTests(unittest.TestCase):
     def test_memory_protocol_supersede_unknown_fact_fails_cleanly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             fact = root / "fact.md"
             fact.write_text("replacement\n", encoding="utf-8")
             instance_dir = init_instance_repo(root / "instance")
@@ -732,7 +732,7 @@ class ExportTests(unittest.TestCase):
                     data_dir,
                     instance_dir,
                     actor="curator:claude/session",
-                    scope="project:secretary",
+                    scope="project:ummanu",
                     slug="replacement",
                     fact_file=fact,
                     supersedes=["missing"],
@@ -745,14 +745,14 @@ class ExportTests(unittest.TestCase):
     def test_memory_protocol_supersede_removes_old_fact_in_one_commit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             old_fact = root / "old.md"
             old_fact.write_text("old fact\n", encoding="utf-8")
             instance_dir = init_instance_repo(root / "instance")
             proposal = propose_memory_fact(
                 data_dir,
                 actor="curator:claude/session",
-                scope="project:secretary",
+                scope="project:ummanu",
                 slug="old",
                 fact_file=old_fact,
                 source="curator:claude/session",
@@ -770,7 +770,7 @@ class ExportTests(unittest.TestCase):
                 data_dir,
                 instance_dir,
                 actor="curator:claude/session",
-                scope="project:secretary",
+                scope="project:ummanu",
                 slug="new",
                 fact_file=new_fact,
                 supersedes=["old"],
@@ -780,16 +780,16 @@ class ExportTests(unittest.TestCase):
             log_count = memory_commit_count(instance_dir)
             message = memory_message(instance_dir)
 
-        self.assertEqual(result.changed_facts, ("secretary/new", "secretary/old"))
-        self.assertEqual(tracked, ["secretary/new.md"])
+        self.assertEqual(result.changed_facts, ("ummanu/new", "ummanu/old"))
+        self.assertEqual(tracked, ["ummanu/new.md"])
         self.assertEqual(log_count, "2")
         self.assertIn("Op: supersede", message)
-        self.assertIn("Supersedes: secretary/old", message)
+        self.assertIn("Supersedes: ummanu/old", message)
 
     def test_memory_protocol_live_lock_rejects_concurrent_write(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             fact = root / "fact.md"
             fact.write_text("fact\n", encoding="utf-8")
             memory_dir = data_dir / "memory"
@@ -809,7 +809,7 @@ class ExportTests(unittest.TestCase):
                 propose_memory_fact(
                     data_dir,
                     actor="curator:claude/session",
-                    scope="project:secretary",
+                    scope="project:ummanu",
                     slug="new-fact",
                     fact_file=fact,
                     source="curator:claude/session",
@@ -818,14 +818,14 @@ class ExportTests(unittest.TestCase):
     def test_memory_protocol_recovers_dirty_worktree_before_commit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             first_fact = root / "first.md"
             first_fact.write_text("first fact\n", encoding="utf-8")
             instance_dir = init_instance_repo(root / "instance")
             first = propose_memory_fact(
                 data_dir,
                 actor="curator:claude/session",
-                scope="project:secretary",
+                scope="project:ummanu",
                 slug="first",
                 fact_file=first_fact,
                 source="curator:claude/session",
@@ -837,15 +837,15 @@ class ExportTests(unittest.TestCase):
                 propose_id=first.propose_id,
             )
             facts_dir = memory_facts_dir(instance_dir)
-            (facts_dir / "secretary" / "first.md").write_text("dirty edit\n", encoding="utf-8")
-            (facts_dir / "secretary" / "residue.md").write_text("residue\n", encoding="utf-8")
+            (facts_dir / "ummanu" / "first.md").write_text("dirty edit\n", encoding="utf-8")
+            (facts_dir / "ummanu" / "residue.md").write_text("residue\n", encoding="utf-8")
             second_fact = root / "second.md"
             second_fact.write_text("second fact\n", encoding="utf-8")
 
             second = propose_memory_fact(
                 data_dir,
                 actor="curator:claude/session",
-                scope="project:secretary",
+                scope="project:ummanu",
                 slug="second",
                 fact_file=second_fact,
                 source="curator:claude/session",
@@ -856,25 +856,25 @@ class ExportTests(unittest.TestCase):
                 actor="curator:claude/session",
                 propose_id=second.propose_id,
             )
-            first_text = (facts_dir / "secretary" / "first.md").read_text(encoding="utf-8")
+            first_text = (facts_dir / "ummanu" / "first.md").read_text(encoding="utf-8")
             tracked = tracked_facts(instance_dir)
             status = memory_status(instance_dir)
 
         self.assertIn("first fact", first_text)
-        self.assertEqual(tracked, ["secretary/first.md", "secretary/second.md"])
+        self.assertEqual(tracked, ["ummanu/first.md", "ummanu/second.md"])
         self.assertEqual(status, "")
 
     def test_export_memory_after_protocol_commit_is_readonly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             protocol_fact = root / "protocol.md"
             protocol_fact.write_text("protocol fact\n", encoding="utf-8")
             instance_dir = init_instance_repo(root / "instance")
             proposal = propose_memory_fact(
                 data_dir,
                 actor="curator:claude/session",
-                scope="project:secretary",
+                scope="project:ummanu",
                 slug="protocol",
                 fact_file=protocol_fact,
                 source="curator:claude/session",
@@ -903,7 +903,7 @@ class ExportTests(unittest.TestCase):
     def test_export_memory_respects_live_journal_lock(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             instance_dir = init_instance_repo(root / "instance")
             memory_dir = data_dir / "memory"
             memory_dir.mkdir(parents=True)
@@ -927,25 +927,25 @@ class ExportTests(unittest.TestCase):
             state = root / "state"
             (state / "pipeline").mkdir(parents=True)
             (state / "pipeline" / "runs.jsonl").write_text(
-                '{"event":"claim","reference":"secretary-353"}\n',
+                '{"event":"claim","reference":"ummanu-353"}\n',
                 encoding="utf-8",
             )
             (state / "pipeline" / "cards.json").write_text(
-                '{"secretary-353":{"worker":"353-system-exports"}}\n',
+                '{"ummanu-353":{"worker":"353-system-exports"}}\n',
                 encoding="utf-8",
             )
 
-            result = export_runs(root / "secretary-data", state_dir=state)
-            runs = (root / "secretary-data" / "runs" / "runs.ndjson").read_text(encoding="utf-8")
+            result = export_runs(root / "ummanu-data", state_dir=state)
+            runs = (root / "ummanu-data" / "runs" / "runs.ndjson").read_text(encoding="utf-8")
             watermarks = json.loads(
-                (root / "secretary-data" / "runs" / "watermarks.json").read_text(encoding="utf-8")
+                (root / "ummanu-data" / "runs" / "watermarks.json").read_text(encoding="utf-8")
             )
-            cards = json.loads((root / "secretary-data" / "runs" / "cards.json").read_text(encoding="utf-8"))
+            cards = json.loads((root / "ummanu-data" / "runs" / "cards.json").read_text(encoding="utf-8"))
 
         self.assertEqual(result.count, 1)
         self.assertIn('"event": "claim"', runs)
         self.assertEqual(watermarks["files"][0]["path"], "pipeline/cards.json")
-        self.assertIn("secretary-353", cards["cards"])
+        self.assertIn("ummanu-353", cards["cards"])
 
     def test_export_runs_fails_on_invalid_jsonl(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -956,7 +956,7 @@ class ExportTests(unittest.TestCase):
             (state / "pipeline" / "cards.json").write_text("{}", encoding="utf-8")
 
             with self.assertRaisesRegex(RuntimeError, "invalid JSONL"):
-                export_runs(root / "secretary-data", state_dir=state)
+                export_runs(root / "ummanu-data", state_dir=state)
 
     def test_export_runs_fails_on_invalid_card_mapping(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -967,18 +967,18 @@ class ExportTests(unittest.TestCase):
             (state / "pipeline" / "cards.json").write_text("{not-json", encoding="utf-8")
 
             with self.assertRaisesRegex(RuntimeError, "invalid JSON"):
-                export_runs(root / "secretary-data", state_dir=state)
+                export_runs(root / "ummanu-data", state_dir=state)
 
     def test_export_runs_preserves_previous_snapshot_on_publish_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             state = root / "state"
-            runs_dir = root / "secretary-data" / "runs"
+            runs_dir = root / "ummanu-data" / "runs"
             (state / "pipeline").mkdir(parents=True)
             (state / "pipeline" / "runs.jsonl").write_text('{"event":"one"}\n', encoding="utf-8")
             (state / "pipeline" / "cards.json").write_text("{}", encoding="utf-8")
 
-            export_runs(root / "secretary-data", state_dir=state)
+            export_runs(root / "ummanu-data", state_dir=state)
             old_runs = (runs_dir / "runs.ndjson").read_text(encoding="utf-8")
             old_watermarks = (runs_dir / "watermarks.json").read_text(encoding="utf-8")
             old_cards = (runs_dir / "cards.json").read_text(encoding="utf-8")
@@ -998,9 +998,9 @@ class ExportTests(unittest.TestCase):
                     raise OSError("full")
                 return original_replace(source, destination)
 
-            with mock.patch("secretary.data.os.replace", side_effect=fail_on_watermarks_publish):
+            with mock.patch("ummanu.data.os.replace", side_effect=fail_on_watermarks_publish):
                 with self.assertRaisesRegex(RuntimeError, "could not publish runs export"):
-                    export_runs(root / "secretary-data", state_dir=state)
+                    export_runs(root / "ummanu-data", state_dir=state)
 
             current_runs = (runs_dir / "runs.ndjson").read_text(encoding="utf-8")
             current_watermarks = (runs_dir / "watermarks.json").read_text(encoding="utf-8")
@@ -1019,10 +1019,10 @@ class ExportTests(unittest.TestCase):
             (transcripts / "project").mkdir(parents=True)
             (transcripts / "project" / "session.jsonl").write_text("{}\n", encoding="utf-8")
 
-            inventory = export_transcripts(root / "secretary-data", roots=[transcripts])
-            no_copy = (root / "secretary-data" / "transcripts" / "copies").exists()
-            copied = export_transcripts(root / "secretary-data", roots=[transcripts], copy=True)
-            copied_dir = (root / "secretary-data" / "transcripts" / "copies").is_dir()
+            inventory = export_transcripts(root / "ummanu-data", roots=[transcripts])
+            no_copy = (root / "ummanu-data" / "transcripts" / "copies").exists()
+            copied = export_transcripts(root / "ummanu-data", roots=[transcripts], copy=True)
+            copied_dir = (root / "ummanu-data" / "transcripts" / "copies").is_dir()
 
         self.assertEqual(inventory.count, 1)
         self.assertFalse(no_copy)
@@ -1039,8 +1039,8 @@ class ExportTests(unittest.TestCase):
             (transcripts / "session.jsonl").write_text("{}\n", encoding="utf-8")
             (transcripts / "linked.jsonl").symlink_to(secret)
 
-            result = export_transcripts(root / "secretary-data", roots=[transcripts], copy=True)
-            copy_root = root / "secretary-data" / "transcripts" / "copies"
+            result = export_transcripts(root / "ummanu-data", roots=[transcripts], copy=True)
+            copy_root = root / "ummanu-data" / "transcripts" / "copies"
             copied_files = [path.name for path in copy_root.rglob("*.jsonl")]
             copied_payload = "\n".join(
                 path.read_text(encoding="utf-8") for path in copy_root.rglob("*.jsonl")
@@ -1054,11 +1054,11 @@ class ExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             transcripts = root / "claude"
-            transcripts_dir = root / "secretary-data" / "transcripts"
+            transcripts_dir = root / "ummanu-data" / "transcripts"
             (transcripts / "project").mkdir(parents=True)
             (transcripts / "project" / "session.jsonl").write_text("{}\n", encoding="utf-8")
 
-            export_transcripts(root / "secretary-data", roots=[transcripts], copy=True)
+            export_transcripts(root / "ummanu-data", roots=[transcripts], copy=True)
             old_inventory = (transcripts_dir / "inventory.json").read_text(encoding="utf-8")
             old_ndjson = (transcripts_dir / "inventory.ndjson").read_text(encoding="utf-8")
             old_copies = sorted(
@@ -1067,9 +1067,9 @@ class ExportTests(unittest.TestCase):
             )
             (transcripts / "project" / "second.jsonl").write_text("{}\n", encoding="utf-8")
 
-            with mock.patch("secretary.data.shutil.copy2", side_effect=OSError("full")):
+            with mock.patch("ummanu.data.shutil.copy2", side_effect=OSError("full")):
                 with self.assertRaisesRegex(RuntimeError, "could not copy transcripts"):
-                    export_transcripts(root / "secretary-data", roots=[transcripts], copy=True)
+                    export_transcripts(root / "ummanu-data", roots=[transcripts], copy=True)
 
             current_inventory = (transcripts_dir / "inventory.json").read_text(encoding="utf-8")
             current_ndjson = (transcripts_dir / "inventory.ndjson").read_text(encoding="utf-8")
@@ -1085,13 +1085,13 @@ class ExportTests(unittest.TestCase):
     def test_export_artifacts_inventories_existing_files_and_task_docs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             artifacts_dir = data_dir / "artifacts"
             (artifacts_dir / "report.txt").parent.mkdir(parents=True)
             (artifacts_dir / "report.txt").write_text("report\n", encoding="utf-8")
             (artifacts_dir / ".env").write_text("TOKEN=do-not-copy\n", encoding="utf-8")
             workspaces = root / "workspaces"
-            workspace = workspaces / "secretary" / "354-backup-create-verify"
+            workspace = workspaces / "ummanu" / "354-backup-create-verify"
             workspace.mkdir(parents=True)
             (workspace / "TASK.md").write_text("task\n", encoding="utf-8")
             (workspace / "REVIEW.md").write_text("review\n", encoding="utf-8")
@@ -1109,47 +1109,47 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(second.count, 3)
         paths = {entry["relative_path"] for entry in inventory["artifacts"]}
         self.assertIn("report.txt", paths)
-        self.assertIn("secretary/354-backup-create-verify/TASK.md", paths)
-        self.assertIn("secretary/354-backup-create-verify/REVIEW.md", paths)
+        self.assertIn("ummanu/354-backup-create-verify/TASK.md", paths)
+        self.assertIn("ummanu/354-backup-create-verify/REVIEW.md", paths)
         self.assertNotIn(".env", paths)
         self.assertEqual(
             copied_docs,
             [
-                "secretary/354-backup-create-verify/REVIEW.md",
-                "secretary/354-backup-create-verify/TASK.md",
+                "ummanu/354-backup-create-verify/REVIEW.md",
+                "ummanu/354-backup-create-verify/TASK.md",
             ],
         )
 
     def test_export_all_passes_copy_transcripts_once(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             instance_dir = Path(tmpdir) / "instance"
             calls = []
 
             with (
                 mock.patch(
-                    "secretary.data.export_board",
+                    "ummanu.data.export_board",
                     side_effect=lambda data_dir_arg, *, instance_dir: (
                         calls.append("board")
                         or data_module.DataExport(data_dir_arg / "board.json", 1, "board")
                     ),
                 ) as board,
                 mock.patch(
-                    "secretary.data.export_memory",
+                    "ummanu.data.export_memory",
                     side_effect=lambda data_dir_arg, instance_dir_arg: (
                         calls.append("memory")
                         or data_module.DataExport(data_dir_arg / "memory.ndjson", 1, "memory")
                     ),
                 ) as memory,
                 mock.patch(
-                    "secretary.data.export_runs",
+                    "ummanu.data.export_runs",
                     side_effect=lambda data_dir_arg: (
                         calls.append("runs")
                         or data_module.DataExport(data_dir_arg / "runs.ndjson", 1, "runs")
                     ),
                 ),
                 mock.patch(
-                    "secretary.data.export_transcripts",
+                    "ummanu.data.export_transcripts",
                     side_effect=lambda data_dir_arg, *, copy: (
                         calls.append("transcripts")
                         or data_module.DataExport(
@@ -1160,7 +1160,7 @@ class ExportTests(unittest.TestCase):
                     ),
                 ) as transcripts,
                 mock.patch(
-                    "secretary.data.export_artifacts",
+                    "ummanu.data.export_artifacts",
                     side_effect=lambda data_dir_arg: (
                         calls.append("artifacts")
                         or data_module.DataExport(data_dir_arg / "artifacts.json", 1, "artifacts")
@@ -1175,15 +1175,15 @@ class ExportTests(unittest.TestCase):
         artifacts.assert_called_once_with(data_dir)
         memory.assert_called_once_with(data_dir, instance_dir)
 
-    def test_default_pipeline_state_uses_secretary_workspace(self):
+    def test_default_pipeline_state_uses_ummanu_workspace(self):
         self.assertEqual(
             data_module.PIPELINE_STATE_DIR,
-            Path.home() / "orca" / "workspaces" / "secretary" / "pipeline" / "state" / "pipeline",
+            Path.home() / "orca" / "workspaces" / "ummanu" / "pipeline" / "state" / "pipeline",
         )
 
 
 def init_instance_repo(path: Path) -> Path:
-    """A private instance repo with one commit, the way `secretary init` leaves it."""
+    """A private instance repo with one commit, the way `ummanu init` leaves it."""
     path.mkdir(parents=True, exist_ok=True)
     git(path, "init", "--initial-branch=main")
     git(path, "config", "user.name", "Test User")

@@ -6,7 +6,7 @@ head is told the path of, the exit status its supervisor records, and the ending
 settles — and none of them is exercised by a process that only echoes. This one does exactly those
 three and nothing else, so a test over it is a test of the product's path rather than of a program.
 
-    result <json>   publish that document to the path in $SECRETARY_RUN_RESULT and then wait to be
+    result <json>   publish that document to the path in $UMMANU_RUN_RESULT and then wait to be
                     ended, which is what a head whose work is done does: the product that owns the
                     process is what ends it;
     exit <status>   end immediately with that status, which is what a head whose CLI refused what
@@ -22,7 +22,7 @@ import time
 
 
 def publish(document: str) -> None:
-    path = os.environ["SECRETARY_RUN_RESULT"]
+    path = os.environ["UMMANU_RUN_RESULT"]
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(json.dumps(json.loads(document)))
         handle.flush()

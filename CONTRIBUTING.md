@@ -1,6 +1,6 @@
 # Contributing
 
-`secretary` is developed in the open around one deployment profile: a single trusted owner running
+`ummanu` is developed in the open around one deployment profile: a single trusted owner running
 one appliance on one host.
 
 ## Feedback
@@ -42,7 +42,7 @@ endpoint, never in a `test_*` module the default run discovers.
 
 ```bash
 python3 -m tests.broad
-python3 -m secretary role-skills audit --check
+python3 -m ummanu role-skills audit --check
 ```
 
 `python3 -m tests.broad` is the local `unit` and `component` profile, not the gate: a pull request is
@@ -55,8 +55,8 @@ the same output, exits with the same status and leaves a summary in the ignored 
 `check show` reads back:
 
 ```bash
-python3 -m secretary check broad --module tests.broad
-python3 -m secretary check show --module tests.broad
+python3 -m ummanu check broad --module tests.broad
+python3 -m ummanu check show --module tests.broad
 ```
 
 The receipt shapes (`--module`, `--command`, a project adapter's `broad_check`) and what each attests

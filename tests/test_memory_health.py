@@ -12,10 +12,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.memory import access, health
+from ummanu.memory import access, health
 
 try:
-    from secretary import memory_service
+    from ummanu import memory_service
 except ImportError:
     memory_service = None
 
@@ -59,19 +59,19 @@ class MemoryHealthWireTests(unittest.TestCase):
             {
                 "result": {
                     "content": [
-                        {"type": "text", "text": '{"id": 7, "scope": "product:secretary"}'},
-                        {"type": "text", "text": '[{"id": 8, "scope": "project:secretary"}]'},
+                        {"type": "text", "text": '{"id": 7, "scope": "product:ummanu"}'},
+                        {"type": "text", "text": '[{"id": 8, "scope": "project:ummanu"}]'},
                     ]
                 }
             }
         )
         self.assertEqual(
             text_rows,
-            [{"id": 7, "scope": "product:secretary"}, {"id": 8, "scope": "project:secretary"}],
+            [{"id": 7, "scope": "product:ummanu"}, {"id": 8, "scope": "project:ummanu"}],
         )
         for structured in (
-            [{"id": 9, "scope": "product:secretary"}],
-            {"result": [{"id": 10, "scope": "project:secretary"}]},
+            [{"id": 9, "scope": "product:ummanu"}],
+            {"result": [{"id": 10, "scope": "project:ummanu"}]},
         ):
             with self.subTest(structured=structured):
                 expected = structured["result"] if isinstance(structured, dict) else structured
@@ -90,7 +90,7 @@ class MemoryHealthWireTests(unittest.TestCase):
                             "id": 2,
                             "result": {
                                 "content": [
-                                    {"type": "text", "text": '[{"id": 7, "scope": "product:secretary"}]'}
+                                    {"type": "text", "text": '[{"id": 7, "scope": "product:ummanu"}]'}
                                 ]
                             },
                         }
@@ -98,10 +98,10 @@ class MemoryHealthWireTests(unittest.TestCase):
                 ),
             ]
         )
-        with mock.patch("secretary.memory.health.http.client.HTTPConnection", return_value=connection):
+        with mock.patch("ummanu.memory.health.http.client.HTTPConnection", return_value=connection):
             rows = health._authenticated_list("launch-bound-token", port=8077, timeout_seconds=5)
 
-        self.assertEqual(rows, [{"id": 7, "scope": "product:secretary"}])
+        self.assertEqual(rows, [{"id": 7, "scope": "product:ummanu"}])
         self.assertTrue(connection.closed)
         self.assertEqual([json.loads(call[2])["method"] for call in connection.calls], [
             "initialize",
@@ -133,7 +133,7 @@ class MemoryHealthWireTests(unittest.TestCase):
                 ),
             ]
         )
-        with mock.patch("secretary.memory.health.http.client.HTTPConnection", return_value=connection):
+        with mock.patch("ummanu.memory.health.http.client.HTTPConnection", return_value=connection):
             with self.assertRaisesRegex(health.MemoryProbeError, "denied.*runtime_identity_stale"):
                 health._authenticated_list("launch-bound-token", port=8077, timeout_seconds=5)
 
@@ -148,10 +148,10 @@ class MemoryHealthIdentityTests(unittest.TestCase):
                 self.assertIsInstance(resolved, access.MemoryReadIdentity)
                 assert isinstance(resolved, access.MemoryReadIdentity)
                 self.assertEqual(resolved.role, "steward")
-                self.assertEqual(resolved.scopes, frozenset({"project:secretary", "product:secretary"}))
-                return [{"id": 1, "scope": "product:secretary"}]
+                self.assertEqual(resolved.scopes, frozenset({"project:ummanu", "product:ummanu"}))
+                return [{"id": 1, "scope": "product:ummanu"}]
 
-            with mock.patch("secretary.memory.health._authenticated_list", side_effect=authenticated):
+            with mock.patch("ummanu.memory.health._authenticated_list", side_effect=authenticated):
                 health.probe_memory(data_dir, timeout_seconds=1, retry_seconds=0)
 
             self.assertFalse(list(access.bindings_dir(data_dir).glob("*.json")))
@@ -162,8 +162,8 @@ class MemoryHealthIdentityTests(unittest.TestCase):
             data_dir = Path(tmp)
             handed_off: list[Path] = []
             with (
-                mock.patch("secretary.memory.health._authenticated_list", return_value=[{"scope": "product:secretary"}]),
-                mock.patch("secretary.memory.health.os.geteuid", return_value=1000),
+                mock.patch("ummanu.memory.health._authenticated_list", return_value=[{"scope": "product:ummanu"}]),
+                mock.patch("ummanu.memory.health.os.geteuid", return_value=1000),
             ):
                 health.probe_memory(
                     data_dir,
@@ -177,7 +177,7 @@ class MemoryHealthIdentityTests(unittest.TestCase):
     def test_missing_expected_steward_entry_is_a_visible_probe_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch(
-                "secretary.memory.health._authenticated_list", return_value=[{"id": 1, "scope": "project:foreign"}]
+                "ummanu.memory.health._authenticated_list", return_value=[{"id": 1, "scope": "project:foreign"}]
             ):
                 with self.assertRaisesRegex(health.MemoryProbeError, "expected steward-scoped"):
                     health.probe_memory(Path(tmp), timeout_seconds=0.01, retry_seconds=0)
@@ -230,9 +230,9 @@ class MemoryHealthIdentityTests(unittest.TestCase):
                     os.close(read_fd)
                     os.waitpid(child, 0)
                 self.assertTrue(outcome["allowed"], outcome["code"])
-                return [{"scope": "product:secretary"}]
+                return [{"scope": "product:ummanu"}]
 
-            with mock.patch("secretary.memory.health._authenticated_list", side_effect=resolve_from_daemon):
+            with mock.patch("ummanu.memory.health._authenticated_list", side_effect=resolve_from_daemon):
                 health.probe_memory(
                     data_dir,
                     timeout_seconds=3,
@@ -242,7 +242,7 @@ class MemoryHealthIdentityTests(unittest.TestCase):
                 )
 
 
-@unittest.skipIf(memory_service is None, "secretary[memory] is not installed")
+@unittest.skipIf(memory_service is None, "ummanu[memory] is not installed")
 class MemoryHealthDaemonIntegrationTests(unittest.TestCase):
     """The pinned streamable-HTTP server, not a hand-written HTTP substitute."""
 
@@ -260,7 +260,7 @@ class MemoryHealthDaemonIntegrationTests(unittest.TestCase):
             memory_service.create_schema(connection, 4)
             connection.execute(
                 "INSERT INTO memories(text, scope, tags, source, created_at) VALUES (?,?,?,?,?)",
-                ("portable health sentinel", "product:secretary", None, "fixture", None),
+                ("portable health sentinel", "product:ummanu", None, "fixture", None),
             )
             connection.commit()
         finally:
@@ -278,7 +278,7 @@ class MemoryHealthDaemonIntegrationTests(unittest.TestCase):
             access.MEMORY_ACCESS_BINDINGS_ENV: str(access.bindings_dir(self.data_dir)),
         }
         self.daemon = subprocess.Popen(
-            [sys.executable, "-c", "from secretary.memory_service import mcp; mcp.run(transport='streamable-http')"],
+            [sys.executable, "-c", "from ummanu.memory_service import mcp; mcp.run(transport='streamable-http')"],
             cwd=source_root,
             env=environment,
             stdout=subprocess.DEVNULL,
@@ -298,7 +298,7 @@ class MemoryHealthDaemonIntegrationTests(unittest.TestCase):
     def test_unprivileged_probe_uses_the_real_streamable_http_session_and_read_guard(self) -> None:
         # This is the ordinary runner path exercised in CI.  The root-only test
         # above covers the distinct privilege-drop handoff.
-        with mock.patch("secretary.memory.health.os.geteuid", return_value=1000):
+        with mock.patch("ummanu.memory.health.os.geteuid", return_value=1000):
             health.probe_memory(self.data_dir, port=self.port, timeout_seconds=10, retry_seconds=0.05)
         deadline = time.monotonic() + 2
         while not self.audit.exists() and time.monotonic() < deadline:
@@ -307,7 +307,7 @@ class MemoryHealthDaemonIntegrationTests(unittest.TestCase):
         allowed = [entry for entry in entries if entry["action"] == "memory_list" and entry["outcome"] == "allowed"]
         self.assertEqual(len(allowed), 1)
         self.assertEqual(allowed[0]["role"], "steward")
-        self.assertEqual(allowed[0]["scopes"], ["product:secretary", "project:secretary"])
+        self.assertEqual(allowed[0]["scopes"], ["product:ummanu", "project:ummanu"])
         self.assertFalse({"text", "query", "token", "capability", "grant", "token_digest"} & set(allowed[0]))
 
     def test_real_daemon_serializes_a_denied_list_row(self) -> None:
@@ -329,7 +329,7 @@ class MemoryHealthDaemonIntegrationTests(unittest.TestCase):
                     (
                         "import types",
                         "from mcp.server.auth.provider import AccessToken",
-                        "from secretary import memory_service",
+                        "from ummanu import memory_service",
                         "async def verify_token(token):",
                         "    return AccessToken(token=token, client_id='fixture', subject='fixture', scopes=[], claims={'memory_grant_id': '0' * 32})",
                         "memory_service.mcp._token_verifier = types.SimpleNamespace(verify_token=verify_token)",

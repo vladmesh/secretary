@@ -16,7 +16,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from secretary.board.owner_events import (
+from ummanu.board.owner_events import (
     CARD_WAITS_FOR_PERSON,
     CLASSES,
     KIND_CLASS,

@@ -14,17 +14,17 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary._fsutil import file_lock
-from secretary.board.e2e_record import e2e_state
-from secretary.dispatch import e2e_stage
-from secretary.dispatch.gate import GateResult
-from secretary.dispatch.gate_receipt import mint_gate_receipt
-from secretary.dispatch.runtime import DispatcherRuntime
-from secretary.dispatch.state import new_attempt_id, now_rfc3339
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 from tests.fakes.dispatcher import FakeHost
+from ummanu._fsutil import file_lock
+from ummanu.board.e2e_record import e2e_state
+from ummanu.dispatch import e2e_stage
+from ummanu.dispatch.gate import GateResult
+from ummanu.dispatch.gate_receipt import mint_gate_receipt
+from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.dispatch.state import new_attempt_id, now_rfc3339
 
-REPO = "vladmesh/secretary"
+REPO = "vladmesh/ummanu"
 SHA = ("c0ffee12" * 5)[:40]
 SECOND_SHA = ("feedbeef" * 5)[:40]
 FIRST_RUN = 9001
@@ -212,7 +212,7 @@ class E2eStageFixture(DispatcherRuntimeFixture):
             self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
-            owner="secretary-pilot",
+            owner="ummanu-pilot",
             sprints=self.sprints,
         )
 

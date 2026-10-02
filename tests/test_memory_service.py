@@ -7,14 +7,14 @@ from unittest import mock
 try:
     import numpy as np
 
-    from secretary import memory_reindex, memory_service
+    from ummanu import memory_reindex, memory_service
 except ImportError:  # The base install deliberately excludes the heavy memory extra.
     np = None
     memory_reindex = None
     memory_service = None
 
 
-@unittest.skipIf(memory_service is None, "secretary[memory] is not installed")
+@unittest.skipIf(memory_service is None, "ummanu[memory] is not installed")
 class IncrementalMemoryIndexTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -222,7 +222,7 @@ class IncrementalMemoryIndexTests(unittest.TestCase):
         )
 
 
-@unittest.skipIf(memory_service is None, "secretary[memory] is not installed")
+@unittest.skipIf(memory_service is None, "ummanu[memory] is not installed")
 class MemoryReadAuthorizationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -236,7 +236,7 @@ class MemoryReadAuthorizationTests(unittest.TestCase):
                 [
                     ("allowed project fact", "project:alpha", None, None, None),
                     ("foreign project fact", "project:foreign", None, None, None),
-                    ("Secretary development fact", "project:secretary", None, None, None),
+                    ("Ummanu development fact", "project:ummanu", None, None, None),
                     ("pending PO review", "review:po", "pending-review", "curator", None),
                 ],
             )
@@ -270,7 +270,7 @@ class MemoryReadAuthorizationTests(unittest.TestCase):
         with mock.patch.object(memory_service, "read_guard", return_value=narrowed):
             self.assertEqual([entry["text"] for entry in memory_service.memory_list()], ["pending PO review"])
 
-        worker = self.identity({"project:alpha", "product:secretary"})
+        worker = self.identity({"project:alpha", "product:ummanu"})
         self.assertIsInstance(
             memory_service.memory_access.narrow(worker, "review:po"),
             memory_service.memory_access.MemoryAccessDenial,
@@ -284,7 +284,7 @@ class MemoryReadAuthorizationTests(unittest.TestCase):
             self.assertEqual(memory_service.memory_list(), [denial.response()])
 
     def test_search_uses_the_resolved_scope_once_and_ignores_spoofed_caller(self):
-        identity = self.identity({"project:alpha", "product:secretary"})
+        identity = self.identity({"project:alpha", "product:ummanu"})
         with (
             mock.patch.object(memory_service, "read_guard", return_value=identity) as guard,
             mock.patch.object(memory_service, "search_ready", return_value=True),
@@ -328,7 +328,7 @@ class MemoryReadAuthorizationTests(unittest.TestCase):
             self.assertEqual(memory_service.memory_list(), [denial.response()])
         self.assertEqual([entry["text"] for entry in memory_service.list_memory_entries()], [
             "pending PO review",
-            "Secretary development fact",
+            "Ummanu development fact",
             "foreign project fact",
             "allowed project fact",
         ])

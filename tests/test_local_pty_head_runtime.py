@@ -39,8 +39,8 @@ import unittest
 from dataclasses import dataclass
 from pathlib import Path
 
-from secretary.dispatch.watchdog import clear_head_heartbeat, head_process_status
-from secretary.runtime.head import (
+from ummanu.dispatch.watchdog import clear_head_heartbeat, head_process_status
+from ummanu.runtime.head import (
     EXITED,
     HEAD_ALIVE,
     HEAD_BUSY,
@@ -55,9 +55,9 @@ from secretary.runtime.head import (
     TaskRef,
     TurnLease,
 )
-from secretary.runtime.head.local_pty import protocol
-from secretary.runtime.head.local_pty.client import SupervisorClient
-from secretary.runtime.head.local_pty.journal import (
+from ummanu.runtime.head.local_pty import protocol
+from ummanu.runtime.head.local_pty.client import SupervisorClient
+from ummanu.runtime.head.local_pty.journal import (
     DRAIN_REQUESTED,
     INPUT_ACCEPTED,
     JOURNAL_SCHEMA_VERSION,
@@ -71,10 +71,10 @@ from secretary.runtime.head.local_pty.journal import (
     read_events,
     read_tail,
 )
-from secretary.codex_provider_events import CodexProviderEventIngress
-from secretary.runtime.codex_preflight import codex_provider_source_descriptor
+from ummanu.codex_provider_events import CodexProviderEventIngress
+from ummanu.runtime.codex_preflight import codex_provider_source_descriptor
 from tests.support.head_runtime_contract import HeadRuntimeContract
-from secretary.runtime.local_pty_head import (
+from ummanu.runtime.local_pty_head import (
     ADOPTED_TURN_SUBJECT,
     DELIVER_DRAINED_BEFORE_THIS_RUNTIME,
     DELIVER_NOT_SUBMITTED,
@@ -168,7 +168,7 @@ class LocalPtyRuntimeTestCase(unittest.TestCase):
         self.runtime = LocalPtyHeadRuntime(
             self.root, head_process_status=head_process_status, delivery_grace=TEST_GRACE_SECONDS
         )
-        self.task = TaskRef.card("secretary-1465", document=f"{self.workspace}/TASK.md")
+        self.task = TaskRef.card("ummanu-1465", document=f"{self.workspace}/TASK.md")
 
     # -- processes -----------------------------------------------------------------------------
 
@@ -222,7 +222,7 @@ class LocalPtyRuntimeTestCase(unittest.TestCase):
             str(self.workspace),
             self.task,
             command=command,
-            title="secretary-1465 worker",
+            title="ummanu-1465 worker",
             pointer=pointer,
             role="worker",
             quiet_seconds=options.pop("quiet_seconds", 0.4),
@@ -453,7 +453,7 @@ class LocalPtyRestartTests(LocalPtyRuntimeTestCase):
             str(self.workspace),
             self.task,
             command=CHILD_COMMAND,
-            title="secretary-1468 worker",
+            title="ummanu-1468 worker",
             run=run,
             role="worker",
         )
@@ -507,7 +507,7 @@ class LocalPtyRestartTests(LocalPtyRuntimeTestCase):
             str(self.workspace),
             self.task,
             command=CHILD_COMMAND,
-            title="secretary-1468 worker",
+            title="ummanu-1468 worker",
             pid_file=preflight.pid_file,
             run_id=preflight.run_id,
             run=preflight,
@@ -540,7 +540,7 @@ class LocalPtyRestartTests(LocalPtyRuntimeTestCase):
             str(self.workspace),
             self.task,
             command=CHILD_COMMAND,
-            title="secretary-1468 worker",
+            title="ummanu-1468 worker",
             pid_file=preflight.pid_file,
             run_id=preflight.run_id,
             run=preflight,
@@ -570,7 +570,7 @@ class LocalPtyRestartTests(LocalPtyRuntimeTestCase):
             str(self.workspace),
             self.task,
             command=CHILD_COMMAND,
-            title="secretary-1468 worker",
+            title="ummanu-1468 worker",
             role="worker",
         )
 
@@ -589,7 +589,7 @@ class LocalPtyRestartTests(LocalPtyRuntimeTestCase):
             str(self.workspace),
             self.task,
             command=CHILD_COMMAND,
-            title="secretary-1468 worker",
+            title="ummanu-1468 worker",
             run_id=run.run_id,
             role="worker",
         )
@@ -867,7 +867,7 @@ class LocalPtyDurableTurnTests(LocalPtyRuntimeTestCase):
             str(self.workspace),
             self.task,
             command=CHILD_COMMAND,
-            title="secretary-1479 worker",
+            title="ummanu-1479 worker",
             run_id=run.run_id,
             role="worker",
             quiet_seconds=0.4,
@@ -908,7 +908,7 @@ class LocalPtyDurableTurnTests(LocalPtyRuntimeTestCase):
             str(self.workspace),
             self.task,
             command=CHILD_COMMAND,
-            title="secretary-1479 worker",
+            title="ummanu-1479 worker",
             run_id=run.run_id,
             role="worker",
             quiet_seconds=0.4,
@@ -1872,7 +1872,7 @@ class TheWaitIsDerivedFromTheSubstrateTests(LocalPtyRuntimeTestCase):
         A name that comes back is a decision somebody has to make again, and this fails when it is
         made silently.
         """
-        source = (REPO / "src" / "secretary" / "runtime" / "local_pty_head.py").read_text(
+        source = (REPO / "src" / "ummanu" / "runtime" / "local_pty_head.py").read_text(
             encoding="utf-8"
         )
         tree = ast.parse(source)
@@ -2186,10 +2186,10 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
     """
 
     def test_the_substrate_is_reached_only_through_its_scoped_consumers(self) -> None:
-        package = REPO / "src" / "secretary" / "runtime" / "head" / "local_pty"
-        backend = REPO / "src" / "secretary" / "runtime" / "local_pty_head.py"
-        po_runner = REPO / "src" / "secretary" / "po" / "runner.py"
-        substrate = "secretary.runtime.head.local_pty"
+        package = REPO / "src" / "ummanu" / "runtime" / "head" / "local_pty"
+        backend = REPO / "src" / "ummanu" / "runtime" / "local_pty_head.py"
+        po_runner = REPO / "src" / "ummanu" / "po" / "runner.py"
+        substrate = "ummanu.runtime.head.local_pty"
         offenders = []
         for path in (REPO / "src").rglob("*.py"):
             if package in path.parents or path in (backend, po_runner):
@@ -2215,7 +2215,7 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
         """
         sites = {}
         for path in sorted((REPO / "src").rglob("*.py")):
-            if path == REPO / "src" / "secretary" / "runtime" / "local_pty_head.py":
+            if path == REPO / "src" / "ummanu" / "runtime" / "local_pty_head.py":
                 continue  # the class's own module, where it is defined rather than built
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for holder in ast.walk(tree):

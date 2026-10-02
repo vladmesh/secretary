@@ -498,10 +498,10 @@ class ApplyTests(FixtureTestCase):
         install = self.install()
         ctx = install.context()
         ctx.require_renamed = True
-        _code, output = quietly(engine.apply, ctx)
+        # Run as the pre-rename tree whichever tree this is: the renamed one goes on into step 5.
+        with unittest.mock.patch.object(engine, "RUNNING_PACKAGE", OLD.package):
+            _code, output = quietly(engine.apply, ctx)
         journal = context.Journal.load(install.layout.journal_path)
-        if engine.running_renamed():
-            self.skipTest("this tree is the renamed one")
         self.assertTrue(journal.done("move"))
         self.assertFalse(journal.done("checkout"))
         self.assertIn("runs from the renamed checkout", output)

@@ -12,10 +12,10 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from secretary.tasks import task_audit_for
-from secretary.webproto.command_reads import CommandReadLayer
-from secretary.webproto.provider_ops import CODEX_RESET_KIND, NO_CREDIT, ProviderOperationLayer
 from tests.sql_backend_fixtures import CardStoreCase
+from ummanu.tasks import task_audit_for
+from ummanu.webproto.command_reads import CommandReadLayer
+from ummanu.webproto.provider_ops import CODEX_RESET_KIND, NO_CREDIT, ProviderOperationLayer
 
 
 class FakeUsage:

@@ -6,16 +6,16 @@ import unittest
 from datetime import UTC, datetime
 from unittest import mock
 
-from secretary.board.events import AnalyticsOutcomeConflict, BoardEventCanon
-from secretary.board.fake import MemoryAudit
-from secretary.board.models import Actor, EntityKind, Event, EventKind
-from secretary.board.terminal_taxonomy import normalize_terminal_taxonomy
-from secretary.dispatch import attempt_accounting
-from secretary.dispatch.gate import GateResult
-from secretary.dispatch.state import OutcomeTerminalPath
-from secretary.dispatch.types import HostError
-from secretary.tasks import TaskError
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
+from ummanu.board.events import AnalyticsOutcomeConflict, BoardEventCanon
+from ummanu.board.fake import MemoryAudit
+from ummanu.board.models import Actor, EntityKind, Event, EventKind
+from ummanu.board.terminal_taxonomy import normalize_terminal_taxonomy
+from ummanu.dispatch import attempt_accounting
+from ummanu.dispatch.gate import GateResult
+from ummanu.dispatch.state import OutcomeTerminalPath
+from ummanu.dispatch.types import HostError
+from ummanu.tasks import TaskError
 
 
 def outcome(*, disposition: str = "rework", effect: str = "evt-effect") -> Event:
@@ -23,7 +23,7 @@ def outcome(*, disposition: str = "rework", effect: str = "evt-effect") -> Event
         event_id="evt-outcome",
         kind=EventKind.ATTEMPT_OUTCOME,
         entity_kind=EntityKind.CARD,
-        ref="secretary-1532",
+        ref="ummanu-1532",
         actor=Actor("dispatcher", "dispatcher"),
         reason="confirmed terminal lifecycle effect",
         occurred_at=datetime(2026, 9, 1, tzinfo=UTC),
@@ -315,7 +315,7 @@ class AttemptOutcomeLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
     def test_fanout_refusal_commits_its_lifecycle_effect_and_outcome(self) -> None:
         self.start_dispatcher()
         with mock.patch(
-            "secretary.dispatch.worker_launch._write_launch_intent",
+            "ummanu.dispatch.worker_launch._write_launch_intent",
             return_value="codex-fanout-policy: prohibited source",
         ):
             blocked = self.tick()

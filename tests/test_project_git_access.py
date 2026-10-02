@@ -26,15 +26,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import cli, secret_store, state_repo
-from secretary.dispatch import gate as dispatcher_gate
-from secretary.cli import main
-from secretary.config import validate_instance
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.launch import FAILURE_CLASS_INFRASTRUCTURE
-from secretary.dispatch.types import GateTransportError, HostError, ProjectGitAccessError
-from secretary.infra import github_credential
-from secretary.infra.github_credential import (
+from ummanu import cli, secret_store, state_repo
+from ummanu.dispatch import gate as dispatcher_gate
+from ummanu.cli import main
+from ummanu.config import validate_instance
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.launch import FAILURE_CLASS_INFRASTRUCTURE
+from ummanu.dispatch.types import GateTransportError, HostError, ProjectGitAccessError
+from ummanu.infra import github_credential
+from ummanu.infra.github_credential import (
     PROJECT_ACCESS_REFUSALS,
     PROJECT_GIT_PHASE,
     CredentialError,
@@ -42,10 +42,10 @@ from secretary.infra.github_credential import (
     ProjectGitAccess,
     project_remote_execution,
 )
-from secretary.infra.recovery_inventory import collect_recovery_inventory
-from secretary.projects.contract import CANNOT_ATTEST_PROJECT, ContractVerdict
-from secretary.secret_words import RECOVERY_WORDS
-from secretary.state_repo import GitChildIdentity, StateRepoError
+from ummanu.infra.recovery_inventory import collect_recovery_inventory
+from ummanu.projects.contract import CANNOT_ATTEST_PROJECT, ContractVerdict
+from ummanu.secret_words import RECOVERY_WORDS
+from ummanu.state_repo import GitChildIdentity, StateRepoError
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 from tests.head_registry import write_installed_pair
 from tests.production_runtime_fixtures import registered_production_runtime
@@ -359,9 +359,9 @@ class ManagedProjectGitTests(HermeticGitTestCase):
         args = operation["args"]
         self.assertEqual(args[:3], ["-c", "credential.helper=", "-c"], "ambient helpers are cleared first")
         self.assertTrue(args[3].startswith("credential.helper=!"))
-        self.assertIn("secretary.infra.github_credential", args[3])
+        self.assertIn("ummanu.infra.github_credential", args[3])
         self.assertEqual(operation["env"].get("GIT_ASKPASS"), "", "ambient askpass is disabled")
-        self.assertEqual(operation["env"].get("SECRETARY_CHECKPOINT_INSTANCE"), str(self.instance))
+        self.assertEqual(operation["env"].get("UMMANU_CHECKPOINT_INSTANCE"), str(self.instance))
         self.assertEqual(operation["child"], GitChildIdentity(os.geteuid(), os.getegid()))
         self.assertNotIn(self.token, json.dumps(args) + json.dumps(operation["env"]))
 
@@ -421,7 +421,7 @@ class ManagedProjectGitTests(HermeticGitTestCase):
         child = state_repo.git_child_identity(self.ws)
         with execution._authorized(child) as (prefix, environment, source):
             self.assertEqual(source, "managed-store")
-            declining = dict(environment, SECRETARY_CHECKPOINT_INSTANCE=str(self.root / "no-instance"))
+            declining = dict(environment, UMMANU_CHECKPOINT_INSTANCE=str(self.root / "no-instance"))
             fill = subprocess.run(
                 ["git", *prefix, "credential", "fill"],
                 input="protocol=https\nhost=github.com\n\n",
@@ -603,9 +603,9 @@ class GitAccessClaimPreflightTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(blocked["failure_class"], FAILURE_CLASS_INFRASTRUCTURE)
         self.assertEqual(
             (blocked["git_access"]["project"], blocked["git_access"]["code"]),
-            ("secretary", "credential-rejected"),
+            ("ummanu", "credential-rejected"),
         )
-        self.assertEqual(self.asked_while, [("secretary", "ready", [])], "asked once, before the claim")
+        self.assertEqual(self.asked_while, [("ummanu", "ready", [])], "asked once, before the claim")
         reason = self.reader.show(CARD_REF)["comments"][-1]["body"]
         self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
         self.assertIn("refusal=credential-rejected", reason)
@@ -617,7 +617,7 @@ class GitAccessClaimPreflightTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         # A determinate refusal, not silence: nothing is retried on the next tick.
         self.tick()
-        self.assertEqual(self.host.git_access_checks, ["secretary"])
+        self.assertEqual(self.host.git_access_checks, ["ummanu"])
         self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
 
     def test_an_unanswered_preflight_leaves_the_card_ready_and_unclaimed(self) -> None:
@@ -635,7 +635,7 @@ class GitAccessClaimPreflightTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     def test_a_contract_refusal_keeps_its_outcome_and_asks_no_git_question(self) -> None:
         self.catalog.broad_check_state = ContractVerdict.as_refused(
-            CANNOT_ATTEST_PROJECT, "secretary", "fixture adapter cannot attest"
+            CANNOT_ATTEST_PROJECT, "ummanu", "fixture adapter cannot attest"
         )
         self.host.git_access = ProjectGitAccess(
             "refused", "github-https", "managed-store", "credential-missing"
@@ -652,7 +652,7 @@ class GitAccessClaimPreflightTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.tick()
 
-        self.assertEqual(self.host.git_access_checks, ["secretary"])
+        self.assertEqual(self.host.git_access_checks, ["ummanu"])
         self.assertNotEqual(self.reader.show(CARD_REF)["state"], "ready")
         self.assertTrue(self.host.prepared, "the worker workspace was prepared after the preflight")
 
@@ -788,7 +788,7 @@ class ProjectGitInventoryTests(HermeticGitTestCase):
         with (
             mock.patch.object(state_repo, "git_child_identity", side_effect=identity),
             mock.patch(
-                "secretary.infra.recovery_inventory.checkpoint_credential_readiness_for_child",
+                "ummanu.infra.recovery_inventory.checkpoint_credential_readiness_for_child",
                 side_effect=readiness,
             ),
         ):

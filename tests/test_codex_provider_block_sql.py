@@ -6,9 +6,9 @@ import json
 import unittest
 from unittest import mock
 
-from secretary.dispatch.launch import WORKER_ROLE, REVIEW_ROLE
-from secretary.dispatch.state import DispatcherRecord
-from secretary.runtime.head import TaskRef
+from ummanu.dispatch.launch import WORKER_ROLE, REVIEW_ROLE
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.runtime.head import TaskRef
 from tests.dispatcher_fixtures import DispatcherRuntimeFixture, CARD_REF
 from tests.fanout_fixtures import accepted_transport_run
 

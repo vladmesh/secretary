@@ -10,12 +10,12 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary import state_repo
-from secretary._fsutil import sha256_file
-from secretary.backup import BackupResult, create_backups
-from secretary.backup_policy import ARCHIVE_ROOT, POSTGRES_BACKUP_VERSION
-from secretary.board.provision import IMAGE, POSTGRES_MAJOR
-from secretary.data import DataExport, export_memory, init_layout, normalize_board_card
+from ummanu import state_repo
+from ummanu._fsutil import sha256_file
+from ummanu.backup import BackupResult, create_backups
+from ummanu.backup_policy import ARCHIVE_ROOT, POSTGRES_BACKUP_VERSION
+from ummanu.board.provision import IMAGE, POSTGRES_MAJOR
+from ummanu.data import DataExport, export_memory, init_layout, normalize_board_card
 
 #: What `postgres_recovery.inspect_source` and `create_dump` report about a store, as `backup verify` requires it.
 ENGINE_DUMP_METADATA: dict[str, Any] = {
@@ -59,10 +59,10 @@ def fake_engine_dump() -> Iterator[mock.MagicMock]:
 
     with (
         mock.patch(
-            "secretary.board.postgres_recovery.inspect_source",
+            "ummanu.board.postgres_recovery.inspect_source",
             side_effect=lambda _instance: (object(), dict(ENGINE_DUMP_METADATA)),
         ),
-        mock.patch("secretary.board.postgres_recovery.create_dump", side_effect=dump) as create_dump,
+        mock.patch("ummanu.board.postgres_recovery.create_dump", side_effect=dump) as create_dump,
     ):
         yield create_dump
 
@@ -71,13 +71,13 @@ def create_backup(instance_path: Path, *, backup_kind: str = "full", **kwargs) -
     """One backup of one kind.
 
     The product asks for every kind it wants in a single pass, so this single-kind shape lives
-    here rather than in `secretary.backup`, where nothing but a test would call it.
+    here rather than in `ummanu.backup`, where nothing but a test would call it.
     """
     return create_backups(instance_path, backup_kinds=(backup_kind,), **kwargs)[0]
 
 
 def _write_instance(root: Path, name: str) -> Path:
-    return _write_instance_to(root / "instance", name, root / "secretary-data")
+    return _write_instance_to(root / "instance", name, root / "ummanu-data")
 
 
 def _write_instance_to(
@@ -90,7 +90,7 @@ def _write_instance_to(
     reindex: dict[str, object] | None = None,
 ) -> Path:
     instance.mkdir()
-    host_block = "host:\n  unit_prefix: secretary-\n" if host or reindex else ""
+    host_block = "host:\n  unit_prefix: ummanu-\n" if host or reindex else ""
     for key, value in (reindex or {}).items():
         host_block += f"  {key}: {value}\n"
     heads_block = "heads:\n  - role: worker\n    model: test-model\n" if heads else ""
@@ -118,11 +118,11 @@ def _seed_instance_facts(instance_dir: Path, facts: dict[str, str]) -> Path:
 def _restore_card(
     *,
     task_id: int = 12,
-    reference: str = "secretary-1",
+    reference: str = "ummanu-1",
     title: str = "Restore",
     description: str = "body",
     column: str = "Ready",
-    swimlane: str = "Secretary",
+    swimlane: str = "Ummanu",
     position: int = 1,
     comments: list[dict[str, str]] | None = None,
 ) -> dict[str, object]:
@@ -135,7 +135,7 @@ def _restore_card(
             "swimlane": swimlane,
             "position": position,
             "task_type": "code",
-            "project": "secretary",
+            "project": "ummanu",
         },
         {
             "id": task_id,
@@ -144,7 +144,7 @@ def _restore_card(
             "description": description,
             "column": column,
             "task_type": "code",
-            "project": "secretary",
+            "project": "ummanu",
             "comments": comments or [],
             "metadata": {
                 "record_type": "task",
@@ -161,7 +161,7 @@ def _prepare_producer_data(data_dir: Path, instance_dir: Path) -> None:
     _seed_instance_facts(instance_dir, {"fact.md": "# fact\n"})
     export_memory(data_dir, instance_dir)
     board = data_dir / "board"
-    cards = [{"reference": "secretary-1", "column": "Ready"}]
+    cards = [{"reference": "ummanu-1", "column": "Ready"}]
     (board / "cards.json").write_text(json.dumps({"cards": cards}), encoding="utf-8")
     (board / "cards.ndjson").write_text("".join(json.dumps(card) + "\n" for card in cards), encoding="utf-8")
     (board / "export.json").write_text("{}", encoding="utf-8")
@@ -195,9 +195,9 @@ def _producer_exports(
 
 def _core_archive(root: Path, name: str) -> Path:
     payload = root / ARCHIVE_ROOT
-    board = payload / "secretary-data" / "board"
-    memory = payload / "secretary-data" / "memory" / "facts"
-    runs = payload / "secretary-data" / "runs"
+    board = payload / "ummanu-data" / "board"
+    memory = payload / "ummanu-data" / "memory" / "facts"
+    runs = payload / "ummanu-data" / "runs"
     board.mkdir(parents=True)
     memory.mkdir(parents=True)
     (memory / "fact.md").write_text("# fact\n", encoding="utf-8")
@@ -214,13 +214,13 @@ def _core_archive(root: Path, name: str) -> Path:
     runs.mkdir(parents=True)
     (payload / "instance").mkdir()
     (payload / "instance" / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
-    (payload / "secretary-data" / "data-manifest.json").write_text("{}", encoding="utf-8")
-    cards = [{"reference": "secretary-1", "column": "Ready"}]
+    (payload / "ummanu-data" / "data-manifest.json").write_text("{}", encoding="utf-8")
+    cards = [{"reference": "ummanu-1", "column": "Ready"}]
     (board / "cards.json").write_text(json.dumps({"cards": cards}), encoding="utf-8")
     (board / "cards.ndjson").write_text("".join(json.dumps(card) + "\n" for card in cards), encoding="utf-8")
     (board / "export.json").write_text("{}", encoding="utf-8")
     _write_board_history(board)
-    (payload / "secretary-data" / "memory" / "export.ndjson").write_text(
+    (payload / "ummanu-data" / "memory" / "export.ndjson").write_text(
         '{"id":"fact"}\n{"id":"second-fact"}\n', encoding="utf-8"
     )
     for filename in ("watermarks.json", "cards.json", "claims.json"):
@@ -257,10 +257,10 @@ def _full_archive(root: Path, name: str, *, legacy_orca_debug: bool = False) -> 
     engine = payload / "engine"
     engine.mkdir()
     (engine / "postgres.dump").write_bytes(ENGINE_DUMP_BYTES)
-    runs = payload / "secretary-data" / "runs"
+    runs = payload / "ummanu-data" / "runs"
     (runs / "runs.ndjson").write_text("{}\n", encoding="utf-8")
     for component in ("transcripts", "artifacts"):
-        directory = payload / "secretary-data" / component
+        directory = payload / "ummanu-data" / component
         directory.mkdir()
         (directory / "inventory.json").write_text("{}", encoding="utf-8")
     if legacy_orca_debug:

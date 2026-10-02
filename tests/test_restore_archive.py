@@ -11,15 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-import secretary.backup_verify as backup_verify_module
-from secretary.backup import verify_backup
-from secretary.backup_policy import ARCHIVE_ROOT
-from secretary.cli import main
-from secretary.restore import (
-    RestoreError,
-    bootstrap_empty,
-    restore_backup,
-)
+import ummanu.backup_verify as backup_verify_module
 from tests.restore_fixtures import (
     _core_archive,
     _full_archive,
@@ -31,6 +23,14 @@ from tests.restore_fixtures import (
     _write_instance_to,
     create_backup,
     fake_engine_dump,
+)
+from ummanu.backup import verify_backup
+from ummanu.backup_policy import ARCHIVE_ROOT
+from ummanu.cli import main
+from ummanu.restore import (
+    RestoreError,
+    bootstrap_empty,
+    restore_backup,
 )
 
 
@@ -46,7 +46,7 @@ class RestoreArchiveTests(unittest.TestCase):
                 instance,
             )
 
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             self.assertEqual(plan.backup_kind, "core")
             self.assertEqual(
                 plan.components,
@@ -97,13 +97,13 @@ class RestoreArchiveTests(unittest.TestCase):
                 )
 
             with (
-                mock.patch("secretary.restore_commands.restore_backup", side_effect=restoring_archive),
+                mock.patch("ummanu.restore_commands.restore_backup", side_effect=restoring_archive),
                 mock.patch("sys.stdout", output),
             ):
                 code = main(["restore", str(archive), "--instance", str(instance)])
 
             payload = json.loads(output.getvalue())
-            self.assertTrue((root / "secretary-data").is_dir())
+            self.assertTrue((root / "ummanu-data").is_dir())
 
         self.assertEqual(code, 0)
         self.assertEqual(
@@ -122,7 +122,7 @@ class RestoreArchiveTests(unittest.TestCase):
                     {"name": "board_restore", "action": "handoff"},
                     {"name": "host_reconcile", "action": "handoff"},
                 ],
-                "data_dir": str(root / "secretary-data"),
+                "data_dir": str(root / "ummanu-data"),
                 "dry_run": False,
                 "instance_identity": {
                     "instance_remote": "git@example.invalid:test/instance.git",
@@ -145,14 +145,14 @@ class RestoreArchiveTests(unittest.TestCase):
                     instance,
                 )
 
-            self.assertFalse((root / "secretary-data").exists())
+            self.assertFalse((root / "ummanu-data").exists())
 
     def test_restore_never_overwrites_existing_target(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = _write_instance(root, "test")
             archive = _core_archive(root, "test")
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             data_dir.mkdir()
             (data_dir / "keep").write_text("keep", encoding="utf-8")
 
@@ -187,7 +187,7 @@ class RestoreArchiveTests(unittest.TestCase):
             # Facts are canon in the private repo, so the derived export is the
             # whole memory component an archive carries.
             payload = root / ARCHIVE_ROOT
-            (payload / "secretary-data" / "memory" / "export.ndjson").unlink()
+            (payload / "ummanu-data" / "memory" / "export.ndjson").unlink()
             manifest = json.loads((payload / "versions.json").read_text(encoding="utf-8"))
             _write_checksums(payload, manifest)
             (payload / "versions.json").write_text(json.dumps(manifest), encoding="utf-8")
@@ -200,7 +200,7 @@ class RestoreArchiveTests(unittest.TestCase):
                     stripped,
                     instance,
                 )
-            self.assertFalse((root / "secretary-data").exists())
+            self.assertFalse((root / "ummanu-data").exists())
 
     def test_verify_rejects_archive_with_missing_memory_journal_object(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -233,7 +233,7 @@ class RestoreArchiveTests(unittest.TestCase):
             plan = restore_backup(archive, instance, _allow_postgres_engine=True)
 
             actions = {component["name"]: component["action"] for component in plan.components}
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             self.assertNotIn("debug_orca_state", actions)
             self.assertEqual(actions["memory_index"], "rebuild")
             self.assertTrue((data_dir / "transcripts" / "inventory.json").is_file())
@@ -258,7 +258,7 @@ class RestoreArchiveTests(unittest.TestCase):
             plan = restore_backup(archive, instance, _allow_postgres_engine=True)
 
             actions = {component["name"]: component["action"] for component in plan.components}
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             self.assertEqual(actions["memory_index"], "rebuild")
             self.assertTrue((data_dir / "transcripts" / "inventory.json").is_file())
             self.assertFalse((data_dir / "debug").exists())
@@ -270,9 +270,9 @@ class RestoreArchiveTests(unittest.TestCase):
             instance = _write_instance(root, "test")
             archive = _full_archive(root, "test")
 
-            with self.assertRaisesRegex(RestoreError, "require secretary restore-postgres"):
+            with self.assertRaisesRegex(RestoreError, "require ummanu restore-postgres"):
                 restore_backup(archive, instance)
-            self.assertFalse((root / "secretary-data").exists())
+            self.assertFalse((root / "ummanu-data").exists())
 
     def test_restore_refuses_a_version_1_archive_as_an_unsupported_version(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -297,7 +297,7 @@ class RestoreArchiveTests(unittest.TestCase):
             )
             self.assertNotEqual(code, 0)
             self.assertIn("unsupported backup version: 1", output.getvalue())
-            self.assertFalse((root / "secretary-data").exists())
+            self.assertFalse((root / "ummanu-data").exists())
 
     def test_restore_rejects_checksum_mismatch_without_publishing_target(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -305,7 +305,7 @@ class RestoreArchiveTests(unittest.TestCase):
             instance = _write_instance(root, "test")
             archive = _core_archive(root, "test")
             payload = root / ARCHIVE_ROOT
-            (payload / "secretary-data" / "board" / "cards.json").write_text(
+            (payload / "ummanu-data" / "board" / "cards.json").write_text(
                 '{"cards": ["changed"]}', encoding="utf-8"
             )
             with tarfile.open(archive, "w") as bundle:
@@ -316,7 +316,7 @@ class RestoreArchiveTests(unittest.TestCase):
                     archive,
                     instance,
                 )
-            self.assertFalse((root / "secretary-data").exists())
+            self.assertFalse((root / "ummanu-data").exists())
 
     def test_restore_rejects_unexpected_data_component_before_publishing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -324,7 +324,7 @@ class RestoreArchiveTests(unittest.TestCase):
             instance = _write_instance(root, "test")
             archive = _core_archive(root, "test")
             payload = root / ARCHIVE_ROOT
-            extra = payload / "secretary-data" / "runs" / "untrusted.json"
+            extra = payload / "ummanu-data" / "runs" / "untrusted.json"
             extra.write_text("{}", encoding="utf-8")
             manifest = json.loads((payload / "versions.json").read_text(encoding="utf-8"))
             _write_checksums(payload, manifest)
@@ -337,7 +337,7 @@ class RestoreArchiveTests(unittest.TestCase):
                     archive,
                     instance,
                 )
-            self.assertFalse((root / "secretary-data").exists())
+            self.assertFalse((root / "ummanu-data").exists())
 
     def test_restore_rejects_a_data_manifest_below_the_top_level(self):
         # The archive carries the file members only: without a directory member
@@ -349,7 +349,7 @@ class RestoreArchiveTests(unittest.TestCase):
                 instance = _write_instance(root, "test")
                 archive = _core_archive(root, "test")
                 payload = root / ARCHIVE_ROOT
-                entry = payload / "secretary-data" / smuggled
+                entry = payload / "ummanu-data" / smuggled
                 entry.parent.mkdir(parents=True, exist_ok=True)
                 entry.write_text("{}", encoding="utf-8")
                 manifest = json.loads((payload / "versions.json").read_text(encoding="utf-8"))
@@ -364,7 +364,7 @@ class RestoreArchiveTests(unittest.TestCase):
                     )
                     bundle.add(
                         entry,
-                        arcname=f"{ARCHIVE_ROOT}/secretary-data/{smuggled}",
+                        arcname=f"{ARCHIVE_ROOT}/ummanu-data/{smuggled}",
                     )
 
                 with self.assertRaisesRegex(RestoreError, "unexpected data component"):
@@ -372,7 +372,7 @@ class RestoreArchiveTests(unittest.TestCase):
                         archive,
                         instance,
                     )
-                self.assertFalse((root / "secretary-data").exists())
+                self.assertFalse((root / "ummanu-data").exists())
 
     def test_restore_discards_memory_journal_runtime_files(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -380,7 +380,7 @@ class RestoreArchiveTests(unittest.TestCase):
             instance = _write_instance(root, "test")
             archive = _core_archive(root, "test")
             payload = root / ARCHIVE_ROOT
-            git_dir = payload / "secretary-data" / "memory" / "facts" / ".git"
+            git_dir = payload / "ummanu-data" / "memory" / "facts" / ".git"
             (git_dir / "hooks").mkdir(parents=True)
             (git_dir / "hooks" / "post-checkout").write_text("exit 1\n", encoding="utf-8")
             (git_dir / "config").write_text("[core]\nfsmonitor = bad\n", encoding="utf-8")
@@ -396,7 +396,7 @@ class RestoreArchiveTests(unittest.TestCase):
                 archive,
                 instance,
             )
-            restored_git = root / "secretary-data" / "memory" / "facts" / ".git"
+            restored_git = root / "ummanu-data" / "memory" / "facts" / ".git"
             self.assertFalse((restored_git / "hooks").exists())
             self.assertFalse((restored_git / "config").exists())
             self.assertFalse((restored_git / "modules").exists())
@@ -423,7 +423,7 @@ class RestoreArchiveTests(unittest.TestCase):
             instance = _write_instance(root, "test")
             archive = _core_archive(root, "test")
             payload = root / ARCHIVE_ROOT
-            git_dir = payload / "secretary-data" / "memory" / "facts" / ".git"
+            git_dir = payload / "ummanu-data" / "memory" / "facts" / ".git"
             marker = root / "runtime-hook-ran"
             hooks = git_dir / "hooks"
             hooks.mkdir()
@@ -448,7 +448,7 @@ class RestoreArchiveTests(unittest.TestCase):
                 instance,
             )
 
-            restored_git = root / "secretary-data" / "memory" / "facts" / ".git"
+            restored_git = root / "ummanu-data" / "memory" / "facts" / ".git"
             self.assertEqual(verified.code, 0, verified.findings)
             self.assertFalse(marker.exists())
             self.assertFalse((restored_git / "config").exists())
@@ -460,7 +460,7 @@ class RestoreArchiveTests(unittest.TestCase):
             instance = _write_instance(root, "test")
             archive = _core_archive(root, "test")
             payload = root / ARCHIVE_ROOT
-            objects = payload / "secretary-data" / "memory" / "facts" / ".git" / "objects"
+            objects = payload / "ummanu-data" / "memory" / "facts" / ".git" / "objects"
             alternate_store = root / "alternate-objects"
             shutil.copytree(objects, alternate_store)
             shutil.rmtree(objects)
@@ -489,7 +489,7 @@ class RestoreArchiveTests(unittest.TestCase):
                 "unexpected data component: memory/facts/.git/objects/info/alternates",
                 verified.findings,
             )
-            self.assertFalse((root / "secretary-data").exists())
+            self.assertFalse((root / "ummanu-data").exists())
 
     def test_restore_publish_failure_leaves_target_unpublished(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -501,17 +501,17 @@ class RestoreArchiveTests(unittest.TestCase):
             real_replace = os.replace
 
             def fail_publish(source, destination):
-                if Path(destination) == root / "secretary-data":
+                if Path(destination) == root / "ummanu-data":
                     raise OSError("disk error")
                 return real_replace(source, destination)
 
-            with mock.patch("secretary.restore.os.replace", side_effect=fail_publish):
+            with mock.patch("ummanu.restore.os.replace", side_effect=fail_publish):
                 with self.assertRaisesRegex(RestoreError, "restore staging failed"):
                     restore_backup(
                         archive,
                         instance,
                     )
-            self.assertFalse((root / "secretary-data").exists())
+            self.assertFalse((root / "ummanu-data").exists())
 
     def test_restore_state_write_failure_leaves_target_unpublished(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -521,7 +521,7 @@ class RestoreArchiveTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "secretary.restore.write_text_atomic",
+                    "ummanu.restore.write_text_atomic",
                     side_effect=RuntimeError("disk error"),
                 ),
                 self.assertRaisesRegex(RestoreError, "could not record restore progress"),
@@ -531,7 +531,7 @@ class RestoreArchiveTests(unittest.TestCase):
                     instance,
                 )
 
-            self.assertFalse((root / "secretary-data").exists())
+            self.assertFalse((root / "ummanu-data").exists())
 
     def test_restore_preserves_memory_history_and_manifest_counts(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -544,9 +544,9 @@ class RestoreArchiveTests(unittest.TestCase):
                 instance,
             )
 
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             manifest = json.loads((root / ARCHIVE_ROOT / "versions.json").read_text(encoding="utf-8"))
-            source_journal = root / ARCHIVE_ROOT / "secretary-data" / "memory" / "facts"
+            source_journal = root / ARCHIVE_ROOT / "ummanu-data" / "memory" / "facts"
             expected_history = _git_history(source_journal)
             cards = json.loads((data_dir / "board" / "cards.json").read_text())["cards"]
             self.assertEqual(len(cards), manifest["components"]["board"]["count"])
@@ -566,12 +566,12 @@ class RestoreArchiveTests(unittest.TestCase):
                 target_data = root / f"target-{kind}-data"
                 target_instance = _write_instance_to(root / f"target-{kind}-instance", "test", target_data)
                 with (
-                    mock.patch("secretary.backup._reject_claimed_worker_context"),
-                    mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-                    mock.patch("secretary.backup._pipeline_action", return_value=None),
+                    mock.patch("ummanu.backup._reject_claimed_worker_context"),
+                    mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+                    mock.patch("ummanu.backup._pipeline_action", return_value=None),
                     fake_engine_dump(),
                     mock.patch(
-                        "secretary.backup.export_all",
+                        "ummanu.backup.export_all",
                         return_value=_producer_exports(source_data),
                     ),
                 ):
@@ -593,7 +593,7 @@ class RestoreArchiveTests(unittest.TestCase):
                 self.assertFalse((target_data / "memory" / "facts").exists())
                 with tarfile.open(backup.archive) as bundle:
                     names = bundle.getnames()
-                data_prefix = f"{ARCHIVE_ROOT}/secretary-data/"
+                data_prefix = f"{ARCHIVE_ROOT}/ummanu-data/"
                 self.assertEqual(
                     [name for name in names if name.startswith(data_prefix) and "memory/facts" in name],
                     [],

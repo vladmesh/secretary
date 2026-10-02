@@ -29,7 +29,7 @@
     "binding": {"enabled": false},
     "adapter": {
       "setup": {"commands": ["python -m pip install -e ."]},
-      "smoke": {"command": "python -m compileall secretary"},
+      "smoke": {"command": "python -m compileall ummanu"},
       "validation": {"ci": "github"},
       "artifact_policy": {"write_project_files": false}
     }
@@ -40,7 +40,7 @@
     "binding": {"enabled": false},
     "adapter": {
       "setup": {"commands": ["python -m pip install -e ."]},
-      "smoke": {"command": "python -m compileall secretary"},
+      "smoke": {"command": "python -m compileall ummanu"},
       "validation": {"ci": "github"},
       "artifact_policy": {"write_project_files": false}
     },

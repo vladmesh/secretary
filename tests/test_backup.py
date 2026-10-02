@@ -12,15 +12,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.backup import create_backups, verify_backup
-from secretary.backup_policy import POLICIES, should_skip_data_entry
-from secretary.data import DataExport
 from tests.restore_fixtures import (
     ENGINE_DUMP_BYTES,
     create_backup,
     engine_dump_component,
     fake_engine_dump,
 )
+from ummanu.backup import create_backups, verify_backup
+from ummanu.backup_policy import POLICIES, should_skip_data_entry
+from ummanu.data import DataExport
 
 
 class BackupTests(unittest.TestCase):
@@ -28,7 +28,7 @@ class BackupTests(unittest.TestCase):
         self.env_patch = mock.patch.dict(os.environ, {"BOARD_ROLE": ""})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
-        self.workspace_patch = mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None)
+        self.workspace_patch = mock.patch("ummanu.backup._claimed_workspace_from_cwd", return_value=None)
         self.workspace_patch.start()
         self.addCleanup(self.workspace_patch.stop)
         self.engine_dump = self.enterContext(fake_engine_dump())
@@ -37,7 +37,7 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
             (instance / "runtime.env").write_text("BOARD_API_TOKEN=do-not-archive\n", encoding="utf-8")
 
@@ -69,9 +69,9 @@ class BackupTests(unittest.TestCase):
                 }
 
             with (
-                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-                mock.patch("secretary.backup._pipeline_action", side_effect=fake_pipeline),
-                mock.patch("secretary.backup.export_all", side_effect=fake_export_all),
+                mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("ummanu.backup._pipeline_action", side_effect=fake_pipeline),
+                mock.patch("ummanu.backup.export_all", side_effect=fake_export_all),
             ):
                 result = create_backup(
                     instance,
@@ -88,27 +88,27 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(verified.manifest["board_backend"], "postgres")
             with tarfile.open(result.archive, "r") as archive:
                 names = set(archive.getnames())
-            self.assertIn("secretary-backup/versions.json", names)
-            self.assertIn("secretary-backup/instance/instance.yaml", names)
-            self.assertIn("secretary-backup/secretary-data/board/cards.json", names)
-            self.assertIn("secretary-backup/engine/postgres.dump", names)
-            self.assertIn("secretary-backup/secretary-data/board/audit.json", names)
-            self.assertIn("secretary-backup/secretary-data/runs/runs.ndjson", names)
-            self.assertIn("secretary-backup/secretary-data/runs/cards.json", names)
-            self.assertIn("secretary-backup/secretary-data/artifacts/inventory.json", names)
+            self.assertIn("ummanu-backup/versions.json", names)
+            self.assertIn("ummanu-backup/instance/instance.yaml", names)
+            self.assertIn("ummanu-backup/ummanu-data/board/cards.json", names)
+            self.assertIn("ummanu-backup/engine/postgres.dump", names)
+            self.assertIn("ummanu-backup/ummanu-data/board/audit.json", names)
+            self.assertIn("ummanu-backup/ummanu-data/runs/runs.ndjson", names)
+            self.assertIn("ummanu-backup/ummanu-data/runs/cards.json", names)
+            self.assertIn("ummanu-backup/ummanu-data/artifacts/inventory.json", names)
             # A20 step 9 (secretary-1726): a new backup carries no Orca state, debug or otherwise.
             self.assertFalse([name for name in names if "orca" in name or "/debug" in name], names)
             self.assertNotIn("debug_orca_state", verified.manifest["components"])
-            self.assertNotIn("secretary-backup/secretary-data/memory/index.sqlite", names)
-            self.assertNotIn("secretary-backup/secretary-data/backups/old.tar", names)
-            self.assertNotIn("secretary-backup/instance/runtime.env", names)
-            self.assertNotIn("secretary-backup/instance/.env", names)
+            self.assertNotIn("ummanu-backup/ummanu-data/memory/index.sqlite", names)
+            self.assertNotIn("ummanu-backup/ummanu-data/backups/old.tar", names)
+            self.assertNotIn("ummanu-backup/instance/runtime.env", names)
+            self.assertNotIn("ummanu-backup/instance/.env", names)
 
     def test_create_excludes_memory_journal_hooks_and_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
             _write_export_surface(data_dir)
             git_dir = data_dir / "memory" / "facts" / ".git"
@@ -132,9 +132,9 @@ class BackupTests(unittest.TestCase):
             }
 
             with (
-                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-                mock.patch("secretary.backup._pipeline_action", return_value=None),
-                mock.patch("secretary.backup.export_all", return_value=exports),
+                mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("ummanu.backup._pipeline_action", return_value=None),
+                mock.patch("ummanu.backup.export_all", return_value=exports),
             ):
                 result = create_backup(
                     instance,
@@ -142,13 +142,13 @@ class BackupTests(unittest.TestCase):
 
             with tarfile.open(result.archive, "r") as archive:
                 names = set(archive.getnames())
-            self.assertIn("secretary-backup/secretary-data/memory/facts/.git/HEAD", names)
-            self.assertNotIn("secretary-backup/secretary-data/memory/facts/.git/config", names)
-            self.assertNotIn("secretary-backup/secretary-data/memory/facts/.git/hooks/post-checkout", names)
-            self.assertNotIn("secretary-backup/secretary-data/memory/facts/.git/modules/nested/config", names)
-            self.assertIn("secretary-backup/secretary-data/memory/export.ndjson", names)
+            self.assertIn("ummanu-backup/ummanu-data/memory/facts/.git/HEAD", names)
+            self.assertNotIn("ummanu-backup/ummanu-data/memory/facts/.git/config", names)
+            self.assertNotIn("ummanu-backup/ummanu-data/memory/facts/.git/hooks/post-checkout", names)
+            self.assertNotIn("ummanu-backup/ummanu-data/memory/facts/.git/modules/nested/config", names)
+            self.assertIn("ummanu-backup/ummanu-data/memory/export.ndjson", names)
             self.assertEqual(
-                [name for name in names if "secretary-data/memory/fastembed-cache" in name], []
+                [name for name in names if "ummanu-data/memory/fastembed-cache" in name], []
             )
             self.assertEqual(
                 verify_backup(
@@ -159,7 +159,7 @@ class BackupTests(unittest.TestCase):
 
     def _full_backup_with_model_cache(self, root: Path, *, cache_bytes: int = 4) -> tuple[Path, Path]:
         instance = root / "instance"
-        data_dir = root / "secretary-data"
+        data_dir = root / "ummanu-data"
         _write_instance(instance, data_dir)
         _write_export_surface(data_dir)
         (data_dir / "memory" / "export.ndjson").write_text("{}\n" * 20000, encoding="utf-8")
@@ -180,15 +180,15 @@ class BackupTests(unittest.TestCase):
             "artifacts": DataExport(data_dir / "artifacts" / "inventory.json", 1, "test"),
         }
         with (
-            mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-            mock.patch("secretary.backup._pipeline_action", return_value=None),
-            mock.patch("secretary.backup.export_all", return_value=exports),
+            mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+            mock.patch("ummanu.backup._pipeline_action", return_value=None),
+            mock.patch("ummanu.backup.export_all", return_value=exports),
         ):
             return create_backup(instance)
 
     def test_a_full_archive_written_with_the_model_cache_still_verifies_and_restores_without_it(self):
-        from secretary.backup_policy import is_memory_model_cache_entry
-        from secretary.restore import restore_backup
+        from ummanu.backup_policy import is_memory_model_cache_entry
+        from ummanu.restore import restore_backup
 
         def before_the_exclusion(relative, *, policy):
             if is_memory_model_cache_entry(relative):
@@ -198,12 +198,12 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance, data_dir = self._full_backup_with_model_cache(root)
-            with mock.patch("secretary.backup.should_skip_data_entry", side_effect=before_the_exclusion):
+            with mock.patch("ummanu.backup.should_skip_data_entry", side_effect=before_the_exclusion):
                 result = self._create_full(instance, data_dir)
             with tarfile.open(result.archive, "r") as archive:
                 names = set(archive.getnames())
             self.assertIn(
-                "secretary-backup/secretary-data/memory/fastembed-cache/models--bge-m3/model.onnx", names
+                "ummanu-backup/ummanu-data/memory/fastembed-cache/models--bge-m3/model.onnx", names
             )
 
             self.assertEqual(verify_backup(result.archive).code, 0)
@@ -220,8 +220,8 @@ class BackupTests(unittest.TestCase):
 
     def test_the_po_queue_round_trips_through_a_full_and_a_core_archive(self):
         """secretary-1770: pending and set-aside PO inputs come back; an in-flight temporary file does not."""
-        from secretary.po.queue import PoQueue
-        from secretary.restore import restore_backup
+        from ummanu.po.queue import PoQueue
+        from ummanu.restore import restore_backup
 
         for kind in ("full", "core"):
             with self.subTest(kind=kind), tempfile.TemporaryDirectory() as tmpdir:
@@ -240,9 +240,9 @@ class BackupTests(unittest.TestCase):
                     "artifacts": DataExport(data_dir / "artifacts" / "inventory.json", 1, "test"),
                 }
                 with (
-                    mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-                    mock.patch("secretary.backup._pipeline_action", return_value=None),
-                    mock.patch("secretary.backup.export_all", return_value=exports),
+                    mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+                    mock.patch("ummanu.backup._pipeline_action", return_value=None),
+                    mock.patch("ummanu.backup.export_all", return_value=exports),
                 ):
                     result = create_backup(instance, backup_kind=kind)
                 self.assertEqual(verify_backup(result.archive).code, 0)
@@ -263,7 +263,7 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
 
             with mock.patch.dict(os.environ, {"BOARD_ROLE": "worker"}):
@@ -274,36 +274,36 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            _write_instance(instance, Path("secretary-data"))
+            _write_instance(instance, Path("ummanu-data"))
 
             with (
-                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-                mock.patch("secretary.backup._pipeline_action", return_value=None),
+                mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("ummanu.backup._pipeline_action", return_value=None),
                 mock.patch(
-                    "secretary.backup.export_all",
+                    "ummanu.backup.export_all",
                     side_effect=lambda data_dir, *_args, **_kwargs: _fake_exports(data_dir),
                 ),
             ):
                 create_backup(instance)
 
-            self.assertTrue((instance / "secretary-data" / "backups").exists())
-            self.assertFalse((root / "secretary-data").exists())
+            self.assertTrue((instance / "ummanu-data" / "backups").exists())
+            self.assertFalse((root / "ummanu-data").exists())
 
     def test_create_ignores_invalid_project_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
             projects = instance / "projects"
             projects.mkdir()
             (projects / "broken.yaml").write_text("defualt_branch: main\n", encoding="utf-8")
 
             with (
-                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-                mock.patch("secretary.backup._pipeline_action", return_value=None),
+                mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("ummanu.backup._pipeline_action", return_value=None),
                 mock.patch(
-                    "secretary.backup.export_all",
+                    "ummanu.backup.export_all",
                     side_effect=RuntimeError("snapshot reached"),
                 ),
                 self.assertRaisesRegex(RuntimeError, "snapshot reached"),
@@ -313,16 +313,16 @@ class BackupTests(unittest.TestCase):
     def test_create_rejects_claimed_workspace_when_board_role_is_removed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            workspace = root / "orca" / "workspaces" / "secretary" / "380-backup"
+            workspace = root / "orca" / "workspaces" / "ummanu" / "380-backup"
             workspace.mkdir(parents=True)
             (workspace / "TASK.md").write_text("task\n", encoding="utf-8")
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
 
             with (
                 mock.patch.dict(os.environ, {"BOARD_ROLE": ""}),
-                mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=workspace),
+                mock.patch("ummanu.backup._claimed_workspace_from_cwd", return_value=workspace),
             ):
                 with self.assertRaisesRegex(RuntimeError, "claimed worker"):
                     create_backup(instance)
@@ -331,7 +331,7 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
             pipeline_calls: list[str] = []
 
@@ -339,9 +339,9 @@ class BackupTests(unittest.TestCase):
                 pipeline_calls.append(action)
 
             with (
-                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-                mock.patch("secretary.backup._pipeline_action", side_effect=fake_pipeline),
-                mock.patch("secretary.backup.export_all", side_effect=RuntimeError("boom")),
+                mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("ummanu.backup._pipeline_action", side_effect=fake_pipeline),
+                mock.patch("ummanu.backup.export_all", side_effect=RuntimeError("boom")),
             ):
                 with self.assertRaisesRegex(RuntimeError, "boom"):
                     create_backup(instance)
@@ -352,7 +352,7 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
             calls: list[list[str]] = []
 
@@ -364,48 +364,48 @@ class BackupTests(unittest.TestCase):
                             "paused": True,
                             "mode": "freeze",
                             "internal_mode": "hard",
-                            "reason": "secretary backup create",
-                            "actor": "secretary-backup",
+                            "reason": "ummanu backup create",
+                            "actor": "ummanu-backup",
                         }
                     ),
                     stderr="",
                 )
 
-            with mock.patch("secretary.backup.subprocess.run", side_effect=fake_run):
-                from secretary.backup import _pipeline_action, _pipeline_status
+            with mock.patch("ummanu.backup.subprocess.run", side_effect=fake_run):
+                from ummanu.backup import _pipeline_action, _pipeline_status
 
                 instance_file = instance / "instance.yaml"
-                _pipeline_status(instance_file=instance_file, command=["secretary"])
-                _pipeline_action("pause", instance_file=instance_file, command=["secretary"])
-                _pipeline_action("resume", instance_file=instance_file, command=["secretary"])
+                _pipeline_status(instance_file=instance_file, command=["ummanu"])
+                _pipeline_action("pause", instance_file=instance_file, command=["ummanu"])
+                _pipeline_action("resume", instance_file=instance_file, command=["ummanu"])
 
             self.assertEqual(
                 calls[0],
-                ["secretary", "pause-status", "--instance", str(instance_file)],
+                ["ummanu", "pause-status", "--instance", str(instance_file)],
             )
             self.assertEqual(
                 calls[1],
                 [
-                    "secretary",
+                    "ummanu",
                     "pause",
                     "freeze",
                     "--instance",
                     str(instance_file),
                     "--reason",
-                    "secretary backup create",
+                    "ummanu backup create",
                     "--actor",
-                    "secretary-backup",
+                    "ummanu-backup",
                 ],
             )
             self.assertEqual(
                 calls[2],
-                ["secretary", "resume", "--instance", str(instance_file), "--actor", "secretary-backup"],
+                ["ummanu", "resume", "--instance", str(instance_file), "--actor", "ummanu-backup"],
             )
             self.assertNotIn("--exclude-workspace", calls[1])
 
     def test_pipeline_status_reads_the_pause_protocol_document(self):
         """`pause-status` answers with the layer's `pause_state` document (secretary-1576)."""
-        from secretary.backup import _pause_summary
+        from ummanu.backup import _pause_summary
 
         self.assertEqual(
             _pause_summary(
@@ -414,16 +414,16 @@ class BackupTests(unittest.TestCase):
                     "state": {
                         "paused": True,
                         "mode": "freeze",
-                        "actor": "secretary-backup",
-                        "pause_reason": "secretary backup create",
+                        "actor": "ummanu-backup",
+                        "pause_reason": "ummanu backup create",
                     },
                 }
             ),
             {
                 "paused": True,
                 "mode": "freeze",
-                "actor": "secretary-backup",
-                "reason": "secretary backup create",
+                "actor": "ummanu-backup",
+                "reason": "ummanu backup create",
             },
         )
         self.assertFalse(_pause_summary({"kind": "pause_state", "state": {"paused": False}})["paused"])
@@ -435,7 +435,7 @@ class BackupTests(unittest.TestCase):
         read, and the production tick treats such a flag as a freeze. Reading that as "not paused"
         would have a backup freeze on top of a state it cannot see.
         """
-        from secretary.backup import _pause_summary
+        from ummanu.backup import _pause_summary
 
         for document in ({}, {"state": {"paused": None, "mode": None}}, {"state": None}):
             with self.subTest(document=document):
@@ -448,28 +448,28 @@ class BackupTests(unittest.TestCase):
             calls.append(list(args))
             return SimpleNamespace(stdout="{}", stderr="")
 
-        with mock.patch("secretary.backup.subprocess.run", side_effect=fake_run):
-            from secretary.backup import _pipeline_action
+        with mock.patch("ummanu.backup.subprocess.run", side_effect=fake_run):
+            from ummanu.backup import _pipeline_action
 
             _pipeline_action(
                 "pause",
                 instance_file=Path("/tmp/instance.yaml"),
-                command=["secretary"],
+                command=["ummanu"],
                 exclude_workspace=Path("/ws/backup"),
             )
 
         self.assertEqual(
             calls[0],
             [
-                "secretary",
+                "ummanu",
                 "pause",
                 "freeze",
                 "--instance",
                 "/tmp/instance.yaml",
                 "--reason",
-                "secretary backup create",
+                "ummanu backup create",
                 "--actor",
-                "secretary-backup",
+                "ummanu-backup",
                 "--exclude-workspace",
                 "/ws/backup",
             ],
@@ -482,17 +482,17 @@ class BackupTests(unittest.TestCase):
             raise subprocess.CalledProcessError(
                 returncode=2,
                 cmd=args,
-                stderr="secretary pause: error: unrecognized arguments: --exclude-workspace /ws/backup\n",
+                stderr="ummanu pause: error: unrecognized arguments: --exclude-workspace /ws/backup\n",
             )
 
-        with mock.patch("secretary.backup.subprocess.run", side_effect=fake_run):
-            from secretary.backup import _pipeline_action
+        with mock.patch("ummanu.backup.subprocess.run", side_effect=fake_run):
+            from ummanu.backup import _pipeline_action
 
             with self.assertRaisesRegex(RuntimeError, "refusing to pause"):
                 _pipeline_action(
                     "pause",
                     instance_file=Path("/tmp/instance.yaml"),
-                    command=["secretary"],
+                    command=["ummanu"],
                     exclude_workspace=Path("/ws/backup"),
                 )
 
@@ -500,7 +500,7 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
             calls: list[tuple[str, Path | None]] = []
 
@@ -509,9 +509,9 @@ class BackupTests(unittest.TestCase):
 
             with (
                 mock.patch.dict(os.environ, {"BOARD_ROLE": "worker"}),
-                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-                mock.patch("secretary.backup._pipeline_action", side_effect=fake_pipeline),
-                mock.patch("secretary.backup.export_all", side_effect=RuntimeError("stop")),
+                mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("ummanu.backup._pipeline_action", side_effect=fake_pipeline),
+                mock.patch("ummanu.backup.export_all", side_effect=RuntimeError("stop")),
                 self.assertRaisesRegex(RuntimeError, "stop"),
             ):
                 create_backup(
@@ -527,7 +527,7 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
 
             with self.assertRaisesRegex(RuntimeError, "caller_workspace"):
@@ -540,12 +540,12 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
 
             with (
                 mock.patch(
-                    "secretary.backup._pipeline_status",
+                    "ummanu.backup._pipeline_status",
                     return_value={
                         "paused": True,
                         "mode": "freeze",
@@ -555,7 +555,7 @@ class BackupTests(unittest.TestCase):
                     },
                 ),
                 mock.patch(
-                    "secretary.backup._pipeline_action",
+                    "ummanu.backup._pipeline_action",
                     side_effect=AssertionError("pause action should not run"),
                 ),
                 self.assertRaisesRegex(RuntimeError, "already paused"),
@@ -566,12 +566,12 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
 
             with (
                 mock.patch(
-                    "secretary.backup._pipeline_status",
+                    "ummanu.backup._pipeline_status",
                     return_value={
                         "paused": True,
                         "mode": "freeze",
@@ -580,7 +580,7 @@ class BackupTests(unittest.TestCase):
                         "actor": "steward",
                     },
                 ),
-                mock.patch("secretary.backup._pipeline_action") as pipeline_action,
+                mock.patch("ummanu.backup._pipeline_action") as pipeline_action,
             ):
                 with self.assertRaisesRegex(RuntimeError, "already paused"):
                     create_backup(instance)
@@ -597,15 +597,15 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
 
             with (
                 mock.patch(
-                    "secretary.backup._pipeline_status",
+                    "ummanu.backup._pipeline_status",
                     return_value={"paused": True, "mode": "drain", "internal_mode": "soft"},
                 ),
-                mock.patch("secretary.backup._pipeline_action") as pipeline_action,
+                mock.patch("ummanu.backup._pipeline_action") as pipeline_action,
             ):
                 with self.assertRaisesRegex(RuntimeError, "already paused"):
                     create_backup(instance)
@@ -616,7 +616,7 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
             lock_path = data_dir / "backups" / ".create.lock"
             lock_path.parent.mkdir(parents=True)
@@ -634,20 +634,20 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
             backups = data_dir / "backups"
             backups.mkdir(parents=True)
-            existing = backups / "secretary-backup-full-20260710T000000Z.tar"
+            existing = backups / "ummanu-backup-full-20260710T000000Z.tar"
             existing.write_bytes(b"keep")
 
 
             with (
-                mock.patch("secretary.backup.datetime") as fake_datetime,
-                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-                mock.patch("secretary.backup._pipeline_action", return_value=None),
+                mock.patch("ummanu.backup.datetime") as fake_datetime,
+                mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("ummanu.backup._pipeline_action", return_value=None),
                 mock.patch(
-                    "secretary.backup.export_all",
+                    "ummanu.backup.export_all",
                     side_effect=lambda data_dir_arg, _instance_dir, **_kwargs: _fake_exports(data_dir_arg),
                 ),
             ):
@@ -662,14 +662,14 @@ class BackupTests(unittest.TestCase):
 
             self.assertEqual(existing.read_bytes(), b"keep")
             self.assertNotEqual(result.archive, existing)
-            self.assertEqual(result.archive.name, "secretary-backup-full-20260710T000000Z-2.tar")
+            self.assertEqual(result.archive.name, "ummanu-backup-full-20260710T000000Z-2.tar")
             self.assertTrue(result.archive.is_file())
 
     def test_create_both_uses_one_pause_and_writes_core_and_full_archives(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
             pipeline_calls: list[str] = []
 
@@ -678,10 +678,10 @@ class BackupTests(unittest.TestCase):
 
 
             with (
-                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-                mock.patch("secretary.backup._pipeline_action", side_effect=fake_pipeline),
+                mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("ummanu.backup._pipeline_action", side_effect=fake_pipeline),
                 mock.patch(
-                    "secretary.backup.export_all",
+                    "ummanu.backup.export_all",
                     side_effect=lambda data_dir_arg, _instance_dir, **_kwargs: _fake_exports(data_dir_arg),
                 ),
             ):
@@ -706,21 +706,21 @@ class BackupTests(unittest.TestCase):
                 full_names = set(archive.getnames())
             # One engine dump serves the pass, and only the full archive carries it.
             self.engine_dump.assert_called_once()
-            self.assertNotIn("secretary-backup/engine/postgres.dump", core_names)
-            self.assertIn("secretary-backup/engine/postgres.dump", full_names)
-            self.assertNotIn("secretary-backup/secretary-data/runs/runs.ndjson", core_names)
-            self.assertIn("secretary-backup/secretary-data/runs/runs.ndjson", full_names)
+            self.assertNotIn("ummanu-backup/engine/postgres.dump", core_names)
+            self.assertIn("ummanu-backup/engine/postgres.dump", full_names)
+            self.assertNotIn("ummanu-backup/ummanu-data/runs/runs.ndjson", core_names)
+            self.assertIn("ummanu-backup/ummanu-data/runs/runs.ndjson", full_names)
 
     def test_failed_create_does_not_leave_zero_length_final_archive(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
 
             with (
-                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-                mock.patch("secretary.backup._pipeline_action", side_effect=RuntimeError("pause failed")),
+                mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("ummanu.backup._pipeline_action", side_effect=RuntimeError("pause failed")),
             ):
                 with self.assertRaisesRegex(RuntimeError, "pause failed"):
                     create_backup(instance)
@@ -731,15 +731,15 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
 
 
             with (
-                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-                mock.patch("secretary.backup._pipeline_action", return_value=None),
+                mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("ummanu.backup._pipeline_action", return_value=None),
                 mock.patch(
-                    "secretary.backup.export_all",
+                    "ummanu.backup.export_all",
                     side_effect=lambda data_dir_arg, _instance_dir, **_kwargs: _fake_exports(
                         data_dir_arg,
                         include_done=True,
@@ -754,29 +754,29 @@ class BackupTests(unittest.TestCase):
             with tarfile.open(result.archive, "r") as archive:
                 names = archive.getnames()
                 cards = json.loads(
-                    archive.extractfile("secretary-backup/secretary-data/board/cards.json")
+                    archive.extractfile("ummanu-backup/ummanu-data/board/cards.json")
                     .read()
                     .decode("utf-8")
                 )
                 manifest = json.loads(
-                    archive.extractfile("secretary-backup/versions.json").read().decode("utf-8")
+                    archive.extractfile("ummanu-backup/versions.json").read().decode("utf-8")
                 )
             self.assertEqual([card["reference"] for card in cards["cards"]], ["active-1"])
             self.assertEqual(manifest["components"]["board"]["count"], 1)
-            self.assertIn("secretary-backup/secretary-data/board/audit.json", names)
-            self.assertIn("secretary-backup/secretary-data/board/audit.ndjson", names)
+            self.assertIn("ummanu-backup/ummanu-data/board/audit.json", names)
+            self.assertIn("ummanu-backup/ummanu-data/board/audit.ndjson", names)
 
     def test_retention_keeps_one_core_and_removes_old_full(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
             backups = data_dir / "backups"
             backups.mkdir(parents=True)
-            old_core = backups / "secretary-backup-core-20260708T000000Z.tar"
-            old_full = backups / "secretary-backup-full-20260708T000000Z.tar"
-            recent_full = backups / "secretary-backup-full-20260710T230000Z.tar"
+            old_core = backups / "ummanu-backup-core-20260708T000000Z.tar"
+            old_full = backups / "ummanu-backup-full-20260708T000000Z.tar"
+            recent_full = backups / "ummanu-backup-full-20260710T230000Z.tar"
             for path in (old_core, old_full, recent_full):
                 path.write_bytes(b"old")
             fresh_mtime = 2_000_000_000
@@ -785,11 +785,11 @@ class BackupTests(unittest.TestCase):
 
 
             with (
-                mock.patch("secretary.backup.datetime") as fake_datetime,
-                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-                mock.patch("secretary.backup._pipeline_action", return_value=None),
+                mock.patch("ummanu.backup.datetime") as fake_datetime,
+                mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("ummanu.backup._pipeline_action", return_value=None),
                 mock.patch(
-                    "secretary.backup.export_all",
+                    "ummanu.backup.export_all",
                     side_effect=lambda data_dir_arg, _instance_dir, **_kwargs: _fake_exports(data_dir_arg),
                 ),
             ):
@@ -810,11 +810,11 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             archive = root / "core.tar"
-            payload = root / "payload" / "secretary-backup"
+            payload = root / "payload" / "ummanu-backup"
             _write_core_payload(payload)
-            (payload / "secretary-data" / "runs" / "claims.json").unlink()
+            (payload / "ummanu-data" / "runs" / "claims.json").unlink()
             with tarfile.open(archive, "w") as tar:
-                tar.add(payload, arcname="secretary-backup")
+                tar.add(payload, arcname="ummanu-backup")
 
             result = verify_backup(
                 archive,
@@ -829,12 +829,12 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             archive = root / "core.tar"
-            payload = root / "payload" / "secretary-backup"
+            payload = root / "payload" / "ummanu-backup"
             _write_core_payload(payload)
-            (payload / "secretary-data" / "board" / "cards.ndjson").unlink()
-            (payload / "secretary-data" / "board" / "export.json").unlink()
+            (payload / "ummanu-data" / "board" / "cards.ndjson").unlink()
+            (payload / "ummanu-data" / "board" / "export.json").unlink()
             with tarfile.open(archive, "w") as tar:
-                tar.add(payload, arcname="secretary-backup")
+                tar.add(payload, arcname="ummanu-backup")
 
             result = verify_backup(
                 archive,
@@ -842,11 +842,11 @@ class BackupTests(unittest.TestCase):
 
         self.assertEqual(result.code, 1)
         self.assertIn(
-            "missing required archive entry: secretary-backup/secretary-data/board/cards.ndjson",
+            "missing required archive entry: ummanu-backup/ummanu-data/board/cards.ndjson",
             result.findings,
         )
         self.assertIn(
-            "missing required archive entry: secretary-backup/secretary-data/board/export.json",
+            "missing required archive entry: ummanu-backup/ummanu-data/board/export.json",
             result.findings,
         )
 
@@ -854,13 +854,13 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             archive = root / "core.tar"
-            payload = root / "payload" / "secretary-backup"
+            payload = root / "payload" / "ummanu-backup"
             _write_core_payload(payload)
             # Facts are canon in the private repo, so the archive's whole memory
             # component is the derived export. Without it there is no memory.
-            (payload / "secretary-data" / "memory" / "export.ndjson").unlink()
+            (payload / "ummanu-data" / "memory" / "export.ndjson").unlink()
             with tarfile.open(archive, "w") as tar:
-                tar.add(payload, arcname="secretary-backup")
+                tar.add(payload, arcname="ummanu-backup")
 
             result = verify_backup(
                 archive,
@@ -868,7 +868,7 @@ class BackupTests(unittest.TestCase):
 
         self.assertEqual(result.code, 1)
         self.assertIn(
-            "missing required archive entry: secretary-backup/secretary-data/memory/export.ndjson",
+            "missing required archive entry: ummanu-backup/ummanu-data/memory/export.ndjson",
             result.findings,
         )
 
@@ -876,7 +876,7 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             archive = root / "invalid-kind.tar"
-            payload = root / "payload" / "secretary-backup"
+            payload = root / "payload" / "ummanu-backup"
             _write_complete_payload(payload)
             manifest_path = payload / "versions.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -886,7 +886,7 @@ class BackupTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with tarfile.open(archive, "w") as tar:
-                tar.add(payload, arcname="secretary-backup")
+                tar.add(payload, arcname="ummanu-backup")
 
             result = verify_backup(
                 archive,
@@ -913,9 +913,9 @@ class BackupTests(unittest.TestCase):
             root = Path(tmpdir)
             archive = root / "broken.tar"
             payload = root / "payload"
-            (payload / "secretary-backup").mkdir(parents=True)
+            (payload / "ummanu-backup").mkdir(parents=True)
             with tarfile.open(archive, "w") as tar:
-                tar.add(payload / "secretary-backup", arcname="secretary-backup")
+                tar.add(payload / "ummanu-backup", arcname="ummanu-backup")
 
             result = verify_backup(
                 archive,
@@ -928,19 +928,19 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             archive = root / "incomplete.tar"
-            payload = root / "payload" / "secretary-backup"
+            payload = root / "payload" / "ummanu-backup"
             (payload / "instance").mkdir(parents=True)
-            (payload / "secretary-data" / "board").mkdir(parents=True)
-            (payload / "secretary-data" / "memory").mkdir(parents=True)
-            (payload / "secretary-data" / "runs").mkdir(parents=True)
-            (payload / "secretary-data" / "transcripts").mkdir(parents=True)
+            (payload / "ummanu-data" / "board").mkdir(parents=True)
+            (payload / "ummanu-data" / "memory").mkdir(parents=True)
+            (payload / "ummanu-data" / "runs").mkdir(parents=True)
+            (payload / "ummanu-data" / "transcripts").mkdir(parents=True)
             (payload / "debug" / "orca-state").mkdir(parents=True)
             (payload / "instance" / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
-            (payload / "secretary-data" / "data-manifest.json").write_text("{}", encoding="utf-8")
-            (payload / "secretary-data" / "board" / "cards.json").write_text("{}", encoding="utf-8")
-            (payload / "secretary-data" / "memory" / "export.ndjson").write_text("", encoding="utf-8")
-            (payload / "secretary-data" / "runs" / "watermarks.json").write_text("{}", encoding="utf-8")
-            (payload / "secretary-data" / "transcripts" / "inventory.json").write_text(
+            (payload / "ummanu-data" / "data-manifest.json").write_text("{}", encoding="utf-8")
+            (payload / "ummanu-data" / "board" / "cards.json").write_text("{}", encoding="utf-8")
+            (payload / "ummanu-data" / "memory" / "export.ndjson").write_text("", encoding="utf-8")
+            (payload / "ummanu-data" / "runs" / "watermarks.json").write_text("{}", encoding="utf-8")
+            (payload / "ummanu-data" / "transcripts" / "inventory.json").write_text(
                 "{}",
                 encoding="utf-8",
             )
@@ -965,7 +965,7 @@ class BackupTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with tarfile.open(archive, "w") as tar:
-                tar.add(payload, arcname="secretary-backup")
+                tar.add(payload, arcname="ummanu-backup")
 
             result = verify_backup(
                 archive,
@@ -980,14 +980,14 @@ class BackupTests(unittest.TestCase):
             with self.subTest(version=version), tempfile.TemporaryDirectory() as tmpdir:
                 root = Path(tmpdir)
                 archive = root / "old.tar"
-                payload = root / "payload" / "secretary-backup"
+                payload = root / "payload" / "ummanu-backup"
                 _write_complete_payload(payload)
                 manifest_path = payload / "versions.json"
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 manifest["version"] = version
                 manifest_path.write_text(json.dumps(manifest, sort_keys=True) + "\n", encoding="utf-8")
                 with tarfile.open(archive, "w") as tar:
-                    tar.add(payload, arcname="secretary-backup")
+                    tar.add(payload, arcname="ummanu-backup")
 
                 result = verify_backup(archive)
 
@@ -1001,11 +1001,11 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             archive = root / "plain-sql.tar"
-            payload = root / "payload" / "secretary-backup"
+            payload = root / "payload" / "ummanu-backup"
             _write_complete_payload(payload)
             (payload / "engine" / "postgres.dump").write_bytes(b"-- plain SQL dump\n")
             with tarfile.open(archive, "w") as tar:
-                tar.add(payload, arcname="secretary-backup")
+                tar.add(payload, arcname="ummanu-backup")
 
             result = verify_backup(archive)
 
@@ -1016,13 +1016,13 @@ class BackupTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             archive = root / "with-transcript-copies.tar"
-            payload = root / "payload" / "secretary-backup"
+            payload = root / "payload" / "ummanu-backup"
             _write_complete_payload(payload)
-            copy_path = payload / "secretary-data" / "transcripts" / "copies" / "session.jsonl"
+            copy_path = payload / "ummanu-data" / "transcripts" / "copies" / "session.jsonl"
             copy_path.parent.mkdir(parents=True)
             copy_path.write_text("{}\n", encoding="utf-8")
             with tarfile.open(archive, "w") as tar:
-                tar.add(payload, arcname="secretary-backup")
+                tar.add(payload, arcname="ummanu-backup")
 
             result = verify_backup(
                 archive,
@@ -1032,7 +1032,7 @@ class BackupTests(unittest.TestCase):
         self.assertTrue(any("unexpected transcript payload copy" in item for item in result.findings))
 
     def test_git_commit_uses_product_repo_root(self):
-        from secretary.backup import _git_commit
+        from ummanu.backup import _git_commit
 
         calls = []
 
@@ -1040,7 +1040,7 @@ class BackupTests(unittest.TestCase):
             calls.append((args, kwargs))
             return SimpleNamespace(stdout="abc123\n", stderr="")
 
-        with mock.patch("secretary.backup.subprocess.run", side_effect=fake_run):
+        with mock.patch("ummanu.backup.subprocess.run", side_effect=fake_run):
             self.assertEqual(_git_commit(Path("/product")), "abc123")
 
         self.assertEqual(calls[0][1]["cwd"], Path("/product"))
@@ -1160,31 +1160,31 @@ def _write_export_surface(data_dir: Path, *, include_done: bool = False) -> None
 
 def _write_complete_payload(payload: Path) -> None:
     (payload / "instance").mkdir(parents=True)
-    (payload / "secretary-data" / "board").mkdir(parents=True)
-    (payload / "secretary-data" / "memory").mkdir(parents=True)
-    (payload / "secretary-data" / "runs").mkdir(parents=True)
-    (payload / "secretary-data" / "transcripts").mkdir(parents=True)
-    (payload / "secretary-data" / "artifacts").mkdir(parents=True)
+    (payload / "ummanu-data" / "board").mkdir(parents=True)
+    (payload / "ummanu-data" / "memory").mkdir(parents=True)
+    (payload / "ummanu-data" / "runs").mkdir(parents=True)
+    (payload / "ummanu-data" / "transcripts").mkdir(parents=True)
+    (payload / "ummanu-data" / "artifacts").mkdir(parents=True)
     (payload / "debug" / "orca-state").mkdir(parents=True)
     (payload / "engine").mkdir(parents=True)
     (payload / "engine" / "postgres.dump").write_bytes(ENGINE_DUMP_BYTES)
     (payload / "instance" / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
-    (payload / "secretary-data" / "data-manifest.json").write_text("{}", encoding="utf-8")
-    (payload / "secretary-data" / "board" / "cards.json").write_text("{}", encoding="utf-8")
-    (payload / "secretary-data" / "board" / "cards.ndjson").write_text("", encoding="utf-8")
-    (payload / "secretary-data" / "board" / "export.json").write_text("{}", encoding="utf-8")
-    (payload / "secretary-data" / "board" / "audit.json").write_text('{"events":[]}', encoding="utf-8")
-    (payload / "secretary-data" / "board" / "audit.ndjson").write_text("", encoding="utf-8")
-    (payload / "secretary-data" / "memory" / "export.ndjson").write_text("{}\n", encoding="utf-8")
-    (payload / "secretary-data" / "runs" / "runs.ndjson").write_text("{}\n", encoding="utf-8")
-    (payload / "secretary-data" / "runs" / "watermarks.json").write_text("{}", encoding="utf-8")
-    (payload / "secretary-data" / "runs" / "cards.json").write_text("{}", encoding="utf-8")
-    (payload / "secretary-data" / "runs" / "claims.json").write_text("{}", encoding="utf-8")
-    (payload / "secretary-data" / "transcripts" / "inventory.json").write_text(
+    (payload / "ummanu-data" / "data-manifest.json").write_text("{}", encoding="utf-8")
+    (payload / "ummanu-data" / "board" / "cards.json").write_text("{}", encoding="utf-8")
+    (payload / "ummanu-data" / "board" / "cards.ndjson").write_text("", encoding="utf-8")
+    (payload / "ummanu-data" / "board" / "export.json").write_text("{}", encoding="utf-8")
+    (payload / "ummanu-data" / "board" / "audit.json").write_text('{"events":[]}', encoding="utf-8")
+    (payload / "ummanu-data" / "board" / "audit.ndjson").write_text("", encoding="utf-8")
+    (payload / "ummanu-data" / "memory" / "export.ndjson").write_text("{}\n", encoding="utf-8")
+    (payload / "ummanu-data" / "runs" / "runs.ndjson").write_text("{}\n", encoding="utf-8")
+    (payload / "ummanu-data" / "runs" / "watermarks.json").write_text("{}", encoding="utf-8")
+    (payload / "ummanu-data" / "runs" / "cards.json").write_text("{}", encoding="utf-8")
+    (payload / "ummanu-data" / "runs" / "claims.json").write_text("{}", encoding="utf-8")
+    (payload / "ummanu-data" / "transcripts" / "inventory.json").write_text(
         "{}",
         encoding="utf-8",
     )
-    (payload / "secretary-data" / "artifacts" / "inventory.json").write_text(
+    (payload / "ummanu-data" / "artifacts" / "inventory.json").write_text(
         "{}",
         encoding="utf-8",
     )
@@ -1214,23 +1214,23 @@ def _write_complete_payload(payload: Path) -> None:
 
 def _write_core_payload(payload: Path) -> None:
     (payload / "instance").mkdir(parents=True)
-    (payload / "secretary-data" / "board").mkdir(parents=True)
-    (payload / "secretary-data" / "memory").mkdir(parents=True)
-    (payload / "secretary-data" / "runs").mkdir(parents=True)
+    (payload / "ummanu-data" / "board").mkdir(parents=True)
+    (payload / "ummanu-data" / "memory").mkdir(parents=True)
+    (payload / "ummanu-data" / "runs").mkdir(parents=True)
     (payload / "instance" / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
-    (payload / "secretary-data" / "data-manifest.json").write_text("{}", encoding="utf-8")
-    (payload / "secretary-data" / "board" / "cards.json").write_text(
+    (payload / "ummanu-data" / "data-manifest.json").write_text("{}", encoding="utf-8")
+    (payload / "ummanu-data" / "board" / "cards.json").write_text(
         '{"version":1,"cards":[]}\n',
         encoding="utf-8",
     )
-    (payload / "secretary-data" / "board" / "cards.ndjson").write_text("", encoding="utf-8")
-    (payload / "secretary-data" / "board" / "export.json").write_text("{}", encoding="utf-8")
-    (payload / "secretary-data" / "board" / "audit.json").write_text('{"events":[]}', encoding="utf-8")
-    (payload / "secretary-data" / "board" / "audit.ndjson").write_text("", encoding="utf-8")
-    (payload / "secretary-data" / "memory" / "export.ndjson").write_text("{}\n", encoding="utf-8")
-    (payload / "secretary-data" / "runs" / "watermarks.json").write_text("{}", encoding="utf-8")
-    (payload / "secretary-data" / "runs" / "cards.json").write_text("{}", encoding="utf-8")
-    (payload / "secretary-data" / "runs" / "claims.json").write_text("{}", encoding="utf-8")
+    (payload / "ummanu-data" / "board" / "cards.ndjson").write_text("", encoding="utf-8")
+    (payload / "ummanu-data" / "board" / "export.json").write_text("{}", encoding="utf-8")
+    (payload / "ummanu-data" / "board" / "audit.json").write_text('{"events":[]}', encoding="utf-8")
+    (payload / "ummanu-data" / "board" / "audit.ndjson").write_text("", encoding="utf-8")
+    (payload / "ummanu-data" / "memory" / "export.ndjson").write_text("{}\n", encoding="utf-8")
+    (payload / "ummanu-data" / "runs" / "watermarks.json").write_text("{}", encoding="utf-8")
+    (payload / "ummanu-data" / "runs" / "cards.json").write_text("{}", encoding="utf-8")
+    (payload / "ummanu-data" / "runs" / "claims.json").write_text("{}", encoding="utf-8")
     (payload / "versions.json").write_text(
         json.dumps(
             {
@@ -1268,18 +1268,18 @@ class BackupMemoryCanonTests(unittest.TestCase):
         self.env_patch = mock.patch.dict(os.environ, {"BOARD_ROLE": ""})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
-        self.workspace_patch = mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None)
+        self.workspace_patch = mock.patch("ummanu.backup._claimed_workspace_from_cwd", return_value=None)
         self.workspace_patch.start()
         self.addCleanup(self.workspace_patch.stop)
         self.engine_dump = self.enterContext(fake_engine_dump())
 
     def test_create_exports_facts_from_the_private_repo(self):
-        from secretary import state_repo
+        from ummanu import state_repo
 
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
             _write_export_surface(data_dir)
             for command in (
@@ -1299,17 +1299,17 @@ class BackupMemoryCanonTests(unittest.TestCase):
                 return lambda data_dir_arg, **_kwargs: DataExport(data_dir_arg / name, 1, name)
 
             with (
-                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-                mock.patch("secretary.backup._pipeline_action", return_value=None),
-                mock.patch("secretary.data.export_board", side_effect=stub("board")),
-                mock.patch("secretary.data.export_runs", side_effect=stub("runs")),
-                mock.patch("secretary.data.export_transcripts", side_effect=stub("transcripts")),
-                mock.patch("secretary.data.export_artifacts", side_effect=stub("artifacts")),
+                mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("ummanu.backup._pipeline_action", return_value=None),
+                mock.patch("ummanu.data.export_board", side_effect=stub("board")),
+                mock.patch("ummanu.data.export_runs", side_effect=stub("runs")),
+                mock.patch("ummanu.data.export_transcripts", side_effect=stub("transcripts")),
+                mock.patch("ummanu.data.export_artifacts", side_effect=stub("artifacts")),
             ):
                 result = create_backup(instance, backup_kind="core")
 
             with tarfile.open(result.archive, "r") as archive:
-                member = archive.extractfile("secretary-backup/secretary-data/memory/export.ndjson")
+                member = archive.extractfile("ummanu-backup/ummanu-data/memory/export.ndjson")
                 exported = member.read().decode("utf-8")
 
             self.assertIn("live fact from the private repo", exported)
@@ -1342,7 +1342,7 @@ class PostgresBackupPolicyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
             secret = "not-in-the-archive"
             (instance / "board-store.env").write_text(secret, encoding="utf-8")
@@ -1372,15 +1372,15 @@ class PostgresBackupPolicyTests(unittest.TestCase):
                 return {**details, "tool_version": "(PostgreSQL) 16.10", "bytes": 9}
 
             with (
-                mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
-                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-                mock.patch("secretary.backup._pipeline_action", return_value=None),
-                mock.patch("secretary.backup.export_all", side_effect=exports),
+                mock.patch("ummanu.backup._claimed_workspace_from_cwd", return_value=None),
+                mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("ummanu.backup._pipeline_action", return_value=None),
+                mock.patch("ummanu.backup.export_all", side_effect=exports),
                 mock.patch(
-                    "secretary.board.postgres_recovery.inspect_source",
+                    "ummanu.board.postgres_recovery.inspect_source",
                     return_value=(object(), metadata),
                 ),
-                mock.patch("secretary.board.postgres_recovery.create_dump", side_effect=dump),
+                mock.patch("ummanu.board.postgres_recovery.create_dump", side_effect=dump),
             ):
                 result = create_backup(instance)
 
@@ -1398,27 +1398,27 @@ class PostgresBackupPolicyTests(unittest.TestCase):
                 )
             self.assertNotIn("board-store.env", names)
             self.assertNotIn(secret.encode(), body)
-            self.assertIn("secretary-backup/secretary-data/memory/export.ndjson", names)
+            self.assertIn("ummanu-backup/ummanu-data/memory/export.ndjson", names)
             self.assertEqual([name for name in names if "memory/fastembed-cache" in name], [])
 
     def test_unusable_postgres_fails_before_pause_or_archive(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             _write_instance(instance, data_dir)
             previous = data_dir / "backups" / "previous.tar"
             previous.parent.mkdir(parents=True)
             previous.write_bytes(b"previous")
             with (
-                mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
+                mock.patch("ummanu.backup._claimed_workspace_from_cwd", return_value=None),
                 mock.patch(
-                    "secretary.board.postgres_recovery.inspect_source",
+                    "ummanu.board.postgres_recovery.inspect_source",
                     side_effect=__import__(
-                        "secretary.board.postgres_recovery", fromlist=["PostgresRecoveryError"]
+                        "ummanu.board.postgres_recovery", fromlist=["PostgresRecoveryError"]
                     ).PostgresRecoveryError("unreachable"),
                 ),
-                mock.patch("secretary.backup._pipeline_action") as pipeline,
+                mock.patch("ummanu.backup._pipeline_action") as pipeline,
                 self.assertRaisesRegex(RuntimeError, "unreachable"),
             ):
                 create_backup(instance)

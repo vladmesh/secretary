@@ -16,22 +16,22 @@ from pathlib import Path
 from typing import Any, ClassVar
 from unittest import mock
 
-from secretary.board.sql_audit import SqlTaskAudit
-from secretary.board.sql_cards import SqlCardClient
-from secretary.product_issues import ProductIssueStore
-from secretary.sprint_observer import (
-    head_choice,
-)
-from secretary.sprints import (
-    SPRINT_BOARD_NAME,
-    SprintReader,
-    SprintWriter,
-)
-from secretary.tasks import TaskReader
 from tests.head_registry import write_installed_pair
 from tests.observer_identity import bind_observer
 from tests.sprint_close_fixtures import DROP_REASON, KEEP_OPEN_REASON
 from tests.sql_backend_fixtures import CardStoreClient, card_store
+from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.board.sql_cards import SqlCardClient
+from ummanu.product_issues import ProductIssueStore
+from ummanu.sprint_observer import (
+    head_choice,
+)
+from ummanu.sprints import (
+    SPRINT_BOARD_NAME,
+    SprintReader,
+    SprintWriter,
+)
+from ummanu.tasks import TaskReader
 
 # A close states a verdict on every issue its sprint declared, and every sprint this fixture
 # opens declares `issue:open`. The tests below are about the rest of the close, so they give
@@ -75,7 +75,7 @@ class SprintSeed:
             {
                 "id": 12,
                 "project_id": 7,
-                "reference": "secretary-12",
+                "reference": "ummanu-12",
                 "title": "existing",
                 "description": "",
                 "column_id": 2,
@@ -85,14 +85,14 @@ class SprintSeed:
                 "date_modification": "1720000000",
             }
         ]
-        self.metadata: dict[int, dict[str, str]] = {12: {"project": "secretary", "task_type": "code"}}
+        self.metadata: dict[int, dict[str, str]] = {12: {"project": "ummanu", "task_type": "code"}}
         self.comments: dict[int, list[dict[str, object]]] = {12: []}
 
 
 def status_seed() -> SprintSeed:
     """The Pipeline a status read of sprints needs: one card, `secretary-510`, under key 12."""
     seed = SprintSeed()
-    seed.tasks[0]["reference"] = "secretary-510"
+    seed.tasks[0]["reference"] = "ummanu-510"
     return seed
 
 
@@ -108,12 +108,12 @@ class ProductSprintSeed(SprintSeed):
         super().__init__()
         self._record(
             20,
-            "product:secretary",
-            "Secretary",
+            "product:ummanu",
+            "Ummanu",
             {
                 "record_type": "product",
-                "product_id": "secretary",
-                "product_projects": json.dumps(["secretary", "secretary-instance"]),
+                "product_id": "ummanu",
+                "product_projects": json.dumps(["ummanu", "secretary-instance"]),
             },
         )
         self._record(
@@ -132,7 +132,7 @@ class ProductSprintSeed(SprintSeed):
             "Open issue",
             {
                 "record_type": "issue",
-                "issue_product": "secretary",
+                "issue_product": "ummanu",
                 "issue_kind": "feature",
                 "issue_priority": "P1",
             },
@@ -143,7 +143,7 @@ class ProductSprintSeed(SprintSeed):
             "Closed issue",
             {
                 "record_type": "issue",
-                "issue_product": "secretary",
+                "issue_product": "ummanu",
                 "issue_kind": "bug",
                 "issue_priority": "P2",
                 "issue_closed_reason": "resolved",
@@ -215,11 +215,11 @@ def _write_project_registry(root: Path, *projects: str) -> Path:
         repo = root / "project-repos" / project
         repo.mkdir(parents=True, exist_ok=True)
         (instance / "projects" / f"{project}.yaml").write_text(
-            f"id: {project}\nrepo: {repo}\nenabled: true\nadapter: secretary\ndefault_branch: main\n",
+            f"id: {project}\nrepo: {repo}\nenabled: true\nadapter: ummanu\ndefault_branch: main\n",
             encoding="utf-8",
         )
     # A config that validates, because the reads of this installation are reached through
-    # `secretary.webproto`, and every operation of that layer resolves the instance before it reads
+    # `ummanu.webproto`, and every operation of that layer resolves the instance before it reads
     # anything. A fixture instance without one is not a smaller installation, it is one no protocol
     # operation can be run against.
     (instance / "instance.yaml").write_text(
@@ -282,7 +282,7 @@ class SprintFixture(SprintBackendFixture, unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.instance = _write_project_registry(
             Path(self.tmp.name),
-            "secretary",
+            "ummanu",
             "secretary-instance",
             "other",
         )
@@ -293,12 +293,12 @@ class SprintFixture(SprintBackendFixture, unittest.TestCase):
             instance=self.instance,
         )
 
-    #: Where a `secretary sprint ...` command asks the backend switch for its board: the
+    #: Where a `ummanu sprint ...` command asks the backend switch for its board: the
     #: `board_client` name bound by the command group and by each protocol layer it builds.
     BOARD_CLIENT_SEAMS: ClassVar[tuple[str, ...]] = (
-        "secretary.sprint_commands.board_client",
-        "secretary.webproto.sprint_reads.board_client",
-        "secretary.webproto.sprint_ops.board_client",
+        "ummanu.sprint_commands.board_client",
+        "ummanu.webproto.sprint_reads.board_client",
+        "ummanu.webproto.sprint_ops.board_client",
     )
 
     @contextlib.contextmanager
@@ -519,9 +519,9 @@ class SprintFixture(SprintBackendFixture, unittest.TestCase):
         for field, value in (
             ("role", "po"),
             ("actor", "operator"),
-            ("product", "secretary"),
+            ("product", "ummanu"),
             ("issues", ["issue:open"]),
-            ("projects", ["secretary"]),
+            ("projects", ["ummanu"]),
             ("observer", head_choice("codex-observer")),
         ):
             kwargs.setdefault(field, value)

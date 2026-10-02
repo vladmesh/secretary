@@ -10,9 +10,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.automations.agents.curator import harvest
-from secretary.automations.agents.retro import cli
-from secretary.runtime.state import PRECHECK_SKIP, AgentState
+from ummanu.automations.agents.curator import harvest
+from ummanu.automations.agents.retro import cli
+from ummanu.runtime.state import PRECHECK_SKIP, AgentState
 
 
 def claude(text: str) -> str:

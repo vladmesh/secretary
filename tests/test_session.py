@@ -6,8 +6,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary import session
-from secretary.runtime import heads as head_registry
+from ummanu import session
+from ummanu.runtime import heads as head_registry
 
 
 def _write_env(dir_path: Path, body: str) -> Path:
@@ -23,19 +23,19 @@ class OperatorEnvTest(unittest.TestCase):
                 Path(tmp),
                 "EXAMPLE_ADMIN_PASSWORD=hunter2\nGITHUB_TOKEN=gh-test-token\n",
             )
-            env = session.operator_env(env_file, base_env={"PATH": "/bin", "SECRETARY_INSTANCE": tmp})
+            env = session.operator_env(env_file, base_env={"PATH": "/bin", "UMMANU_INSTANCE": tmp})
         self.assertEqual(env["EXAMPLE_ADMIN_PASSWORD"], "hunter2")
         self.assertEqual(env["GITHUB_TOKEN"], "gh-test-token")
         self.assertEqual(env["PATH"], "/bin")
-        self.assertEqual(env["SECRETARY_ROLE"], "operator")
+        self.assertEqual(env["UMMANU_ROLE"], "operator")
 
     def test_launches_with_no_transport_file(self):
         """The operator session needs no transport file: the board is reached through its store."""
         with tempfile.TemporaryDirectory() as tmp:
             env_file = _write_env(Path(tmp), "SOMETHING=else\n")
-            env = session.operator_env(env_file, base_env={"SECRETARY_INSTANCE": tmp})
+            env = session.operator_env(env_file, base_env={"UMMANU_INSTANCE": tmp})
         self.assertEqual(env["SOMETHING"], "else")
-        self.assertEqual(env["SECRETARY_ROLE"], "operator")
+        self.assertEqual(env["UMMANU_ROLE"], "operator")
 
 
 # The product ships a small neutral registry; an OpenRouter-backed hermes head is one

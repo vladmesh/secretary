@@ -6,21 +6,21 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from secretary.board.checkpoint_layout import LOGICAL_FILES, publish_split_board
+from ummanu.board.checkpoint_layout import LOGICAL_FILES, publish_split_board
 
 # The checkout these tests run out of, which is the one they have. Nothing resolves it for them:
-# an install materializes the configured checkout or `~/secretary`, and neither exists on a machine
+# an install materializes the configured checkout or `~/ummanu`, and neither exists on a machine
 # that only checked this branch out somewhere.
 PRODUCT_ROOT = Path(__file__).resolve().parents[2]
 
 CARD = {
-    "reference": "secretary-1",
+    "reference": "ummanu-1",
     "title": "Recovered",
     "description": "from checkpoint",
     "column": "Ready",
-    "swimlane": "secretary",
+    "swimlane": "ummanu",
     "position": 1,
-    "fields": {"project": "secretary", "task_type": "code"},
+    "fields": {"project": "ummanu", "task_type": "code"},
     "metadata": {"record_type": "task"},
     "comments": [],
 }
@@ -29,15 +29,15 @@ SPRINT = {
     "reference": "sprint:41",
     "goal": "Ship sprint entities",
     "definition_of_done": "restore rebuilds it",
-    "repositories": ["secretary"],
+    "repositories": ["ummanu"],
     "status": "closed",
     "budget": {"by_type": {"red_ci": 1}},
-    "current_task": "secretary-1",
+    "current_task": "ummanu-1",
     "resume": None,
     "audit": {
         "created_at": "2026-07-01T00:00:00Z",
         "updated_at": "2026-07-02T00:00:00Z",
-        "board": "Secretary sprints",
+        "board": "Ummanu sprints",
     },
     "comments": [{"ts": "2026-07-01T10:00:00Z", "text": "[po]\\nnote"}],
 }
@@ -59,7 +59,7 @@ def _checkpoint(
         "name: recovered\n"
         f"data_dir: {data_dir}\n"
         "offsite:\n  instance_remote: placeholder\n"
-        "host:\n  unit_prefix: secretary-\n",
+        "host:\n  unit_prefix: ummanu-\n",
         encoding="utf-8",
     )
     (board / "cards.ndjson").write_text(json.dumps(CARD) + "\n", encoding="utf-8")

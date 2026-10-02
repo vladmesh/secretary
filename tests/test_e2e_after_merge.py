@@ -18,21 +18,21 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest import mock
 
-from secretary._fsutil import file_lock
-from secretary.board import po_origin as origin_field
-from secretary.board.e2e_record import AfterMergeMark, e2e_state
-from secretary.board.owner_events import OwnerEventStore
-from secretary.dispatch import e2e_after_merge
-from secretary.dispatch.e2e_after_merge import queues, reconcile_after_merge
-from secretary.dispatch.post_merge import reconcile_post_merge_watches, watches
-from secretary.dispatch.runtime import DispatcherRuntime
-from secretary.dispatch.state import new_attempt_id, now_rfc3339
-from secretary.dispatch.types import HostError
-from secretary.sprints import SprintReader
-from secretary.tasks import TaskError, is_significant_card_event
 from tests.e2e_stage_fixtures import REPO, E2eGitHubHost, E2eStageFixture, SimulatedCrash
 from tests.integration_setup import require_disposable_board_fixture
 from tests.sql_backend_fixtures import PostgresBoard
+from ummanu._fsutil import file_lock
+from ummanu.board import po_origin as origin_field
+from ummanu.board.e2e_record import AfterMergeMark, e2e_state
+from ummanu.board.owner_events import OwnerEventStore
+from ummanu.dispatch import e2e_after_merge
+from ummanu.dispatch.e2e_after_merge import queues, reconcile_after_merge
+from ummanu.dispatch.post_merge import reconcile_post_merge_watches, watches
+from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.dispatch.state import new_attempt_id, now_rfc3339
+from ummanu.dispatch.types import HostError
+from ummanu.sprints import SprintReader
+from ummanu.tasks import TaskError, is_significant_card_event
 
 SPRINT = "sprint:1031"
 OTHER_REPO = "vladmesh/codegen"
@@ -208,7 +208,7 @@ class AfterMergeFixture(E2eStageFixture):
 
     # --- arrangement ------------------------------------------------------------------------------
 
-    def done_card(self, *, sprint: str = SPRINT, project: str = "secretary", origin: bool = False) -> str:
+    def done_card(self, *, sprint: str = SPRINT, project: str = "ummanu", origin: bool = False) -> str:
         """A code card the release already merged: Done. Its number leaves room for the cards the
         dispatcher cuts in between (wait cards, decisions, hotfixes take the next free number)."""
         self.number += 100
@@ -225,7 +225,7 @@ class AfterMergeFixture(E2eStageFixture):
         self.host.history.extend(shas)
 
     def merge(
-        self, ref: str, sha: str, *, result: str = "green", project: str = "secretary", repo: str = REPO
+        self, ref: str, sha: str, *, result: str = "green", project: str = "ummanu", repo: str = REPO
     ) -> list[dict[str, Any]]:
         """The post-merge watch of `ref` resolved with `result`, published on the next tick."""
         self.merged_at += 60
@@ -287,10 +287,10 @@ class AfterMergeFixture(E2eStageFixture):
             runtime.production_state.save(payload)
         return outcomes
 
-    def queue(self, project: str = "secretary") -> dict[str, Any]:
+    def queue(self, project: str = "ummanu") -> dict[str, Any]:
         return queues(self.runtime.production_state.load()).get(project) or {}
 
-    def pending(self, project: str = "secretary") -> list[str]:
+    def pending(self, project: str = "ummanu") -> list[str]:
         return [str(entry["ref"]) for entry in self.queue(project).get("pending") or []]
 
     def run_of(self, carrier: str, index: int = -1) -> Any:
@@ -374,7 +374,7 @@ class QueueingTests(AfterMergeFixture, unittest.TestCase):
         card = self.done_card()
         self.on_main(_sha("a"))
         with mock.patch.object(
-            self.catalog, "adapter", side_effect=HostError("adapters/secretary.yaml is unavailable")
+            self.catalog, "adapter", side_effect=HostError("adapters/ummanu.yaml is unavailable")
         ):
             outcomes = self.merge(card, _sha("a"))
             # Still unreadable on the next pass: kept again, nothing published twice.
@@ -382,7 +382,7 @@ class QueueingTests(AfterMergeFixture, unittest.TestCase):
 
         [kept] = [o for o in outcomes if o.get("action") == "e2e-after-merge-not-queued"]
         self.assertEqual(kept["status"], "degraded")
-        self.assertIn("adapters/secretary.yaml is unavailable", kept["reason"])
+        self.assertIn("adapters/ummanu.yaml is unavailable", kept["reason"])
         self.assertIn("e2e-after-merge-not-queued", [o.get("action") for o in again])
         self.assertEqual(self.watched(), [card])
         self.assertEqual(self.pending(), [])
@@ -517,7 +517,7 @@ class QueueingTests(AfterMergeFixture, unittest.TestCase):
         self.assertEqual(len(self.host.dispatches), 2)
         by_project = {o["project"]: o["action"] for o in outcomes}
         self.assertEqual(
-            by_project, {"secretary": "e2e-after-merge-waiting", "codegen": "e2e-after-merge-waiting"}
+            by_project, {"ummanu": "e2e-after-merge-waiting", "codegen": "e2e-after-merge-waiting"}
         )
         self.assertEqual(
             self.host.dispatches[1]["path"], f"repos/{OTHER_REPO}/actions/workflows/e2e.yml/dispatches"
@@ -681,7 +681,7 @@ class BudgetTests(AfterMergeFixture, unittest.TestCase):
             self.reader.client.call(
                 "chargeSprintE2e",
                 sprint_ref=SPRINT,
-                task_ref="secretary-511",
+                task_ref="ummanu-511",
                 dispatch_id=f"d-{n}",
                 at=_now(),
             )
@@ -733,7 +733,7 @@ class BudgetTests(AfterMergeFixture, unittest.TestCase):
         # Its own cap was spent by three earlier after-merge runs no sprint paid for.
         state.after_merge = AfterMergeMark(merge_sha=_sha("a"), charged=["x-1", "x-2", "x-3"])
         self.writer.record_e2e_state(
-            role="dispatcher", actor="secretary-pilot", reference=capped, state=state.text()
+            role="dispatcher", actor="ummanu-pilot", reference=capped, state=state.text()
         )
 
         [waiting] = self.am_tick()
@@ -824,7 +824,7 @@ class BudgetTests(AfterMergeFixture, unittest.TestCase):
             actor="po",
             reference=decision["ref"],
             kind="decision",
-            body="## Decision\n\nThe owner said no.\n\n## How to verify\n\n`secretary task show`\n",
+            body="## Decision\n\nThe owner said no.\n\n## How to verify\n\n`ummanu task show`\n",
             request_id="po-complete",
         )
 
@@ -847,7 +847,7 @@ class BudgetTests(AfterMergeFixture, unittest.TestCase):
         state = e2e_state(self.reader.show(capped))
         state.after_merge = AfterMergeMark(merge_sha=_sha("a"), charged=["x-1", "x-2", "x-3"])
         self.writer.record_e2e_state(
-            role="dispatcher", actor="secretary-pilot", reference=capped, state=state.text()
+            role="dispatcher", actor="ummanu-pilot", reference=capped, state=state.text()
         )
 
         [declined] = self.am_tick()
@@ -993,11 +993,11 @@ class OutcomeTests(AfterMergeFixture, unittest.TestCase):
         [recorded] = state.after_merge_runs
         recorded.hotfix, recorded.acted = "", False
         self.writer.record_e2e_state(
-            role="dispatcher", actor="secretary-pilot", reference=cards[-1], state=state.text()
+            role="dispatcher", actor="ummanu-pilot", reference=cards[-1], state=state.text()
         )
         with file_lock(self.runtime.production_state.tick_lock):
             payload = self.runtime.production_state.load()
-            queues(payload)["secretary"] = {
+            queues(payload)["ummanu"] = {
                 "pending": [],
                 "run": {"carrier": cards[-1], "dispatch_id": run.dispatch_id, "sha": run.sha, "entries": []},
                 "budget_waits": [],
@@ -1039,7 +1039,7 @@ class OutcomeTests(AfterMergeFixture, unittest.TestCase):
         self.am_tick()
         run = self.run_of(cards[-1])
         with mock.patch(
-            "secretary.dispatch.wait_cards.utcnow", return_value=datetime.now(UTC) + timedelta(hours=3)
+            "ummanu.dispatch.wait_cards.utcnow", return_value=datetime.now(UTC) + timedelta(hours=3)
         ):
             self.host.run_answer = ("in_progress", None)
             with file_lock(self.runtime.production_state.tick_lock):

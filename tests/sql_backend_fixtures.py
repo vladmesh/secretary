@@ -25,15 +25,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, ClassVar
 
-from secretary.board import migrate, schema
-from secretary.board.backend import record_key, sprint_reference_number
-from secretary.board.sql_cards import SqlCardClient, _task_number_of
-from secretary.board.store import BoardStoreConfig
-from secretary.runtime.container_labels import TEST_BOARD_LABEL
 from tests.container_cleanup import remove_test_container
+from ummanu.board import migrate, schema
+from ummanu.board.backend import record_key, sprint_reference_number
+from ummanu.board.sql_cards import SqlCardClient, _task_number_of
+from ummanu.board.store import BoardStoreConfig
+from ummanu.runtime.container_labels import TEST_BOARD_LABEL
 
 IMAGE = "postgres:16"
-OWNER = "secretary_owner"
+OWNER = "ummanu_owner"
 OWNER_PASSWORD = "throwaway-owner-password"
 APP_PASSWORD = "throwaway@app/pass:word"
 READ_PASSWORD = "throwaway-read-password"
@@ -447,7 +447,7 @@ def _seed_card_row(
     lanes: dict[int, str],
 ) -> int:
     """A seed row in the legacy board shape, written as the card row it describes."""
-    from secretary.tasks import _STATE_BY_COLUMN
+    from ummanu.tasks import _STATE_BY_COLUMN
 
     moved = row.get("date_moved")
     return insert_card_row(
@@ -551,7 +551,7 @@ class CardStoreClient(SqlCardClient):
 
     def move(self, key: int, state: str, *, position: int = 1) -> None:
         """Put a card into another column, as a writer's move would."""
-        from secretary.board.sql_cards import _COLUMN_ID_BY_STATE
+        from ummanu.board.sql_cards import _COLUMN_ID_BY_STATE
 
         self._arrange(
             "moveTaskPosition",
@@ -643,7 +643,7 @@ class CardStoreClient(SqlCardClient):
         return int(self._query("SELECT count(*) FROM tasks")[0][0])
 
     def state(self, key: int) -> str:
-        from secretary.board.sql_cards import _STATE_BY_COLUMN_ID
+        from ummanu.board.sql_cards import _STATE_BY_COLUMN_ID
 
         return _STATE_BY_COLUMN_ID[int(self.row(key)["column_id"])]
 
@@ -652,7 +652,7 @@ class CardStoreClient(SqlCardClient):
         key: int,
         reference: str,
         *,
-        project: str | None = "secretary",
+        project: str | None = "ummanu",
         state: str = "ready",
         title: str | None = None,
         description: str = "",
@@ -661,7 +661,7 @@ class CardStoreClient(SqlCardClient):
         closed: bool = False,
         created: int = 1720000000,
         moved: int | None = None,
-        lane: str | None = "Secretary",
+        lane: str | None = "Ummanu",
     ) -> None:
         """One card row, under `key`, with its metadata written through the client."""
         with self.transaction():
@@ -691,7 +691,7 @@ class CardStoreClient(SqlCardClient):
 
         The defaults are the ones every sprint needs to exist at all; a test states the rest.
         """
-        from secretary.board.sql_cards import SPRINT_BOARD_ID
+        from ummanu.board.sql_cards import SPRINT_BOARD_ID
 
         key = record_key("sprint", reference)
         values = {key_: str(value) for key_, value in metadata.items()}
@@ -712,7 +712,7 @@ class CardStoreClient(SqlCardClient):
                     values={
                         "sprint_goal": "ship the thing",
                         "sprint_definition_of_done": "the thing ships",
-                        "sprint_repositories": '["secretary"]',
+                        "sprint_repositories": '["ummanu"]',
                         "sprint_status": status,
                         **values,
                     },

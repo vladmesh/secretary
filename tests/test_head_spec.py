@@ -16,15 +16,15 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.types import HostError
-from secretary.runtime.head import (
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.types import HostError
+from ummanu.runtime.head import (
     HeadSpec,
     HeadSpecError,
     head_spec,
     load_head_specs,
 )
-from secretary.runtime.heads import HEADS_TOML, Registry, load_registry
+from ummanu.runtime.heads import HEADS_TOML, Registry, load_registry
 
 INSTALLED_SNAPSHOT = Path(__file__).parent / "fixtures" / "heads" / "installed-heads.yaml"
 

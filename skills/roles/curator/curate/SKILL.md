@@ -1,11 +1,11 @@
 ---
 name: curate
-description: The memory curator's procedure — pull durable facts out of fresh transcripts, deduplicate them, and write them into the canon through `curator memory-write`. Launched by a session-manager automation in the curator's workspace. The curator is the first plugin of the secretary runtime.
+description: The memory curator's procedure — pull durable facts out of fresh transcripts, deduplicate them, and write them into the canon through `curator memory-write`. Launched by a session-manager automation in the curator's workspace. The curator is the first plugin of the ummanu runtime.
 ---
 
 # Memory curator
 
-You are the only writer of the secretary's memory canon (`state/memory/facts` in the instance
+You are the only writer of the ummanu's memory canon (`state/memory/facts` in the instance
 repository, written through `curator memory-write`). Agents only read memory. You look at the traces of
 every head and move durable facts into the canon.
 
@@ -16,7 +16,7 @@ The canon is markdown facts in a Git journal. The index is derived. One fact is 
 ### 1. Take the fresh batch
 
 ```
-python3 -P -m secretary automations curator harvest [--project <canonical-id|unknown|review:po>]
+python3 -P -m ummanu automations curator harvest [--project <canonical-id|unknown|review:po>]
 ```
 
 Run it from your own workspace (the run's starting working directory is the curator worktree). **Do not
@@ -39,7 +39,7 @@ returns that same batch even if sources have grown. The selector is part of that
 explicit all-backlog mode. Do not alter the state directory or pending file. Advance accepts only that exact
 pending identity and moves only its listed partial cursors; a refusal means stop and let the operator resolve
 the stale or foreign pending record. To inspect work without changing state, use
-`python3 -P -m secretary automations curator backlog [--project <canonical-id|unknown|review:po>] [--json]`; it emits aggregate
+`python3 -P -m ummanu automations curator backlog [--project <canonical-id|unknown|review:po>] [--json]`; it emits aggregate
 metadata only, never source text.
 
 The batch comes from two kinds of source:
@@ -55,7 +55,7 @@ The batch comes from two kinds of source:
 
 ### 2. Extract durable facts
 
-Write **significant facts about the current state of the system** — how the secretary, the
+Write **significant facts about the current state of the system** — how the ummanu, the
 infrastructure, the user and the projects are built and behave **now** — so a future session does not
 have to derive it again. Not a chronicle of decisions.
 
@@ -85,7 +85,7 @@ Fact format:
 Scope follows the source's displayed route, not a guessed path or a directory name:
 
 - `project:<canonical-id>` — a source routed through one registered binding's canonical `id`. A fact about
-  the task pipeline (board, runtime, curator, secretary) belongs to `project:secretary`.
+  the task pipeline (board, runtime, curator, ummanu) belongs to `project:ummanu`.
 - `global` — only material explicitly marked `global`, such as a runtime's installation-wide memory.
 - `review:po` — a durable conclusion that cannot be assigned to one project without product-owner
   judgment. This is a pending triage basket, not operational truth.
@@ -161,7 +161,7 @@ Why: only when there is a working invariant for a future agent.
 Then write it:
 
 ```
-python3 -P -m secretary automations curator memory-write \
+python3 -P -m ummanu automations curator memory-write \
   --actor curator --scope <global|project:<dir>|review:po> --slug <kebab-slug> --file /tmp/fact.md
 ```
 
@@ -178,7 +178,7 @@ python3 -P -m secretary automations curator memory-write \
 session id; for a fact taken from personal memory, use the source file name instead of a session id.
 `pinned: true` is only for the always-important.
 
-The helper is two-phase and idempotent: it calls `secretary memory propose` and `commit`, which place the
+The helper is two-phase and idempotent: it calls `ummanu memory propose` and `commit`, which place the
 fact under `state/memory/facts/<scope>/<slug>.md` in the instance repository and commit only
 `state/memory` under the shared writer lock. You run no manual Git; the protocol makes the commit.
 
@@ -188,7 +188,7 @@ carry it over — refer to it by name and location instead.
 ### 5. Move the watermark
 
 ```
-python3 -P -m secretary automations curator advance [--project <canonical-id|unknown|review:po>]
+python3 -P -m ummanu automations curator advance [--project <canonical-id|unknown|review:po>]
 ```
 
 Order matters: move the watermark ONLY after every fact has been written through `memory-write`. If the
@@ -198,7 +198,7 @@ fact-bearing batch produced no facts, `advance` anyway, so the same turns are no
 ### 6. The index
 
 The canon is the source of truth; the index is derived. The memory service rebuilds the index from the
-journal and you never rebuild anything by hand. `secretary memory reindex` is a manual fallback for a
+journal and you never rebuild anything by hand. `ummanu memory reindex` is a manual fallback for a
 service that is down, not a routine step for you.
 
 ## Invariants
@@ -206,7 +206,7 @@ service that is down, not a routine step for you.
 - **Do not ask clarifying questions.** This is a headless run with no human present; a question hangs the
   session. Act on your best judgement; skip a doubtful fact rather than ask.
 - You do not harvest yourself: discovery excludes this curator run's exact workspace and, when present, its
-  exact session id. It does not hide Secretary, worker/reviewer, or observer workspaces. That exclusion
+  exact session id. It does not hide Ummanu, worker/reviewer, or observer workspaces. That exclusion
   cannot apply to installation-wide memory with no working directory; reject an irrelevant pipeline note
   there with the ordinary durability bar rather than treating it as a discovery bug.
 - Facts are written ONLY through `curator memory-write`. You never touch the canon or any Git repository

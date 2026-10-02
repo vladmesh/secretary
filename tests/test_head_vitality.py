@@ -17,7 +17,7 @@ import time
 import unittest
 from unittest import mock
 
-from secretary.dispatch.head_vitality import (
+from ummanu.dispatch.head_vitality import (
     CURSOR_LIMIT,
     REASON_LIMIT,
     HeadVitalityError,
@@ -28,12 +28,12 @@ from secretary.dispatch.head_vitality import (
     TurnState,
     VitalitySnapshot,
 )
-from secretary.dispatch.watchdog import (
+from ummanu.dispatch.watchdog import (
     HEARTBEAT_DEAD,
     HEARTBEAT_LIVE_MATCH,
     head_process_status,
 )
-from secretary.runtime.head import identity, with_pid_heartbeat
+from ummanu.runtime.head import identity, with_pid_heartbeat
 
 RUN_ID = "run-1"
 

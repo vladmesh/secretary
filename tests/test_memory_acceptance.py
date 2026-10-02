@@ -12,14 +12,14 @@ from pathlib import Path
 from unittest import mock
 
 try:
-    from secretary import memory_service
+    from ummanu import memory_service
 except ImportError:
     memory_service = None
 
-from secretary.memory import access
-from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
-from secretary.runtime.head.identity import publish_heartbeat
 from tests.integration_setup import require_integration_setup
+from ummanu.memory import access
+from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef
+from ummanu.runtime.head.identity import publish_heartbeat
 
 
 class MemoryScopeAcceptanceTests(unittest.TestCase):
@@ -27,7 +27,7 @@ class MemoryScopeAcceptanceTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        require_integration_setup(memory_service, "secretary[memory] is not installed")
+        require_integration_setup(memory_service, "ummanu[memory] is not installed")
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -45,8 +45,8 @@ class MemoryScopeAcceptanceTests(unittest.TestCase):
                     ("acceptance sentinel global", "global", None, "fixture", None),
                     ("acceptance sentinel alpha", "project:alpha", None, "fixture", None),
                     ("acceptance sentinel beta", "project:beta", None, "fixture", None),
-                    ("acceptance sentinel secretary", "project:secretary", None, "fixture", None),
-                    ("acceptance sentinel product", "product:secretary", None, "fixture", None),
+                    ("acceptance sentinel ummanu", "project:ummanu", None, "fixture", None),
+                    ("acceptance sentinel product", "product:ummanu", None, "fixture", None),
                 ],
             )
             conn.commit()
@@ -101,8 +101,8 @@ class MemoryScopeAcceptanceTests(unittest.TestCase):
     def test_end_user_scope_matrix_and_no_expansion_paths(self) -> None:
         po = self.grant("po", TaskRef.standing("interactive"), access.interactive_po_subject())
         foreign_worker = self.grant("worker", TaskRef.card("alpha-card"), access.card_subject("alpha-card", "alpha"))
-        secretary_worker = self.grant(
-            "worker", TaskRef.card("secretary-card"), access.card_subject("secretary-card", "secretary")
+        ummanu_worker = self.grant(
+            "worker", TaskRef.card("ummanu-card"), access.card_subject("ummanu-card", "ummanu")
         )
         observer = self.grant(
             "observer", TaskRef.sprint("sprint-acceptance"), access.sprint_subject("sprint-acceptance", ["alpha", "beta"])
@@ -111,14 +111,14 @@ class MemoryScopeAcceptanceTests(unittest.TestCase):
         with self.authenticated(po):
             self.assertEqual(
                 self.scopes_from_list(),
-                {"global", "project:alpha", "project:beta", "project:secretary", "product:secretary"},
+                {"global", "project:alpha", "project:beta", "project:ummanu", "product:ummanu"},
             )
             self.assert_get("global", True)
 
         with self.authenticated(foreign_worker):
-            self.assertEqual(self.scopes_from_list(), {"project:alpha", "product:secretary"})
+            self.assertEqual(self.scopes_from_list(), {"project:alpha", "product:ummanu"})
             self.assert_get("project:alpha", True)
-            self.assert_get("project:secretary", False)
+            self.assert_get("project:ummanu", False)
             self.assert_get("project:beta", False)
             self.assert_get("global", False)
             # `caller` and a manually wider scope are inputs to the real tool, not authority.
@@ -128,18 +128,18 @@ class MemoryScopeAcceptanceTests(unittest.TestCase):
                 memory_service, "search_memory", return_value=[]
             ) as search:
                 self.assertEqual(memory_service.memory_search("acceptance query", caller="po"), [])
-            self.assertEqual(search.call_args.kwargs["allowed_scopes"], frozenset({"project:alpha", "product:secretary"}))
+            self.assertEqual(search.call_args.kwargs["allowed_scopes"], frozenset({"project:alpha", "product:ummanu"}))
 
-        with self.authenticated(secretary_worker):
-            self.assertEqual(self.scopes_from_list(), {"project:secretary", "product:secretary"})
-            self.assert_get("project:secretary", True)
+        with self.authenticated(ummanu_worker):
+            self.assertEqual(self.scopes_from_list(), {"project:ummanu", "product:ummanu"})
+            self.assert_get("project:ummanu", True)
             self.assert_get("project:alpha", False)
 
         with self.authenticated(observer):
-            self.assertEqual(self.scopes_from_list(), {"project:alpha", "project:beta", "product:secretary"})
+            self.assertEqual(self.scopes_from_list(), {"project:alpha", "project:beta", "product:ummanu"})
             self.assert_get("project:alpha", True)
             self.assert_get("project:beta", True)
-            self.assert_get("project:secretary", False)
+            self.assert_get("project:ummanu", False)
             self.assert_get("global", False)
 
         entries = [json.loads(line) for line in self.audit.read_text(encoding="utf-8").splitlines()]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from secretary.board.models import (
+from ummanu.board.models import (
     Issue,
     IssueCloseReason,
     IssueKind,
@@ -15,7 +15,7 @@ class IssueVocabularyTests(unittest.TestCase):
         issue = Issue(
             "issue:typed",
             "Typed issue",
-            "product:secretary",
+            "product:ummanu",
             priority="P1",
             issue_kind="bug",
             close_reason="resolved",
@@ -32,7 +32,7 @@ class IssueVocabularyTests(unittest.TestCase):
         issue = Issue(
             "issue:empty",
             "Empty metadata",
-            "product:secretary",
+            "product:ummanu",
             priority="",
             issue_kind="",
             close_reason="",
@@ -77,7 +77,7 @@ class IssueVocabularyTests(unittest.TestCase):
                 Issue(
                     "issue:invalid",
                     "Invalid metadata",
-                    "product:secretary",
+                    "product:ummanu",
                     **values,
                 )
 

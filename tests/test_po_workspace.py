@@ -12,10 +12,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import upgrade
-from secretary.memory import client_config
-from secretary.po import workspace
-from secretary.role_skills import (
+from ummanu import upgrade
+from ummanu.memory import client_config
+from ummanu.po import workspace
+from ummanu.role_skills import (
     BIN_DIR_ENV,
     MANIFEST,
     OWNERSHIP_MARKER,
@@ -68,7 +68,7 @@ class InstructionsTests(unittest.TestCase):
 
     def test_an_issue_like_finding_is_filed_at_once_without_asking_the_owner(self) -> None:
         for rule in (
-            "file it with `secretary issue create --role po` at once",
+            "file it with `ummanu issue create --role po` at once",
             "Do not ask the owner whether to file it",
             "Check for a duplicate first",
             "`issue append` what is new",
@@ -162,9 +162,9 @@ class PoWorkspaceStepTests(unittest.TestCase):
         runs: list[tuple[upgrade.StepResult, set[Path]]] = []
         for _ in range(2):
             with (
-                mock.patch("secretary.upgrade.os.geteuid", return_value=0),
-                mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
-                mock.patch("secretary.upgrade.os.chown") as chown,
+                mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
+                mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=account),
+                mock.patch("ummanu.upgrade.os.chown") as chown,
             ):
                 result = upgrade.step_po_workspace_owner(context)
             runs.append((result, {Path(call.args[0]) for call in chown.call_args_list}))
@@ -206,8 +206,8 @@ class PoWorkspaceStepTests(unittest.TestCase):
         )
 
         with (
-            mock.patch("secretary.upgrade.os.geteuid", return_value=1000),
-            mock.patch("secretary.upgrade.os.chown") as chown,
+            mock.patch("ummanu.upgrade.os.geteuid", return_value=1000),
+            mock.patch("ummanu.upgrade.os.chown") as chown,
         ):
             result = upgrade.step_po_workspace_owner(context)
 
@@ -309,7 +309,7 @@ class PoSkillDeliveryTests(unittest.TestCase):
                 root = self.data / workspace.WORKSPACE_NAME / relative
                 self.assertEqual({path.name for path in root.iterdir()}, PO_SKILLS)
                 for skill in PO_SKILLS:
-                    role = "po" if skill == "open-issue" else "secretary"
+                    role = "po" if skill == "open-issue" else "ummanu"
                     self.assertEqual(
                         (root / skill / "SKILL.md").read_bytes(),
                         (ROOT / "skills" / "roles" / role / skill / "SKILL.md").read_bytes(),
@@ -321,7 +321,7 @@ class PoSkillDeliveryTests(unittest.TestCase):
         self.assertEqual({skill for skill, _ in registry.roles["po"]}, PO_SKILLS)
         for skill in PO_SKILLS:
             role = registry.source_role("po", skill)
-            self.assertEqual(role, "po" if skill == "open-issue" else "secretary")
+            self.assertEqual(role, "po" if skill == "open-issue" else "ummanu")
 
     def test_without_an_installation_the_workspace_targets_are_named_and_skipped(self) -> None:
         result = audit(instance_path=self.instance, product_manifest=MANIFEST, home=self.home)
@@ -345,7 +345,7 @@ class PoSkillDeliveryTests(unittest.TestCase):
     def test_only_a_question_about_a_workspace_role_reads_the_instance_file(self) -> None:
         """An observer launch gate must not fail on an instance file the observer's targets never use."""
         (self.instance / "instance.yaml").write_text("{}\n", encoding="utf-8")
-        env = {"SECRETARY_ROLE_SKILLS_MANIFEST": str(MANIFEST), "HOME": str(self.home)}
+        env = {"UMMANU_ROLE_SKILLS_MANIFEST": str(MANIFEST), "HOME": str(self.home)}
 
         with mock.patch.dict(os.environ, env):
             observer = skill_delivery("observer", "observe-sprint", "claude", instance_path=self.instance)
@@ -376,13 +376,13 @@ class RetiredSkillTests(unittest.TestCase):
         self.manifest.parent.mkdir(parents=True, exist_ok=True)
         listed = ", ".join(json.dumps(skill) for skill in skills)
         self.manifest.write_text(
-            f"[roles.secretary]\nskills = [{listed}]\n\n"
-            f'[targets.t]\nshell = "claude"\nroot = "{self.shell}"\nroles = ["secretary"]\n',
+            f"[roles.ummanu]\nskills = [{listed}]\n\n"
+            f'[targets.t]\nshell = "claude"\nroot = "{self.shell}"\nroles = ["ummanu"]\n',
             encoding="utf-8",
         )
 
     def write_skill(self, name: str, text: str) -> Path:
-        path = self.skills / "roles" / "secretary" / name / "SKILL.md"
+        path = self.skills / "roles" / "ummanu" / name / "SKILL.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
         return path
@@ -473,11 +473,11 @@ class RetiredSkillTests(unittest.TestCase):
         self.write_skill("kept", "# kept\n")
         self.manifest.parent.mkdir(parents=True, exist_ok=True)
         self.manifest.write_text(
-            '[roles.secretary]\nskills = ["kept"]\n\n[roles.po]\nskills = ["secretary/missing"]\n',
+            '[roles.ummanu]\nskills = ["kept"]\n\n[roles.po]\nskills = ["ummanu/missing"]\n',
             encoding="utf-8",
         )
 
-        with self.assertRaisesRegex(RegistryError, "secretary/missing"):
+        with self.assertRaisesRegex(RegistryError, "ummanu/missing"):
             load_registry(self.instance, product_manifest=self.manifest)
 
 

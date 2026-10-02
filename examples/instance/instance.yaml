@@ -1,8 +1,8 @@
 # Example instance config. No live bindings — safe to commit to the product repo.
 version: 1
-name: example-secretary
+name: example-ummanu
 description: Example installation used by doctor --dry-run and schema tests.
-data_dir: /var/lib/secretary-data
+data_dir: /var/lib/ummanu-data
 offsite:
   instance_remote: git@example.invalid:example/secretary-instance.git
 persona:
@@ -17,10 +17,10 @@ policies:
   default_code_concurrency: 1
 host:
   projects_root: /srv/projects
-  unit_prefix: secretary-
+  unit_prefix: ummanu-
   units:
-    - secretary-pipeline.service
-    - secretary-curator.timer
+    - ummanu-pipeline.service
+    - ummanu-curator.timer
   # Components this installation deliberately does not run. Anything the product
   # ships and this block does not name is enabled.
   components:
@@ -30,6 +30,6 @@ host:
   # Names under unit_prefix owned by something else. Without an entry here an
   # unrecognised unit in our namespace is a conflict and apply refuses to write.
   foreign_units:
-    - secretary-supervisor.timer
+    - ummanu-supervisor.timer
   # One inference request must leave CPU for the minute dispatcher tick.
   memory_threads: 1

@@ -1,7 +1,7 @@
 """The operator's half of the web transport: the pause, the open sprints, the history, and the
 owner's two writes on a card.
 
-Every test goes through :class:`secretary.web.app.WebApp`, the object the socket handler calls.
+Every test goes through :class:`ummanu.web.app.WebApp`, the object the socket handler calls.
 The four new layers are either the real ones over the fake board (`TransportFixture`, where the
 question is what a write does) or recording fakes (where the question is what the transport hands
 down and how a page draws what came back). Nothing here reaches a live installation.
@@ -13,13 +13,13 @@ import json
 import unittest
 from typing import Any
 
-from secretary.status import collect_status
-from secretary.tasks import TaskWriter
-from secretary.web.app import ROUTES, WebApp
-from secretary.webproto.card_ops import MOVE_TARGETS, CardOperationLayer
-from secretary.webproto.errors import InstallationUnavailable, ReadError
-from secretary.webproto.reads import ReadLayer, health_summary
 from tests.webproto_sprint_fixtures import SprintProtocolFixture
+from ummanu.status import collect_status
+from ummanu.tasks import TaskWriter
+from ummanu.web.app import ROUTES, WebApp
+from ummanu.webproto.card_ops import MOVE_TARGETS, CardOperationLayer
+from ummanu.webproto.errors import InstallationUnavailable, ReadError
+from ummanu.webproto.reads import ReadLayer, health_summary
 
 
 def available() -> dict[str, Any]:
@@ -66,7 +66,7 @@ def pause_document(*, paused: bool = False, mode: str | None = None) -> dict[str
         "dispatcher": {"phase": "production", "tracked_cards": 1, "source": available()},
         "heads": {
             "cards": [
-                {"ref": "secretary-9", "state": "claimed", "worker": "running", "reviewer": "not-running"}
+                {"ref": "ummanu-9", "state": "claimed", "worker": "running", "reviewer": "not-running"}
             ],
             "observers": [],
         },
@@ -81,17 +81,17 @@ def sprint_item(ref: str = "sprint:7") -> dict[str, Any]:
     return {
         "ref": ref,
         "status": "open",
-        "product": "secretary",
-        "reservations": ["secretary"],
+        "product": "ummanu",
+        "reservations": ["ummanu"],
         "goal": "a goal " * 60,
-        "current_task": {"ref": "secretary-9", "live": True, "reason": "cut", "source": available()},
+        "current_task": {"ref": "ummanu-9", "live": True, "reason": "cut", "source": available()},
         "current_card_state": {
-            "card": "secretary-9",
+            "card": "ummanu-9",
             "state": "in_progress",
             "since": "2026-09-13T09:00:00Z",
             "age_seconds": 10800.0,
             "transition": "recorded",
-            "reason": "secretary-9 stands in in_progress",
+            "reason": "ummanu-9 stands in in_progress",
             "source": available(),
         },
         "observer": {
@@ -111,10 +111,10 @@ def sprint_item(ref: str = "sprint:7") -> dict[str, Any]:
             "hard_reached": False,
             "by_type": {"red_review": 13},
         },
-        "cards": {"states": {"assessment": ["secretary-9"]}, "source": available()},
+        "cards": {"states": {"assessment": ["ummanu-9"]}, "source": available()},
         "decision": {
             "entry": {
-                "selected_step": "rework secretary-9",
+                "selected_step": "rework ummanu-9",
                 "selected_why": "the review is red",
                 "next_safe_step": "wait",
             },
@@ -140,7 +140,7 @@ def history(items: list[dict[str, Any]], *, more: bool = False) -> dict[str, Any
 def command(action: str, ref: str, *, outcome: str = "success", reason: str | None = None) -> dict[str, Any]:
     return {
         "occurred_at": "2026-09-13T11:59:00Z",
-        "actor": {"role": "dispatcher", "id": "secretary-production"},
+        "actor": {"role": "dispatcher", "id": "ummanu-production"},
         "action": action,
         "entity": {"kind": "card", "ref": ref},
         "result": {"outcome": outcome, "reason": reason},
@@ -177,7 +177,7 @@ class FakeAppFixture(unittest.TestCase):
         self.pause_ops = Recording(pause_drain={"kind": "pause_drain"}, pause_resume={"kind": "pause_resume"})
         self.command_reads = Recording(
             command_history=history(
-                [command("card.assessed", "secretary-9", outcome="", reason="review:red")]
+                [command("card.assessed", "ummanu-9", outcome="", reason="review:red")]
             )
         )
         self.card_ops = Recording(task_comment={"kind": "card_commented"}, task_move={"kind": "card_moved"})
@@ -272,7 +272,7 @@ class RouteTests(FakeAppFixture):
         )
 
     def test_a_sprint_close_hands_the_decisions_down_unparsed(self) -> None:
-        text = "cards:\n  - {ref: secretary-9, verdict: drop, reason: not now}\n"
+        text = "cards:\n  - {ref: ummanu-9, verdict: drop, reason: not now}\n"
         response = self.post(
             "/api/sprints/sprint:7/close",
             {"request_id": "r-1", "reason": "why", "closeout": "what became", "decisions": text},
@@ -311,7 +311,7 @@ class RouteTests(FakeAppFixture):
 
     def test_a_card_comment_and_a_move_are_made_as_the_po_from_the_web(self) -> None:
         self.assertEqual(
-            self.post("/api/tasks/secretary-9/comment", {"request_id": "r-1", "body": "hi"}).status, 200
+            self.post("/api/tasks/ummanu-9/comment", {"request_id": "r-1", "body": "hi"}).status, 200
         )
         self.assertEqual(
             self.card_ops.calls[-1],
@@ -322,13 +322,13 @@ class RouteTests(FakeAppFixture):
                     "request_id": "r-1",
                     "actor": "web",
                     "role": "po",
-                    "reference": "secretary-9",
+                    "reference": "ummanu-9",
                     "body": "hi",
                 },
             ),
         )
         response = self.post(
-            "/api/tasks/secretary-9/move",
+            "/api/tasks/ummanu-9/move",
             {
                 "request_id": "r-2",
                 "target": "ready",
@@ -347,7 +347,7 @@ class RouteTests(FakeAppFixture):
                     "request_id": "r-2",
                     "actor": "web",
                     "role": "po",
-                    "reference": "secretary-9",
+                    "reference": "ummanu-9",
                     "target": "ready",
                     "reason": "reslice",
                     "sprint_override": True,
@@ -357,13 +357,13 @@ class RouteTests(FakeAppFixture):
         )
 
     def test_a_move_without_the_override_hands_down_false(self) -> None:
-        self.post("/api/tasks/secretary-9/move", {"request_id": "r-2", "target": "ready", "reason": "x"})
+        self.post("/api/tasks/ummanu-9/move", {"request_id": "r-2", "target": "ready", "reason": "x"})
         self.assertIs(self.card_ops.calls[-1][1]["sprint_override"], False)
         self.assertEqual(self.card_ops.calls[-1][1]["sprint_override_reason"], "")
 
     def test_a_move_with_a_non_boolean_override_is_refused(self) -> None:
         response = self.post(
-            "/api/tasks/secretary-9/move",
+            "/api/tasks/ummanu-9/move",
             {"request_id": "r-2", "target": "ready", "reason": "x", "sprint_override": "maybe"},
         )
         self.assertEqual(response.status, 400)
@@ -435,7 +435,7 @@ class DashboardPageTests(FakeAppFixture):
                 "host": {
                     "units": [
                         {
-                            "name": "secretary-web.service",
+                            "name": "ummanu-web.service",
                             "kind": "service",
                             "present": True,
                             "active": "failed",
@@ -448,12 +448,12 @@ class DashboardPageTests(FakeAppFixture):
         self.reads.answers["system_snapshot"]["installation"]["health"]["status"] = status
         page = self.text(self.get("/"))
         self.assertIn("attention", page)
-        self.assertIn("secretary-web.service is failed", page)
+        self.assertIn("ummanu-web.service is failed", page)
         self.assertIn("the pipeline is paused (freeze)", page)
 
     def test_the_history_page_links_to_the_older_page_by_cursor(self) -> None:
         self.command_reads = Recording(
-            command_history=history([command("routing", "secretary-9")], more=True)
+            command_history=history([command("routing", "ummanu-9")], more=True)
         )
         page = self.text(self.get("/history"))
         self.assertIn("routing", page)
@@ -482,7 +482,7 @@ class DashboardPageTests(FakeAppFixture):
             "since": None,
             "age_seconds": None,
             "transition": "absent",
-            "reason": "the committed audit records no state transition of secretary-9",
+            "reason": "the committed audit records no state transition of ummanu-9",
         }
         self.sprint_reads = Recording(sprint_list=sprint_listing([item]))
         page = self.text(self.get("/sprints"))
@@ -498,7 +498,7 @@ class DashboardPageTests(FakeAppFixture):
             "since": None,
             "age_seconds": None,
             "transition": "not_applicable",
-            "reason": "sprint:7 is closed: secretary-9 is the card it ended on",
+            "reason": "sprint:7 is closed: ummanu-9 is the card it ended on",
         }
         self.sprint_reads = Recording(sprint_list=sprint_listing([item]))
         page = self.text(self.get("/sprints"))
@@ -509,7 +509,7 @@ class DashboardPageTests(FakeAppFixture):
         """Criterion 2 on the page: the reference stands, only the new part says it is unknown."""
         item = sprint_item()
         item["current_card_state"] = {
-            "card": "secretary-9",
+            "card": "ummanu-9",
             "state": None,
             "since": None,
             "age_seconds": None,
@@ -519,7 +519,7 @@ class DashboardPageTests(FakeAppFixture):
         }
         self.sprint_reads = Recording(sprint_list=sprint_listing([item]))
         page = self.text(self.get("/sprints"))
-        self.assertIn("secretary-9", page)
+        self.assertIn("ummanu-9", page)
         self.assertIn("the committed audit journal could not be read", page)
         self.assertNotIn("in this state", page)
 
@@ -527,10 +527,10 @@ class DashboardPageTests(FakeAppFixture):
         second = sprint_item("sprint:8")
         second["reservations"] = ["orca"]
         self.sprint_reads = Recording(sprint_list=sprint_listing([sprint_item(), second]))
-        page = self.text(self.get("/sprints", "view=archive&q=goal&project=secretary"))
+        page = self.text(self.get("/sprints", "view=archive&q=goal&project=ummanu"))
         self.assertEqual(self.sprint_reads.calls[-1][1]["statuses"], ["closed", "stopped"])
         self.assertIn('name="q" value="goal"', page)
-        self.assertIn('<option value="secretary" selected>', page)
+        self.assertIn('<option value="ummanu" selected>', page)
         self.assertIn('<option value="orca">', page)
         self.assertIn("sprint:7", page)
         self.assertNotIn("sprint:8</a>", page)
@@ -543,17 +543,17 @@ class DashboardPageTests(FakeAppFixture):
     def test_projects_have_a_list_and_an_individual_page(self) -> None:
         self.reads.answers["system_snapshot"]["projects"]["items"] = [
             {
-                "id": "secretary",
-                "repo": "/srv/secretary",
-                "adapter": "secretary",
+                "id": "ummanu",
+                "repo": "/srv/ummanu",
+                "adapter": "ummanu",
                 "default_branch": "main",
                 "enabled": True,
             }
         ]
         listing = self.text(self.get("/projects"))
-        self.assertIn('href="/projects/secretary"', listing)
-        detail = self.text(self.get("/projects/secretary"))
-        self.assertIn("/srv/secretary", detail)
+        self.assertIn('href="/projects/ummanu"', listing)
+        detail = self.text(self.get("/projects/ummanu"))
+        self.assertIn("/srv/ummanu", detail)
         self.assertIn("Sprints", detail)
         self.assertIn("sprint:7", detail)
         self.assertEqual(self.get("/projects/missing").status, 404)
@@ -644,20 +644,20 @@ class DashboardPageTests(FakeAppFixture):
         ]
         self.reads = Recording(
             task_snapshot={
-                "ref": "secretary-9",
+                "ref": "ummanu-9",
                 "observed_at": "2026-09-13T12:40:00Z",
                 "card": {
                     "source": available(),
-                    "value": {"title": "a card", "state": "validate", "project": "secretary"},
+                    "value": {"title": "a card", "state": "validate", "project": "ummanu"},
                 },
-                "project": {"id": "secretary", "registered": True},
+                "project": {"id": "ummanu", "registered": True},
                 "attempt": {},
                 "agents": {"source": available(), "items": []},
                 "work": {},
                 "events": {"source": available(), "items": events, "next_cursor": "c"},
             }
         )
-        page = self.text(self.get("/tasks/secretary-9"))
+        page = self.text(self.get("/tasks/ummanu-9"))
         self.assertEqual(page.count("<li><details><summary><time"), 2)
         self.assertIn(">12:31:00</time>", page)
         self.assertIn("worker report:done", page)
@@ -673,10 +673,10 @@ class DashboardPageTests(FakeAppFixture):
     def card_page(self, value: dict, agents: list | None = None, heads: list | None = None) -> str:
         self.reads = Recording(
             task_snapshot={
-                "ref": "secretary-9",
+                "ref": "ummanu-9",
                 "observed_at": "2026-09-13T12:40:00Z",
                 "card": {"source": available(), "value": value},
-                "project": {"id": "secretary", "registered": True},
+                "project": {"id": "ummanu", "registered": True},
                 "attempt": {},
                 "agents": {"source": available(), "items": agents or []},
                 "heads": {"source": available(), "items": heads or []},
@@ -684,34 +684,34 @@ class DashboardPageTests(FakeAppFixture):
                 "events": {"source": available(), "items": [], "next_cursor": "c"},
             }
         )
-        return self.text(self.get("/tasks/secretary-9"))
+        return self.text(self.get("/tasks/ummanu-9"))
 
     def test_the_card_page_opens_on_the_whole_task_rendered_from_its_markdown(self) -> None:
         page = self.card_page(
             {
                 "title": "Guard escalation on QA routing",
                 "state": "in_progress",
-                "project": "secretary",
+                "project": "ummanu",
                 "sprint": "sprint:7",
                 "description": "# Goal\n\nMake it wait.\n\n# Acceptance criteria\n\n- a `service` test\n- no new loop",
             }
         )
         self.assertIn("<h1>Guard escalation on QA routing</h1>", page)
-        self.assertIn('<label for="tab-card-secretary-9-0">Task</label>', page)
-        self.assertIn('id="tab-card-secretary-9-0" checked', page)
+        self.assertIn('<label for="tab-card-ummanu-9-0">Task</label>', page)
+        self.assertIn('id="tab-card-ummanu-9-0" checked', page)
         self.assertIn("<h3>Acceptance criteria</h3>", page)
         self.assertIn("<code>service</code>", page)
         # The card is filed under its sprint in the crumbs.
         self.assertIn('<a href="/sprints/sprint%3A7">sprint:7</a>', page)
 
     def test_a_card_without_a_description_says_so(self) -> None:
-        page = self.card_page({"title": "t", "state": "ready", "project": "secretary"})
+        page = self.card_page({"title": "t", "state": "ready", "project": "ummanu"})
         self.assertIn("this card carries no description beyond its title", page)
 
     def test_the_heads_panel_names_the_model_and_the_effort(self) -> None:
         """The latest run of a role is the chip; the process behind it gives the pulse; earlier runs are a line each."""
         page = self.card_page(
-            {"title": "t", "state": "in_progress", "project": "secretary"},
+            {"title": "t", "state": "in_progress", "project": "ummanu"},
             agents=[
                 {"role": "worker", "run_id": "run-2", "state": "running", "reason": "a live process matches"}
             ],
@@ -753,13 +753,13 @@ class DashboardPageTests(FakeAppFixture):
         self.assertIn('<span class="ref">claude-opus-5-5</span>', page)
         self.assertIn('class="pulse live"', page)
         self.assertIn("a live process matches", page)
-        self.assertIn('href="/tasks/secretary-9/heads/run-2"', page)
+        self.assertIn('href="/tasks/ummanu-9/heads/run-2"', page)
         # The earlier run is one line under the chip, with its own model and its own link.
         self.assertIn('<ul class="head-runs">', page)
         self.assertIn("Sonnet 5", page)
-        self.assertIn('href="/tasks/secretary-9/heads/run-1"', page)
+        self.assertIn('href="/tasks/ummanu-9/heads/run-1"', page)
         self.assertIn('<span class="age">attempt 1</span>', page)
-        self.assertEqual(self.get("/tasks/secretary-9", "events=7").status, 200)
+        self.assertEqual(self.get("/tasks/ummanu-9", "events=7").status, 200)
         self.assertEqual(self.reads.calls[-1][1]["events"], 7)
 
     def test_top_level_pages_carry_no_crumbs_and_nested_pages_only_the_identifier(self) -> None:
@@ -816,7 +816,7 @@ class CardOperationTests(SprintProtocolFixture):
 
     def card(self) -> tuple[str, str]:
         """The card the board is seeded with, and the state it is in: `secretary-12`, in Ready."""
-        return "secretary-12", self.state_of("secretary-12")
+        return "ummanu-12", self.state_of("ummanu-12")
 
     def state_of(self, ref: str) -> str:
         return str(self.writer().reader.show(ref)["state"])
@@ -831,7 +831,7 @@ class CardOperationTests(SprintProtocolFixture):
 
     def test_a_comment_on_no_card_is_not_found(self) -> None:
         with self.assertRaises(ReadError) as caught:
-            self.layer().task_comment(request_id="r-1", actor="web", reference="secretary-none", body="x")
+            self.layer().task_comment(request_id="r-1", actor="web", reference="ummanu-none", body="x")
         self.assertEqual(caught.exception.code, "not_found")
 
     def test_an_empty_comment_and_a_missing_request_id_are_refused_before_the_board(self) -> None:
@@ -932,7 +932,7 @@ class HealthSummaryTests(unittest.TestCase):
                 "host": {
                     "units": [
                         {
-                            "name": "secretary-curator.service",
+                            "name": "ummanu-curator.service",
                             "kind": "service",
                             "present": True,
                             "active": "inactive",
@@ -946,7 +946,7 @@ class HealthSummaryTests(unittest.TestCase):
 
 class StatusWithoutSprintsTests(SprintProtocolFixture):
     def test_the_web_reads_status_without_the_sprints_or_the_panel_probes(self) -> None:
-        from secretary.config import validate_instance
+        from ummanu.config import validate_instance
 
         report = validate_instance(self.instance)
         snapshot = collect_status(

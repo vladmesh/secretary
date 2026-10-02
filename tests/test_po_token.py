@@ -9,8 +9,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import upgrade
-from secretary.po import token as po_token
+from ummanu import upgrade
+from ummanu.po import token as po_token
 
 
 class PoTokenStepTests(unittest.TestCase):
@@ -88,9 +88,9 @@ class PoTokenStepTests(unittest.TestCase):
     def test_a_root_invoker_hands_the_token_to_the_runtime_user(self) -> None:
         account = SimpleNamespace(pw_uid=4321, pw_gid=4321)
         with (
-            mock.patch("secretary.upgrade.os.geteuid", return_value=0),
-            mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
-            mock.patch("secretary.upgrade.os.chown") as chown,
+            mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
+            mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=account),
+            mock.patch("ummanu.upgrade.os.chown") as chown,
         ):
             result = self.run_step(runtime_user="po-runtime")
 
@@ -102,7 +102,7 @@ class PoTokenStepTests(unittest.TestCase):
         self.assertEqual(names.index("step_po_token"), names.index("step_po_workspace_owner") + 1)
 
     def test_the_token_lives_outside_the_po_workspace(self) -> None:
-        from secretary.po.workspace import workspace_dir
+        from ummanu.po.workspace import workspace_dir
 
         self.assertNotIn(workspace_dir(self.data), po_token.token_path(self.data).parents)
 

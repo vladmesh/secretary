@@ -94,8 +94,8 @@ from typing import Any, Self
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-#: Where `secretary-web.service` listens. The unit binds this and only this
-#: (`packaging/systemd/secretary-web.service`); `--base-url` is for a second installation or a
+#: Where `ummanu-web.service` listens. The unit binds this and only this
+#: (`packaging/systemd/ummanu-web.service`); `--base-url` is for a second installation or a
 #: stand, not for reaching a published front, which adds TLS and a password to every number.
 DEFAULT_BASE_URL = "http://127.0.0.1:8787"
 
@@ -131,7 +131,7 @@ WARM_REQUESTS = 20
 #: The concurrency measurement: four browsers' worth of the dashboard at once, while the PO page a
 #: real operator leaves open keeps polling its session.
 CONCURRENT_REQUESTS = 4
-#: The cadence being modelled: `src/secretary/web/pages.py` polls the selected session from the
+#: The cadence being modelled: `src/ummanu/web/pages.py` polls the selected session from the
 #: open `/po` page with `setInterval(async () => { await fetch(...) }, 3000)`, which starts a read
 #: every three seconds whether or not the previous one has answered. This script starts its polls on
 #: the same independent schedule, and never shortens or stretches it.
@@ -426,8 +426,8 @@ def resolve_data_dir(argument: str | None) -> tuple[Path, str]:
     """Where this installation's data plane is, and which rule said so.
 
     The product's own order, and the product's own last step: the argument, then
-    `SECRETARY_DATA_DIR`, then `SECRETARY_INSTANCE`, then the default instance the CLI documents
-    (`secretary.onboarding.DEFAULT_INSTANCE`) — read through `secretary.config.instance_data_dir`
+    `UMMANU_DATA_DIR`, then `UMMANU_INSTANCE`, then the default instance the CLI documents
+    (`ummanu.onboarding.DEFAULT_INSTANCE`) — read through `ummanu.config.instance_data_dir`
     rather than a second copy of the mapping. The default instance matters because the documented
     command is run from an ordinary checkout shell, which does not inherit the service unit's
     environment: without this step that shell resolved no data directory at all, could not read the
@@ -439,27 +439,27 @@ def resolve_data_dir(argument: str | None) -> tuple[Path, str]:
     """
     if argument:
         return Path(argument).expanduser(), "--data-dir"
-    configured = os.environ.get("SECRETARY_DATA_DIR")
+    configured = os.environ.get("UMMANU_DATA_DIR")
     if configured:
-        return Path(configured).expanduser(), "SECRETARY_DATA_DIR"
+        return Path(configured).expanduser(), "UMMANU_DATA_DIR"
     _product_path()
     try:
-        from secretary.config import DataDirError, instance_data_dir
-        from secretary.onboarding import DEFAULT_INSTANCE
+        from ummanu.config import DataDirError, instance_data_dir
+        from ummanu.onboarding import DEFAULT_INSTANCE
     except ImportError as exc:
         raise Unmeasurable(
             f"the product could not be imported from {REPO_ROOT / 'src'} ({exc}), so this "
             f"installation's data directory could not be resolved; pass --data-dir"
         ) from None
-    selected = os.environ.get("SECRETARY_INSTANCE")
-    source = "SECRETARY_INSTANCE" if selected else "the default instance"
+    selected = os.environ.get("UMMANU_INSTANCE")
+    source = "UMMANU_INSTANCE" if selected else "the default instance"
     instance = Path(selected or DEFAULT_INSTANCE).expanduser()
     try:
         return instance_data_dir(instance), f"{source} {instance}"
     except DataDirError as exc:
         raise Unmeasurable(
             f"the data directory of {instance} could not be resolved ({exc}); set "
-            f"SECRETARY_INSTANCE or SECRETARY_DATA_DIR, or pass --data-dir"
+            f"UMMANU_INSTANCE or UMMANU_DATA_DIR, or pass --data-dir"
         ) from None
 
 
@@ -468,11 +468,11 @@ def po_cookie(data_dir: Path) -> str:
 
     The derivation is imported from the product rather than copied: the cookie is an HMAC keyed by
     the token file, and a second implementation of that rule here would be a second thing to keep
-    in step with `secretary.po.token`.
+    in step with `ummanu.po.token`.
     """
     _product_path()
     try:
-        from secretary.po.token import COOKIE_NAME, TokenError, cookie_value, read_token
+        from ummanu.po.token import COOKIE_NAME, TokenError, cookie_value, read_token
     except ImportError as exc:
         raise Unmeasurable(f"the PO cookie rule could not be imported from this checkout: {exc}") from None
     try:
@@ -496,7 +496,7 @@ def session_is_running(route: str, body: bytes) -> bool:
     The product decides this and publishes it: `webproto.po_ops.po_session` sets `running` from
     whether any turn of the session is in the running state, and the session page installs its
     three-second `setInterval` only `if (__RUNNING__)`, clearing it when the turn ends
-    (`src/secretary/web/pages.py`). So an idle session is one no browser polls, and a document
+    (`src/ummanu/web/pages.py`). So an idle session is one no browser polls, and a document
     this script cannot read `running` out of is one it cannot say either way about — which is a
     refusal here rather than a guess, because the guess would decide whether a scenario was
     reproduced.
@@ -1328,7 +1328,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--data-dir",
         default=None,
         help=(
-            "where the PO token lives; defaults to SECRETARY_DATA_DIR, then SECRETARY_INSTANCE, "
+            "where the PO token lives; defaults to UMMANU_DATA_DIR, then UMMANU_INSTANCE, "
             "then the instance the CLI defaults to"
         ),
     )

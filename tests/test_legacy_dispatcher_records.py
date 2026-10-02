@@ -20,19 +20,19 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.launch import CAUSE_WORKSPACE_CONTRACT, FAILURE_CLASS_TASK, classify_bring_up_failure
-from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatch.types import LegacyDispatcherRecord
-from secretary.runtime.head import operations as head_ops
-from secretary.runtime.head_runtimes import ORCA_LEGACY_RUNTIME
 from tests.dispatcher_fixtures import DispatcherRuntimeFixture, SupervisedBackend, supervised_run
 from tests.fakes.dispatcher import FakeCatalog
 from tests.production_runtime_fixtures import registered_production_runtime
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.launch import CAUSE_WORKSPACE_CONTRACT, FAILURE_CLASS_TASK, classify_bring_up_failure
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.types import LegacyDispatcherRecord
+from ummanu.runtime.head import operations as head_ops
+from ummanu.runtime.head_runtimes import ORCA_LEGACY_RUNTIME
 
-REF = "secretary-1722"
+REF = "ummanu-1722"
 WORKER = f"{REF}-worker"
-TASK = {"ref": REF, "project": "secretary", "description": "d", "workspace": {"base_branch": "main"}}
+TASK = {"ref": REF, "project": "ummanu", "description": "d", "workspace": {"base_branch": "main"}}
 
 
 def _legacy_run(run_id: str, *, role: str, runtime: str) -> dict[str, Any]:
@@ -57,7 +57,7 @@ class HostRefusesLegacyRecordsTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
         self.orca_root = self.root / "orca-workspaces"
-        env = mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.orca_root)})
+        env = mock.patch.dict(os.environ, {"UMMANU_DISPATCHER_WORKSPACES_ROOT": str(self.orca_root)})
         env.start()
         self.addCleanup(env.stop)
         self.host = CommandHostRuntime(  # type: ignore[arg-type]
@@ -74,8 +74,8 @@ class HostRefusesLegacyRecordsTests(unittest.TestCase):
             )
             patched.start()
             self.addCleanup(patched.stop)
-        self.git_workspace = self.root / "data" / "workspaces" / "secretary" / WORKER
-        self.orca_workspace = self.orca_root / "secretary" / WORKER
+        self.git_workspace = self.root / "data" / "workspaces" / "ummanu" / WORKER
+        self.orca_workspace = self.orca_root / "ummanu" / WORKER
         for workspace in (self.git_workspace, self.orca_workspace):
             workspace.mkdir(parents=True)
 
@@ -190,17 +190,17 @@ class HostRefusesLegacyRecordsTests(unittest.TestCase):
 class LegacyRecordBlocksTheCardTests(DispatcherRuntimeFixture, unittest.TestCase):
     """What the dispatcher does with the refusal: the card goes Blocked, with the reason on it."""
 
-    def _record_of(self, ref: str = "secretary-510") -> DispatcherRecord:
+    def _record_of(self, ref: str = "ummanu-510") -> DispatcherRecord:
         return self.runtime.production_state.records(self.runtime.production_state.load())[ref]
 
     def refusal(self) -> LegacyDispatcherRecord:
         """The refusal exactly as the real host raises it for this card's record."""
         record = self._record_of()
-        orca = Path(self.data_dir) / "orca-workspaces" / "secretary" / record.worker
+        orca = Path(self.data_dir) / "orca-workspaces" / "ummanu" / record.worker
         record.workspace = str(orca)
         host = CommandHostRuntime(FakeCatalog(), Path(self.data_dir) / "host", mode="real")  # type: ignore[arg-type]
         with (
-            mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(orca.parents[1])}),
+            mock.patch.dict(os.environ, {"UMMANU_DISPATCHER_WORKSPACES_ROOT": str(orca.parents[1])}),
             self.assertRaises(LegacyDispatcherRecord) as refused,
         ):
             host.teardown(record)
@@ -215,7 +215,7 @@ class LegacyRecordBlocksTheCardTests(DispatcherRuntimeFixture, unittest.TestCase
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-510",
+            reference="ummanu-510",
             kind="red",
             body="fix it",
             request_id="review-red",
@@ -224,7 +224,7 @@ class LegacyRecordBlocksTheCardTests(DispatcherRuntimeFixture, unittest.TestCase
         result = self._park_and_decide("rework")
 
         self.assertEqual(result["status"], "blocked")
-        task = self.reader.show("secretary-510")
+        task = self.reader.show("ummanu-510")
         self.assertEqual(task["state"], "blocked")
         self.assertIn("legacy dispatcher record", task["comments"][-1]["body"])
         self.assertIn(refusal.subject, task["comments"][-1]["body"])
@@ -239,7 +239,7 @@ class LegacyRecordBlocksTheCardTests(DispatcherRuntimeFixture, unittest.TestCase
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-510",
+            reference="ummanu-510",
             kind="green",
             body="ok",
             request_id="review-green",
@@ -249,7 +249,7 @@ class LegacyRecordBlocksTheCardTests(DispatcherRuntimeFixture, unittest.TestCase
 
         self.assertEqual(result["status"], "blocked", result)
         self.assertEqual(result["reason"], "release cleanup refused")
-        task = self.reader.show("secretary-510")
+        task = self.reader.show("ummanu-510")
         self.assertEqual(task["state"], "blocked")
         self.assertIn("release cleanup refused: legacy dispatcher record", task["comments"][-1]["body"])
         self.assertIn(refusal.subject, task["comments"][-1]["body"])

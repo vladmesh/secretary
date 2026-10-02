@@ -2,7 +2,7 @@
 
 Operator runbooks for a running installation. Install and restore are in [Recovery](RECOVERY.md);
 command and route contracts are in [Protocols](PROTOCOLS.md). The state of a particular installation
-comes from `secretary status` and `secretary doctor`, not from this file.
+comes from `ummanu status` and `ummanu doctor`, not from this file.
 
 - [installation and host requirements](#install-and-check-the-code);
 - [data, status and checkpoint operation](#data-plane);
@@ -25,10 +25,10 @@ python3 -m tests.broad
 The first form installs the CLI, the second adds the memory runtime, the third the pinned linter. `ruff`
 is pinned in `pyproject.toml` and any other version refuses to run; run it only on changed Python paths
 with the command in [Testing](TESTING.md#changed-python-lint). Host bootstrap supports Ubuntu 24.04,
-installs Docker and Compose from the distribution and provisions the board store; `secretary install` or
-`secretary recover` then applies the instance ([Recovery](RECOVERY.md)).
+installs Docker and Compose from the distribution and provisions the board store; `ummanu install` or
+`ummanu recover` then applies the instance ([Recovery](RECOVERY.md)).
 
-`secretary status --instance <dir>` summarizes an installation; `--json` is a structured snapshot and
+`ummanu status --instance <dir>` summarizes an installation; `--json` is a structured snapshot and
 writes no state. `doctor` reports broken invariants (`--json` for structured findings). Changing the
 host requires `reconcile plan` and a separate confirmed apply.
 
@@ -36,22 +36,22 @@ host requires `reconcile plan` and a separate confirmed apply.
 
 ### Installation secrets
 
-Installation secrets live in the recoverable store (`secretary secret init/set/import`, the `secrets/`
+Installation secrets live in the recoverable store (`ummanu secret init/set/import`, the `secrets/`
 directory of the private repository) and are materialised into env files. The store contract is in
 [Recovery](RECOVERY.md#secrets). `runtime.env` next to `instance.yaml` can be a materialisation target;
-whether it is shows under `secret_store.materialize` in `secretary status --json`. The product does
+whether it is shows under `secret_store.materialize` in `ummanu status --json`. The product does
 not migrate it on its own. Either way the file is `0600`, gitignored and in no checkpoint or archive.
-`secretary shell` receives the whole file; dispatcher-launched workers and reviewers receive
+`ummanu shell` receives the whole file; dispatcher-launched workers and reviewers receive
 non-secret runtime switches through the role-environment wrapper.
 
 Migrate an existing `<instance>/runtime.env` with the CLI, never by copying values through a shell or
 an argument list:
 
 ```bash
-python3 -P -m secretary secret init --instance INSTANCE
-python3 -P -m secretary secret import --instance INSTANCE --file INSTANCE/runtime.env \
+python3 -P -m ummanu secret init --instance INSTANCE
+python3 -P -m ummanu secret import --instance INSTANCE --file INSTANCE/runtime.env \
   --scope installation --purpose runtime --materialize runtime-env
-python3 -P -m secretary secret materialize --instance INSTANCE --target runtime-env
+python3 -P -m ummanu secret materialize --instance INSTANCE --target runtime-env
 ```
 
 `secret init` is interactive and shows the recovery phrase once. `runtime-env` is a named target
@@ -61,8 +61,8 @@ decrypts the store.
 
 ### PostgreSQL board store
 
-A fresh `secretary bootstrap` creates `/opt/secretary/postgres-compose.yml` (or checks the one root
-installed), the `secretary-board-store_board-db` volume and `<instance>/board-store.env`, runs Alembic to the
+A fresh `ummanu bootstrap` creates `/opt/ummanu/postgres-compose.yml` (or checks the one root
+installed), the `ummanu-board-store_board-db` volume and `<instance>/board-store.env`, runs Alembic to the
 shipped head and verifies the owner/app/read logins and privilege boundary. PostgreSQL is the only
 container on this path and publishes only `127.0.0.1:5432`. Schema and roles are in
 [Board store](BOARD_STORE.md).
@@ -93,7 +93,7 @@ rejected credential blocks the card with `step: git-access-preflight` and a refu
 `unsupported-transport`, `unsafe-remote`, `remote-unresolved`); no workspace or head is created and the
 block is not retried. A preflight with no answer leaves the card in Ready. A credential refused later,
 at the gate, blocks with `git_access_refusal`. To recover: read the `project-git:<project>` rows of
-`secretary doctor --instance INSTANCE`, rotate or unlock the token, return the card to Ready.
+`ummanu doctor --instance INSTANCE`, rotate or unlock the token, return the card to Ready.
 
 ## Codex provider-internal fan-out policy
 
@@ -110,11 +110,11 @@ before the next row, and outputs only raw-stream digests and typed event summari
 ## System requirements
 
 The memory runtime loads a local embedding model and is the dominant memory consumer; an index
-rebuild is its peak. No supported minimum is declared: size the host from `secretary status --json`
+rebuild is its peak. No supported minimum is declared: size the host from `ummanu status --json`
 resource figures.
 
 The model cache is `DATA_DIR/memory/fastembed-cache`, never `/tmp`. `host.memory_threads` sets the
-ONNX Runtime inference limit (default `1`). `secretary doctor` prints the cache path and warns when
+ONNX Runtime inference limit (default `1`). `ummanu doctor` prints the cache path and warns when
 `data_dir` puts it under a temporary directory.
 
 Heads run on `local-pty`, which ships with the product: no host-owned head runtime is installed,
@@ -123,8 +123,8 @@ ordered after or reported (A20 step 9, [Head runtime](HEAD_RUNTIME.md#a20-exit-c
 ## Data plane
 
 ```bash
-python3 -P -m secretary data init --instance INSTANCE
-python3 -P -m secretary data export --instance INSTANCE [--copy-transcripts]
+python3 -P -m ummanu data init --instance INSTANCE
+python3 -P -m ummanu data export --instance INSTANCE [--copy-transcripts]
 ```
 
 `data init` creates the local layout and manifest. The memory-fact canon is
@@ -140,10 +140,10 @@ run at most once per five-minute window (a due push forces a fresh preparation).
 fail-closed: pending task audit, an `export.json` counter mismatch or a detected secret blocks the
 commit, the reason goes into the dispatcher's checkpoint state, and the next tick retries.
 
-The shipped memory pack `packaging/memory/product-secretary` is materialized into the memory canon
+The shipped memory pack `packaging/memory/product-ummanu` is materialized into the memory canon
 during install and upgrade, with its ownership and digest record in
-`INSTANCE/state/memory/packs/product-secretary.json`. It publishes facts under `product:secretary`. A
-local fact at a shipped id stops the upgrade. `secretary upgrade --no-pull` still compares the
+`INSTANCE/state/memory/packs/product-ummanu.json`. It publishes facts under `product:ummanu`. A
+local fact at a shipped id stops the upgrade. `ummanu upgrade --no-pull` still compares the
 checkout's pack digest to the ledger and restarts the memory service when reconciliation changed it.
 The ledger stays `pending` until the export is published and readable by the service user; the next
 upgrade retries.
@@ -152,19 +152,19 @@ upgrade retries.
 
 Install and upgrade reconcile an installation-owned `po_memory` stdio MCP entry in the installation
 user's `~/.claude.json`, `~/.codex/config.toml` and `DATA_DIR/codex-home`, preserving login state
-and unrelated entries. The command is `PRODUCT_ROOT/.venv/bin/secretary-memory-po-bridge`; its
+and unrelated entries. The command is `PRODUCT_ROOT/.venv/bin/ummanu-memory-po-bridge`; its
 environment names only the grant directory and loopback Memory URL, and no bearer is stored.
 
 The entry applies to Claude or Codex processes started afterwards; restart existing sessions to get
-`po_memory`. `secretary shell` and dispatcher-launched heads use the direct HTTP Memory endpoint with
+`po_memory`. `ummanu shell` and dispatcher-launched heads use the direct HTTP Memory endpoint with
 a role-bound capability instead; a worker or reviewer gets scope `project:<card-project> +
-product:secretary`.
+product:ummanu`.
 
 Inspect without exposing credentials:
 
 ```bash
-secretary upgrade --dry-run --no-pull --instance INSTANCE
-rg -n 'po_memory|secretary-memory-po-bridge' \
+ummanu upgrade --dry-run --no-pull --instance INSTANCE
+rg -n 'po_memory|ummanu-memory-po-bridge' \
   ~/.claude.json ~/.codex/config.toml \
   DATA_DIR/codex-home/config.toml
 ```
@@ -183,8 +183,8 @@ in under `DATA_DIR/codex-home` (`CODEX_HOME=DATA_DIR/codex-home codex login`), o
 there". There is no fallback to the legacy Orca home (`~/.config/orca/...`); A20 step 7 removed it
 (secretary-1723) once every live Codex head was proven to run on the data-dir login.
 
-Rung 3 needs to know the data dir. It comes from `SECRETARY_DATA_DIR`. The production dispatcher
-tick, the background agents and `secretary shell` set that variable for their own run from the
+Rung 3 needs to know the data dir. It comes from `UMMANU_DATA_DIR`. The production dispatcher
+tick, the background agents and `ummanu shell` set that variable for their own run from the
 selected instance, and the web unit sets it in its unit file. A process with no data dir, no profile
 `codex_home` and no `TA_CODEX_HOME` is refused.
 
@@ -206,10 +206,10 @@ through the same copy-once path, so the packaged defaults are never skipped, whi
 Check the login as the installation user:
 
 ```bash
-secretary doctor --offline --instance INSTANCE | grep 'codex home'
+ummanu doctor --offline --instance INSTANCE | grep 'codex home'
 #   error: codex home: no Codex login for this installation: log in under DATA_DIR/codex-home ...
 CODEX_HOME=DATA_DIR/codex-home codex login
-secretary doctor --offline --instance INSTANCE | grep 'codex home'
+ummanu doctor --offline --instance INSTANCE | grep 'codex home'
 #   codex home: DATA_DIR/codex-home (data-dir home)
 ```
 
@@ -224,7 +224,7 @@ ingested 468 of the 3217 rollouts there (`runtime/codex_home.py`, `_LEGACY_SESSI
 the curator's watermark names every one). No head is launched there. This covers the watchdog's
 activity signal, the delivery confirmation for service heads, the dispatcher's continuation recovery
 proof and the curator. Each reader counts a session only once. An explicit sessions override
-(`TA_CODEX_SESSIONS`, `SECRETARY_CODEX_SESSIONS`, `TA_CODEX_SESSIONS_DIR`) is still the only root
+(`TA_CODEX_SESSIONS`, `UMMANU_CODEX_SESSIONS`, `TA_CODEX_SESSIONS_DIR`) is still the only root
 while it is set.
 
 ### The PO workspace
@@ -248,12 +248,12 @@ root-owned by an earlier run is repaired:
 The MCP entries are the same stdio bridge as the user-scoped ones above, written by the same
 writers. The skills are the `po` role of `skills/manifest.toml`: `open-sprint`, `open-issue`,
 `grilling`, `knowledge-doc`, delivered through targets whose root starts with `@po/`. A skill entry
-`secretary/open-sprint` reads the skill from the secretary role's tree, so shared skills have one
+`ummanu/open-sprint` reads the skill from the ummanu role's tree, so shared skills have one
 source. `role-skills audit|sync` resolves `@po/` from the instance's `data_dir`, or `--data-dir`;
 with no `instance.yaml` those targets are listed as unresolved and skipped.
 
 `role-skills sync` removes a skill copy from a target root once no manifest declares that skill for
-that root, but only a copy it can prove it delivered: one carrying the `.secretary-role-skill`
+that root, but only a copy it can prove it delivered: one carrying the `.ummanu-role-skill`
 marker it writes into every copy, or, for copies delivered before the marker existed, one whose
 `SKILL.md` is byte for byte a version the manifest's repository shipped under that name. Other
 directories in a shell root are never touched. `audit` lists pending removals under `retired`.
@@ -262,12 +262,12 @@ Check:
 
 ```bash
 ls -la DATA_DIR/po DATA_DIR/po/.claude/skills DATA_DIR/po/.agents/skills
-secretary role-skills audit --instance INSTANCE
+ummanu role-skills audit --instance INSTANCE
 ```
 
 ### PO head sessions and turns
 
-`secretary.po.runner` runs the PO head headless, without a head runtime. A **session** is one
+`ummanu.po.runner` runs the PO head headless, without a head runtime. A **session** is one
 conversation with one CLI (`claude` or `codex`), one model and one reasoning effort, with `DATA_DIR/po` as cwd. A **turn**
 is one CLI process with full permissions (`--dangerously-skip-permissions`,
 `--dangerously-bypass-approvals-and-sandbox`), its own process group, and the owner's message on stdin:
@@ -291,15 +291,15 @@ as reported). Codex: its `--json` event stream names no model, so it is the `mod
 `turn_context` in the thread's rollout, `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*-THREAD_ID.jsonl`
 (`CODEX_HOME` of the turn environment, else `~/.codex`). A turn that reported nothing (no result object,
 no rollout) keeps `null`; the session reads show the latest turn's non-null value.
-**Environment.** A turn gets the `po-serve` environment (HOME, auth, `SECRETARY_*`, `TA_*` kept) with
-the directory of the interpreter running `po-serve` (the product runtime, `/home/dev/secretary/.venv/bin`
+**Environment.** A turn gets the `po-serve` environment (HOME, auth, `UMMANU_*`, `TA_*` kept) with
+the directory of the interpreter running `po-serve` (the product runtime, `/home/dev/ummanu/.venv/bin`
 on prod) first on `PATH` and the product source it imports first on `PYTHONPATH`. So `python3 -P -m
-secretary ...` and `secretary ...` from the PO workspace run the product, not the system Python.
+ummanu ...` and `ummanu ...` from the PO workspace run the product, not the system Python.
 `PoRunner.turn_environment()` computes it for every turn and re-run; an explicit `env=` replaces it.
 Check, as the runtime user from `DATA_DIR/po` (prints the service interpreter, then `ok`):
 
 ```bash
-BIN=$(dirname "$(tr '\0' '\n' </proc/$(systemctl show -p MainPID --value secretary-po.service)/cmdline | head -1)"); echo "$BIN"; env PATH="$BIN:$PATH" sh -c 'python3 -P -m secretary --help >/dev/null && secretary --help >/dev/null && echo ok'
+BIN=$(dirname "$(tr '\0' '\n' </proc/$(systemctl show -p MainPID --value ummanu-po.service)/cmdline | head -1)"); echo "$BIN"; env PATH="$BIN:$PATH" sh -c 'python3 -P -m ummanu --help >/dev/null && ummanu --help >/dev/null && echo ok'
 ```
 
 Board store tables (revisions `0008_po_sessions`, `0009_po_requests`, `0010_po_session_close`,
@@ -325,7 +325,7 @@ request row or process. A replay of a send made before the close still answers i
 deleted and a closed session is not reopened; its feed and raw output stay. Check:
 
 ```bash
-psql "$SECRETARY_DB_READ_URL" -c "SELECT session_id, state, closed_at, closed_by FROM po_sessions ORDER BY created_at DESC LIMIT 10"
+psql "$UMMANU_DB_READ_URL" -c "SELECT session_id, state, closed_at, closed_by FROM po_sessions ORDER BY created_at DESC LIMIT 10"
 ```
 
 Raw output of a turn is in `DATA_DIR/po-runs/SESSION/turn-NNNN.{prompt,stdout,stderr,last-message}`,
@@ -345,10 +345,10 @@ pid until the PO service's next start re-runs it.
 
 ### The PO service
 
-`secretary-po.service` (`secretary po-serve --instance INSTANCE`, `Type=simple`, `Restart=always`, the
+`ummanu-po.service` (`ummanu po-serve --instance INSTANCE`, `Type=simple`, `Restart=always`, the
 runtime user, the web unit's environment) is the one owner of PO turns: it holds the installation's only
 `PoRunner`, and every turn process is a child in its control group. It has no `PartOf=`/`BindsTo=` tie to
-`secretary-web.service`, so **a web restart touches no turn**: a running turn finishes and its answer
+`ummanu-web.service`, so **a web restart touches no turn**: a running turn finishes and its answer
 reaches the feed. `reconcile apply` and `upgrade` install and enable it with the other catalogue units,
 doctor lists it, and `host.components.po.enabled: false` opts out (then no PO turn runs anywhere). The
 service takes an exclusive lock, `DATA_DIR/po-service/service.lock`; a second `po-serve` on the same data
@@ -379,7 +379,7 @@ create can never take the id of a message still waiting in the queue.
 
 **Endpoint.** The Unix socket `DATA_DIR/po-service/po.sock` (mode 0600 in a 0700 directory): one JSON
 request line, one JSON answer line, ops `submit`, `create_session`, `sprint_session`, `stop_turn`,
-`close_session`, `rename_session`, `status` and `restart` (`secretary.po.client`). The web is only a client: it reads the
+`close_session`, `rename_session`, `status` and `restart` (`ummanu.po.client`). The web is only a client: it reads the
 store and the queue directory and sends every write here. The service runs a request only once its
 whole line arrived.
 
@@ -406,10 +406,10 @@ sending again with the same form is safe`, `data.reason = outcome_unknown`), a s
 unexpected error. A lost answer to a stop or a close says repeating it is safe (both are idempotent).
 The web never starts a turn itself.
 
-**Turn environment.** Every turn process gets `SECRETARY_PO_SESSION=<session_id>` beside the product
+**Turn environment.** Every turn process gets `UMMANU_PO_SESSION=<session_id>` beside the product
 runtime's `PATH`/`PYTHONPATH`, on its first launch, a re-run and a relaunch alike. `sprint create` inside
 a turn takes it as the default of `--po-session`, so the sprint records the session that opened it.
-Beside it, `SECRETARY_PO_REQUEST=<request id>` names the input the turn answers (read from `po_requests`
+Beside it, `UMMANU_PO_REQUEST=<request id>` names the input the turn answers (read from `po_requests`
 for that turn, so a re-run names the same one; unset when the input carried no request id, and never
 inherited from the service's own environment). `task create --role po` inside a turn records both as
 the card's origin, and the card's result comes back to that session when it settles
@@ -417,8 +417,8 @@ the card's origin, and the card's result comes back to that session when it sett
 
 **Session title.** `po_sessions.title` (0019) is a readable name, null for an untitled session. The owner
 sets it from the session page (`POST /po/sessions/ID/title`, field `title`); the PO sets its own with
-`secretary po rename --instance I --title TEXT [--session ID]`, whose `--session` defaults to
-`$SECRETARY_PO_SESSION`. Both go through the service's `rename_session` to `PoStore.set_title`, the one
+`ummanu po rename --instance I --title TEXT [--session ID]`, whose `--session` defaults to
+`$UMMANU_PO_SESSION`. Both go through the service's `rename_session` to `PoStore.set_title`, the one
 rule: trimmed, one line (no C0/C1 control character), at most 120 characters; empty clears it. It carries
 no request id and writes no `po_requests` row: a repeat sets the same value. A closed session may be
 renamed. The resolver titles a sprint's new session with the sprint's ref (`sprint:<N>`). The CLI prints
@@ -438,8 +438,8 @@ under the service lock, so concurrent resolves of one sprint open one session; a
 request id opens nothing and finishes whatever a failed attempt left. Check:
 
 ```bash
-secretary sprint show --ref sprint:ID | jq '{po_session, allowed_productions}'
-secretary sprint show --ref sprint:ID | jq '.comments[] | select(.body | contains("no longer exists"))'
+ummanu sprint show --ref sprint:ID | jq '{po_session, allowed_productions}'
+ummanu sprint show --ref sprint:ID | jq '.comments[] | select(.body | contains("no longer exists"))'
 ```
 
 **The dispatcher, a second source.** The dispatcher submits `decision` and `operation` cards
@@ -464,11 +464,11 @@ This is the only place the rule is evaluated, and it refuses nothing: every oper
 normal PO turn, with the service's `## Production rights (the PO service)` section after the card's text
 (the `note` of its queue file; the turn's prompt and the `/po` feed show it). An operation touching `none`
 or an allowed production says the sprint allows it and runs with no confirmation. Any other production
-goes to the PO to decide under the owner's standing rule (secretary production by default; others only as
+goes to the PO to decide under the owner's standing rule (ummanu production by default; others only as
 agreed at sprint planning). The journal says:
 
 ```text
-secretary po: <card> queued for the PO to decide: touches production <p>; sprint <ref> allows [<list>]
+ummanu po: <card> queued for the PO to decide: touches production <p>; sprint <ref> allows [<list>]
 ```
 
 The PO then either records the allowance (`sprint allow-production --role po`, audit kind
@@ -477,13 +477,13 @@ handover`, like any card it may not decide. The service never hands a card over 
 on a handed-over card (`input: owner_answer`) is queued without a rights section: the owner decided. Missing
 facts, an operation naming no production and a sprint the service cannot read are refused `unavailable`:
 nothing is queued, the dispatcher repeats the submit each tick (`po-service-unanswered`), and the journal
-says `secretary po: dispatcher input <id> not queued: <what is missing>` or `secretary po: <card> not
+says `ummanu po: dispatcher input <id> not queued: <what is missing>` or `ummanu po: <card> not
 queued: sprint <ref> cannot be read for its allowed productions (...)`. Check a card and its sprint:
 
 ```bash
-secretary task show --ref REF | jq '{touches_production, waiting_owner}'
-secretary sprint show --ref sprint:ID | jq '.allowed_productions'
-journalctl -u secretary-po.service | grep -e 'queued for the PO to decide' -e 'not queued'
+ummanu task show --ref REF | jq '{touches_production, waiting_owner}'
+ummanu sprint show --ref sprint:ID | jq '.allowed_productions'
+journalctl -u ummanu-po.service | grep -e 'queued for the PO to decide' -e 'not queued'
 ```
 
 **Service start.** Every turn left `running` is looked at once:
@@ -508,12 +508,12 @@ first after a second and then doubling up to 30 s (journal: `still running witho
 retries in Ns`), and the sessions of those rows take no queued input while every other session goes on.
 So a restart of the PO service costs at most the turn it interrupted, re-run.
 
-**Upgrades never kill a running turn.** The PO itself runs `secretary upgrade` inside a turn. The `po`
-step of `secretary upgrade` asks for a restart when the service's process inputs moved (product code or
+**Upgrades never kill a running turn.** The PO itself runs `ummanu upgrade` inside a turn. The `po`
+step of `ummanu upgrade` asks for a restart when the service's process inputs moved (product code or
 dependencies, bundled schemas, the unit file) or its **process receipt** does not match the checkout,
 and the service decides by one rule
 (`PoService.request_restart`): idle, it exits at once and `Restart=always` starts the new code, which the
-step waits for (`restarted secretary-po.service while idle`); busy, it starts no queued
+step waits for (`restarted ummanu-po.service while idle`); busy, it starts no queued
 turn (new messages keep queueing) and exits by itself as soon as its running turns settle — the step reports `PO service restart
 deferred: N turn(s) running` and does not fail. The request is the marker `DATA_DIR/po-service/restart-pending`;
 the next process removes it at start. A stopped service is started.
@@ -536,18 +536,18 @@ pending (`PO service restart pending: ...`, the deferred case), and an uninstall
 named as not checked. Check:
 
 ```bash
-systemctl status secretary-po.service
-journalctl -u secretary-po.service | grep 'secretary po'   # recovery, re-runs, set-aside inputs, deferred restarts
+systemctl status ummanu-po.service
+journalctl -u ummanu-po.service | grep 'ummanu po'   # recovery, re-runs, set-aside inputs, deferred restarts
 ls -l DATA_DIR/po-queue/ DATA_DIR/po-queue/refused/ DATA_DIR/po-service/
 jq . DATA_DIR/po-service/process-receipt.json                # compare .process.pid with MainPID
 cat DATA_DIR/po-queue/*.json                               # what waits, oldest first by name
-psql "$SECRETARY_DB_READ_URL" -c "SELECT session_id, seq, state, reason FROM po_turns WHERE state <> 'completed' OR reason IS NOT NULL ORDER BY started_at DESC LIMIT 10"
+psql "$UMMANU_DB_READ_URL" -c "SELECT session_id, seq, state, reason FROM po_turns WHERE state <> 'completed' OR reason IS NOT NULL ORDER BY started_at DESC LIMIT 10"
 ```
 
 ### The PO head in the dashboard
 
 `/po` is a client of the PO service ([The PO service](#the-po-service)): its pages read the board store
-and the queue, and every create, send, stop and close goes over the service's socket. `secretary
+and the queue, and every create, send, stop and close goes over the service's socket. `ummanu
 web-serve` builds no runner and recovers no turn. A PO head is a shell on this host, so `/po` has its own token on top of the
 front's password.
 
@@ -559,11 +559,11 @@ is absent and never rewrites an existing one. Read it on the host:
 sudo -u RUNTIME_USER cat DATA_DIR/po-web-token
 ```
 
-**Rotate** by deleting the file and running the step again (`secretary upgrade`, or install). Every
+**Rotate** by deleting the file and running the step again (`ummanu upgrade`, or install). Every
 browser cookie issued under the old token stops working on the next request; nothing needs a restart.
 
 **Logging in.** Open `/po`, enter the token. The form posts to `/po/login`, which compares it with
-`hmac.compare_digest` and sets cookie `secretary_po`: `HttpOnly; SameSite=Strict; Path=/po`, 30 days,
+`hmac.compare_digest` and sets cookie `ummanu_po`: `HttpOnly; SameSite=Strict; Path=/po`, 30 days,
 plus `Secure` when the request came through the TLS front (the front sets `X-Forwarded-Proto: https`).
 The cookie value is an HMAC keyed by the token, never the token. Without a valid cookie every `/po`
 route answers 401 (a page with the login form, or JSON `po_token_required`) before the PO service or the
@@ -642,10 +642,10 @@ Observe an ordinary, already-authorized board transition; do not create a card c
 tick:
 
 ```bash
-secretary status --json --instance INSTANCE
-secretary dispatcher production-observe --instance INSTANCE
-secretary doctor --instance INSTANCE
-journalctl --user -u secretary-dispatcher-production.service --since "TIME"
+ummanu status --json --instance INSTANCE
+ummanu dispatcher production-observe --instance INSTANCE
+ummanu doctor --instance INSTANCE
+journalctl --user -u ummanu-dispatcher-production.service --since "TIME"
 ```
 
 A changed normalized board or run export gives one local checkpoint commit at the end of that tick
@@ -659,14 +659,14 @@ observation.
 
 ## Status and doctor
 
-`secretary status --json --instance INSTANCE` is the read-only operational snapshot and safe to poll.
+`ummanu status --json --instance INSTANCE` is the read-only operational snapshot and safe to poll.
 It reports managed services and timers, projects and heads, active dispatcher attempts (workspace,
 watchdog liveness, progress, respawn state), sprint observers, pause state, checkpoint freshness,
 memory index state, and host disk, memory and load. A live run reads each head's liveness the way the
 dispatcher's watchdog does (`command_terminal_status`: the pid heartbeat and the exact-run provider
 cursor) into the watchdog's `panel` field; `--offline` reports it as `not-probed`.
 
-`secretary doctor --json --instance INSTANCE` evaluates invariants over the same snapshot and exits
+`ummanu doctor --json --instance INSTANCE` evaluates invariants over the same snapshot and exits
 non-zero for a broken or unavailable host. Use `status` for what is running and `doctor` for what
 needs repair.
 
@@ -674,7 +674,7 @@ Doctor measures free bytes on the filesystem containing the configured `data_dir
 existing ancestor). Below 10 GiB it reports `root_disk_low` with `free_bytes` and
 `threshold_bytes`; a failed or malformed probe reports `root_disk_unavailable` and exits as
 unavailable. The threshold and the seven-day build-cache age are defined once in
-`secretary.infra.host_space_policy`. Offline doctor skips the host probe; dry-run remains read-only.
+`ummanu.infra.host_space_policy`. Offline doctor skips the host probe; dry-run remains read-only.
 
 The `recovery` object is shared with doctor:
 
@@ -715,9 +715,9 @@ The bell in the dashboard's header counts the owner events nobody has read; `/ow
 same list from a terminal, read-only through the board store's read role (it marks nothing read):
 
 ```bash
-python3 -P -m secretary owner-events list --instance INSTANCE            # open needs-the-owner first, then newest first
-python3 -P -m secretary owner-events list --instance INSTANCE --unread   # only what nobody read
-python3 -P -m secretary owner-events list --instance INSTANCE --json     # {unread, events: [...]}
+python3 -P -m ummanu owner-events list --instance INSTANCE            # open needs-the-owner first, then newest first
+python3 -P -m ummanu owner-events list --instance INSTANCE --unread   # only what nobody read
+python3 -P -m ummanu owner-events list --instance INSTANCE --json     # {unread, events: [...]}
 ```
 
 Each line is `*` for unread, `#id`, the moment, the class, the kind and the subject, then the text.
@@ -736,7 +736,7 @@ What each kind means:
 | `sprint_closed` | notice | a sprint was closed | read its closeout on the sprint page |
 | `sprint_stopped` | notice | a sprint's budget reached the hard limit and it was stopped | decide whether to reopen it |
 | `budget_signal` | notice | a sprint's budget reached its signal threshold | look at why its cards keep going round |
-| `observer_dead` | notice | a sprint's observer head is dead and the tick did not relaunch it (backoff, drain, a failed bring-up) | `secretary status`; the dispatcher retries after the backoff |
+| `observer_dead` | notice | a sprint's observer head is dead and the tick did not relaunch it (backoff, drain, a failed bring-up) | `ummanu status`; the dispatcher retries after the backoff |
 | `head_dead` | notice | a worker or reviewer head died or stalled again after its one respawn, or its respawn failed; the card is Blocked | read the card's Blocked reason |
 | `po_turn_failed` | notice | a PO turn ended `failed` (its subject is the card a dispatcher input was about, else `po-session:<id>`) | read the turn on `/po`; for a handed-over card, a new owner comment sends the answer again |
 | `provider_red` | notice | doctor found a provider's key expired or login missing, its quota spent, its provider down, or its probe broken | fix the login or wait for the quota |
@@ -778,9 +778,9 @@ against the thresholds a sprint is judged on.
 
 | what | where it lands | how to read it |
 | --- | --- | --- |
-| one web request | `journalctl -u secretary-web.service` | `127.0.0.1 GET /sprints 200 4612.3ms` — client, verb, request target, HTTP status, and the milliseconds the application spent on it. One line per answered request, including a HEAD, a refusal and a contained 500. |
-| one dispatcher tick | the dispatcher journal, and `secretary status` | `dispatcher.last_tick` carries `duration_ms` beside the outcome already recorded for that tick (`seq`, `at`, `status`, `healthy`, `actions`). The human `secretary status` prints it as `last tick: #12 ok at ... in 4322 ms`. |
-| one checkpoint run | `secretary status` | `checkpoint.checkpoint_duration_ms`, printed by `secretary status` and by `secretary doctor` as `checkpoint: committed in 2100 ms`. Every outcome carries its own number, including an unchanged run and a blocked one — a no-change checkpoint still regenerated the whole projection. |
+| one web request | `journalctl -u ummanu-web.service` | `127.0.0.1 GET /sprints 200 4612.3ms` — client, verb, request target, HTTP status, and the milliseconds the application spent on it. One line per answered request, including a HEAD, a refusal and a contained 500. |
+| one dispatcher tick | the dispatcher journal, and `ummanu status` | `dispatcher.last_tick` carries `duration_ms` beside the outcome already recorded for that tick (`seq`, `at`, `status`, `healthy`, `actions`). The human `ummanu status` prints it as `last tick: #12 ok at ... in 4322 ms`. |
+| one checkpoint run | `ummanu status` | `checkpoint.checkpoint_duration_ms`, printed by `ummanu status` and by `ummanu doctor` as `checkpoint: committed in 2100 ms`. Every outcome carries its own number, including an unchanged run and a blocked one — a no-change checkpoint still regenerated the whole projection. |
 
 The web duration is the application's part of the answer — reading the body, handling the request,
 and writing the headers and body back — not the whole socket lifetime. The tick duration is the
@@ -910,9 +910,9 @@ scenario itself. An installation with no open session at all still exits 2.
 
 The PO poll needs this installation's PO token (`DATA_DIR/po-web-token`, mode 0600), so run the
 command as the runtime user. The data directory is resolved the way the product resolves it:
-`--data-dir`, then `SECRETARY_DATA_DIR`, then `SECRETARY_INSTANCE`, then the instance the CLI
-itself defaults to (`secretary.onboarding.DEFAULT_INSTANCE`, read through
-`secretary.config.instance_data_dir`). That last step is what makes the one command above work in
+`--data-dir`, then `UMMANU_DATA_DIR`, then `UMMANU_INSTANCE`, then the instance the CLI
+itself defaults to (`ummanu.onboarding.DEFAULT_INSTANCE`, read through
+`ummanu.config.instance_data_dir`). That last step is what makes the one command above work in
 an ordinary checkout shell, which does not inherit the service unit's environment. The output names
 the directory it resolved and which of those four rules chose it.
 
@@ -977,11 +977,11 @@ binding exists only in command output.
 Do not edit instance files by hand; each stage rewrites its own artifacts.
 
 ```bash
-python3 -P -m secretary project add PROJECT_PATH --instance "$INSTANCE"
-python3 -P -m secretary project provision-start PROJECT_ID --instance "$INSTANCE"
+python3 -P -m ummanu project add PROJECT_PATH --instance "$INSTANCE"
+python3 -P -m ummanu project provision-start PROJECT_ID --instance "$INSTANCE"
 # the provision agent writes result.yaml next to task.yaml, taking run_id and scanner head from the task
-python3 -P -m secretary project provision-apply PROJECT_ID --instance "$INSTANCE"
-python3 -P -m secretary project gate PROJECT_ID --instance "$INSTANCE"
+python3 -P -m ummanu project provision-apply PROJECT_ID --instance "$INSTANCE"
+python3 -P -m ummanu project gate PROJECT_ID --instance "$INSTANCE"
 ```
 
 A clean run: `project add` prints an ok scanner status and pending provision; `provision-start`
@@ -1013,10 +1013,10 @@ the gate refuse with "enabled binding has no matching passed gate result". `--re
 supported way out; do not edit the binding or adapter by hand:
 
 ```bash
-python3 -P -m secretary project add PROJECT_PATH --re-onboard --instance "$INSTANCE"
-python3 -P -m secretary project provision-start PROJECT_ID --instance "$INSTANCE"
-python3 -P -m secretary project provision-apply PROJECT_ID --instance "$INSTANCE"
-python3 -P -m secretary project gate PROJECT_ID --instance "$INSTANCE"
+python3 -P -m ummanu project add PROJECT_PATH --re-onboard --instance "$INSTANCE"
+python3 -P -m ummanu project provision-start PROJECT_ID --instance "$INSTANCE"
+python3 -P -m ummanu project provision-apply PROJECT_ID --instance "$INSTANCE"
+python3 -P -m ummanu project gate PROJECT_ID --instance "$INSTANCE"
 ```
 
 Identity must still match and the binding must validate; otherwise the command writes nothing and the
@@ -1068,8 +1068,8 @@ The mechanical gate reads `validation.required_checks` from the adapter:
 
 ## Starting a sprint
 
-A person starts a sprint through an interactive secretary session using the secretary role skill
-`open-sprint` (delivered by `secretary role-skills sync`, in both Claude and Codex targets). The skill
+A person starts a sprint through an interactive ummanu session using the ummanu role skill
+`open-sprint` (delivered by `ummanu role-skills sync`, in both Claude and Codex targets). The skill
 gathers live context, checks that no other open sprint holds the needed repositories, interviews on
 unresolved product forks and fixes a checkable Definition of Done. The goal is the person's choice.
 A sprint needs its Product, at least one open Issue and at least one reserved registered project; an
@@ -1077,13 +1077,13 @@ installation holds one open sprint unless [two open sprints](#the-two-sprint-pil
 project another open sprint reserves is a resource conflict.
 
 ```bash
-python3 -P -m secretary sprint create --role po --actor <actor> \
+python3 -P -m ummanu sprint create --role po --actor <actor> \
   --goal "<one sentence>" --dod-file DOD.md \
   --product <product-id> --issue issue:<ID> --project <project-id> \
   --observer <head-profile|none> \
   --repository <repo> [--repository <repo>]
-python3 -P -m secretary sprint show --ref sprint:<ID>
-python3 -P -m secretary sprint status --ref sprint:<ID>
+python3 -P -m ummanu sprint show --ref sprint:<ID>
+python3 -P -m ummanu sprint status --ref sprint:<ID>
 ```
 
 After that the sprint is not driven by hand: the production tick launches the observer head,
@@ -1097,9 +1097,9 @@ knowledge document holds only the "why" and a pointer to the sprint reference.
 ## What is running right now
 
 ```bash
-python3 -P -m secretary sprint list                      # every sprint, with what each is doing
-python3 -P -m secretary sprint list --status open        # only the ones that are open
-python3 -P -m secretary sprint status --ref sprint:1431  # one sprint, plus its own fields
+python3 -P -m ummanu sprint list                      # every sprint, with what each is doing
+python3 -P -m ummanu sprint list --status open        # only the ones that are open
+python3 -P -m ummanu sprint status --ref sprint:1431  # one sprint, plus its own fields
 ```
 
 Both are reads over the same protocol operations and print one JSON document; the listing's
@@ -1130,7 +1130,7 @@ answered. Which section each source can take away is in
   `--data-dir` the command exits `1` with `backend_unavailable`.
 
 Exit statuses: unknown sprint or malformed filter `2` (`not_found` / `validation`), a refusing source
-`1` (`backend_unavailable`). `secretary sprint show --ref` reads the entity record, comments included.
+`1` (`backend_unavailable`). `ummanu sprint show --ref` reads the entity record, comments included.
 
 ### A card waiting on its e2e run
 
@@ -1195,7 +1195,7 @@ distinct v2 semantic request. Missing, unreadable, ambiguous, staged or unrelate
 refuses delivery. Recovery does not rewrite audit facts or infer bytes from a current timestamp.
 New additive dispatcher fields default empty when an older record is loaded; the body grammar
 and latest receipt remain compatible with existing reviewers and observer consumers. Refresh
-the secretary dispatcher through its supported upgrade route before continuation; an older
+the ummanu dispatcher through its supported upgrade route before continuation; an older
 dispatcher does not understand the v2 effect fence and must not resume its mutable writer path.
 
 The caller uses the existing durable refusal/escalation convention: every failure records ref,
@@ -1226,7 +1226,7 @@ Blocked. What you see:
   waiting on <decision card>`. Cards that need a run later join the same decision with a comment on
   it; there is one decision per spent budget.
 
-What you do: answer on the decision card as the owner (the card page's comment form, or `secretary task
+What you do: answer on the decision card as the owner (the card page's comment form, or `ummanu task
 comment --ref <decision card> --role owner --body-file ANSWER.md`) holding exactly one of these two
 lines, in any case, with anything else you want to say around it:
 
@@ -1238,7 +1238,7 @@ e2e budget: no
 A comment with neither line, with both, or with two raise lines is not an answer. Your comment reaches
 the PO session with its event id, and:
 
-- on `e2e budget: raise <N>` the PO runs `secretary sprint e2e-budget --ref sprint:<N> --role po
+- on `e2e budget: raise <N>` the PO runs `ummanu sprint e2e-budget --ref sprint:<N> --role po
   --authorized-by <your comment's event id>` and completes the decision card. The raise is your N and
   nothing else: an `--add` other than it is refused. The waiting cards dispatch on the next tick. The
   PO cannot raise the budget without your comment: the command refuses any authorization but your
@@ -1249,7 +1249,7 @@ the PO session with its event id, and:
 
 A card outside every sprint has its own cap of 3 runs; every dispatch attempt counts, one GitHub
 refused included. If a PO session cut it, the same decision card goes to that session, answered the
-same way, and the raise is `secretary task e2e-budget --ref <card> --role po --authorized-by <event
+same way, and the raise is `ummanu task e2e-budget --ref <card> --role po --authorized-by <event
 id>`. If nobody's PO session cut it, the card is Blocked with `e2e run cap
 reached (3)` and the bell shows `e2e_budget_spent`.
 
@@ -1308,9 +1308,9 @@ Both are reads: they write nothing and never re-send, retry or repair. Contract 
 ### The last commands, across everything
 
 ```bash
-python3 -P -m secretary web-read commands --instance ~/secretary-instance
-python3 -P -m secretary web-read commands --instance ~/secretary-instance --limit 20
-python3 -P -m secretary web-read commands --instance ~/secretary-instance --json
+python3 -P -m ummanu web-read commands --instance ~/secretary-instance
+python3 -P -m ummanu web-read commands --instance ~/secretary-instance --limit 20
+python3 -P -m ummanu web-read commands --instance ~/secretary-instance --json
 ```
 
 One line per command, newest first, across cards, sprints, products and issues: who, action, entity,
@@ -1321,7 +1321,7 @@ be read; an empty history is `items: []`.
 ### What happened to a request id
 
 ```bash
-python3 -P -m secretary web-read request --instance ~/secretary-instance --request-id ID
+python3 -P -m ummanu web-read request --instance ~/secretary-instance --request-id ID
 ```
 
 Use the `web-read request` form when a command failed, timed out or was interrupted, instead of
@@ -1329,7 +1329,7 @@ running it again to find out:
 
 | answer | what to do |
 | --- | --- |
-| `committed` | nothing. If `staged` is true beside it, run `secretary task reconcile-audit`; the operation itself is done |
+| `committed` | nothing. If `staged` is true beside it, run `ummanu task reconcile-audit`; the operation itself is done |
 | `pending` | repeat the operation **with the same request id**; a new id starts a second operation |
 | `not_found` | the installation never saw it; safe to send |
 | `unknown` | the audit could not be read; repair the journal and ask again. Not `not_found` |
@@ -1343,7 +1343,7 @@ id, `1` with `backend_unavailable` if the layer could not run.
 A PO intervenes in a running sprint with a comment on the entity, not by editing its cards.
 
 ```bash
-python3 -P -m secretary sprint comment --ref sprint:1431 --role po --actor <actor> \
+python3 -P -m ummanu sprint comment --ref sprint:1431 --role po --actor <actor> \
   --request-id po-2026-09-06-slow-down --body-file NOTE.md
 ```
 
@@ -1356,7 +1356,7 @@ with `validation`, exit `2`. A closed or stopped sprint accepts a comment too
 ### Reading what happened to that comment
 
 ```bash
-python3 -P -m secretary sprint comment-delivery --ref sprint:1431 --comment-id evt_<...>
+python3 -P -m ummanu sprint comment-delivery --ref sprint:1431 --comment-id evt_<...>
 ```
 
 It only reads; redelivery belongs to the production tick. States are defined in
@@ -1373,7 +1373,7 @@ It only reads; redelivery belongs to the production tick. States are defined in
 
 `handed_over` means the batch covering the comment was acknowledged, not that the observer read or
 acted on it; `acceptance.established` is always `false`. To judge that, read the next resume entry
-(`secretary sprint status --ref sprint:ID`, `decision.entry`). Only a `po` comment wakes the observer;
+(`ummanu sprint status --ref sprint:ID`, `decision.entry`). Only a `po` comment wakes the observer;
 other roles' comments ride along with a later significant event.
 
 ## Closing a sprint
@@ -1402,7 +1402,7 @@ cards:
 decided about the remainder. The close writes it into `state/knowledge` and links it to the sprint.
 
 ```bash
-python3 -P -m secretary sprint close --role po --actor <actor> --ref sprint:1431 \
+python3 -P -m ummanu sprint close --role po --actor <actor> --ref sprint:1431 \
   --request-id close-2026-09-07-1431 \
   --reason "the goal is reached far enough to cut the next sprint; the rest is deferred" \
   --decisions-file DECISIONS.yaml --closeout-file CLOSEOUT.md
@@ -1428,16 +1428,16 @@ refused with `validation`, exit `2`.
 | `4` | pending | repeat the same request id |
 
 The close stops no head. The next production tick stops the observer of a sprint that is no longer
-open and drops its record; after one tick confirm with `secretary sprint status --ref sprint:ID` that
+open and drops its record; after one tick confirm with `ummanu sprint status --ref sprint:ID` that
 the observer reads `ended`.
 
 ```bash
-python3 -P -m secretary sprint close-result --ref sprint:1431 --event-id evt_<...>
+python3 -P -m ummanu sprint close-result --ref sprint:1431 --event-id evt_<...>
 ```
 
 ### Commenting after the close
 
-`secretary sprint comment` on a closed or stopped sprint saves and audits the comment and does nothing
+`ummanu sprint comment` on a closed or stopped sprint saves and audits the comment and does nothing
 else: no reopen, no reservation, no head. `sprint comment-delivery` answers `not_deliverable`.
 
 ## The two-sprint pilot
@@ -1458,7 +1458,7 @@ Add to `instance.yaml` and commit like any config change:
 open_sprint_limit: 2
 ```
 
-Only `1` and `2` are accepted. Anything else keeps the limit at one and `secretary doctor` reports an
+Only `1` and `2` are accepted. Anything else keeps the limit at one and `ummanu doctor` reports an
 `open_sprint_limit` finding. The value is read at each admission; nothing restarts.
 
 ### Verifying it took effect
@@ -1466,7 +1466,7 @@ Only `1` and `2` are accepted. Anything else keeps the limit at one and `secreta
 A clean `doctor` does not distinguish `2` from absent. Read the effective limit (config read only):
 
 ```bash
-python3 -c 'import sys; from pathlib import Path; from secretary.sprints import instance_open_sprint_limit; print(instance_open_sprint_limit(Path(sys.argv[1])))' <instance>
+python3 -c 'import sys; from pathlib import Path; from ummanu.sprints import instance_open_sprint_limit; print(instance_open_sprint_limit(Path(sys.argv[1])))' <instance>
 ```
 
 `1` after writing `2` means a different file was read or the value was refused. The count refusal reads
@@ -1514,7 +1514,7 @@ refuses every new `create` and `reopen`. A checkpoint taken with two open sprint
 onto a limit-one installation (`restored open sprints are not admissible on this installation`).
 
 1. Close the second sprint ([Closing a sprint](#closing-a-sprint)).
-2. Confirm `python3 -P -m secretary sprint list --status open` shows exactly one.
+2. Confirm `python3 -P -m ummanu sprint list --status open` shows exactly one.
 3. Set `open_sprint_limit: 1` in `instance.yaml` (or delete the key) and commit.
 4. Verify the effective limit is `1` with the read-back command.
 5. Let one production tick write and push the checkpoint.
@@ -1524,20 +1524,20 @@ and a restore of that window's archive are refused. Keep that window short.
 
 ## Dispatcher task Python isolation
 
-Every new card workspace gets the dispatcher-owned `.secretary-task-env/venv`, separate from the
+Every new card workspace gets the dispatcher-owned `.ummanu-task-env/venv`, separate from the
 adapter-owned `.venv`. Before creating it the dispatcher appends any missing lines to the repository's
-`info/exclude`: `.secretary-task-env/`, `/TASK.md` and `/state/checks/`. Projects need no `.gitignore`
+`info/exclude`: `.ummanu-task-env/`, `/TASK.md` and `/state/checks/`. Projects need no `.gitignore`
 entries; linked worktrees share the file, and the entries stay after cleanup.
 
 Everything else the pipeline generates in a card workspace is owned too, so a settled Done workspace is
 removable under the unchanged cleanup dirtiness rule. Worker and reviewer heads run with
-`PYTHONPYCACHEPREFIX`, `RUFF_CACHE_DIR` and `MYPY_CACHE_DIR` pointing into `.secretary-task-env/`; the
+`PYTHONPYCACHEPREFIX`, `RUFF_CACHE_DIR` and `MYPY_CACHE_DIR` pointing into `.ummanu-task-env/`; the
 broad receipt lands there; and files the editable install creates in the source tree (for example
 `src/*.egg-info/`) are recorded with their exact digests in the cleanup journal's `generated` map right
 after the install. A file that existed before the install, or that a head later rewrites, stays author work.
 Tests often start child interpreters with an environment built from scratch, which drops
-`PYTHONPYCACHEPREFIX`, so the venv's site-packages also holds `00-secretary-task-pycache.pth`: it sets
-`sys.pycache_prefix` to `.secretary-task-env/pycache` for every interpreter of that venv unless an explicit
+`PYTHONPYCACHEPREFIX`, so the venv's site-packages also holds `00-ummanu-task-pycache.pth`: it sets
+`sys.pycache_prefix` to `.ummanu-task-env/pycache` for every interpreter of that venv unless an explicit
 prefix is already set. A venv made ready before this file existed is still accepted and gains the file on
 its next bring-up. Children started with an interpreter outside the workspace venv are not covered.
 
@@ -1553,7 +1553,7 @@ that points elsewhere.
 Gate, release and cleanup accept an absent namespace and fail closed on an existing unowned one. The
 owner record is written atomically before population; a valid owner without a `ready` marker is
 resumed by the next prepare. A namespace with no valid owner is not adopted: if it holds no operator or
-adapter data, remove only that worktree's `.secretary-task-env/` and retry bring-up; if uncertain, keep
+adapter data, remove only that worktree's `.ummanu-task-env/` and retry bring-up; if uncertain, keep
 the worktree and escalate. Never fabricate an owner record.
 
 At prepare, launch, gate, release and before removal the dispatcher probes the production interpreter.
@@ -1567,10 +1567,10 @@ Substitute the exact registered root for both occurrences. Do not restart or kil
 metadata or delete the retained checkout as part of this repair.
 
 `workspace_targeted_editable` covers both workspaces roots: the Orca workspaces root of A20 steps 8
-and 11 (`SECRETARY_DISPATCHER_WORKSPACES_ROOT`, default `~/orca/workspaces`) and `DATA_DIR/workspaces`,
+and 11 (`UMMANU_DISPATCHER_WORKSPACES_ROOT`, default `~/orca/workspaces`) and `DATA_DIR/workspaces`,
 where git-managed card and observer worktrees live. A workspace's owner is read from its path, so the
 real dispatcher refuses to start (`workspace_roots_overlap`, naming both paths) when the two roots
-are equal or one is inside the other. Point `SECRETARY_DISPATCHER_WORKSPACES_ROOT` or the instance
+are equal or one is inside the other. Point `UMMANU_DISPATCHER_WORKSPACES_ROOT` or the instance
 `data_dir` elsewhere so the two are disjoint.
 
 ## Git residue: read the manifest, then replay exact targets
@@ -1583,7 +1583,7 @@ usage error, and nothing is written.
 1. Read the project's manifest. This step performs no effect and writes nothing, not even the journal
    or its replay cursor:
 
-       secretary instance-maintenance --instance INSTANCE --residue-inventory --project PROJECT
+       ummanu instance-maintenance --instance INSTANCE --residue-inventory --project PROJECT
 
    Only that binding's repository, audit and intents are read. An unregistered project is refused
    before any read. Without `--project` the command is a read-only report over every project.
@@ -1614,7 +1614,7 @@ usage error, and nothing is written.
 
 2. Replay the targets you chose, each with the digest you read, in the same order (at most 20):
 
-       secretary instance-maintenance --instance INSTANCE --residue-replay --project PROJECT \
+       ummanu instance-maintenance --instance INSTANCE --residue-replay --project PROJECT \
            --target TARGET --manifest DIGEST [--target TARGET --manifest DIGEST ...]
 
    Before any effect the target's manifest is recomputed. A different digest, an unknown target or
@@ -1638,7 +1638,7 @@ project slot. Observer fence and declared-observer contracts are in
 
 While a sprint is open its observer is the only writer of the sprint's cards on its reserved projects. To
 intervene on such a card, the PO passes `--sprint-override` and a non-empty `--sprint-override-reason-file`
-to `secretary task create`, `move` or `edit`; the reason goes to the audit. A PO card linked to no sprint
+to `ummanu task create`, `move` or `edit`; the reason goes to the audit. A PO card linked to no sprint
 needs no override; on a reserved project the dispatcher admits it only as `research` or `infra`, and
 blocks a `code` card at admission with `sprint-reservation-blocked` naming the reserving sprint
 ([Protocols](PROTOCOLS.md#cards-outside-a-sprint)). Refusals: `sprint_write_forbidden` (names the
@@ -1649,9 +1649,9 @@ bound on the next tick; no operator step.
 
 At the budget signal threshold the observer prompt carries a note to reconsider the plan. At the hard
 threshold the sprint becomes `stopped`: the head is stopped, newly linked Ready cards are skipped, active
-cards finish their cycle. `secretary status --json` shows each sprint under `installation.sprints.items`
+cards finish their cycle. `ummanu status --json` shows each sprint under `installation.sprints.items`
 (status, hard-stop reason, budget, resume freshness, observer state) and an unreadable board under
-`installation.sprints.error`. Only `secretary sprint reopen --role po` continues a stopped sprint.
+`installation.sprints.error`. Only `ummanu sprint reopen --role po` continues a stopped sprint.
 
 The observer profile comes only from the sprint's `sprint_observer` field (or `none`); a profile the
 registry lacks is fenced, never launched on a default. The [head readiness](#head-readiness) gate runs
@@ -1680,7 +1680,7 @@ Each sprint's decision appears under the `observer-reconcile` step:
   ladder advances, no raw input is sent;
 - `observer-redelivered` — a batch was sent again (observer ready without acknowledgement, or the
   acknowledgement deadline ran out); the original batch is kept;
-- `observer-wake-deferred` — the wake failed; after `SECRETARY_OBSERVER_WAKE_MAX_ATTEMPTS` (3) failures
+- `observer-wake-deferred` — the wake failed; after `UMMANU_OBSERVER_WAKE_MAX_ATTEMPTS` (3) failures
   the head is replaced (`observer-relaunched`);
 - `observer-relaunched` — the head was replaced (dead pid, exhausted wake retries, or the no-progress
   ladder). A replacement over a quiet queue sets a launch cooldown;
@@ -1697,12 +1697,12 @@ Each sprint's decision appears under the `observer-reconcile` step:
 
 Timers:
 
-- `SECRETARY_OBSERVER_ACK_DEADLINE_SECONDS` (30 minutes) — how long one sent batch may stay
+- `UMMANU_OBSERVER_ACK_DEADLINE_SECONDS` (30 minutes) — how long one sent batch may stay
   unacknowledged before redelivery, measured from the send.
-- `SECRETARY_OBSERVER_UNPROVEN_TURN_CEILING_SECONDS` (15 minutes) — for a record whose provider source
+- `UMMANU_OBSERVER_UNPROVEN_TURN_CEILING_SECONDS` (15 minutes) — for a record whose provider source
   never got admitted (unbound, foreign, unreadable). Past it the delivery takes the wake retries and then
   replacement, carrying the batch into the replacement's launch.
-- `SECRETARY_OBSERVER_TURN_CEILING_SECONDS` (3 hours) — for records with no provider-progress source.
+- `UMMANU_OBSERVER_TURN_CEILING_SECONDS` (3 hours) — for records with no provider-progress source.
 - A head with an admitted cursor has no ceiling; its no-progress ladder decides. An unbound Codex source
   is retried for binding on every poll under the launch-time rules.
 
@@ -1714,26 +1714,26 @@ clear a composer with Ctrl-C, Escape, a key chord or raw terminal input.
 
 ### The observer role skill
 
-The `observer` role's `observe-sprint` skill is delivered by `secretary role-skills sync` (the
-`role-skills` step of `secretary upgrade`) and checked by `secretary role-skills audit --check`. If the
+The `observer` role's `observe-sprint` skill is delivered by `ummanu role-skills sync` (the
+`role-skills` step of `ummanu upgrade`) and checked by `ummanu role-skills audit --check`. If the
 skill is not in the head's shell, the launch is deferred with a reason like:
 
 ```
 observer role skill is not available to this head: observer/observe-sprint is not in the codex
-skill directory (<root>/observe-sprint/SKILL.md); run `secretary role-skills sync`
+skill directory (<root>/observe-sprint/SKILL.md); run `ummanu role-skills sync`
 ```
 
 The same reason appears when `skills/manifest.toml` has no `observer` target for that shell or is
-unreadable. It shows in `secretary status --json`, `secretary sprint status` and `secretary dispatcher
+unreadable. It shows in `ummanu status --json`, `ummanu sprint status` and `ummanu dispatcher
 production-observe`. Fix:
 
 ```bash
-secretary role-skills audit --check
-secretary role-skills sync
+ummanu role-skills audit --check
+ummanu role-skills sync
 ```
 
 Both commands read the product manifest plus the optional `<instance>/skills/manifest.toml` of the
-installation named by `--instance` (default `SECRETARY_INSTANCE`). A skill may ship one executable
+installation named by `--instance` (default `UMMANU_INSTANCE`). A skill may ship one executable
 `<skill>.sh`, linked into the operator's bin directory as `<skill>` (see `skills/README.md`).
 
 Liveness uses the versioned launch-identity heartbeat. A missing file counts as alive during the
@@ -1750,8 +1750,8 @@ record generation and launch counter.
 - An outcome with a pending audit field (degraded) — the action happened but its event is pending:
 
 ```bash
-secretary task verify-audit --instance INSTANCE     # .pending, .backend
-secretary task reconcile-audit --instance INSTANCE  # repaired/unresolved
+ummanu task verify-audit --instance INSTANCE     # .pending, .backend
+ummanu task reconcile-audit --instance INSTANCE  # repaired/unresolved
 ```
 
 Both read the card audit, the `requests` table ([Board store](BOARD_STORE.md) §7.3). `reconcile-audit`
@@ -1781,7 +1781,7 @@ resume). Delivery contracts are in
 - `worker-launch-undelivered` / `review-launch-undelivered` (degraded) — the pointer was not accepted
   (`busy`, `blocked`, `update-modal`, `starting`, `unknown-dialog`, or `refused` when found in the
   composer). The launch is not adopted as a claim, whatever the pid. After
-  `SECRETARY_LAUNCH_DELIVERY_MAX_ATTEMPTS` (5) the head is stopped and relaunched
+  `UMMANU_LAUNCH_DELIVERY_MAX_ATTEMPTS` (5) the head is stopped and relaunched
   (`*-launch-undeliverable`). A stop the host will not confirm reports `*-stop-unconfirmed` and keeps the
   intent; nothing is opened beside an unstopped head. A report of `pre-delivery-starting` after bytes were
   written is the normal path for a head still starting.
@@ -1799,9 +1799,9 @@ resume). Delivery contracts are in
 State without reading a transcript:
 
 ```bash
-secretary status --json --instance INSTANCE                    # .dispatcher.observers
-secretary dispatcher production-observe --instance INSTANCE    # .observers
-secretary pause-status --instance INSTANCE                     # .heads.observers, .state.stopped_observer
+ummanu status --json --instance INSTANCE                    # .dispatcher.observers
+ummanu dispatcher production-observe --instance INSTANCE    # .observers
+ummanu pause-status --instance INSTANCE                     # .heads.observers, .state.stopped_observer
 ```
 
 An observer row carries sprint, profile, state (`running`, `waiting`, `idle-grace`, `wake-deferred`,
@@ -1858,14 +1858,14 @@ The checkpoint gate and board export refuse while a Product or Issue write is st
 through the CLI; never move files under `board/product-issue-transactions/` or `board/pending-audit/`:
 
 ```bash
-secretary product transaction list --data-dir DATA_DIR
-secretary product transaction retry --request-id REQUEST_ID --data-dir DATA_DIR
-secretary product transaction discard --request-id REQUEST_ID --data-dir DATA_DIR
+ummanu product transaction list --data-dir DATA_DIR
+ummanu product transaction retry --request-id REQUEST_ID --data-dir DATA_DIR
+ummanu product transaction discard --request-id REQUEST_ID --data-dir DATA_DIR
 ```
 
 `retry` first: it resumes the operation and commits its event. `discard` is for a released transaction
 the backend never accepted; it refuses with `live_write` if the row or comment exists, and always refuses
-typed pending events. A document already outside the released journal comes back with `secretary product
+typed pending events. A document already outside the released journal comes back with `ummanu product
 transaction adopt --path FILE`.
 
 ### A checkpoint blocked by duplicate card references
@@ -1898,15 +1898,15 @@ The checkpoint and the full sequence are in [Recovery](RECOVERY.md#fresh-install
 clean replacement host:
 
 ```bash
-sudo secretary bootstrap --instance-remote REMOTE --instance-dir INSTANCE --installation-user INSTALL_USER
-sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user INSTALL_USER \
+sudo ummanu bootstrap --instance-remote REMOTE --instance-dir INSTANCE --installation-user INSTALL_USER
+sudo ummanu recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user INSTALL_USER \
   --recovery-phrase-file PHRASE_FILE
 ```
 
 The recovery command is `recover`, not `install`. Operator rules for a recovery that does not finish
 cleanly:
 
-- Rerun the identical `secretary recover` after fixing the reported external cause. Completed board and
+- Rerun the identical `ummanu recover` after fixing the reported external cause. Completed board and
   memory phases are skipped, existing repositories are untouched, and only missing projects and their
   host state are retried. Do not edit `recovery-progress.json`, project registry files or Git credential
   files.
@@ -1935,19 +1935,19 @@ checkout is unavailable; repair it through `recover`.
 the archive contract is in [Recovery](RECOVERY.md#backend-aware-cold-archives).
 
 ```bash
-python3 -P -m secretary backup create --instance INSTANCE --kind both
-python3 -P -m secretary backup verify ARCHIVE.tar [--strict]
+python3 -P -m ummanu backup create --instance INSTANCE --kind both
+python3 -P -m ummanu backup verify ARCHIVE.tar [--strict]
 ```
 
 `create` writes an unencrypted tar into `backups/` (`core`, `full` or `both`). `board-store.env` and the
 memory model cache are never included; staging files are `0600` and no password reaches argv or logs.
 `verify` returns `0` on success, `1` for findings or strict warnings, `2` for an unreadable archive.
 
-Legacy extraction is `secretary restore ARCHIVE.tar`. A `full` archive restores into a separately
+Legacy extraction is `ummanu restore ARCHIVE.tar`. A `full` archive restores into a separately
 provisioned, migrated, empty target of the same instance with a different database endpoint:
 
 ```bash
-python3 -P -m secretary restore-postgres ARCHIVE.tar --instance TARGET
+python3 -P -m ummanu restore-postgres ARCHIVE.tar --instance TARGET
 ```
 
 Neither command reconciles or starts processes.
@@ -1975,7 +1975,7 @@ On release the dispatcher:
    checkout fast-forwards to that commit ([Board store §7.4](BOARD_STORE.md#74-schema-versioning-and-migrations)).
    A refused migration keeps the checkout on its old commit, on both paths. The dispatcher retains
    the original `release_schema_refused` facts and delivered remote merge in its release record,
-   then creates one `operation` for the sprint's PO with recovery (`secretary upgrade` once the
+   then creates one `operation` for the sprint's PO with recovery (`ummanu upgrade` once the
    cause is fixed) and verification. If creation is refused, ordinary ticks retry the persisted
    request, including after restart; the source stays unsettled and activation is not retried.
    Once the operation commits, the canonical typed reason references it, the source goes to Blocked,
@@ -1991,12 +1991,12 @@ Teardown happens only on this path; parked and rework cards keep their workspace
 
 A merge that landed opens a post-merge CI watch before the card reaches Done, and the observer is woken
 on its result (`green`, `red`, `absent` or `timeout`), not on the Done
-([Protocols](PROTOCOLS.md#post-merge-ci)). `secretary dispatcher production-observe` lists open watches
+([Protocols](PROTOCOLS.md#post-merge-ci)). `ummanu dispatcher production-observe` lists open watches
 under `post_merge_watches`; each resolution is a `post-merge-ci` tick action, and the result is a
-dispatcher comment on the card and on its sprint. `SECRETARY_POST_MERGE_CI_CEILING_SECONDS` (3600)
+dispatcher comment on the card and on its sprint. `UMMANU_POST_MERGE_CI_CEILING_SECONDS` (3600)
 bounds the wait.
 
-Kill switch: `SECRETARY_DISPATCHER_AUTOMERGE=off` disables push and fast-forward. The card still reaches
+Kill switch: `UMMANU_DISPATCHER_AUTOMERGE=off` disables push and fast-forward. The card still reaches
 done and needs a manual merge. Default on.
 
 ## Pausing the pipeline
@@ -2004,11 +2004,11 @@ done and needs a manual merge. Default on.
 Pause contract: [Protocols](PROTOCOLS.md#pause).
 
 ```bash
-python3 -P -m secretary pause-scope  --instance INSTANCE                  # what a pause would reach
-python3 -P -m secretary pause drain  --instance INSTANCE --reason "why"
-python3 -P -m secretary pause freeze --instance INSTANCE --reason "why"
-python3 -P -m secretary resume       --instance INSTANCE
-python3 -P -m secretary pause-status --instance INSTANCE
+python3 -P -m ummanu pause-scope  --instance INSTANCE                  # what a pause would reach
+python3 -P -m ummanu pause drain  --instance INSTANCE --reason "why"
+python3 -P -m ummanu pause freeze --instance INSTANCE --reason "why"
+python3 -P -m ummanu resume       --instance INSTANCE
+python3 -P -m ummanu pause-status --instance INSTANCE
 ```
 
 `drain` stops claiming Ready cards, dispatching background roles and launching observers for new sprints;
@@ -2032,7 +2032,7 @@ the pause wrote it.
 ### Read the scope first, then decide
 
 ```bash
-python3 -P -m secretary pause-scope --instance INSTANCE
+python3 -P -m ummanu pause-scope --instance INSTANCE
 ```
 
 It writes nothing and reports: `extent` (pipeline-wide, no per-sprint pause), `target` (the flag,
@@ -2042,8 +2042,8 @@ production state and legacy mirror), `sprints`, `cards` (every board card with i
 Then decide and read the result:
 
 ```bash
-python3 -P -m secretary pause drain --instance INSTANCE --reason "why"
-python3 -P -m secretary pause-status --instance INSTANCE
+python3 -P -m ummanu pause drain --instance INSTANCE --reason "why"
+python3 -P -m ummanu pause-status --instance INSTANCE
 ```
 
 The response carries `action` (`paused`, `noop`, `resumed`), `changed` and the pause state. A drain while
@@ -2090,7 +2090,7 @@ path: one respawn in the same workspace, then Blocked. A runtime that answers un
 head; the waiting ceiling still runs as a fallback.
 
 The launch-identity heartbeat, written by the launcher before `exec`, lives under
-`SECRETARY_DISPATCHER_BODY_DIR` (default `/tmp`) with its leaf handoff; respawn deletes both first. A
+`UMMANU_DISPATCHER_BODY_DIR` (default `/tmp`) with its leaf handoff; respawn deletes both first. A
 matching live heartbeat is positive liveness; a dead one takes the stall path; missing or unreadable
 keeps the output fallback; a live mismatch is degraded and never authorizes a close, stop, signal,
 adoption or replacement. The raw command override has no heartbeat and stays on output checks.
@@ -2109,7 +2109,7 @@ takes respawn then Blocked. A head nobody could observe is never replaced on the
 ceiling the tick escalates to the operator. The respawned worker gets the same `TASK.md`, commands and
 generation.
 
-This idle bounce is a degraded tick and turns `secretary automations health` red until a healthy tick follows.
+This idle bounce is a degraded tick and turns `ummanu automations health` red until a healthy tick follows.
 The Blocked move after it is not degraded; the steward reports it as `new_blocked`. Every respawn writes a
 board comment.
 
@@ -2127,26 +2127,26 @@ nothing running (typically a raw move out of Blocked) is settled in that tick:
 - `orphan-worker-heartbeat-unbound` (degraded) — a live heartbeat at this card's worker pid path cannot be
   bound. Nothing is launched or signalled; find out whose process it is first.
 
-Returning the same card again gets a fresh answer. While unresolved, `secretary status` marks the attempt
-`degraded` with `headless` details, and `secretary sprint status` lists it under
+Returning the same card again gets a fresh answer. While unresolved, `ummanu status` marks the attempt
+`degraded` with `headless` details, and `ummanu sprint status` lists it under
 `work.degraded_cards.items`. A card sitting in In progress is not on its own evidence that anything is running.
 
 ### Watchdog settings
 
-- `SECRETARY_INITIAL_OUTPUT_STALL_SECONDS` — first-output window, default 180.
-- `SECRETARY_REVIEW_VERDICT_STALL_SECONDS` — verdict ceiling after first output, default 5400.
-- `SECRETARY_WORKER_REPORT_STALL_SECONDS` — report ceiling after first output, default 21600.
-- `SECRETARY_HEAD_IDLE_STALL_SECONDS` — no production effect since the wait tick moved onto the vitality
+- `UMMANU_INITIAL_OUTPUT_STALL_SECONDS` — first-output window, default 180.
+- `UMMANU_REVIEW_VERDICT_STALL_SECONDS` — verdict ceiling after first output, default 5400.
+- `UMMANU_WORKER_REPORT_STALL_SECONDS` — report ceiling after first output, default 21600.
+- `UMMANU_HEAD_IDLE_STALL_SECONDS` — no production effect since the wait tick moved onto the vitality
   verdict; the vitality thresholds do not read it (see `docs/HEAD_VITALITY.md`, Thresholds).
-- `SECRETARY_LAUNCH_DELIVERY_MAX_ATTEMPTS` — ticks a head may hold an unaccepted pointer before relaunch,
+- `UMMANU_LAUNCH_DELIVERY_MAX_ATTEMPTS` — ticks a head may hold an unaccepted pointer before relaunch,
   default 5.
 
 The stall settings are read at check time; garbage or zero falls back to the default.
 
 ### Reports and verdicts
 
-Heads write bodies to `/tmp/secretary-report-<ref>-<round>.md` and `/tmp/secretary-verdict-<ref>-<round>.md`
-(directory from `SECRETARY_DISPATCHER_BODY_DIR`); files are left in place. The round is part of the
+Heads write bodies to `/tmp/ummanu-report-<ref>-<round>.md` and `/tmp/ummanu-verdict-<ref>-<round>.md`
+(directory from `UMMANU_DISPATCHER_BODY_DIR`); files are left in place. The round is part of the
 verdict request id.
 
 A worker round ends only with a report under the request id the dispatcher issued, taken from the hidden
@@ -2154,13 +2154,13 @@ A worker round ends only with a report under the request id the dispatcher issue
 for a worker by hand, copy the command from its `TASK.md`, ids included; a report under any other id is
 written to the card and moves nothing.
 
-`secretary task report` answering `audit_pending` means the comment landed but the audit did not: rerun
-the same command unchanged (answers `replayed`) or run `secretary task reconcile-audit`.
+`ummanu task report` answering `audit_pending` means the comment landed but the audit did not: rerun
+the same command unchanged (answers `replayed`) or run `ummanu task reconcile-audit`.
 
 ## Background-role telemetry
 
 ```bash
-python3 -P -m secretary automations health
+python3 -P -m ummanu automations health
 ```
 
 One line per role: timer state and freshness of the last healthy tick. Expected state comes from
@@ -2168,16 +2168,16 @@ One line per role: timer state and freshness of the last healthy tick. Expected 
 neutral. An unreadable config prints an error. Non-zero exit: an enabled role is red or the config is
 unavailable.
 
-- `scripts/secretary-agent-gate.sh` runs every role through one environment and exit-code protocol
-  (every role through `python3 -P -m secretary automations`, which injects the board ports steward and retro need). It
-  resolves the checkout as `TA_RUNTIME_PYTHONPATH`, then `TA_SECRETARY_REPO`, then `$HOME/secretary`, and
+- `scripts/ummanu-agent-gate.sh` runs every role through one environment and exit-code protocol
+  (every role through `python3 -P -m ummanu automations`, which injects the board ports steward and retro need). It
+  resolves the checkout as `TA_RUNTIME_PYTHONPATH`, then `UMMANU_REPO`, then `$HOME/ummanu`, and
   uses only that checkout's `.venv/bin/python3`. A `configuration error` naming the checkout means its
   source tree or interpreter is missing, non-executable or another venv's; it fails before precheck.
-  Inspect the rendered units or `secretary doctor`, then repair as the owner from a healthy installed
+  Inspect the rendered units or `ummanu doctor`, then repair as the owner from a healthy installed
   command:
 
   ```bash
-  secretary upgrade --no-pull --product-root /absolute/path/to/selected/checkout
+  ummanu upgrade --no-pull --product-root /absolute/path/to/selected/checkout
   ```
 
   Do not use system-wide `pip`, copy site-packages or point `PYTHONPATH` at another checkout.
@@ -2194,9 +2194,9 @@ unavailable.
   writes nothing and shows up as missing freshness. A freeze is healthy unless the frozen tick failed again
   to stop an observer.
 
-Readers resolve dispatcher state like the dispatcher: `--data-dir`, else `SECRETARY_DATA_DIR`, else
+Readers resolve dispatcher state like the dispatcher: `--data-dir`, else `UMMANU_DATA_DIR`, else
 `data_dir` from the instance (a relative value resolves from `instance.yaml`, `~` is expanded). Setting
-`SECRETARY_DATA_DIR` in `runtime.env` moves both writer and readers.
+`UMMANU_DATA_DIR` in `runtime.env` moves both writer and readers.
 
 A continuous run of unhealthy ticks is one incident; the steward reports one unhealthy event (opening
 reason, failed tick count, `retained_window` grouped by step/action and error code) and one recovery.
@@ -2206,47 +2206,47 @@ the dispatcher's readiness cache; an unreadable cache keeps the previous baselin
 
 ## The local web transport
 
-`secretary web-serve` serves the dashboard and card pages over the `web-read` and `web-run` operations.
+`ummanu web-serve` serves the dashboard and card pages over the `web-read` and `web-run` operations.
 It answers on loopback only. Routes and codes: [Protocols](PROTOCOLS.md#serving-the-pipeline-locally).
 
 > **It is never published directly.** A non-loopback bind is refused in code with: "this service has no
 > password, no TLS and no authorisation, and its routes start real heads on this installation, so it
-> binds a loopback address only. External access is published by the guarded front instead (`secretary
+> binds a loopback address only. External access is published by the guarded front instead (`ummanu
 > web-front`, DoD 5), which terminates TLS, checks a password and proxies here; this refusal is what makes
 > that front the only way in". Do not weaken it and do not forward the port. Outside access is
 > [the published web front](#the-published-web-front).
 
-The packaged `secretary-web.service` runs it on `127.0.0.1:8787`. To run another by hand:
+The packaged `ummanu-web.service` runs it on `127.0.0.1:8787`. To run another by hand:
 
 ```bash
 # start it in the foreground; Ctrl-C stops it
-python3 -P -m secretary web-serve --instance INSTANCE
+python3 -P -m ummanu web-serve --instance INSTANCE
 
 # a second one beside the first, or a different data plane
-python3 -P -m secretary web-serve --instance INSTANCE --port 8788 --data-dir DIR
+python3 -P -m ummanu web-serve --instance INSTANCE --port 8788 --data-dir DIR
 
 # head profiles from a registry other than the installation's own
-python3 -P -m secretary web-serve --instance INSTANCE --heads-registry REGISTRY
+python3 -P -m ummanu web-serve --instance INSTANCE --heads-registry REGISTRY
 ```
 
 | flag | default | what it is |
 | --- | --- | --- |
 | `--instance` | required | instance directory or `instance.yaml` |
-| `--data-dir` | the instance's own | override the data plane, or `SECRETARY_DATA_DIR` |
+| `--data-dir` | the instance's own | override the data plane, or `UMMANU_DATA_DIR` |
 | `--host` | `127.0.0.1` | bind address; refused unless every resolved address is loopback |
 | `--port` | `8787` | bind port |
 | `--heads-registry` | the installation's own | where `--profile` values resolve, or `TA_HEADS_REGISTRY` |
 | `--offline` | off | collect installation health without inspecting the live host |
 
 **Stopping it** loses nothing: cursors belong to browsers. It does not stop heads its runs raised; a run
-is ended by `secretary web-run state --run-id RUN` when its result arrives or its deadline passes.
+is ended by `ummanu web-run state --run-id RUN` when its result arrives or its deadline passes.
 
 **Diagnosing it.** It logs one line per request on stderr. Direct reads:
 
 ```bash
 curl -s localhost:8787/api/system | python3 -m json.tool | head -40      # the dashboard's document
 curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/api/tasks/REF   # 200, 404, 503 …
-python3 -P -m secretary web-read system --instance INSTANCE              # the same read, no HTTP
+python3 -P -m ummanu web-read system --instance INSTANCE              # the same read, no HTTP
 ```
 
 An unavailable source renders as a marked block with reason and age, never an empty list; an unreadable
@@ -2321,7 +2321,7 @@ what is left *now*, so no reading is drawn as words rather than as a figure. An 
 while ago says how old it is. The bar's height is reserved under the page rather than overlaid, so it
 covers nothing, the `/po` composer included.
 
-Its data is the cached provider layer (`secretary.web.provider_usage`, a five-minute in-process cache).
+Its data is the cached provider layer (`ummanu.web.provider_usage`, a five-minute in-process cache).
 **Rendering a page never adds a provider
 call**: the transport hands the bar the cached read, so a hundred page loads inside one cache window ask
 each provider once, and JSON routes, which render no page, ask nothing. A process built without the
@@ -2344,7 +2344,7 @@ The bar also carries a doctor lamp, at its left, on every page. Its state follow
   state uses a neutral grey lamp. A real status finding still makes it yellow or red.
 
 Each problem carries that stable code beside the sentence a person reads, and the **code**, not the
-wording, is what the colour is decided from (`secretary.webproto.reads.PROBLEM_SEVERITY`). Red wins
+wording, is what the colour is decided from (`ummanu.webproto.reads.PROBLEM_SEVERITY`). Red wins
 over yellow, and yellow over green: one red problem is a red lamp however many yellow ones there are.
 
 **Health that could not be read is red and never green.** A reading that did not happen — an instance
@@ -2368,14 +2368,14 @@ collected`, with no `health.unreadable` finding. A process built without the lay
 
 #### Periodic doctor recording
 
-The catalog materializer owns `secretary-doctor.service` and `secretary-doctor.timer`. The timer starts
+The catalog materializer owns `ummanu-doctor.service` and `ummanu-doctor.timer`. The timer starts
 30 seconds after boot and 60 seconds after the previous oneshot becomes inactive, with one-second
 accuracy. It uses the installation runtime user, home, runtime.env and installed product venv. The
 timer must be enabled/active; its triggered oneshot need not remain active. Component disabled/foreign
 declarations retain their existing ownership boundary. Daily instance Git maintenance is independent.
 
-The rendered command is `PRODUCT_ROOT/.venv/bin/secretary doctor-record --instance INSTANCE --data-dir DATA_DIR`.
-It calls this installed product's `python -P -m secretary doctor --instance INSTANCE --json`, whose
+The rendered command is `PRODUCT_ROOT/.venv/bin/ummanu doctor-record --instance INSTANCE --data-dir DATA_DIR`.
+It calls this installed product's `python -P -m ummanu doctor --instance INSTANCE --json`, whose
 `run_doctor_json`/`collect_doctor_inspection` remain the sole diagnostic evaluator. Manual fixture/offline
 runs can pass `--host-fixture DIR`/`--offline`; records retain their mode, and a live web reader refuses
 to treat those modes as a live diagnostic success. No scheduler runs in dispatcher ticks or page requests.
@@ -2443,17 +2443,17 @@ for it and share it), and one response draws its panel and its lamp from one rea
 window expires mid-request. A warm dashboard render starts no subprocess and opens no `board/*.ndjson`. For the same
 reason `web-serve` runs the board store's git-exclusion guard (`board-store.env` untracked and ignored)
 once at start-up instead of on every request; a refusal it finds there holds for the life of the
-process, and a store repaired or created later is picked up by restarting `secretary-web.service`.
+process, and a store repaired or created later is picked up by restarting `ummanu-web.service`.
 
 ### Running a card through the installed service
 
-The two POST routes, through the front, as `curl`. `~/.secretary-owner.curlrc` is a mode-0600 file with
+The two POST routes, through the front, as `curl`. `~/.ummanu-owner.curlrc` is a mode-0600 file with
 `user = "owner:..."` and `cacert = "DATA_DIR/webfront/caddy/pki/authorities/local/root.crt"`, so the password
 never reaches a command line or history.
 
 ```bash
 F=https://HOST
-K=~/.secretary-owner.curlrc
+K=~/.ummanu-owner.curlrc
 
 # 1. a card this installation may run: a registered project, no open sprint reserving it, Issues
 curl -sS -K $K "$F/api/tasks/REF" | python3 -m json.tool | head -30
@@ -2487,13 +2487,13 @@ Routes `GET /sprints/new`, `POST /sprints` and `GET /sprints/{ref}`; contract in
 open issues, registered projects and head profiles. Fill in goal and Definition of Done, tick at least one
 issue and one project, choose the observer, and leave worker and reviewer on "the observer chooses" unless
 a role must be pinned. It calls the same `sprint_create` operation as the CLI, as role `po`, actor `web`.
-The browser does not offer `none`; use `secretary sprint create --observer none` for that.
+The browser does not offer `none`; use `ummanu sprint create --observer none` for that.
 
 "Start this sprint" is the create; the tick raises the observer. The sprint page says:
 
 | what the page says | what to do |
 | --- | --- |
-| saved — no observer is up for it yet | wait for the next tick; `secretary sprint status --ref REF` agrees |
+| saved — no observer is up for it yet | wait for the next tick; `ummanu sprint status --ref REF` agrees |
 | running — an observer head is up | nothing |
 | stopped — an observer was raised for it and is not alive | look at the dispatcher; do not resubmit |
 | no observer — this sprint declared none | nothing |
@@ -2507,19 +2507,19 @@ request id and can create a second sprint. A refusal returns the form with your 
 board's words, and a fresh request id (except the part-done case, which keeps id and values); the block at
 the top says which.
 
-A POST from another site is refused with 403 based on `Origin`. Clients sending none (`curl`, `secretary
+A POST from another site is refused with 403 based on `Origin`. Clients sending none (`curl`, `ummanu
 web-run`, the diagnostics above) are unaffected; to imitate a browser send `-H "Origin: https://HOST"`.
 
 ### Updating the service
 
-Code: `secretary upgrade` moves the checkout and its `web` step restarts and probes the transport
+Code: `ummanu upgrade` moves the checkout and its `web` step restarts and probes the transport
 ([Updating the published application to `main`](#updating-the-published-application-to-main)).
 
 Head profiles: edit the canonical registry, then materialize:
 
 ```bash
 $EDITOR ~/secretary-instance/heads/heads.toml
-cd ~/secretary && python3 -P -m secretary upgrade --instance ~/secretary-instance --no-pull
+cd ~/ummanu && python3 -P -m ummanu upgrade --instance ~/secretary-instance --no-pull
 ```
 
 Never edit `heads/heads.yaml`: it is a generated snapshot pinned by `heads/source.yaml`, and an edited one
@@ -2528,7 +2528,7 @@ restart reason (`the head registry snapshot changed`). If the upgrade stopped be
 by hand:
 
 ```bash
-sudo systemctl restart secretary-web.service            # the front is PartOf= and comes with it
+sudo systemctl restart ummanu-web.service            # the front is PartOf= and comes with it
 curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/api/system   # 200
 ```
 
@@ -2537,7 +2537,7 @@ the process was not restarted.
 
 ## The published web front
 
-`secretary-web-front.service` is Caddy (Ubuntu archive) terminating TLS and checking a password with
+`ummanu-web-front.service` is Caddy (Ubuntu archive) terminating TLS and checking a password with
 `basicauth`, proxying to the loopback transport. The bcrypt hash comes from the secret store. Commands and
 guard contract: [Protocols](PROTOCOLS.md#publishing-the-pipeline-the-guarded-front).
 
@@ -2554,7 +2554,7 @@ The front never installs it anywhere. Copy it to the browser's machine:
 
 ```bash
 # copy it to the machine the browser runs on
-scp USER@HOST:secretary-data/webfront/caddy/pki/authorities/local/root.crt secretary-root.crt
+scp USER@HOST:ummanu-data/webfront/caddy/pki/authorities/local/root.crt ummanu-root.crt
 ```
 
 Import it as a trusted **certificate authority**: Firefox *Settings → Privacy & Security → Certificates →
@@ -2568,57 +2568,57 @@ Values never travel through argv:
 
 ```bash
 # the owner types their own, and it is read from stdin
-python3 -P -m secretary web-front set-password --instance ~/secretary-instance --stdin
+python3 -P -m ummanu web-front set-password --instance ~/secretary-instance --stdin
 
 # or the product generates one from `secrets` and stores it
-python3 -P -m secretary web-front set-password --instance ~/secretary-instance --generate
+python3 -P -m ummanu web-front set-password --instance ~/secretary-instance --generate
 ```
 
 Read the current one back (writes a mode-0600 env file outside the repository):
 
 ```bash
-python3 -P -m secretary secret materialize --instance ~/secretary-instance --target file
-cat ~/secretary-data/webfront/owner-password.env      # SECRETARY_WEB_FRONT_PASSWORD=...
+python3 -P -m ummanu secret materialize --instance ~/secretary-instance --target file
+cat ~/ummanu-data/webfront/owner-password.env      # UMMANU_WEB_FRONT_PASSWORD=...
 ```
 
 A new password takes effect after render and restart:
 
 ```bash
-python3 -P -m secretary web-front render --instance ~/secretary-instance \
+python3 -P -m ummanu web-front render --instance ~/secretary-instance \
   --site https://HOST [--site https://ADDRESS ...]
-sudo systemctl restart secretary-web-front.service
+sudo systemctl restart ummanu-web-front.service
 ```
 
 ### Starting, updating and stopping
 
 ```bash
-sudo systemctl status secretary-web.service secretary-web-front.service
-sudo systemctl restart secretary-web-front.service       # after a render
-sudo systemctl stop secretary-web-front.service          # off the public interfaces, now
-python3 -P -m secretary status --instance ~/secretary-instance   # both units, enabled and active
+sudo systemctl status ummanu-web.service ummanu-web-front.service
+sudo systemctl restart ummanu-web-front.service       # after a render
+sudo systemctl stop ummanu-web-front.service          # off the public interfaces, now
+python3 -P -m ummanu status --instance ~/secretary-instance   # both units, enabled and active
 ```
 
-The front is `PartOf=secretary-web.service`: restarting or stopping the transport does the same to the
-front. Both are `Restart=always` with a three-second delay. Units roll out through `secretary reconcile
+The front is `PartOf=ummanu-web.service`: restarting or stopping the transport does the same to the
+front. Both are `Restart=always` with a three-second delay. Units roll out through `ummanu reconcile
 apply`; the Caddyfile does not, because it holds the hash — `web-front render` writes it under
-`~/secretary-data/webfront/`, mode 0600, untracked. `ExecStartPre` runs `caddy validate`, so a broken
+`~/ummanu-data/webfront/`, mode 0600, untracked. `ExecStartPre` runs `caddy validate`, so a broken
 render fails the start instead of taking down a running front.
 
 ### Updating the published application to `main`
 
-`secretary-web.service` runs the product from the configured editable checkout. A running process keeps
+`ummanu-web.service` runs the product from the configured editable checkout. A running process keeps
 the code it imported at start but reads bundled schemas and other lazy files from the checkout as it is
 now, so a checkout that moves under a running process can stop it answering. The supported update is one
 command:
 
 ```bash
-secretary upgrade --instance ~/secretary-instance      # `pull` fast-forwards ~/secretary onto main
+ummanu upgrade --instance ~/secretary-instance      # `pull` fast-forwards ~/ummanu onto main
 ```
 
 Its `web` step runs after `pull`, `dependencies`, `head-registry` and `host` succeed, restarts
-`secretary-web.service` (the front follows) and probes it. A failure in an earlier step stops the run before
+`ummanu-web.service` (the front follows) and probes it. A failure in an earlier step stops the run before
 the restart. Run the upgrade as the installation owner from the installed checkout
-(`/home/dev/secretary/.venv/bin/secretary`), never from a task workspace: without `--product-root` it
+(`/home/dev/ummanu/.venv/bin/ummanu`), never from a task workspace: without `--product-root` it
 materializes the configured checkout.
 
 The `host` step uses the complete `packaging/systemd` catalogue of the selected target checkout,
@@ -2649,16 +2649,16 @@ Restart reasons, from repository-relative changed paths:
 
 | reason | what moved |
 | --- | --- |
-| `product code or dependencies changed` | `src/` (`secretary`, the background agents' `secretary.automations` included), `pyproject.toml`/`uv.lock`/`requirements.txt`, or a reinstall by `dependencies` |
-| `bundled schemas changed` | `src/secretary/schemas/` |
-| `a web unit file changed` | `secretary-web.service` or the front unit |
+| `product code or dependencies changed` | `src/` (`ummanu`, the background agents' `ummanu.automations` included), `pyproject.toml`/`uv.lock`/`requirements.txt`, or a reinstall by `dependencies` |
+| `bundled schemas changed` | `src/ummanu/schemas/` |
+| `a web unit file changed` | `ummanu-web.service` or the front unit |
 | `the head registry snapshot changed` | `heads/heads.yaml` regenerated |
 
 | line | meaning |
 | --- | --- |
-| `changed   web: restarted secretary-web.service and probed http://127.0.0.1:8787/api/system -> 200; wrote web process receipt: ...` | replaced, answered, receipt written |
+| `changed   web: restarted ummanu-web.service and probed http://127.0.0.1:8787/api/system -> 200; wrote web process receipt: ...` | replaced, answered, receipt written |
 | `unchanged web: web process receipt verified: ...` | the active process generation matches the receipt for this revision and inputs |
-| `skipped   web: secretary-web.service is not installed …` / `… is installed but not active; an upgrade does not start it` | the web receipt step has no active transport to reconcile; `host` starts enabled canonical services and `verify` checks their required state |
+| `skipped   web: ummanu-web.service is not installed …` / `… is installed but not active; an upgrade does not start it` | the web receipt step has no active transport to reconcile; `host` starts enabled canonical services and `verify` checks their required state |
 | `failed    web: …` | see below |
 
 An empty pull does not prove the process is current: a checkout the dispatcher advanced, or a missing
@@ -2667,7 +2667,7 @@ evidence of the process generation, revision and input hashes, excluded from bac
 mismatched receipt is stale, never `unchanged`; do not copy or edit it.
 
 `--dry-run` compares `HEAD` with `origin/<branch>`, names the actions the target revision would cause
-(`would restart secretary-web.service and probe ...`), and writes nothing.
+(`would restart ummanu-web.service and probe ...`), and writes nothing.
 
 `upgrade` restarts onto the dependency set `dependencies` left. That step reinstalls when the venv does
 not match the checkout by its receipt ([Upgrade](#upgrade)); it does not inspect a venv edited by hand
@@ -2675,30 +2675,30 @@ behind a matching receipt.
 
 #### When the restart or the probe fails
 
-*The restart failed* (`restarting secretary-web.service failed: …`): nothing was probed; the old process may
+*The restart failed* (`restarting ummanu-web.service failed: …`): nothing was probed; the old process may
 or may not run.
 
 ```bash
-systemctl is-active secretary-web.service
-sudo journalctl -u secretary-web.service -n 50 --no-pager
+systemctl is-active ummanu-web.service
+sudo journalctl -u ummanu-web.service -n 50 --no-pager
 ```
 
-*The probe failed* (`secretary-web.service restarted but the loopback probe failed:
+*The probe failed* (`ummanu-web.service restarted but the loopback probe failed:
 http://127.0.0.1:8787/api/system did not answer 200 within 20s …`): the new process cannot serve. The
 message gives the last answer (`HTTP 500` or a socket error). An unexpected failure is a `500` carrying a
 reference; the journal line under it names the exception and call site:
 
 ```bash
-sudo journalctl -u secretary-web.service -n 50 --no-pager     # the reference, the class, the frames
+sudo journalctl -u ummanu-web.service -n 50 --no-pager     # the reference, the class, the frames
 curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/api/system
 ```
 
 **Rollback** is the checkout plus `upgrade --no-pull` (`upgrade` is `--ff-only`):
 
 ```bash
-git -C ~/secretary log --oneline -3                  # the revision to go back to
-git -C ~/secretary switch --detach <previous-sha>
-secretary upgrade --instance ~/secretary-instance --no-pull
+git -C ~/ummanu log --oneline -3                  # the revision to go back to
+git -C ~/ummanu switch --detach <previous-sha>
+ummanu upgrade --instance ~/secretary-instance --no-pull
 ```
 
 `git switch` alone leaves the head-registry pin, units, dependencies and the memory and web processes as
@@ -2707,23 +2707,23 @@ service through their receipts, the web transport through its own (the front is 
 it). See [Taking the slice down, and rolling the application back a
 revision](#taking-the-slice-down-and-rolling-the-application-back-a-revision).
 For a target revision older than `bb43b5f` (secretary-1743), that revision's `upgrade` has no
-dependency or memory receipts. After `secretary upgrade --no-pull`, also run
-`"$HOME/secretary/.venv/bin/pip" install -e "$HOME/secretary[dev,memory]"` and restart
-`secretary-memory.service`.
+dependency or memory receipts. After `ummanu upgrade --no-pull`, also run
+`"$HOME/ummanu/.venv/bin/pip" install -e "$HOME/ummanu[dev,memory]"` and restart
+`ummanu-memory.service`.
 
 When an upgrade did not finish, or a service was restarted by hand, check whether the process is newer than
 the checkout:
 
 ```bash
-git -C ~/secretary rev-parse --short HEAD                        # which revision is checked out
-git -C ~/secretary reflog show --date=iso -1 HEAD                # when that checkout last moved
-systemctl show -p ExecMainStartTimestamp secretary-web.service   # when the process started
+git -C ~/ummanu rev-parse --short HEAD                        # which revision is checked out
+git -C ~/ummanu reflog show --date=iso -1 HEAD                # when that checkout last moved
+systemctl show -p ExecMainStartTimestamp ummanu-web.service   # when the process started
 ```
 
 The process start (UTC) must be later than the reflog time (local time with offset). If the reflog has no
 entry, ask the running process for a route only the expected code has, for example
 `curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/sprints/new`. The head-registry pin in
-`heads/source.yaml` (printed by `secretary status`) is written early in the upgrade and never proves the
+`heads/source.yaml` (printed by `ummanu status`) is written early in the upgrade and never proves the
 upgrade finished or the process was replaced; a pin ahead of the checkout indicates a `git switch` rollback
 without `upgrade`.
 
@@ -2731,16 +2731,16 @@ A request in flight during the restart fails; a reload a moment later reaches th
 
 ### Taking the slice down, and rolling the application back a revision
 
-**Taking the slice down** is `sudo systemctl stop secretary-web-front.service`; the transport and pipeline
+**Taking the slice down** is `sudo systemctl stop ummanu-web-front.service`; the transport and pipeline
 keep running ([Rolling back to before this front existed](#rolling-back-to-before-this-front-existed)).
 
 **Rolling the application back a revision** while staying published: move the tree, then run
 `upgrade --no-pull` against it (the upgrade last):
 
 ```bash
-git -C ~/secretary log --oneline -10     # `git -C ~/secretary reflog` says what was installed when
-git -C ~/secretary switch --detach <revision>
-secretary upgrade --instance ~/secretary-instance --no-pull
+git -C ~/ummanu log --oneline -10     # `git -C ~/ummanu reflog` says what was installed when
+git -C ~/ummanu switch --detach <revision>
+ummanu upgrade --instance ~/secretary-instance --no-pull
 ```
 
 - `upgrade --no-pull` compares the venv and the memory service with the moved checkout through the
@@ -2752,15 +2752,15 @@ secretary upgrade --instance ~/secretary-instance --no-pull
   back.
 
 For a target revision older than `bb43b5f` (secretary-1743), that revision's `upgrade` has no
-dependency or memory receipts. After `secretary upgrade --no-pull`, also run
-`"$HOME/secretary/.venv/bin/pip" install -e "$HOME/secretary[dev,memory]"` and restart
-`secretary-memory.service`.
+dependency or memory receipts. After `ummanu upgrade --no-pull`, also run
+`"$HOME/ummanu/.venv/bin/pip" install -e "$HOME/ummanu[dev,memory]"` and restart
+`ummanu-memory.service`.
 
 A detached checkout makes the next upgrade's `pull` refuse by name. Return explicitly, the same way:
 
 ```bash
-git -C ~/secretary switch main
-secretary upgrade --instance ~/secretary-instance --no-pull
+git -C ~/ummanu switch main
+ummanu upgrade --instance ~/secretary-instance --no-pull
 ```
 
 ### A snapshot of the whole thing, in one go
@@ -2770,18 +2770,18 @@ No password, nothing written to the installation:
 ```bash
 {
   date -Is
-  git -C ~/secretary rev-parse HEAD
-  git -C ~/secretary status --porcelain
+  git -C ~/ummanu rev-parse HEAD
+  git -C ~/ummanu status --porcelain
   systemctl show -p ActiveState -p SubState -p ExecMainStartTimestamp \
-    secretary-web.service secretary-web-front.service
+    ummanu-web.service ummanu-web-front.service
   ss -ltnp '( sport = :8787 or sport = :443 )'
-  secretary status --instance ~/secretary-instance
-  secretary web-front check --instance ~/secretary-instance
+  ummanu status --instance ~/secretary-instance
+  ummanu web-front check --instance ~/secretary-instance
   for path in / /api/system /api/tasks/secretary-1/events; do
     printf '%s ' "$path"
     curl -sk -o /dev/null -w '%{http_code} %{size_download}\n' "https://HOST$path"
   done
-} 2>&1 | tee ~/secretary-data/webfront/snapshot-$(date -u +%Y%m%dT%H%M%SZ).txt
+} 2>&1 | tee ~/ummanu-data/webfront/snapshot-$(date -u +%Y%m%dT%H%M%SZ).txt
 ```
 
 It shows the served revision and tree cleanliness, both units, that the transport is on `127.0.0.1:8787`
@@ -2790,7 +2790,7 @@ and only Caddy on `443`, the installation view, unguarded routes, and what an un
 ### Auditing what is exposed
 
 ```bash
-python3 -P -m secretary web-front check --instance ~/secretary-instance
+python3 -P -m ummanu web-front check --instance ~/secretary-instance
 ```
 
 It parses the running configuration against every published route and prints `"unguarded": []`, or exits
@@ -2807,7 +2807,7 @@ done
 curl -sk -o /dev/null -w '%{http_code}\n' -X POST -d '{}' https://HOST/api/runs/start
 ```
 
-Every line must read `401 0`. A `200` is an incident: `sudo systemctl stop secretary-web-front.service`
+Every line must read `401 0`. A `200` is an incident: `sudo systemctl stop ummanu-web-front.service`
 removes the public listener at once and leaves the pipeline running; then investigate.
 
 ### Rolling back to before this front existed
@@ -2816,20 +2816,20 @@ Nothing in the pipeline depends on either unit. In increasing permanence:
 
 ```bash
 # 1. off the public interfaces, this second; the transport and the pipeline keep running
-sudo systemctl stop secretary-web-front.service
+sudo systemctl stop ummanu-web-front.service
 
 # 2. rehearse or run guarded on loopback only — the same file, one line different
-python3 -P -m secretary web-front render --instance ~/secretary-instance \
+python3 -P -m ummanu web-front render --instance ~/secretary-instance \
   --site https://HOST --bind 127.0.0.1
-sudo systemctl restart secretary-web-front.service
+sudo systemctl restart ummanu-web-front.service
 
 # 3. permanently: disable both halves, then let reconcile remove the units
-sudo systemctl disable --now secretary-web-front.service secretary-web.service
+sudo systemctl disable --now ummanu-web-front.service ummanu-web.service
 ```
 
 For 3, set `host.components.web.enabled: false` and `host.components.web-front.enabled: false` in
-`instance.yaml` and run `secretary reconcile apply`. Delete `~/secretary-data/webfront/` if wanted; drop the
-password and hash with `secretary secret remove --id web-front-password` and `--id
+`instance.yaml` and run `ummanu reconcile apply`. Delete `~/ummanu-data/webfront/` if wanted; drop the
+password and hash with `ummanu secret remove --id web-front-password` and `--id
 web-front-password-hash`. Remove Caddy with `sudo apt-get remove caddy`; `caddy.service` is masked so the
 package never starts an unconfigured listener (`sudo systemctl unmask caddy.service` to undo).
 
@@ -2837,32 +2837,32 @@ package never starts an unconfigured listener (`sudo systemctl unmask caddy.serv
 
 | symptom | what it means | what to do |
 | --- | --- | --- |
-| connection refused / times out from outside | the front is not listening, or the network is in the way | `ss -ltn '( sport = :443 )'`; `sudo systemctl status secretary-web-front.service` |
-| the unit is `activating (auto-restart)` | `caddy validate` refused the configuration | `journalctl -u secretary-web-front.service -n 50`; re-render |
-| `permission denied` binding 443 | the capability is not in effect | `systemctl cat secretary-web-front.service` must show `AmbientCapabilities=CAP_NET_BIND_SERVICE` |
+| connection refused / times out from outside | the front is not listening, or the network is in the way | `ss -ltn '( sport = :443 )'`; `sudo systemctl status ummanu-web-front.service` |
+| the unit is `activating (auto-restart)` | `caddy validate` refused the configuration | `journalctl -u ummanu-web-front.service -n 50`; re-render |
+| `permission denied` binding 443 | the capability is not in effect | `systemctl cat ummanu-web-front.service` must show `AmbientCapabilities=CAP_NET_BIND_SERVICE` |
 | a certificate warning that will not go away | no trusted root | see *Trusting the root*; not a failure |
 | 401 with the right password | the running configuration is older than the store | re-render and restart; `web-front check` prints the file the unit reads |
-| 502 after the password | the loopback transport is down | `sudo systemctl status secretary-web.service`, then `curl -s localhost:8787/api/system` |
+| 502 after the password | the loopback transport is down | `sudo systemctl status ummanu-web.service`, then `curl -s localhost:8787/api/system` |
 | a section is marked unavailable | a source below the transport refused | see *Diagnosing it* |
-| every route answers `500` with `reference: <id>` | an unexpected failure escaped; a stale process against a moved checkout is the known cause | grep the reference in `journalctl -u secretary-web.service`, then *Updating the published application to `main`* |
+| every route answers `500` with `reference: <id>` | an unexpected failure escaped; a stale process against a moved checkout is the known cause | grep the reference in `journalctl -u ummanu-web.service`, then *Updating the published application to `main`* |
 
 SSH is unaffected by the front; if it is wedged, SSH in and stop it.
 
 ## Units
 
 Templates are documented in [packaging/systemd/README.md](../packaging/systemd/README.md). Units are rolled
-out by `secretary reconcile apply`; manual installation is neither needed nor a source of ownership. The
+out by `ummanu reconcile apply`; manual installation is neither needed nor a source of ownership. The
 production dispatcher timer runs a one-shot tick. Memory, curator, steward and retro each have exactly one
 scheduler owner.
 
 ### Production interpreter provenance
 
-The dispatcher unit runs an isolated preflight before the `secretary` entry point, catching an editable
+The dispatcher unit runs an isolated preflight before the `ummanu` entry point, catching an editable
 install that points at a task workspace (even a vanished one). A refusal exits non-zero before importing
 candidate code, records its classification and metadata target in tick telemetry, turns `triggered-agents
 health` red, and gives the steward one incident.
 
-`secretary doctor --instance INSTANCE` reports `production_runtime_provenance` with the interpreter, product
+`ummanu doctor --instance INSTANCE` reports `production_runtime_provenance` with the interpreter, product
 root and offending target. The only supported repair is the command it prints:
 
 ```bash
@@ -2875,12 +2875,12 @@ incident.
 
 ## Upgrade
 
-`secretary upgrade --instance <dir>` pulls a new product version and re-materialises the installation. It is
+`ummanu upgrade --instance <dir>` pulls a new product version and re-materialises the installation. It is
 idempotent once materialized state, including an active web process receipt, is current.
 
 ```bash
-secretary upgrade --instance INSTANCE --dry-run   # decide everything, write nothing
-secretary upgrade --instance INSTANCE
+ummanu upgrade --instance INSTANCE --dry-run   # decide everything, write nothing
+ummanu upgrade --instance INSTANCE
 ```
 
 Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failure stops the run:
@@ -2891,14 +2891,14 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `registries` | read the skill manifest, instance overlay, head canon and memory pack; an unreadable or undeliverable registry stops the run before any write |
 | `memory-pack` | materialize the shipped memory pack into the memory canon |
 | `dependencies` | compare the venv with the checkout through the dependency receipt (tracked-manifest digest, extras, venv path); on a mismatch, a snapshot install or a wrong Ruff pin, `pip install -e <root>[dev,…]` with every extra this installation uses, then write the receipt |
-| `dependency-provenance` | import `secretary`, psycopg, SQLAlchemy and Alembic with `-P` from the selected root and venv |
+| `dependency-provenance` | import `ummanu`, psycopg, SQLAlchemy and Alembic with `-P` from the selected root and venv |
 | `board-store-provision` | no-op before provisioning; otherwise verify/start the pinned `postgres:16` service and volume without rotating credentials |
 | `board-store` | connect as owner and apply Alembic to the shipped head |
 | `board-store-roles` | verify owner/app/read credentials, attributes and privilege boundaries |
 | `memory-clients` | reconcile the `po_memory` MCP entries (Claude, `~/.codex`, the legacy Codex home and an existing `DATA_DIR/codex-home`, seeding what it lacks) without touching provider login state |
 | `codex-home` | seed `AGENTS.md` and `config.toml` copy-once into `DATA_DIR/codex-home`; never `auth.json`, never the legacy Orca home ([Codex home](#codex-home-codex_home)) |
 | `head-registry` | generate `heads/heads.yaml` and `heads/source.yaml` from the canon |
-| `instance-packing` | keep the instance repository's local Git packing controls bounded, with implicit `gc --auto` off (`gc.auto=0`, `maintenance.auto=false`); packing runs from `secretary-instance-maintenance.timer` ([Recovery](RECOVERY.md#local-git-packing-controls)) |
+| `instance-packing` | keep the instance repository's local Git packing controls bounded, with implicit `gc --auto` off (`gc.auto=0`, `maintenance.auto=false`); packing runs from `ummanu-instance-maintenance.timer` ([Recovery](RECOVERY.md#local-git-packing-controls)) |
 | `head-registry-checkpoint` | commit only the generated pair under the writer lock and publish it fast-forward; an unavailable or diverged remote stops the upgrade naming the retained commit |
 | `role-worktrees` | fast-forward role worktrees onto the base branch |
 | `role-skills` | `role_skills sync` into shell skill directories |
@@ -2927,7 +2927,7 @@ The packaged systemd timers are the only schedule owner of the background roles 
 steward). Before sprint:1459 they ran as Orca automations; upgrade no longer creates, repoints or
 deletes any, and `doctor` does not report them.
 
-When `pull` advances the checkout, the process re-executes `python -P -m secretary` from the pulled checkout
+When `pull` advances the checkout, the process re-executes `python -P -m ummanu` from the pulled checkout
 with the same arguments and changed paths, so steps new in that revision run in the same upgrade.
 `--no-pull` runs the current schedule once; `--dry-run` fetches and reports without moving anything.
 
@@ -2938,13 +2938,13 @@ If `host` reports `unowned names in our namespace`, resolve it as in
 
 `--product-root` names the checkout to install; every step reads only it (skill manifest and roles,
 `packaging/systemd`, agent specs, role worktrees, and its head canon when the installation owns none).
-`secretary role-skills audit|sync --product-root <checkout>` delivers skills alone.
+`ummanu role-skills audit|sync --product-root <checkout>` delivers skills alone.
 
-Without `--product-root`, install and upgrade materialize the configured checkout (`TA_SECRETARY_REPO`, else
-`$HOME/secretary`), not the directory the command runs in. `install` and `recover` refuse a path with no
-product. A first install from a checkout other than `~/secretary` names it with `--product-root`.
+Without `--product-root`, install and upgrade materialize the configured checkout (`UMMANU_REPO`, else
+`$HOME/ummanu`), not the directory the command runs in. `install` and `recover` refuse a path with no
+product. A first install from a checkout other than `~/ummanu` names it with `--product-root`.
 
-The selected checkout is written into the dispatcher unit as `TA_SECRETARY_REPO` and rendered into every
+The selected checkout is written into the dispatcher unit as `UMMANU_REPO` and rendered into every
 launched head's command line, so heads import the installed product.
 
 ### Path precedence
@@ -2953,29 +2953,29 @@ No absolute product path is shipped. First hit wins:
 
 | what | order |
 | --- | --- |
-| the installation | `--instance` / `SECRETARY_INSTANCE`, else `~/secretary-instance` |
-| the product checkout a head imports | `TA_SECRETARY_REPO`, else `$HOME/secretary` |
-| the checkout an install or upgrade materializes | `--product-root`, else `TA_SECRETARY_REPO`, else `$HOME/secretary` |
-| the product skill manifest | `--product-root`, else `SECRETARY_ROLE_SKILLS_MANIFEST`, else the configured checkout's |
-| the checkout a launcher starts a role out of | `TA_RUNTIME_PYTHONPATH`, else `TA_SECRETARY_REPO`, else `$HOME/secretary` |
-| the packaged units a plan or a doctor run compares against | the checkout named by the command, else the one `heads/source.yaml` recorded, else `TA_SECRETARY_REPO`, else `$HOME/secretary` |
+| the installation | `--instance` / `UMMANU_INSTANCE`, else `~/secretary-instance` |
+| the product checkout a head imports | `UMMANU_REPO`, else `$HOME/ummanu` |
+| the checkout an install or upgrade materializes | `--product-root`, else `UMMANU_REPO`, else `$HOME/ummanu` |
+| the product skill manifest | `--product-root`, else `UMMANU_ROLE_SKILLS_MANIFEST`, else the configured checkout's |
+| the checkout a launcher starts a role out of | `TA_RUNTIME_PYTHONPATH`, else `UMMANU_REPO`, else `$HOME/ummanu` |
+| the packaged units a plan or a doctor run compares against | the checkout named by the command, else the one `heads/source.yaml` recorded, else `UMMANU_REPO`, else `$HOME/ummanu` |
 | the account an upgrade materializes for | `--runtime-user`, else the owner of the instance directory |
 | a skill's shell root | the manifest's `root`, expanded against the installation owner's home |
-| a skill's command link | `SECRETARY_BIN_DIR`, else `<owner home>/bin` |
+| a skill's command link | `UMMANU_BIN_DIR`, else `<owner home>/bin` |
 | a role worktree | `TA_WORKSPACES_ROOT`, else `<owner home>/orca/workspaces` |
-| the role runtime env file | `SECRETARY_RUNTIME_ENV_FILE`, else `TA_RUNTIME_ENV_FILE`, else `<instance>/runtime.env` |
+| the role runtime env file | `UMMANU_RUNTIME_ENV_FILE`, else `TA_RUNTIME_ENV_FILE`, else `<instance>/runtime.env` |
 | the head registry a tick reads | `TA_HEADS_REGISTRY`, else `<instance>/heads/heads.yaml`, else the running checkout's default |
 
 `~` in a shipped manifest and `$HOME` in a shipped entry point mean the installation owner's home, resolved
 once per upgrade, so a repair run as root writes under the owner rather than `/root`. Skill sources resolve
-beside their manifest. `secretary role-skills sync` run by hand uses the caller's home. Nothing falls back
+beside their manifest. `ummanu role-skills sync` run by hand uses the caller's home. Nothing falls back
 to the checkout the running module was imported from; an offline `doctor` compares against the checkout
 recorded in `heads/source.yaml`.
 
 ### The installation's head registry
 
 A live tick reads only the installation's `heads/heads.yaml` and matching `heads/source.yaml` (canon,
-checkout, revision, snapshot digest); a stale or incomplete pair fails before routing. Only `secretary
+checkout, revision, snapshot digest); a stale or incomplete pair fails before routing. Only `ummanu
 upgrade` moves and checkpoint-publishes that pair, so editing a product checkout's canon does not affect a
 running installation.
 
@@ -2983,14 +2983,14 @@ An installation owns its registry by keeping `heads/heads.toml`; otherwise it ma
 product's small shipped default (a Claude and an OpenAI subscription, cross-family fallbacks, one default
 per role, no installation policy). A present but unusable `heads/heads.toml` fails the upgrade by name.
 
-`secretary status --json` returns `installation.head_registry` (`snapshot`, `canonical`, `canonical_owner`
+`ummanu status --json` returns `installation.head_registry` (`snapshot`, `canonical`, `canonical_owner`
 `instance`/`product`, `product_root`, `revision`, `error`). `error` is set when the pin was never written on
 this version or the snapshot is broken.
 
 `[role_defaults]` routes worker and reviewer heads and the curator, retro and steward heads; it does not
 route observers (`role_defaults.observer` only labels an observer record with no sprint to read). An
-`automation.toml` `head` is a last resort. Packaged role units export `SECRETARY_INSTANCE` and their
-`runtime.env` path; dispatcher-launched heads get both on their command line. `SECRETARY_INSTANCE` in a
+`automation.toml` `head` is a last resort. Packaged role units export `UMMANU_INSTANCE` and their
+`runtime.env` path; dispatcher-launched heads get both on their command line. `UMMANU_INSTANCE` in a
 `runtime.env` never overrides them.
 
 ### Manual curator routing in an instance canon
@@ -2998,7 +2998,7 @@ route observers (`role_defaults.observer` only labels an observer record with no
 This is a deferred, manual operator procedure for an installation whose private
 `INSTANCE/heads/heads.toml` already declares the Terra tier `profiles.codex-terra-high`. It changes only that instance
 canon. Do not add the curator's profile choice, its model, or its account policy to
-`src/secretary/runtime/heads.toml`: the product file remains the portable fallback for an installation
+`src/ummanu/runtime/heads.toml`: the product file remains the portable fallback for an installation
 with no canon of its own.
 
 Before changing the role default, record the current `role_defaults.curator` as `PREVIOUS_PROFILE`. Inspect the
@@ -3016,20 +3016,20 @@ Change the existing instance table only as follows:
 curator = "codex-terra-high"
 ```
 
-`secretary-curator.timer` is the sole scheduler owner when the curator component is enabled. The Orca curator
+`ummanu-curator.timer` is the sole scheduler owner when the curator component is enabled. The Orca curator
 automation must remain disabled: it is a leftover of the schedule before sprint:1459, and removing it is a PO action
 (A20 step 10). This installation's curator component must remain disabled for this deferred route change. Verify the latter read-only against the selected installation:
 
 ```bash
-SECRETARY_INSTANCE=INSTANCE python3 -P -m secretary automations health
+UMMANU_INSTANCE=INSTANCE python3 -P -m ummanu automations health
 ```
 
 The output must retain the `DISABLED curator` line. Do not change `host.components.curator`, run `systemctl`, start or stop a service or timer, invoke the curator, run a production
 baseline/backfill, write or delete a fact, reindex, or run a canary. Routing a role authorizes none of those actions.
 
 After a separately approved instance-canon edit, materialize it manually with the normal instance rollout, for
-example `secretary upgrade --no-pull --instance INSTANCE --product-root PRODUCT_ROOT`. Confirm with
-`secretary status --json --instance INSTANCE` that the head-registry canonical owner is `instance` and that the new
+example `ummanu upgrade --no-pull --instance INSTANCE --product-root PRODUCT_ROOT`. Confirm with
+`ummanu status --json --instance INSTANCE` that the head-registry canonical owner is `instance` and that the new
 snapshot was written. The routing assignment has no automatic rollout, shim, migration, or dependency step. The
 routing change takes effect only for a later eligible scheduled run; it does not justify a
 manual invocation. To roll back, restore `role_defaults.curator = "PREVIOUS_PROFILE"` in the same private canon,
@@ -3050,9 +3050,9 @@ failed write is refused and left for manual resolution rather than guessed forwa
 [Memory](PROTOCOLS.md#memory) and [Project baseline settlement](PROTOCOLS.md#project-baseline-settlement).
 
 A broken snapshot stops the tick and names the reason (missing table, wrong shape, unknown resource or
-adapter, a role default naming a missing head). A process given `SECRETARY_INSTANCE` whose snapshot is
+adapter, a role default naming a missing head). A process given `UMMANU_INSTANCE` whose snapshot is
 missing or unreadable fails on that path; the shipped registry is only for a checkout with no installation
-selected. The dispatcher answers `invalid_heads`; the fix is `secretary upgrade`.
+selected. The dispatcher answers `invalid_heads`; the fix is `ummanu upgrade`.
 
 ### Ownership and fail-closed behaviour
 
@@ -3061,7 +3061,7 @@ neither the plan nor the manifest is a conflict, and any conflict aborts the run
 Resolve it:
 
 - the unit is ours and matches the packaged file byte for byte:
-  `secretary reconcile adopt --instance <dir> --logical-id systemd:unit:<name> --yes`;
+  `ummanu reconcile adopt --instance <dir> --logical-id systemd:unit:<name> --yes`;
 - the name belongs to something else: list it in `host.foreign_units` in `instance.yaml`.
 
 A differing unit is not adopted: remove it and let `apply` install the canonical one, or find out why the
@@ -3085,13 +3085,13 @@ A disabled component whose unit is installed and owned is stopped and removed.
 A deterministic gate before and after an upgrade:
 
 ```bash
-secretary doctor --instance <dir>
-secretary role-skills audit --check
-secretary dispatcher production-tick --instance <dir> --probe
+ummanu doctor --instance <dir>
+ummanu role-skills audit --check
+ummanu dispatcher production-tick --instance <dir> --probe
 python3 -m tests.broad
 ```
 
-The `secretary` commands check the installation; `python3 -m tests.broad` runs the `unit` and `component`
+The `ummanu` commands check the installation; `python3 -m tests.broad` runs the `unit` and `component`
 suites of the code it runs, not repository-wide discovery. This is an operator gate, not the test contract:
 that is the dispatcher-owned exact-SHA CI run ([Testing](TESTING.md)). When an upgrade touches packaging,
 recovery, memory, the local-PTY runtime or the board seam, run that suite directly, for example `python3
@@ -3106,21 +3106,21 @@ Receipt ownership and travel are in [Receipt names](PROTOCOLS.md#receipt-names);
 [Protocols](PROTOCOLS.md#broad-check-handling).
 
 ```bash
-python3 -m secretary check broad --module tests.broad
-python3 -m secretary check show --module tests.broad
+python3 -m ummanu check broad --module tests.broad
+python3 -m ummanu check show --module tests.broad
 ```
 
-When the registered project's adapter declares a `broad_check` module, `secretary check broad --reuse` and
-`secretary check show` run it with no flag; `--module` overrides. A project that declares none and passes
+When the registered project's adapter declares a `broad_check` module, `ummanu check broad --reuse` and
+`ummanu check show` run it with no flag; `--module` overrides. A project that declares none and passes
 none is refused as `no_broad_check_module`. Task-packet commands use the registered production source and
 interpreter with `-P`; when a contract omits `broad_check.interpreter`, the inner suite uses
-`.secretary-task-env/venv/bin/python3`.
+`.ummanu-task-env/venv/bin/python3`.
 
 `check broad` streams output to stderr, exits with the check's status (`128+N` for a signal), and writes one
 receipt under `state/checks/` in the workspace (ignored, never committed): check set and digest, working
 directory, import provenance, timing, exit code, parsed verdict and counts, bounded output tail. In a workspace
-whose `.secretary-task-env/` the dispatcher owns, writer, `check show` and `--reuse` all use
-`.secretary-task-env/checks/` instead, so owned cleanup removes the receipt with the namespace. A raw exit
+whose `.ummanu-task-env/` the dispatcher owns, writer, `check show` and `--reuse` all use
+`.ummanu-task-env/checks/` instead, so owned cleanup removes the receipt with the namespace. A raw exit
 code that disagrees with the runner's result is refused as `receipt_status_mismatch`.
 
 Two shapes:
@@ -3160,7 +3160,7 @@ Before a worker, reviewer or observer launch the dispatcher probes the profile's
 `heads/heads.yaml`. Verdicts are cached in the data directory for 300 seconds:
 
 ```bash
-secretary dispatcher resource-health --instance <dir>
+ummanu dispatcher resource-health --instance <dir>
 ```
 
 - `ready` allows a launch.
@@ -3170,7 +3170,7 @@ secretary dispatcher resource-health --instance <dir>
 - `probe_broken` (command, interpreter or import missing) forbids a launch. Probes run with the
   dispatcher's interpreter directory first on `PATH`.
 
-`secretary doctor` reports every resource's probe and names broken probes as findings, reusing a fresh
+`ummanu doctor` reports every resource's probe and names broken probes as findings, reusing a fresh
 dispatcher verdict; `--offline` reports only what is recorded.
 
 For a card in Ready, a forbidden verdict walks the registry's fallback chain to the first head whose resource
@@ -3189,7 +3189,7 @@ reason under `skipped_ready`, and the scan continues with the next card.
 Whether a workspace that looks empty has a head:
 
 ```bash
-secretary head-status --instance <dir> --workspace <path>
+ummanu head-status --instance <dir> --workspace <path>
 ```
 
 It prints one row per dispatcher-held head (worker and reviewer apart) with an actionable `summary`. Exit 0

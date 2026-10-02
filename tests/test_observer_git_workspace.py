@@ -22,15 +22,15 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from secretary.dispatch.cleanup import CleanupOwner
-from secretary.dispatch.host import OBSERVER_REPO_BRANCH, CommandHostRuntime
-from secretary.dispatch.observer import ObserverRecord, _write_launch_intent
-from secretary.dispatch.types import HostError, LegacyDispatcherRecord
-from secretary.observer_root import observer_root_repo
-from secretary.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
 from tests.fakes.dispatcher import FakeCatalog
 from tests.production_runtime_fixtures import registered_production_runtime
+from ummanu.dispatch.cleanup import CleanupOwner
+from ummanu.dispatch.host import OBSERVER_REPO_BRANCH, CommandHostRuntime
+from ummanu.dispatch.observer import ObserverRecord, _write_launch_intent
+from ummanu.dispatch.types import HostError, LegacyDispatcherRecord
+from ummanu.observer_root import observer_root_repo
+from ummanu.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
 
 REF = "sprint:1705"
 TOKEN = "sprint-1705"
@@ -119,9 +119,9 @@ class ObserverGitWorkspaceTests(unittest.TestCase):
         env = mock.patch.dict(
             os.environ,
             {
-                "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.orca_root),
-                "SECRETARY_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
-                "SECRETARY_CLAUDE_PROJECTS": str(self.root / "claude-projects"),
+                "UMMANU_DISPATCHER_WORKSPACES_ROOT": str(self.orca_root),
+                "UMMANU_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
+                "UMMANU_CLAUDE_PROJECTS": str(self.root / "claude-projects"),
             },
         )
         env.start()
@@ -246,7 +246,7 @@ class ObserverGitWorkspaceTests(unittest.TestCase):
     def test_a_worktree_git_refuses_to_cut_starts_no_head(self) -> None:
         with (
             mock.patch(
-                "secretary.dispatch.host.git_worktree.add",
+                "ummanu.dispatch.host.git_worktree.add",
                 return_value=subprocess.CompletedProcess([], 128, "", "fatal: invalid reference"),
             ),
             self.assertRaisesRegex(HostError, "git worktree add failed for the observer workspace"),

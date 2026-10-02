@@ -18,17 +18,17 @@ from unittest import mock
 
 import yaml
 
-from secretary.board.wait_card import WaitSpecError, parse_returns
-from secretary.config import validate
-from secretary.dispatch.e2e import (
+from ummanu.board.wait_card import WaitSpecError, parse_returns
+from ummanu.config import validate
+from ummanu.dispatch.e2e import (
     DEFAULT_DEADLINE,
     AdapterE2eDeclarationError,
     E2eDeclaration,
     parse_e2e,
 )
-from secretary.dispatch.host import InstanceCatalog
-from secretary.dispatch.types import HostError
-from secretary.tasks import TaskError, TaskWriter
+from ummanu.dispatch.host import InstanceCatalog
+from ummanu.dispatch.types import HostError
+from ummanu.tasks import TaskError, TaskWriter
 
 #: A schema-valid adapter around the `validation` block under test.
 VALID_ADAPTER = {
@@ -52,7 +52,7 @@ class DeclarationTests(unittest.TestCase):
                     "inputs": {"suite": "mega", "stands": 2, "fast": False},
                     "deadline": "90m",
                     "candidate_input": "sha",
-                    "dispatch_id_input": "secretary_dispatch_id",
+                    "dispatch_id_input": "ummanu_dispatch_id",
                 }
             ),
             adapter="codegen",
@@ -64,7 +64,7 @@ class DeclarationTests(unittest.TestCase):
                 (("suite", "mega"), ("stands", "2"), ("fast", "false")),
                 "90m",
                 "sha",
-                "secretary_dispatch_id",
+                "ummanu_dispatch_id",
             ),
         )
         assert declaration is not None
@@ -75,7 +75,7 @@ class DeclarationTests(unittest.TestCase):
                 "stands": "2",
                 "fast": "false",
                 "sha": "a" * 40,
-                "secretary_dispatch_id": "d-1",
+                "ummanu_dispatch_id": "d-1",
             },
         )
 
@@ -87,9 +87,9 @@ class DeclarationTests(unittest.TestCase):
         assert declaration is not None
         self.assertEqual(declaration.dispatch_inputs("d-1", "a" * 40), {"suite": "mega", "qa": "true"})
         # A name the dispatcher reserved before is an ordinary input when no dispatch id input is declared.
-        plain = parse_e2e(github({"workflow": "e2e.yml", "inputs": {"secretary_dispatch_id": "x"}}))
+        plain = parse_e2e(github({"workflow": "e2e.yml", "inputs": {"ummanu_dispatch_id": "x"}}))
         assert plain is not None
-        self.assertEqual(plain.dispatch_inputs("d-1", "a" * 40), {"secretary_dispatch_id": "x"})
+        self.assertEqual(plain.dispatch_inputs("d-1", "a" * 40), {"ummanu_dispatch_id": "x"})
 
     def test_the_minimal_declaration_takes_the_defaults(self) -> None:
         declaration = parse_e2e(github({"workflow": 4242}))
@@ -214,7 +214,7 @@ class AdapterSchemaTests(unittest.TestCase):
                 "inputs": {"suite": "mega", "n": 2, "fast": True},
                 "candidate_input": "sha",
             },
-            {"workflow": "e2e.yml", "dispatch_id_input": "secretary_dispatch_id"},
+            {"workflow": "e2e.yml", "dispatch_id_input": "ummanu_dispatch_id"},
             {"workflow": "stand-e2e.yml", "inputs": {"suite": "mega-noop"}, "placement": "after_merge"},
             {"workflow": "e2e.yml", "placement": "before_merge"},
         ):
@@ -244,7 +244,7 @@ class DispatcherWaitRightsTests(unittest.TestCase):
     """What the stage may create: a wait card, returning to one named card. Nothing is written here."""
 
     WRITES = ("createTask", "updateTask", "moveTaskPosition", "saveTaskMetadata", "createComment")
-    RUN_URL = "https://github.com/vladmesh/secretary/actions/runs/4242"
+    RUN_URL = "https://github.com/vladmesh/ummanu/actions/runs/4242"
 
     def setUp(self) -> None:
         tmp = self.enterContext(tempfile.TemporaryDirectory())
@@ -256,8 +256,8 @@ class DispatcherWaitRightsTests(unittest.TestCase):
         self.assertEqual(written, [])
 
     def test_the_card_address_names_one_card(self) -> None:
-        self.assertEqual(parse_returns(["card: secretary-1795"]), ("card:secretary-1795",))
-        for address in ("card:", "card:Secretary 1795", "card:sprint:1469"):
+        self.assertEqual(parse_returns(["card: ummanu-1795"]), ("card:ummanu-1795",))
+        for address in ("card:", "card:Ummanu 1795", "card:sprint:1469"):
             with (
                 self.subTest(address=address),
                 self.assertRaisesRegex(WaitSpecError, "not observer, dependents or po-session"),
@@ -272,8 +272,8 @@ class DispatcherWaitRightsTests(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaises(TaskError) as raised:
                 self.writer.create(
                     role="dispatcher",
-                    actor="secretary-dispatcher",
-                    project="secretary",
+                    actor="ummanu-dispatcher",
+                    project="ummanu",
                     task_type=kind,
                     title="T",
                 )
@@ -289,11 +289,11 @@ class DispatcherWaitRightsTests(unittest.TestCase):
                 self.writer.create(
                     role=role,
                     actor=role,
-                    project="secretary",
+                    project="ummanu",
                     task_type="wait",
                     title="T",
                     sprint="sprint:1469",
-                    wait={"run": self.RUN_URL, "deadline": "2h", "returns": ["card:secretary-1795"]},
+                    wait={"run": self.RUN_URL, "deadline": "2h", "returns": ["card:ummanu-1795"]},
                 )
             self.assertEqual(raised.exception.code, "validation")
         self.assertNothingWritten()

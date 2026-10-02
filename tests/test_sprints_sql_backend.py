@@ -11,12 +11,12 @@ import json
 from pathlib import Path
 from unittest import mock
 
-from secretary.board.sql_sprints import sprint_key
-from secretary.sprint_observer import head_choice
-from secretary.sprints import SprintWriter
-from secretary.tasks import TaskError
 from tests.fakes.sprints import SprintFixture
 from tests.sprint_close_fixtures import close_decisions
+from ummanu.board.sql_sprints import sprint_key
+from ummanu.sprint_observer import head_choice
+from ummanu.sprints import SprintWriter
+from ummanu.tasks import TaskError
 
 
 class SqlSprintAtomicityTests(SprintFixture):
@@ -34,9 +34,9 @@ class SqlSprintAtomicityTests(SprintFixture):
             goal="atomic sprint",
             definition_of_done="every row commits together",
             repositories=[str(Path(self.tmp.name) / "repo")],
-            product="secretary",
+            product="ummanu",
             issues=["issue:open"],
-            projects=["secretary"],
+            projects=["ummanu"],
             observer=head_choice("codex-observer"),
             reference="sprint:atomic",
             request_id=request_id,
@@ -53,11 +53,11 @@ class SqlSprintAtomicityTests(SprintFixture):
         )
 
     def test_sql_local_run_authority_survives_new_reader_and_rollback(self) -> None:
-        from secretary.sprints import SprintReader
+        from ummanu.sprints import SprintReader
 
-        entries = [{"project": "secretary", "argv": ["docker", "run", "two words"], "rationale": "owner's probe"}]
-        options = {"role": "po", "actor": "operator", "goal": "declared", "product": "secretary",
-                   "issues": ["issue:open"], "projects": ["secretary"], "observer": {"kind": "none"},
+        entries = [{"project": "ummanu", "argv": ["docker", "run", "two words"], "rationale": "owner's probe"}]
+        options = {"role": "po", "actor": "operator", "goal": "declared", "product": "ummanu",
+                   "issues": ["issue:open"], "projects": ["ummanu"], "observer": {"kind": "none"},
                    "reference": "sprint:atomic", "request_id": "local-sql", "local_run_exceptions": entries}
         original = self.client.sprints._replace_relations
         with mock.patch.object(self.client.sprints, "_replace_relations", side_effect=self._after(original)), self.assertRaises(TaskError):
@@ -74,14 +74,14 @@ class SqlSprintAtomicityTests(SprintFixture):
     def test_released_staged_create_without_field_replays_at_empty_default(self) -> None:
         intent = self.writer._create_intent(
             role="po", actor="operator", goal="old staged request", definition_of_done="",
-            repositories=[], product="secretary", issues=["issue:open"], reservations=["secretary"],
+            repositories=[], product="ummanu", issues=["issue:open"], reservations=["ummanu"],
             reference="sprint:atomic", observer={"kind": "none"},
         ).to_document()
         self.assertNotIn("local_run_exceptions", intent)
         event = self.writer._event("created", "po", "operator", "sprint:atomic", "old-staged", {"intent": intent})
         self.writer.audit.stage("old-staged", event)
-        options = {"role": "po", "actor": "operator", "goal": "old staged request", "product": "secretary",
-                   "issues": ["issue:open"], "projects": ["secretary"], "observer": {"kind": "none"},
+        options = {"role": "po", "actor": "operator", "goal": "old staged request", "product": "ummanu",
+                   "issues": ["issue:open"], "projects": ["ummanu"], "observer": {"kind": "none"},
                    "reference": "sprint:atomic", "request_id": "old-staged", "local_run_exceptions": []}
         result = self.writer.create(**options)
         self.assertEqual(result["event_id"], event["event_id"])
@@ -291,13 +291,13 @@ class SqlSprintAtomicityTests(SprintFixture):
                 ), self.assertRaises(TaskError):
                     self.writer.restore(
                         reference="sprint:atomic",
-                        values={"sprint_reservations": json.dumps(["secretary"])},
+                        values={"sprint_reservations": json.dumps(["ummanu"])},
                         request_id=request_id,
                     )
                 self._assert_no_request(request_id)
                 self.writer.restore(
                     reference="sprint:atomic",
-                    values={"sprint_reservations": json.dumps(["secretary"])},
+                    values={"sprint_reservations": json.dumps(["ummanu"])},
                     request_id=request_id,
                 )
                 self.assertEqual(
@@ -321,7 +321,7 @@ class SqlSprintAtomicityTests(SprintFixture):
         )
         self.writer.restore(
             reference=reference,
-            values={"sprint_reservations": json.dumps(["secretary", "other"])},
+            values={"sprint_reservations": json.dumps(["ummanu", "other"])},
             request_id=f"seed-reservations-{reference}",
         )
         return reference
@@ -345,7 +345,7 @@ class SqlSprintAtomicityTests(SprintFixture):
         self.assertEqual(self._reservation_rows(reference), rows)
         self.assertEqual(
             rows,
-            [("other", True, 0, False), ("secretary", False, 0, True)],
+            [("other", True, 0, False), ("ummanu", False, 0, True)],
         )
         self.assertEqual(first["sprint"]["reservations"], ["other"])
 
@@ -380,7 +380,7 @@ class SqlSprintAtomicityTests(SprintFixture):
                 )
                 self.assertEqual(
                     self._reservation_rows(reference),
-                    [("other", True, 0, False), ("secretary", False, 0, True)],
+                    [("other", True, 0, False), ("ummanu", False, 0, True)],
                 )
 
     def test_restore_cannot_take_a_project_reserved_by_another_sprint(self) -> None:
@@ -439,7 +439,7 @@ class SqlSprintAtomicityTests(SprintFixture):
                 writer = SprintWriter(client, data_dir=self.tmp.name, instance=self.instance)
                 ref = writer.create(
                     role="po", actor="operator", goal="reopen", repositories=["/repo"],
-                    product="secretary", issues=["issue:open"], projects=["secretary"],
+                    product="ummanu", issues=["issue:open"], projects=["ummanu"],
                     observer=head_choice("codex-observer"), reference=f"sprint:reopen-{suffix}",
                     request_id=f"seed-reopen-{suffix}",
                 )["sprint"]["ref"]
@@ -508,14 +508,14 @@ class SqlTransportNamespaceTests(SprintFixture):
             [(0,)],
         )
 
-    def test_secretary_5_and_sprint_5_never_cross_dispatch(self) -> None:
+    def test_ummanu_5_and_sprint_5_never_cross_dispatch(self) -> None:
         self.client = self.make_ownership_client()
         card_key = self.client.call(
-            "createTask", project_id=1, title="card five", reference="secretary-5", column_id=2
+            "createTask", project_id=1, title="card five", reference="ummanu-5", column_id=2
         )
         self.client.call(
             "saveTaskMetadata", task_id=card_key,
-            values={"project": "secretary", "task_type": "code", "worker_profile": "codex-high"},
+            values={"project": "ummanu", "task_type": "code", "worker_profile": "codex-high"},
         )
         self.client.call("createComment", task_id=card_key, content="card comment")
         writer = SprintWriter(self.client, data_dir=self.tmp.name)
@@ -543,11 +543,11 @@ class SqlTransportNamespaceTests(SprintFixture):
         self.client.call("closeTask", task_id=card_key)
 
         self.assertEqual(
-            self.client._query("SELECT title, archived FROM tasks WHERE task_ref='secretary-5'"),
+            self.client._query("SELECT title, archived FROM tasks WHERE task_ref='ummanu-5'"),
             [("card five edited", True)],
         )
         self.assertEqual(
-            self.client._query("SELECT body FROM task_comments WHERE task_ref='secretary-5' ORDER BY comment_id"),
+            self.client._query("SELECT body FROM task_comments WHERE task_ref='ummanu-5' ORDER BY comment_id"),
             [("card comment",), ("second card comment",)],
         )
         self.assertEqual(self.client._query("SELECT count(*) FROM sprint_comments"), [(0,)])
@@ -563,13 +563,13 @@ class SqlTransportNamespaceTests(SprintFixture):
         with self.assertRaisesRegex(TaskError, "not a Card linked to sprint:900") as raised:
             writer.restore(
                 reference="sprint:900",
-                values={"sprint_current_task": "secretary-12"},
+                values={"sprint_current_task": "ummanu-12"},
                 request_id="cursor-restore",
             )
         self.assertEqual(raised.exception.code, "backend_error")
 
         self.assertEqual(
-            self.client._query("SELECT sprint_ref FROM tasks WHERE task_ref='secretary-12'"),
+            self.client._query("SELECT sprint_ref FROM tasks WHERE task_ref='ummanu-12'"),
             [(None,)],
         )
         self.assertEqual(

@@ -19,23 +19,23 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.cli import main
-from secretary.config import validate
-from secretary.runtime.head.identity import publish_heartbeat
-from secretary.tasks import TaskError, task_audit_for
-from secretary.webproto import agents as agent_reads
-from secretary.webproto.cursor import Cursor
-from secretary.webproto.errors import InvalidCursor, TaskNotFound
-from secretary.webproto.reads import ReadLayer
 from tests.fakes.dispatcher import dispatcher_seed
 from tests.sql_backend_fixtures import card_store, terminate_session
+from ummanu.cli import main
+from ummanu.config import validate
+from ummanu.runtime.head.identity import publish_heartbeat
+from ummanu.tasks import TaskError, task_audit_for
+from ummanu.webproto import agents as agent_reads
+from ummanu.webproto.cursor import Cursor
+from ummanu.webproto.errors import InvalidCursor, TaskNotFound
+from ummanu.webproto.reads import ReadLayer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 HEALTH = {"schema_version": 1, "installation": {"name": "test"}}
 
 
-def _instance(root: Path, *, projects: tuple[str, ...] = ("secretary",)) -> Path:
+def _instance(root: Path, *, projects: tuple[str, ...] = ("ummanu",)) -> Path:
     """A validating instance whose data plane is under ``root``."""
     instance_dir = root / "instance"
     (instance_dir / "projects").mkdir(parents=True)
@@ -74,7 +74,7 @@ def _event(ref: str, kind: str, *, ordinal: int) -> dict:
         "subject": {"kind": "card", "ref": ref},
         "ref": ref,
         "occurred_at": "2026-09-06T00:00:00Z",
-        "actor": {"role": "dispatcher", "id": "secretary-production"},
+        "actor": {"role": "dispatcher", "id": "ummanu-production"},
         "reason": f"event {ordinal}",
         "related_refs": [],
         "data": {},
@@ -89,7 +89,7 @@ def _routing(ref: str, attempt: int, phase: str, heads: list[dict], *, ordinal: 
         "kind": "routing",
         "occurred_at": "2026-09-06T00:00:00Z",
         "outcome": "success",
-        "actor": {"role": "dispatcher", "id": "secretary-production"},
+        "actor": {"role": "dispatcher", "id": "ummanu-production"},
         "ref": ref,
         "request_id": f"req-{ref}-{ordinal}",
         "payload": {
@@ -179,82 +179,82 @@ class CursorTests(ReadLayerFixture):
     def test_paging_a_cursor_reads_every_event_exactly_once(self) -> None:
         _journal(
             self.board,
-            [_event("secretary-1", "card.started", ordinal=index) for index in range(5)],
+            [_event("ummanu-1", "card.started", ordinal=index) for index in range(5)],
         )
         # Another card's events are interleaved: a position must survive them without shifting.
-        _journal(self.board, [_event("secretary-2", "card.started", ordinal=99)])
+        _journal(self.board, [_event("ummanu-2", "card.started", ordinal=99)])
         _journal(
             self.board,
-            [_event("secretary-1", "card.reported", ordinal=index) for index in range(5, 9)],
+            [_event("ummanu-1", "card.reported", ordinal=index) for index in range(5, 9)],
         )
         layer = self.layer()
         seen: list[str] = []
         cursor = None
         for _ in range(20):
-            page = layer.task_events("secretary-1", cursor, limit=2)
+            page = layer.task_events("ummanu-1", cursor, limit=2)
             seen.extend(item["event_id"] for item in page["items"])
             cursor = page["next_cursor"]
             if not page["items"]:
                 break
-        self.assertEqual(seen, [f"evt-secretary-1-{index}" for index in range(9)])
+        self.assertEqual(seen, [f"evt-ummanu-1-{index}" for index in range(9)])
         self.assertEqual(len(seen), len(set(seen)))
 
     def test_the_same_cursor_twice_is_the_same_page(self) -> None:
-        _journal(self.board, [_event("secretary-1", "card.started", ordinal=i) for i in range(6)])
+        _journal(self.board, [_event("ummanu-1", "card.started", ordinal=i) for i in range(6)])
         layer = self.layer()
-        first = layer.task_events("secretary-1", None, limit=3)
-        again = layer.task_events("secretary-1", None, limit=3)
+        first = layer.task_events("ummanu-1", None, limit=3)
+        again = layer.task_events("ummanu-1", None, limit=3)
         self.assertEqual(first["items"], again["items"])
-        resumed = layer.task_events("secretary-1", first["next_cursor"], limit=3)
-        repeated = layer.task_events("secretary-1", first["next_cursor"], limit=3)
+        resumed = layer.task_events("ummanu-1", first["next_cursor"], limit=3)
+        repeated = layer.task_events("ummanu-1", first["next_cursor"], limit=3)
         self.assertEqual(resumed["items"], repeated["items"])
         self.assertEqual(
             [item["event_id"] for item in resumed["items"]],
-            [f"evt-secretary-1-{index}" for index in (3, 4, 5)],
+            [f"evt-ummanu-1-{index}" for index in (3, 4, 5)],
         )
 
     def test_a_cursor_issued_before_new_events_returns_exactly_those_events(self) -> None:
-        _journal(self.board, [_event("secretary-1", "card.started", ordinal=0)])
+        _journal(self.board, [_event("ummanu-1", "card.started", ordinal=0)])
         layer = self.layer()
-        page = layer.task_events("secretary-1", None, limit=50)
+        page = layer.task_events("ummanu-1", None, limit=50)
         self.assertEqual(len(page["items"]), 1)
         self.assertFalse(page["has_more"])
         cursor = page["next_cursor"]
         # Nothing new yet: the same cursor is an empty page, not a repeat and not an error.
-        self.assertEqual(layer.task_events("secretary-1", cursor, limit=50)["items"], [])
+        self.assertEqual(layer.task_events("ummanu-1", cursor, limit=50)["items"], [])
         _journal(
             self.board,
             [
-                _event("secretary-2", "card.started", ordinal=7),
-                _event("secretary-1", "card.moved", ordinal=1),
+                _event("ummanu-2", "card.started", ordinal=7),
+                _event("ummanu-1", "card.moved", ordinal=1),
             ],
         )
-        after = layer.task_events("secretary-1", cursor, limit=50)
-        self.assertEqual([item["event_id"] for item in after["items"]], ["evt-secretary-1-1"])
+        after = layer.task_events("ummanu-1", cursor, limit=50)
+        self.assertEqual([item["event_id"] for item in after["items"]], ["evt-ummanu-1-1"])
 
     def test_a_cursor_from_another_card_is_refused_by_name(self) -> None:
-        _journal(self.board, [_event("secretary-1", "card.started", ordinal=0)])
+        _journal(self.board, [_event("ummanu-1", "card.started", ordinal=0)])
         layer = self.layer()
-        foreign = layer.task_events("secretary-1", None, limit=1)["next_cursor"]
+        foreign = layer.task_events("ummanu-1", None, limit=1)["next_cursor"]
         with self.assertRaises(InvalidCursor) as refused:
-            layer.task_events("secretary-2", foreign, limit=1)
-        self.assertIn("secretary-1", str(refused.exception))
+            layer.task_events("ummanu-2", foreign, limit=1)
+        self.assertIn("ummanu-1", str(refused.exception))
         with self.assertRaises(InvalidCursor):
-            layer.task_events("secretary-1", "not-a-cursor", limit=1)
+            layer.task_events("ummanu-1", "not-a-cursor", limit=1)
 
     def test_a_cursor_past_the_end_of_the_journal_is_refused_not_reset(self) -> None:
-        _journal(self.board, [_event("secretary-1", "card.started", ordinal=0)])
-        beyond = Cursor(ref="secretary-1", offset=10_000_000).encode()
+        _journal(self.board, [_event("ummanu-1", "card.started", ordinal=0)])
+        beyond = Cursor(ref="ummanu-1", offset=10_000_000).encode()
         with self.assertRaises(InvalidCursor):
-            self.layer().task_events("secretary-1", beyond, limit=1)
+            self.layer().task_events("ummanu-1", beyond, limit=1)
 
     def test_an_unreadable_audit_is_a_source_fact_and_keeps_the_cursor(self) -> None:
-        _journal(self.board, [_event("secretary-1", "card.started", ordinal=0)])
+        _journal(self.board, [_event("ummanu-1", "card.started", ordinal=0)])
         layer = self.layer()
-        cursor = layer.task_events("secretary-1", None, limit=1)["next_cursor"]
+        cursor = layer.task_events("ummanu-1", None, limit=1)["next_cursor"]
         refusal = TaskError("backend_unavailable", "the board store could not answer a read", 1)
         with mock.patch.object(self.board, "_query", side_effect=refusal):
-            page = layer.task_events("secretary-1", cursor, limit=1)
+            page = layer.task_events("ummanu-1", cursor, limit=1)
         self.assertEqual(page["source"]["state"], "unavailable")
         self.assertIn("could not be read", page["source"]["reason"])
         self.assertEqual(page["items"], [])
@@ -270,19 +270,19 @@ class CursorTests(ReadLayerFixture):
                     "event_id": "evt-generic",
                     "kind": "created",
                     "outcome": "success",
-                    "ref": "secretary-1",
+                    "ref": "ummanu-1",
                     "request_id": "req-generic",
                     "occurred_at": "2026-09-06T00:00:00Z",
                     "actor": {"role": "observer", "id": "observer"},
-                    "payload": {"project": "secretary"},
+                    "payload": {"project": "ummanu"},
                 },
-                _event("secretary-1", "card.started", ordinal=0),
+                _event("ummanu-1", "card.started", ordinal=0),
             ],
         )
-        items = self.layer().task_events("secretary-1", None, limit=10)["items"]
+        items = self.layer().task_events("ummanu-1", None, limit=10)["items"]
         self.assertEqual([item["typed"] for item in items], [False, True])
         self.assertEqual(items[0]["outcome"], "success")
-        self.assertEqual(items[0]["data"], {"project": "secretary"})
+        self.assertEqual(items[0]["data"], {"project": "ummanu"})
         self.assertEqual(items[1]["reason"], "event 0")
 
 
@@ -309,22 +309,22 @@ class AgentStateTests(ReadLayerFixture):
 
     def test_a_live_matching_process_is_running(self) -> None:
         pid_file = str(self.tmp / "live.pid")
-        publish_heartbeat(pid_file, {"run_id": "run-live", "role": "worker", "task": "card:secretary-1"})
+        publish_heartbeat(pid_file, {"run_id": "run-live", "role": "worker", "task": "card:ummanu-1"})
         rows = self._states(
             {
-                "secretary-1": self._record(
-                    "secretary-1",
+                "ummanu-1": self._record(
+                    "ummanu-1",
                     worker_pid_file=pid_file,
                     worker_head_run={
                         "run_id": "run-live",
                         "lifecycle": "working",
-                        "task_ref": {"kind": "card", "ref": "secretary-1"},
+                        "task_ref": {"kind": "card", "ref": "ummanu-1"},
                     },
                 )
             }
         )
-        self.assertEqual(rows["secretary-1"]["state"], "running")
-        self.assertEqual(rows["secretary-1"]["evidence"]["heartbeat_state"], "live-match")
+        self.assertEqual(rows["ummanu-1"]["state"], "running")
+        self.assertEqual(rows["ummanu-1"]["evidence"]["heartbeat_state"], "live-match")
 
     def test_a_confirmed_stop_is_finished_and_a_missing_process_is_a_failure(self) -> None:
         dead = self.tmp / "dead.pid"
@@ -335,9 +335,9 @@ class AgentStateTests(ReadLayerFixture):
                     "pid": _dead_pid(),
                     "boot_id": "boot",
                     "proc_starttime_ticks": "42",
-                    "run_id": "run-secretary-2",
+                    "run_id": "run-ummanu-2",
                     "role": "worker",
-                    "task": "secretary-2",
+                    "task": "ummanu-2",
                 }
             ),
             encoding="utf-8",
@@ -345,43 +345,43 @@ class AgentStateTests(ReadLayerFixture):
         rows = self._states(
             {
                 # A run whose stop the dispatcher confirmed: an ending, whatever the heartbeat says.
-                "secretary-1": self._record(
-                    "secretary-1",
+                "ummanu-1": self._record(
+                    "ummanu-1",
                     worker_head_run={"run_id": "run-1", "lifecycle": "exited"},
                 ),
                 # A run that still expects a process, and there is none.
-                "secretary-2": self._record("secretary-2", worker_pid_file=str(dead)),
+                "ummanu-2": self._record("ummanu-2", worker_pid_file=str(dead)),
             }
         )
-        self.assertEqual(rows["secretary-1"]["state"], "finished")
-        self.assertEqual(rows["secretary-2"]["state"], "process_failed")
-        self.assertIn("expects a process", rows["secretary-2"]["reason"])
+        self.assertEqual(rows["ummanu-1"]["state"], "finished")
+        self.assertEqual(rows["ummanu-2"]["state"], "process_failed")
+        self.assertIn("expects a process", rows["ummanu-2"]["reason"])
 
     def test_an_unreadable_heartbeat_is_a_source_failure_not_a_dead_head(self) -> None:
         broken = self.tmp / "broken.pid"
         broken.write_text("{not json", encoding="utf-8")
-        rows = self._states({"secretary-1": self._record("secretary-1", worker_pid_file=str(broken))})
-        self.assertEqual(rows["secretary-1"]["state"], "source_unavailable")
-        self.assertIn("could not be read", rows["secretary-1"]["reason"])
+        rows = self._states({"ummanu-1": self._record("ummanu-1", worker_pid_file=str(broken))})
+        self.assertEqual(rows["ummanu-1"]["state"], "source_unavailable")
+        self.assertIn("could not be read", rows["ummanu-1"]["reason"])
 
     def test_no_evidence_yet_is_unknown_rather_than_absent(self) -> None:
         rows = self._states(
             {
-                "secretary-1": self._record("secretary-1"),
-                "secretary-2": self._record("secretary-2", worker_head_run={}),
+                "ummanu-1": self._record("ummanu-1"),
+                "ummanu-2": self._record("ummanu-2", worker_head_run={}),
             }
         )
-        self.assertEqual(rows["secretary-1"]["state"], "unknown")
-        self.assertIn("has not published a launch heartbeat", rows["secretary-1"]["reason"])
-        self.assertEqual(rows["secretary-2"]["state"], "unknown")
-        self.assertIn("no durable run", rows["secretary-2"]["reason"])
+        self.assertEqual(rows["ummanu-1"]["state"], "unknown")
+        self.assertIn("has not published a launch heartbeat", rows["ummanu-1"]["reason"])
+        self.assertEqual(rows["ummanu-2"]["state"], "unknown")
+        self.assertIn("no durable run", rows["ummanu-2"]["reason"])
 
     def test_a_pane_is_never_evidence_that_an_agent_is_alive(self) -> None:
         """The card's own invariant: a window that exists says nothing about a process."""
         rows = self._states(
             {
-                "secretary-1": self._record(
-                    "secretary-1",
+                "ummanu-1": self._record(
+                    "ummanu-1",
                     handle="pane-1",
                     worker_leaf="leaf-1",
                     review_handle="pane-2",
@@ -391,15 +391,15 @@ class AgentStateTests(ReadLayerFixture):
                 )
             }
         )
-        self.assertEqual(rows["secretary-1"]["state"], "unknown")
-        self.assertNotIn("running", {rows["secretary-1"]["state"]})
+        self.assertEqual(rows["ummanu-1"]["state"], "unknown")
+        self.assertNotIn("running", {rows["ummanu-1"]["state"]})
 
     def test_both_roles_are_reported_and_named(self) -> None:
         _production(
             self.data_dir,
             {
-                "secretary-1": self._record(
-                    "secretary-1",
+                "ummanu-1": self._record(
+                    "ummanu-1",
                     review_pid_file=str(self.tmp / "review.pid"),
                     review_head="claude-reviewer",
                     review_head_run={"run_id": "run-review", "lifecycle": "working"},
@@ -420,7 +420,7 @@ class DegradedSourceTests(ReadLayerFixture):
         self.assertEqual(snapshot["agents"]["items"], [])
         # Everything whose source did answer is still there.
         self.assertEqual(snapshot["projects"]["source"]["state"], "available")
-        self.assertEqual([project["id"] for project in snapshot["projects"]["items"]], ["secretary"])
+        self.assertEqual([project["id"] for project in snapshot["projects"]["items"]], ["ummanu"])
         self.assertEqual(snapshot["tasks"]["source"]["state"], "available")
         self.assertEqual(snapshot["installation"]["health"]["source"]["state"], "available")
 
@@ -429,7 +429,7 @@ class DegradedSourceTests(ReadLayerFixture):
             instance_dir = Path("/nonexistent")
 
             def call(self, method, **params):
-                from secretary.tasks import TaskError
+                from ummanu.tasks import TaskError
 
                 raise TaskError("backend_unavailable", "board store is not answering", 1)
 
@@ -471,7 +471,7 @@ class DegradedSourceTests(ReadLayerFixture):
 
     def test_an_invalid_instance_is_a_typed_refusal_not_a_snapshot(self) -> None:
         (self.instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
-        from secretary.webproto.errors import InstallationUnavailable
+        from ummanu.webproto.errors import InstallationUnavailable
 
         with self.assertRaises(InstallationUnavailable):
             self.layer().system_snapshot()
@@ -487,11 +487,11 @@ class TaskSnapshotTests(ReadLayerFixture):
 
     def test_a_task_snapshot_carries_state_project_events_and_result(self) -> None:
         self._card()
-        _journal(self.board, [_event("secretary-510", "card.started", ordinal=0)])
+        _journal(self.board, [_event("ummanu-510", "card.started", ordinal=0)])
         _production(
             self.data_dir,
             {
-                "secretary-510": {
+                "ummanu-510": {
                     "attempt_id": "attempt-1",
                     "state": "validate",
                     "head": "codex-worker",
@@ -502,16 +502,16 @@ class TaskSnapshotTests(ReadLayerFixture):
                 }
             },
         )
-        snapshot = self.layer().task_snapshot("secretary-510")
+        snapshot = self.layer().task_snapshot("ummanu-510")
         self.assertEqual(snapshot["card"]["value"]["state"], "ready")
         self.assertEqual(
             snapshot["project"],
             {
-                "id": "secretary",
+                "id": "ummanu",
                 "registered": True,
                 "binding": {
-                    "repo": "/projects/secretary",
-                    "adapter": "secretary",
+                    "repo": "/projects/ummanu",
+                    "adapter": "ummanu",
                     "default_branch": "main",
                     "enabled": True,
                 },
@@ -519,7 +519,7 @@ class TaskSnapshotTests(ReadLayerFixture):
         )
         self.assertEqual(snapshot["attempt"]["value"]["gate_state"], "green")
         self.assertEqual([row["role"] for row in snapshot["agents"]["items"]], ["worker"])
-        self.assertEqual(snapshot["agents"]["items"][0]["project"], "secretary")
+        self.assertEqual(snapshot["agents"]["items"][0]["project"], "ummanu")
         self.assertEqual(snapshot["work"]["worker_report"]["value"], "done")
         self.assertEqual(snapshot["work"]["review_verdict"]["value"], "green")
         self.assertEqual(snapshot["work"]["decision"]["value"], "release")
@@ -529,7 +529,7 @@ class TaskSnapshotTests(ReadLayerFixture):
         # The tail's cursor continues at the end of the journal, so a client polling with it is
         # never handed an event it was just shown.
         self.assertEqual(
-            self.layer().task_events("secretary-510", snapshot["events"]["next_cursor"])["items"],
+            self.layer().task_events("ummanu-510", snapshot["events"]["next_cursor"])["items"],
             [],
         )
 
@@ -557,10 +557,10 @@ class TaskSnapshotTests(ReadLayerFixture):
         _journal(
             self.board,
             [
-                _routing("secretary-510", 1, "worker", [first], ordinal=1),
+                _routing("ummanu-510", 1, "worker", [first], ordinal=1),
                 # The first run's occurrence names another model; it stays on that run's row.
                 _usage(
-                    "secretary-510",
+                    "ummanu-510",
                     ordinal=2,
                     attempt=1,
                     launch_id="run-0",
@@ -568,9 +568,9 @@ class TaskSnapshotTests(ReadLayerFixture):
                     resolved_models=["claude-fable-5-1"],
                     resolved_effort="medium",
                 ),
-                _routing("secretary-510", 2, "worker", [worker], ordinal=3),
+                _routing("ummanu-510", 2, "worker", [worker], ordinal=3),
                 _usage(
-                    "secretary-510",
+                    "ummanu-510",
                     ordinal=4,
                     attempt=2,
                     launch_id="run-1",
@@ -578,13 +578,13 @@ class TaskSnapshotTests(ReadLayerFixture):
                     resolved_models=["claude-haiku-4-5", "claude-opus-5-5"],
                     resolved_effort="high",
                 ),
-                _routing("secretary-510", 2, "review", [reviewer], ordinal=5),
+                _routing("ummanu-510", 2, "review", [reviewer], ordinal=5),
             ],
         )
         _production(
             self.data_dir,
             {
-                "secretary-510": {
+                "ummanu-510": {
                     "attempt_id": "attempt-2",
                     "state": "validate",
                     "head": "claude-opus",
@@ -595,7 +595,7 @@ class TaskSnapshotTests(ReadLayerFixture):
             },
         )
 
-        snapshot = self.layer().task_snapshot("secretary-510")
+        snapshot = self.layer().task_snapshot("ummanu-510")
 
         self.assertEqual(validate(snapshot, "web-read", "task"), [])
         self.assertEqual(snapshot["heads"]["source"]["state"], "available")
@@ -642,12 +642,12 @@ class TaskSnapshotTests(ReadLayerFixture):
         _journal(
             self.board,
             [
-                _routing("secretary-510", 1, "worker", [worker], ordinal=1),
-                _usage("secretary-510", ordinal=2, attempt=1, launch_id="run-1"),
+                _routing("ummanu-510", 1, "worker", [worker], ordinal=1),
+                _usage("ummanu-510", ordinal=2, attempt=1, launch_id="run-1"),
             ],
         )
 
-        (row,) = self.layer().task_snapshot("secretary-510")["heads"]["items"]
+        (row,) = self.layer().task_snapshot("ummanu-510")["heads"]["items"]
 
         self.assertEqual(
             (row["model"], row["resolved_model"], row["resolved_effort"]), ("gpt-5.6-terra", None, None)
@@ -661,7 +661,7 @@ class TaskSnapshotTests(ReadLayerFixture):
                 "comment": "[report:blocked]\nclassification: external_fact\n\nthe dependency is down",
             }
         ])
-        work = self.layer().task_snapshot("secretary-510")["work"]
+        work = self.layer().task_snapshot("ummanu-510")["work"]
         self.assertEqual(work["worker_report"]["classification"], "external_fact")
         self.assertEqual(
             work["outcome"],
@@ -670,14 +670,14 @@ class TaskSnapshotTests(ReadLayerFixture):
 
     def test_an_unknown_reference_is_a_typed_not_found(self) -> None:
         with self.assertRaises(TaskNotFound):
-            self.layer().task_snapshot("secretary-does-not-exist")
+            self.layer().task_snapshot("ummanu-does-not-exist")
 
     def test_a_task_snapshot_survives_a_board_that_will_not_answer(self) -> None:
         """The card read is refused and the audit of the same store still answers."""
-        _journal(self.board, [_event("secretary-1", "card.started", ordinal=0)])
+        _journal(self.board, [_event("ummanu-1", "card.started", ordinal=0)])
         refusal = TaskError("backend_error", "the board refused the read request", 1)
         with mock.patch.object(self.board, "call", side_effect=refusal):
-            snapshot = self.layer().task_snapshot("secretary-1")
+            snapshot = self.layer().task_snapshot("ummanu-1")
         self.assertEqual(snapshot["card"]["source"]["state"], "unavailable")
         self.assertIsNone(snapshot["card"]["value"])
         self.assertEqual(snapshot["events"]["source"]["state"], "available")
@@ -687,11 +687,11 @@ class TaskSnapshotTests(ReadLayerFixture):
 class SchemaTests(ReadLayerFixture):
     def test_every_document_validates_against_the_published_schema(self) -> None:
         self.board.replace_comments(12, [{"date_creation": 1, "comment": "[report:done]\ndone"}])
-        _journal(self.board, [_event("secretary-510", "card.started", ordinal=0)])
+        _journal(self.board, [_event("ummanu-510", "card.started", ordinal=0)])
         _production(
             self.data_dir,
             {
-                "secretary-510": {
+                "ummanu-510": {
                     "attempt_id": "attempt-1",
                     "state": "validate",
                     "worker_pid_file": str(self.tmp / "worker.pid"),
@@ -702,8 +702,8 @@ class SchemaTests(ReadLayerFixture):
         layer = self.layer()
         for document in (
             layer.system_snapshot(),
-            layer.task_snapshot("secretary-510"),
-            layer.task_events("secretary-510", None, limit=10),
+            layer.task_snapshot("ummanu-510"),
+            layer.task_events("ummanu-510", None, limit=10),
         ):
             with self.subTest(kind=document["kind"]):
                 self.assertEqual(validate(document, "web-read", document["kind"]), [])
@@ -717,7 +717,7 @@ class TransportIndependenceTests(unittest.TestCase):
         """
         http httpx requests urllib urllib3 socket socketserver ssl asyncio aiohttp flask fastapi
         starlette uvicorn django jinja2 tornado werkzeug wsgiref html cgi bottle sanic quart
-        secretary.dispatch.review secretary.dispatch.head_status secretary.runtime.pane_host
+        ummanu.dispatch.review ummanu.dispatch.head_status ummanu.runtime.pane_host
         """.split()
     )
 
@@ -725,7 +725,7 @@ class TransportIndependenceTests(unittest.TestCase):
         import ast
 
         found: list[tuple[str, str]] = []
-        for path in sorted((REPO_ROOT / "src" / "secretary" / "webproto").glob("*.py")):
+        for path in sorted((REPO_ROOT / "src" / "ummanu" / "webproto").glob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
@@ -764,30 +764,30 @@ class WebReadCommandTests(ReadLayerFixture):
         return code, out.getvalue(), err.getvalue()
 
     def test_the_three_commands_print_their_snapshots(self) -> None:
-        _journal(self.board, [_event("secretary-510", "card.started", ordinal=0)])
+        _journal(self.board, [_event("ummanu-510", "card.started", ordinal=0)])
         with mock.patch(
-            "secretary.webproto.commands.ReadLayer",
+            "ummanu.webproto.commands.ReadLayer",
             lambda instance, **kwargs: self.layer(),
         ):
             code, out, _ = self._run("web-read", "system", "--json")
             self.assertEqual(code, 0)
             self.assertEqual(json.loads(out)["kind"], "system")
 
-            code, out, _ = self._run("web-read", "task", "--ref", "secretary-510", "--json")
+            code, out, _ = self._run("web-read", "task", "--ref", "ummanu-510", "--json")
             self.assertEqual(code, 0)
-            self.assertEqual(json.loads(out)["ref"], "secretary-510")
+            self.assertEqual(json.loads(out)["ref"], "ummanu-510")
 
-            code, out, _ = self._run("web-read", "events", "--ref", "secretary-510")
+            code, out, _ = self._run("web-read", "events", "--ref", "ummanu-510")
             self.assertEqual(code, 0)
             self.assertIn("next cursor:", out)
 
     def test_a_refused_read_exits_on_its_code_and_prints_the_error(self) -> None:
         with mock.patch(
-            "secretary.webproto.commands.ReadLayer",
+            "ummanu.webproto.commands.ReadLayer",
             lambda instance, **kwargs: self.layer(),
         ):
             code, _, err = self._run(
-                "web-read", "events", "--ref", "secretary-1", "--cursor", "nonsense", "--json"
+                "web-read", "events", "--ref", "ummanu-1", "--cursor", "nonsense", "--json"
             )
         self.assertEqual(code, 2)
         self.assertEqual(json.loads(err)["error"]["code"], "validation")

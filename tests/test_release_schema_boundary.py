@@ -28,24 +28,24 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from secretary.board import migrate, release_migrations, schema_gate
-from secretary.board.production_rights import ACTIVATION_OPERATION_REQUEST_PREFIX, touches_production
-from secretary.board.sql_cards import SqlCardClient
-from secretary.board.store import BoardStoreConfig
-from secretary.dispatch import release_activation, release_lifecycle
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.production_checkout import ProductionActivationRefused
-from secretary.dispatch.runtime import DispatcherRuntime
-from secretary.dispatch.runtime_preflight import PACKAGE
-from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatch.types import HostError
-from secretary.tasks import TaskError, TaskReader, TaskWriter
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture, ensure_attempt
 from tests.production_runtime_fixtures import RegisteredProductionRuntime
 from tests.sql_backend_fixtures import OWNER, PostgresBoard, seed_client
+from ummanu.board import migrate, release_migrations, schema_gate
+from ummanu.board.production_rights import ACTIVATION_OPERATION_REQUEST_PREFIX, touches_production
+from ummanu.board.sql_cards import SqlCardClient
+from ummanu.board.store import BoardStoreConfig
+from ummanu.dispatch import release_activation, release_lifecycle
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.production_checkout import ProductionActivationRefused
+from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.dispatch.runtime_preflight import PACKAGE
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.types import HostError
+from ummanu.tasks import TaskError, TaskReader, TaskWriter
 
 HEAD = migrate.EXPECTED_SCHEMA_REVISION
-BRANCH = "pipeline/secretary-510"
+BRANCH = "pipeline/ummanu-510"
 CANARY = "0025_release_canary"
 FAILING = "0026_release_canary_fails"
 SPRINT = "sprint:1031"
@@ -104,7 +104,7 @@ op.execute("UPDATE release_canary_missing SET x = 1")
 
 
 class _Catalog:
-    """One project, `secretary`, bound to the production checkout."""
+    """One project, `ummanu`, bound to the production checkout."""
 
     def __init__(self, repo: Path, instance: Path, ci: str) -> None:
         self.repo = repo
@@ -135,7 +135,7 @@ class _ReleaseHost(CommandHostRuntime):
             production_runtime=RegisteredProductionRuntime(  # type: ignore[arg-type]
                 interpreter=str(product_root / ".venv" / "bin" / "python3"),
                 product_root=str(product_root),
-                import_origin=str(product_root / "src" / "secretary" / "__init__.py"),
+                import_origin=str(product_root / "src" / "ummanu" / "__init__.py"),
             ),
         )
         self.workspace = workspace
@@ -200,7 +200,7 @@ class ReleaseFixture:
         path.chmod(0o600)
         registry = instance / "projects"
         registry.mkdir(exist_ok=True)
-        (registry / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
+        (registry / "ummanu.yaml").write_text("id: ummanu\n", encoding="utf-8")
         return instance
 
     def query(self, config: BoardStoreConfig, sql: str) -> list[tuple]:
@@ -241,7 +241,7 @@ class ReleaseFixture:
 
     def repos(self) -> tuple[Path, Path]:
         """(production checkout, worker workspace): both at the old commit, which ships the packaged bundle."""
-        origin, production, workspace = self.root / "origin.git", self.root / "secretary", self.root / "workspace"
+        origin, production, workspace = self.root / "origin.git", self.root / "ummanu", self.root / "workspace"
         git(self.root, "init", "--quiet", "--bare", "--initial-branch", "main", str(origin))
         git(self.root, "clone", "--quiet", str(origin), str(production))
         for repo in (production,):
@@ -286,7 +286,7 @@ class ReleaseFixture:
         return _ReleaseHost(_Catalog(production, instance, ci), self.root, workspace, product_root=production)
 
     def release(self, host: _ReleaseHost, workspace: Path) -> Any:
-        return host.complete_green({"ref": "secretary-510", "project": "secretary"}, SimpleNamespace(workspace=str(workspace)))
+        return host.complete_green({"ref": "ummanu-510", "project": "ummanu"}, SimpleNamespace(workspace=str(workspace)))
 
 
 class MigrationRunnerCleanupTests(ReleaseFixture, unittest.TestCase):
@@ -437,7 +437,7 @@ class ReleaseAppliesTheTargetSchemaFirstTests(ReleaseFixture, unittest.TestCase)
             with self.subTest(role=role):
                 shown = TaskReader(client).show(CARD_REF)
                 self.assertEqual((shown["ref"], shown["title"]), (CARD_REF, "Pilot"))
-                self.assertIn("secretary-511", [card["ref"] for card in TaskReader(client).list()])
+                self.assertIn("ummanu-511", [card["ref"] for card in TaskReader(client).list()])
         writer = TaskWriter(SqlCardClient(config.for_role("app"), instance), data_dir=self.root, workspace=self.root)
         self.addCleanup(writer.client.close)
         writer.comment(role="observer", actor="observer", reference=CARD_REF, body="still writes", request_id="after-0025")
@@ -547,7 +547,7 @@ class RefusedReleaseKeepsTheCheckoutTests(ReleaseFixture, unittest.TestCase):
                 config = self.database()
                 instance = self.instance(config, self.root / f"instance-{reason}-{safety}")
                 shutil.rmtree(self.root / "origin.git", ignore_errors=True)
-                shutil.rmtree(self.root / "secretary", ignore_errors=True)
+                shutil.rmtree(self.root / "ummanu", ignore_errors=True)
                 shutil.rmtree(self.root / "workspace", ignore_errors=True)
                 production, workspace = self.repos()
                 old = git(production, "rev-parse", "HEAD")
@@ -625,7 +625,7 @@ class RefusedReleaseKeepsTheCheckoutTests(ReleaseFixture, unittest.TestCase):
         store = refused_login / "board-store.env"
         store.write_text(
             store.read_text(encoding="utf-8").replace(
-                f"SECRETARY_DB_OWNER_PASSWORD={config.owner_password}", "SECRETARY_DB_OWNER_PASSWORD=not-it"
+                f"UMMANU_DB_OWNER_PASSWORD={config.owner_password}", "UMMANU_DB_OWNER_PASSWORD=not-it"
             ),
             encoding="utf-8",
         )
@@ -740,7 +740,7 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
         """Construct a new runtime; its next tick loads the obligation from the production state."""
         self.runtime = DispatcherRuntime(
             self.reader, self.writer, self.writer.audit, self.data_dir, self.catalog, self.host,
-            owner="secretary-pilot", sprints=self.sprints,
+            owner="ummanu-pilot", sprints=self.sprints,
         )
 
     def obligation(self) -> dict[str, Any]:
@@ -763,7 +763,7 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
         [operation] = self.operations()
         self.assertEqual(facts, {**owed["facts"], "operation": operation["ref"]})
         self.assertEqual((operation["project"], operation["sprint"], touches_production(operation)),
-                         ("secretary", SPRINT, "secretary"))
+                         ("ummanu", SPRINT, "ummanu"))
         self.assertEqual(operation["description"], owed["operation"]["description"])
         [created] = self.writer.audit.events(operation["ref"], kind="created")
         self.assertEqual(created["request_id"], owed["operation"]["request_id"])
@@ -783,13 +783,13 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
 
     def test_native_registry_refusal_survives_reload_and_an_ordinary_production_tick(self) -> None:
         record, records, payload = self.arrange(partial=True)
-        registry = self.data_dir / "projects" / "secretary.yaml"
+        registry = self.data_dir / "projects" / "ummanu.yaml"
         withheld = registry.with_suffix(".withheld")
         registry.rename(withheld)
         try:
             outcome = self.release_card(record, records, payload)
             self.assertEqual(outcome["status"], "degraded")
-            self.assertIn("unknown registered project: secretary", outcome["reason"])
+            self.assertIn("unknown registered project: ummanu", outcome["reason"])
             owed = self.obligation()
             self.assertEqual(owed["facts"]["applied"], [CANARY])
             self.assertEqual(owed["facts"]["pending"], [CANARY, FAILING])
@@ -813,7 +813,7 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
         self.settled(owed)
 
     def test_one_shot_sprint_guard_unavailable_retains_the_original_github_delivery(self) -> None:
-        from secretary.tasks import SprintReservationUnverifiable
+        from ummanu.tasks import SprintReservationUnverifiable
 
         record, records, payload = self.arrange(ci="github")
         with mock.patch.object(self.writer, "open_sprints_reserving",
@@ -958,12 +958,12 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
         [operation] = self.operations()
         self.assertEqual(
             (operation["project"], operation["sprint"], operation["state"], touches_production(operation)),
-            ("secretary", SPRINT, "ready", "secretary"),
+            ("ummanu", SPRINT, "ready", "ummanu"),
         )
         self.assertIn(operation["ref"], reason)
         body = operation["description"]
         for needle in (self.old, self.target, FAILING, "Applied by this release (committed, additive): none",
-                       "secretary upgrade", "secretary doctor --json", "Delivered to the remote"):
+                       "ummanu upgrade", "ummanu doctor --json", "Delivered to the remote"):
             self.assertIn(needle, body)
         [created] = self.writer.audit.events(operation["ref"], kind="created")
         self.assertEqual(created["actor"]["role"], "dispatcher")
@@ -1021,7 +1021,7 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
             self.assertIn(needle, str(blocked))
         [operation] = self.operations()
         self.assertIn(operation["ref"], str(blocked))
-        self.assertEqual((operation["sprint"], touches_production(operation)), (SPRINT, "secretary"))
+        self.assertEqual((operation["sprint"], touches_production(operation)), (SPRINT, "ummanu"))
         for needle in ("docs/RENAME.md §T3", "The merge landed on `main`", "Do not retry the release",
                        self.old, self.target):
             self.assertIn(needle, operation["description"])
@@ -1034,11 +1034,11 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
     def test_the_dispatcher_creates_no_other_operation(self) -> None:
         self.start_dispatcher()
         self.instance(self.board_config(), self.data_dir)
-        base = dict(role="dispatcher", actor="secretary-pilot", project="secretary", task_type="operation",
+        base = dict(role="dispatcher", actor="ummanu-pilot", project="ummanu", task_type="operation",
                     title="T", sprint=SPRINT)
         for extra, code in (
-            ({"touches_production": "secretary"}, "role_forbidden"),
-            ({"touches_production": "secretary", "request_id": "dispatcher-anything-1"}, "role_forbidden"),
+            ({"touches_production": "ummanu"}, "role_forbidden"),
+            ({"touches_production": "ummanu", "request_id": "dispatcher-anything-1"}, "role_forbidden"),
             ({"touches_production": "none", "request_id": ACTIVATION_OPERATION_REQUEST_PREFIX + "x"}, "validation"),
         ):
             with self.subTest(extra=extra), self.assertRaises(TaskError) as raised:
@@ -1047,7 +1047,7 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
         with self.assertRaises(TaskError) as observer:
             self.writer.create(
                 **{**base, "role": "observer", "actor": "observer"},
-                touches_production="secretary",
+                touches_production="ummanu",
                 request_id=ACTIVATION_OPERATION_REQUEST_PREFIX + "y",
                 origin={"session": "s", "request": "r"},
             )

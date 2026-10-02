@@ -13,7 +13,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from unittest import mock
 
-from secretary.runtime.role_env import OBSERVER_GENERATION_ENV, OBSERVER_SPRINT_ENV
+from ummanu.runtime.role_env import OBSERVER_GENERATION_ENV, OBSERVER_SPRINT_ENV
 
 GENERATION = "testgeneration"
 

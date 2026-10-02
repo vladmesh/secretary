@@ -2,7 +2,7 @@
 
 `role_env exec` requires the product's executable `.venv/bin/python3` for standing roles and for
 the worker/reviewer Docker guard. A test checkout (and CI's) has no `.venv`, so a test that really
-launches such a role points `TA_SECRETARY_REPO` at one of these instead: its `src` is this
+launches such a role points `UMMANU_REPO` at one of these instead: its `src` is this
 checkout's and its `.venv` is the running interpreter's own prefix, dependencies included.
 """
 
@@ -50,6 +50,6 @@ def guarded_product_env(parent: Path) -> dict[str, str]:
     )
     docker.chmod(0o755)
     return {
-        "TA_SECRETARY_REPO": str(product),
+        "UMMANU_REPO": str(product),
         "PATH": str(native_bin) + os.pathsep + str(product / ".venv/bin"),
     }

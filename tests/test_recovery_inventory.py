@@ -9,17 +9,17 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.checkpoint import _credential_snapshot
-from secretary.cli import main
-from secretary.config import validate_instance
-from secretary.head_health import HeadReadiness
-from secretary.host import CollectResult, HostInventory
-from secretary.infra.recovery_inventory import collect_recovery_inventory
-from secretary.secret_store import initialize_store, set_secret
-from secretary.secret_words import RECOVERY_WORDS
-from secretary.status import collect_status
 from tests.head_registry import write_installed_pair
 from tests.retired_board import LEGACY_ENV, LEGACY_SECRET_IDS, LEGACY_VALUES
+from ummanu.checkpoint import _credential_snapshot
+from ummanu.cli import main
+from ummanu.config import validate_instance
+from ummanu.head_health import HeadReadiness
+from ummanu.host import CollectResult, HostInventory
+from ummanu.infra.recovery_inventory import collect_recovery_inventory
+from ummanu.secret_store import initialize_store, set_secret
+from ummanu.secret_words import RECOVERY_WORDS
+from ummanu.status import collect_status
 
 REGISTRY = """resources:
   never-used:
@@ -83,7 +83,7 @@ class RecoveryInventoryTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             _, report = self.fixture(Path(tmp), recorded)
-            with mock.patch("secretary.infra.recovery_inventory.run_probe") as probe:
+            with mock.patch("ummanu.infra.recovery_inventory.run_probe") as probe:
                 snapshot = collect_recovery_inventory(report, inspect_live=False, now=now, checkpoint={})
 
         probe.assert_not_called()
@@ -101,7 +101,7 @@ class RecoveryInventoryTests(unittest.TestCase):
             health = report.data_dir / "dispatcher" / "resource_health.json"
             before = health.read_bytes()
             with mock.patch(
-                "secretary.infra.recovery_inventory.run_probe",
+                "ummanu.infra.recovery_inventory.run_probe",
                 side_effect=lambda resource, probe, stamp: HeadReadiness(
                     resource, "unauthenticated", "login required", stamp
                 ),
@@ -119,8 +119,8 @@ class RecoveryInventoryTests(unittest.TestCase):
             _, report = self.fixture(Path(tmp))
             inventory = HostInventory(units=set(), unit_states={})
             with (
-                mock.patch("secretary.status.LiveHostSource.collect", return_value=CollectResult(inventory)),
-                mock.patch("secretary.infra.recovery_inventory.run_probe") as probe,
+                mock.patch("ummanu.status.LiveHostSource.collect", return_value=CollectResult(inventory)),
+                mock.patch("ummanu.infra.recovery_inventory.run_probe") as probe,
             ):
                 snapshot = collect_status(report)
 
@@ -223,8 +223,8 @@ class RecoveryInventoryTests(unittest.TestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "SECRETARY_INSTANCE": str(instance),
-                    "SECRETARY_RUNTIME_ENV_FILE": str(instance / "runtime.env"),
+                    "UMMANU_INSTANCE": str(instance),
+                    "UMMANU_RUNTIME_ENV_FILE": str(instance / "runtime.env"),
                 },
                 clear=False,
             ):
@@ -232,8 +232,8 @@ class RecoveryInventoryTests(unittest.TestCase):
             with mock.patch.dict(
                 os.environ,
                 {
-                    "SECRETARY_INSTANCE": str(instance),
-                    "SECRETARY_RUNTIME_ENV_FILE": str(instance / "elsewhere.env"),
+                    "UMMANU_INSTANCE": str(instance),
+                    "UMMANU_RUNTIME_ENV_FILE": str(instance / "elsewhere.env"),
                 },
                 clear=False,
             ):
@@ -249,8 +249,8 @@ class RecoveryInventoryTests(unittest.TestCase):
             root = Path(tmp)
             instance, report = self.fixture(root)
             workspaces = root / "workspaces"
-            canonical = workspaces / "secretary" / "pipeline" / "state" / "pipeline"
-            bound = {"SECRETARY_INSTANCE": str(instance), "TA_WORKSPACES_ROOT": str(workspaces)}
+            canonical = workspaces / "ummanu" / "pipeline" / "state" / "pipeline"
+            bound = {"UMMANU_INSTANCE": str(instance), "TA_WORKSPACES_ROOT": str(workspaces)}
             with mock.patch.dict(os.environ, bound, clear=True):
                 declared = collect_recovery_inventory(report, inspect_live=False, checkpoint={})
             with mock.patch.dict(os.environ, {**bound, "TA_PIPELINE_STATE_DIR": str(canonical)}, clear=True):
@@ -313,16 +313,16 @@ class RecoveryInventoryTests(unittest.TestCase):
             before_files = snapshot()
             bound_env = {
                 "HOME": str(root / "home"),
-                "SECRETARY_INSTANCE": str(instance),
-                "SECRETARY_RUNTIME_ENV_FILE": str(runtime),
+                "UMMANU_INSTANCE": str(instance),
+                "UMMANU_RUNTIME_ENV_FILE": str(runtime),
                 "TA_PIPELINE_STATE_DIR": str(root / "run-state"),
             }
             with (
                 mock.patch.dict(os.environ, bound_env, clear=True),
-                mock.patch("secretary.infra.recovery_inventory.run_probe") as probe,
-                mock.patch("secretary.dispatch.host.CommandHostRuntime.prepare_worker") as worker,
-                mock.patch("secretary.dispatch.host.CommandHostRuntime.start_review") as reviewer,
-                mock.patch("secretary.dispatch.observer._launch_observer") as observer,
+                mock.patch("ummanu.infra.recovery_inventory.run_probe") as probe,
+                mock.patch("ummanu.dispatch.host.CommandHostRuntime.prepare_worker") as worker,
+                mock.patch("ummanu.dispatch.host.CommandHostRuntime.start_review") as reviewer,
+                mock.patch("ummanu.dispatch.observer._launch_observer") as observer,
                 mock.patch("builtins.print"),
             ):
                 before_env = dict(os.environ)

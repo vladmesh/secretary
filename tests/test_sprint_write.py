@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from unittest import TestCase
 
-from secretary.board.models import SprintState
-from secretary.board.roles import Role
-from secretary.board.sprint_write import (
+from tests.retired_board import RETIRED_STORE
+from ummanu.board.models import SprintState
+from ummanu.board.roles import Role
+from ummanu.board.sprint_write import (
     SprintCreateIntent,
     SprintMutationReceipt,
     SprintReopenIntent,
     SprintWriteSnapshot,
 )
-from tests.retired_board import RETIRED_STORE
 
 
 class SprintWriteValueTests(TestCase):
@@ -23,9 +23,9 @@ class SprintWriteValueTests(TestCase):
                 "repositories": ["/srv/a", "/srv/b"],
                 "product": "product:7",
                 "issues": ["issue:8"],
-                "reservations": ["secretary"],
+                "reservations": ["ummanu"],
                 "budget": {"by_type": {"blocked": 2}},
-                "current_task": "secretary-9",
+                "current_task": "ummanu-9",
                 "observer": {"kind": "none"},
                 "audit": {"updated_at": "2026-09-16T12:00:00Z"},
             }
@@ -34,12 +34,12 @@ class SprintWriteValueTests(TestCase):
         self.assertEqual(snapshot.repositories, ("/srv/a", "/srv/b"))
         self.assertEqual(snapshot.issues, ("issue:8",))
         self.assertEqual(snapshot.budget.by_type["blocked"], 2)
-        self.assertEqual(snapshot.current_task, "secretary-9")
+        self.assertEqual(snapshot.current_task, "ummanu-9")
         self.assertEqual(snapshot.updated_at, "2026-09-16T12:00:00Z")
         admission = snapshot.admission()
         self.assertEqual(admission.ref, "sprint:42")
         self.assertEqual(admission.product, "product:7")
-        self.assertEqual(admission.reservations, ("secretary",))
+        self.assertEqual(admission.reservations, ("ummanu",))
         self.assertTrue(admission.is_open is False)
 
     def test_snapshot_keeps_reader_legacy_unknown_state_fallback(self) -> None:
@@ -55,7 +55,7 @@ class SprintWriteValueTests(TestCase):
             "repositories": ["/srv/a"],
             "product": "product:1",
             "issues": ["issue:2"],
-            "reservations": ["secretary"],
+            "reservations": ["ummanu"],
             "reference": "sprint:3",
             "status": "open",
             "observer": {"kind": "none"},

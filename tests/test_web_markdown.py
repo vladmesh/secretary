@@ -14,8 +14,8 @@ import time
 import unittest
 from typing import Any, ClassVar
 
-from secretary.web import pages
-from secretary.web.markdown import render
+from ummanu.web import pages
+from ummanu.web.markdown import render
 
 ALLOWED_TAGS = {
     "h3",
@@ -289,7 +289,7 @@ class PageShellTest(unittest.TestCase):
         self.assertIn('id="theme-toggle"', page)
         self.assertIn("☀", page)
         self.assertIn("☾", page)
-        self.assertIn("secretary.web.theme", page)
+        self.assertIn("ummanu.web.theme", page)
         self.assertIn("document.documentElement.dataset.theme", page)
 
     def test_explicit_light_and_dark_themes_pin_the_browser_color_scheme(self) -> None:

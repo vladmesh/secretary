@@ -5,11 +5,11 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from secretary.board.terminal_taxonomy import normalize_terminal_taxonomy
-from secretary.dispatch.production import _budget_event_type
-from secretary.dispatch.state import DispatcherRecord
-from secretary.tasks import TaskReader
-from secretary.webproto.reads import _events_document
+from ummanu.board.terminal_taxonomy import normalize_terminal_taxonomy
+from ummanu.dispatch.production import _budget_event_type
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.tasks import TaskReader
+from ummanu.webproto.reads import _events_document
 
 
 class DeadPaneHistoryTests(unittest.TestCase):
@@ -29,7 +29,7 @@ class DeadPaneHistoryTests(unittest.TestCase):
             [{"comment": reason, "date_creation": 0}] if method == "getAllComments" else {}
         )
         card = TaskReader(client)._show_card(
-            {"id": 1, "column_id": 1, "reference": "secretary-old"},
+            {"id": 1, "column_id": 1, "reference": "ummanu-old"},
             {1: "Blocked"},
             {},
         )
@@ -51,5 +51,5 @@ class DeadPaneHistoryTests(unittest.TestCase):
         page = mock.Mock(items=(event,), has_more=False)
         page.source.to_json.return_value = {"state": "available"}
         page.next_cursor.encode.return_value = "cursor"
-        shown = _events_document("secretary-old", page, now=0, cursor=None)
+        shown = _events_document("ummanu-old", page, now=0, cursor=None)
         self.assertEqual(shown["items"][0]["data"]["failure_cause"], old_cause)

@@ -4,7 +4,7 @@ Four things are pinned here, and the first is the defect the rest exist for.
 
 **The split is reproduced, not asserted from timestamps.** A process holds the callables it imported
 when it started; `importlib.resources` reads bundled data files from the checkout as the checkout is
-*now*. On 2026-09-11 `secretary-web.service` had been running since 06:33 UTC when
+*now*. On 2026-09-11 `ummanu-web.service` had been running since 06:33 UTC when
 `f9cabc3` landed at 09:42 UTC and made the onboarding contract's drafted adapter a relative `$ref`
 to `adapter.schema.json`, resolved through a registry the process's validator did not have. Every
 route then answered an empty reply, because `jsonschema.exceptions._WrappedReferencingError:
@@ -41,22 +41,22 @@ from unittest import mock
 
 from jsonschema import Draft202012Validator
 
-from secretary import upgrade
-from secretary.config import load_schema, validate
-from secretary.host_apply import HostCommandError
-from secretary.web.health import (
+from tests.fakes.upgrade import FakeUnitInstaller
+from ummanu import upgrade
+from ummanu.config import load_schema, validate
+from ummanu.host_apply import HostCommandError
+from ummanu.web.health import (
     WebProbeError,
     WebTarget,
     probe_web,
     target_from_unit,
 )
-from secretary.web.server import LoopbackOnly
-from tests.fakes.upgrade import FakeUnitInstaller
+from ummanu.web.server import LoopbackOnly
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "onboarding" / "happy-path.json"
 
-UNIT_PREFIX = "secretary-"
+UNIT_PREFIX = "ummanu-"
 WEB_UNIT = f"{UNIT_PREFIX}web.service"
 
 
@@ -64,7 +64,7 @@ def _unit_text(port: int, host: str = "127.0.0.1") -> bytes:
     """The shape of the installed unit the probe reads its target out of."""
     return (
         "[Service]\n"
-        f"ExecStart=/opt/secretary/.venv/bin/secretary web-serve --instance /srv/i "
+        f"ExecStart=/opt/ummanu/.venv/bin/ummanu web-serve --instance /srv/i "
         f"--host {host} --port {port}\n"
     ).encode()
 
@@ -82,7 +82,7 @@ _SCRATCH: tempfile.TemporaryDirectory[str] | None = None
 
 def setUpModule() -> None:
     global _SCRATCH
-    _SCRATCH = tempfile.TemporaryDirectory(prefix="secretary-web-process-coherence-")
+    _SCRATCH = tempfile.TemporaryDirectory(prefix="ummanu-web-process-coherence-")
     unittest.addModuleCleanup(_SCRATCH.cleanup)
 
 
@@ -140,7 +140,7 @@ class RetainedValidatorTests(unittest.TestCase):
 
     def test_a_retained_registry_less_validator_cannot_resolve_the_bundled_cross_file_ref(self) -> None:
         document = self.document()
-        # Exactly what `secretary.config.validate` was before f9cabc3: no registry. A process that
+        # Exactly what `ummanu.config.validate` was before f9cabc3: no registry. A process that
         # imported that module keeps this callable no matter what the checkout does afterwards.
         stale = Draft202012Validator(load_schema("onboarding-contract"))
 
@@ -156,7 +156,7 @@ class RetainedValidatorTests(unittest.TestCase):
 
     def test_the_bundled_schemas_do_carry_a_cross_file_reference(self) -> None:
         """Guards the two tests above from passing vacuously if the `$ref` were ever inlined again."""
-        text = (REPO_ROOT / "src" / "secretary" / "schemas" / "onboarding-contract.schema.json").read_text(
+        text = (REPO_ROOT / "src" / "ummanu" / "schemas" / "onboarding-contract.schema.json").read_text(
             encoding="utf-8"
         )
         self.assertIn('"$ref": "adapter.schema.json"', text)
@@ -243,7 +243,7 @@ sys.path.insert(0, sys.argv[1])
 # Imported once, at start. This is the whole of what a restart replaces.
 from driftpkg import validator
 
-DOCUMENT = {"adapter": {"id": "secretary"}}
+DOCUMENT = {"adapter": {"id": "ummanu"}}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -636,14 +636,14 @@ class WebStepOrderingTests(unittest.TestCase):
 
 
 BASELINE = {
-    "src/secretary/config.py": "SCHEMAS = {}\n",
-    "src/secretary/schemas/onboarding-contract.schema.json": '{"$id": "onboarding-contract.schema.json"}\n',
-    "src/secretary/automations/__main__.py": "ROOT = None\n",
-    "packaging/systemd/secretary-web.service": "[Service]\nExecStart=/x --host 127.0.0.1 --port 8787\n",
+    "src/ummanu/config.py": "SCHEMAS = {}\n",
+    "src/ummanu/schemas/onboarding-contract.schema.json": '{"$id": "onboarding-contract.schema.json"}\n',
+    "src/ummanu/automations/__main__.py": "ROOT = None\n",
+    "packaging/systemd/ummanu-web.service": "[Service]\nExecStart=/x --host 127.0.0.1 --port 8787\n",
     "packaging/systemd/README.md": "not a unit\n",
     # The entrypoint the live units execute: `step_pull` refuses a target without it (secretary-1929).
-    "src/secretary/dispatch/runtime_preflight.py": "PACKAGE = 'secretary'\n",
-    "pyproject.toml": '[project]\nname = "secretary"\n\n[project.scripts]\nsecretary = "secretary.cli:main"\n',
+    "src/ummanu/dispatch/runtime_preflight.py": "PACKAGE = 'ummanu'\n",
+    "pyproject.toml": '[project]\nname = "ummanu"\n\n[project.scripts]\nummanu = "ummanu.cli:main"\n',
     "docs/OPERATIONS.md": "how to run it\n",
     # The product checkout carries its own virtualenv, and `step_pull` refuses a dirty checkout.
     ".gitignore": ".venv/\n",
@@ -656,9 +656,9 @@ OUTAGE_REVISION_PATHS = (
     "docs/OPERATIONS.md",
     "docs/PROTOCOLS.md",
     "pyproject.toml",
-    "src/secretary/config.py",
-    "src/secretary/onboarding.py",
-    "src/secretary/schemas/onboarding-contract.schema.json",
+    "src/ummanu/config.py",
+    "src/ummanu/onboarding.py",
+    "src/ummanu/schemas/onboarding-contract.schema.json",
     "tests/test_gate.py",
     "tests/test_onboarding.py",
     "tests/test_provision.py",
@@ -668,7 +668,7 @@ OUTAGE_REVISION_PATHS = (
 class ChangePathTests(unittest.TestCase):
     """The prefixes are about this repository, so they are checked against this repository.
 
-    `MEMORY_CODE_PATHS` said `secretary/` and `SCHEMA_PATHS` said `secretary/schemas/`. Nothing Git
+    `MEMORY_CODE_PATHS` said `ummanu/` and `SCHEMA_PATHS` said `ummanu/schemas/`. Nothing Git
     reports here starts that way — the packages live under `src/` — so both matched nothing, every
     flag stayed false, and the one revision this card exists because of moved none of them.
     """
@@ -696,14 +696,14 @@ class ChangePathTests(unittest.TestCase):
 
     def test_a_packaged_unit_is_recognised_by_its_own_file_name(self) -> None:
         changed = (
-            "packaging/systemd/secretary-web.service",
-            "packaging/systemd/secretary-memory.service",
+            "packaging/systemd/ummanu-web.service",
+            "packaging/systemd/ummanu-memory.service",
             "packaging/systemd/README.md",
-            "src/secretary/web/server.py",
+            "src/ummanu/web/server.py",
         )
 
-        self.assertEqual(upgrade.planned_unit_names(changed, "secretary-web"), ("secretary-web.service",))
-        self.assertEqual(upgrade.planned_unit_names(changed, "secretary-nothing"), ())
+        self.assertEqual(upgrade.planned_unit_names(changed, "ummanu-web"), ("ummanu-web.service",))
+        self.assertEqual(upgrade.planned_unit_names(changed, "ummanu-nothing"), ())
 
 
 class PulledRevisionTests(unittest.TestCase):
@@ -777,14 +777,14 @@ class PulledRevisionTests(unittest.TestCase):
     # -- the applied path ----------------------------------------------------------------------
 
     def test_a_source_only_revision_reaches_the_web_step_as_a_named_reason(self) -> None:
-        self.publish({"src/secretary/config.py": "SCHEMAS = {'adapter': 1}\n"})
+        self.publish({"src/ummanu/config.py": "SCHEMAS = {'adapter': 1}\n"})
         context = self.context()
 
         pulled = upgrade.step_pull(context)
         result = upgrade.step_web(context)
 
         self.assertEqual(pulled.status, "changed")
-        self.assertEqual(context.changed_paths, ("src/secretary/config.py",))
+        self.assertEqual(context.changed_paths, ("src/ummanu/config.py",))
         self.assertEqual(result.status, "changed")
         self.assertIn("product code or dependencies changed", result.detail)
         self.assertIn(("restart", WEB_UNIT), self.units.calls)
@@ -793,7 +793,7 @@ class PulledRevisionTests(unittest.TestCase):
     def test_a_schema_only_revision_reaches_the_web_step_as_a_named_reason(self) -> None:
         """The revision shape that caused the outage: one bundled schema file and nothing else."""
         self.publish(
-            {"src/secretary/schemas/onboarding-contract.schema.json": '{"$ref": "adapter.schema.json"}\n'}
+            {"src/ummanu/schemas/onboarding-contract.schema.json": '{"$ref": "adapter.schema.json"}\n'}
         )
         context = self.context()
 
@@ -806,8 +806,8 @@ class PulledRevisionTests(unittest.TestCase):
         self.assertIn(("restart", WEB_UNIT), self.units.calls)
 
     def test_a_revision_in_the_background_agents_reaches_the_web_step(self) -> None:
-        """The transport imports `secretary.automations` too, so a change there is a reason as well."""
-        self.publish({"src/secretary/automations/__main__.py": "ROOT = '/x'\n"})
+        """The transport imports `ummanu.automations` too, so a change there is a reason as well."""
+        self.publish({"src/ummanu/automations/__main__.py": "ROOT = '/x'\n"})
         context = self.context()
 
         upgrade.step_pull(context)
@@ -844,10 +844,10 @@ class PulledRevisionTests(unittest.TestCase):
 
         `run_upgrade` reads the marker and hands its path set to the same recorder; before this
         round it derived `code_changed` there and left `schemas_changed` false, which meant the real
-        `secretary upgrade` — the one that re-executes — never saw a schema move at all.
+        `ummanu upgrade` — the one that re-executes — never saw a schema move at all.
         """
         self.publish(
-            {"src/secretary/schemas/onboarding-contract.schema.json": '{"$ref": "adapter.schema.json"}\n'}
+            {"src/ummanu/schemas/onboarding-contract.schema.json": '{"$ref": "adapter.schema.json"}\n'}
         )
         pulling = self.context()
         upgrade.step_pull(pulling)
@@ -864,12 +864,12 @@ class PulledRevisionTests(unittest.TestCase):
     def test_dry_run_plans_the_upstream_target_and_moves_nothing(self) -> None:
         target = self.publish(
             {
-                "src/secretary/config.py": "SCHEMAS = {'adapter': 1}\n",
-                "src/secretary/schemas/onboarding-contract.schema.json": '{"x": 1}\n',
+                "src/ummanu/config.py": "SCHEMAS = {'adapter': 1}\n",
+                "src/ummanu/schemas/onboarding-contract.schema.json": '{"x": 1}\n',
                 "pyproject.toml": (
-                    '[project]\nname = "secretary"\nversion = "2"\n\n[project.scripts]\nsecretary = "secretary.cli:main"\n'
+                    '[project]\nname = "ummanu"\nversion = "2"\n\n[project.scripts]\nummanu = "ummanu.cli:main"\n'
                 ),
-                "packaging/systemd/secretary-web.service": "[Service]\nExecStart=/y --port 8787\n",
+                "packaging/systemd/ummanu-web.service": "[Service]\nExecStart=/y --port 8787\n",
             }
         )
         self.venv()
@@ -886,7 +886,7 @@ class PulledRevisionTests(unittest.TestCase):
         self.assertNotEqual(self._head(self.product), target)
         self.assertEqual(self._git(self.product, "status", "--porcelain"), "")
         # And the plan is the target revision's, not the installed revision's.
-        self.assertIn("src/secretary/config.py", context.changed_paths)
+        self.assertIn("src/ummanu/config.py", context.changed_paths)
         self.assertIn("a dependency manifest moved", dependencies.detail)
         self.assertEqual(web.status, "changed")
         self.assertIn(f"would restart {WEB_UNIT}", web.detail)
@@ -903,7 +903,7 @@ class PulledRevisionTests(unittest.TestCase):
 
     def test_dry_run_names_a_pending_web_unit_change_the_host_step_cannot_see_yet(self) -> None:
         """Under `--dry-run` the unit file on disk is still the old one; only the plan knows."""
-        self.publish({"packaging/systemd/secretary-web.service": "[Service]\nExecStart=/z --port 8787\n"})
+        self.publish({"packaging/systemd/ummanu-web.service": "[Service]\nExecStart=/z --port 8787\n"})
         context = self.context(dry_run=True)
 
         upgrade.step_pull(context)
@@ -1012,7 +1012,7 @@ class ProbeTests(unittest.TestCase):
 
     def test_the_shipped_unit_serves_the_address_the_probe_would_read(self) -> None:
         """The packaged unit and the probe cannot disagree, because one is read from the other."""
-        packaged = (REPO_ROOT / "packaging" / "systemd" / "secretary-web.service").read_bytes()
+        packaged = (REPO_ROOT / "packaging" / "systemd" / "ummanu-web.service").read_bytes()
         self.assertEqual(target_from_unit(packaged), WebTarget("127.0.0.1", 8787, "/api/system"))
 
     def test_a_unit_serving_off_loopback_is_refused_before_a_request_is_made(self) -> None:

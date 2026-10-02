@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 import unittest
 
-from secretary.board.models import SprintState
-from secretary.board.sprint_read import (
+from ummanu.board.models import SprintState
+from ummanu.board.sprint_read import (
     BUDGET_EVENT_TYPES,
     SprintReadMetadata,
     SprintResume,

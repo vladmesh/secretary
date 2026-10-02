@@ -12,9 +12,9 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from secretary.board.completion_evidence import is_wait
-from secretary.board.origin_outbox import STATUSES, OutboxRow, owed_target
-from secretary.board.po_origin import po_origin
+from ummanu.board.completion_evidence import is_wait
+from ummanu.board.origin_outbox import STATUSES, OutboxRow, owed_target
+from ummanu.board.po_origin import po_origin
 
 
 class SimulatedCrash(Exception):

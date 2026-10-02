@@ -20,18 +20,18 @@ from __future__ import annotations
 
 import unittest
 
-from secretary.dispatch.head_vitality import (
+from ummanu.dispatch.head_vitality import (
     SourceAvailability,
     VitalitySnapshot,
 )
-from secretary.dispatch.head_vitality_episode import (
+from ummanu.dispatch.head_vitality_episode import (
     DEFAULT_VITALITY_THRESHOLDS,
     VitalityEpisode,
     VitalityVerdict,
     reduce_vitality,
 )
 
-RUN_ID = "run-secretary-1420"
+RUN_ID = "run-ummanu-1420"
 RUN_FINGERPRINT = "a" * 32
 THRESHOLDS = DEFAULT_VITALITY_THRESHOLDS  # suspect_after=300s, confirm_after=600s
 
@@ -596,7 +596,7 @@ class CodegenOrchestrator1194DeterministicSplitFailureTests(unittest.TestCase):
         first (Unverifiable throughout): escalation is a POLICY conclusion about a launch
         fact, never a vitality verdict about the head.
         """
-        from secretary.dispatch.head_vitality_policy import (
+        from ummanu.dispatch.head_vitality_policy import (
             DeterministicReasonClass,
             RecoveryIntent,
             apply_rung_state,
@@ -653,7 +653,7 @@ class CodegenOrchestrator1194DeterministicSplitFailureTests(unittest.TestCase):
         unavailability freezes evidence instead of spending it, and its repetition buys no
         rung.
         """
-        from secretary.dispatch.head_vitality_policy import (
+        from ummanu.dispatch.head_vitality_policy import (
             RecoveryIntent,
             apply_rung_state,
             decide_recovery,

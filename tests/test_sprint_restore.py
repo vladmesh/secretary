@@ -17,23 +17,23 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.data import export_board, init_layout, normalize_sprint_entity
-from secretary.restore import (
+from tests.fakes.sprints import SprintBackendFixture, _write_project_registry
+from tests.observer_identity import as_observer
+from tests.sprint_close_fixtures import close_decisions
+from ummanu.data import export_board, init_layout, normalize_sprint_entity
+from ummanu.restore import (
     RestoreError,
     import_normalized_board,
     restore_findings,
     restore_state,
 )
-from secretary.sprint_observer import head_choice, none_choice
-from secretary.sprints import (
+from ummanu.sprint_observer import head_choice, none_choice
+from ummanu.sprints import (
     SprintReader,
     SprintWriter,
     sprint_admission_lock,
 )
-from secretary.tasks import TaskReader, TaskWriter
-from tests.fakes.sprints import SprintBackendFixture, _write_project_registry
-from tests.observer_identity import as_observer
-from tests.sprint_close_fixtures import close_decisions
+from ummanu.tasks import TaskReader, TaskWriter
 
 
 def _root(name: str) -> str:
@@ -47,14 +47,14 @@ def _root(name: str) -> str:
 
 CARD_EXPORT = {
     "id": 13,
-    "reference": "secretary-13",
+    "reference": "ummanu-13",
     "title": "Linked card",
     "description": "card body",
     "column": "Ready",
     "swimlane": "",
     "position": 1,
     "task_type": "code",
-    "project": "secretary",
+    "project": "ummanu",
     "metadata": {
         "record_type": "task",
         "complexity": "standard",
@@ -67,7 +67,7 @@ RESUME = {
     "selected_step": "restore the entity",
     "selected_why": "the checkpoint carries it",
     "rejected_alternatives": "recreate it by hand",
-    "current_task": "secretary-12",
+    "current_task": "ummanu-12",
     "dod_state": "tests pending",
     "next_safe_step": "run the suite",
     "recorded_at": "2026-07-20T00:00:00Z",
@@ -80,7 +80,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
     def persisted_reference_count(self, client: object, reference: str) -> int:
         """Count a reference through the backend client without reading fake rows."""
         total = 0
-        for name in ("Pipeline", "Secretary sprints"):
+        for name in ("Pipeline", "Ummanu sprints"):
             project = client.call("getProjectByName", name=name)  # type: ignore[attr-defined]
             if not isinstance(project, dict) or not project.get("id"):
                 continue
@@ -100,7 +100,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         init_layout(self.source_data)
         init_layout(self.target_data)
         self.source = self.make_sprint_client()
-        self.instance = _write_project_registry(self.root, "secretary", "secretary-instance")
+        self.instance = _write_project_registry(self.root, "ummanu", "secretary-instance")
         self.ref = self._seed_closed_sprint()
         self._export()
 
@@ -108,7 +108,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         self.assertFalse(hasattr(SprintWriter, "restore_comment"))
 
     def test_local_run_vectors_restore_export_and_replay_with_parity(self) -> None:
-        entries = [{"project": "secretary", "argv": ["python3", "-m", "tests.probe", "two words", ""], "rationale": "owner's exact probe"}]
+        entries = [{"project": "ummanu", "argv": ["python3", "-m", "tests.probe", "two words", ""], "rationale": "owner's exact probe"}]
         path = self.target_data / "board" / "sprints.json"
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["sprints"][0]["local_run_exceptions"] = entries
@@ -142,19 +142,19 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
             goal="Ship sprint entities into recovery",
             definition_of_done="restore rebuilds the entity",
             reference="sprint:entity",
-            repositories=["secretary", "secretary-instance"],
-            product="secretary",
+            repositories=["ummanu", "secretary-instance"],
+            product="ummanu",
             issues=["issue:open"],
-            projects=["secretary", "secretary-instance"],
+            projects=["ummanu", "secretary-instance"],
             observer=head_choice("codex-observer"),
             request_id="seed-create",
         )["sprint"]["ref"]
         with as_observer(ref):
             card = TaskWriter(self.source, data_dir=self.source_data).create(  # type: ignore[arg-type]
-                # The sprint holds `secretary`, so its own observer is the writer of its cards.
+                # The sprint holds `ummanu`, so its own observer is the writer of its cards.
                 role="observer",
                 actor="observer",
-                project="secretary",
+                project="ummanu",
                 task_type="code",
                 title="linked",
                 target="ready",
@@ -227,10 +227,10 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         self.assertEqual(exported["status"], "closed")
         self.assertEqual(
             exported["repositories"],
-            [_root("secretary"), _root("secretary-instance")],
+            [_root("ummanu"), _root("secretary-instance")],
         )
         self.assertEqual(exported["budget"]["by_type"]["red_ci"], 1)
-        self.assertEqual(exported["current_task"], "secretary-13")
+        self.assertEqual(exported["current_task"], "ummanu-13")
         self.assertEqual(exported["resume"]["selected_step"], RESUME["selected_step"])
         self.assertEqual(
             [comment["text"] for comment in exported["comments"]],
@@ -246,7 +246,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         self.assertEqual(live["goal"], exported["goal"])
         self.assertEqual(live["definition_of_done"], exported["definition_of_done"])
         self.assertEqual(live["repositories"], exported["repositories"])
-        self.assertEqual(live["product"], "secretary")
+        self.assertEqual(live["product"], "ummanu")
         self.assertEqual(live["issues"], exported["issues"])
         self.assertEqual(live["reservations"], exported["reservations"])
         self.assertEqual(live["status"], "closed")
@@ -408,7 +408,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
             (
                 "product",
                 {
-                    "product": "secretary",
+                    "product": "ummanu",
                     "reservations": ["other"],
                     "repositories": [_root("other")],
                     "observer": none_choice(),
@@ -417,7 +417,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
             ),
             (
                 "reservation",
-                {"product": "other", "repositories": [_root("other")], "reservations": ["secretary"]},
+                {"product": "other", "repositories": [_root("other")], "reservations": ["ummanu"]},
                 "already reserved by an open sprint",
             ),
             (
@@ -425,7 +425,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
                 {
                     "product": "other",
                     "reservations": ["other"],
-                    "repositories": [_root("secretary/nested")],
+                    "repositories": [_root("ummanu/nested")],
                     "observer": none_choice(),
                 },
                 "overlaps",
@@ -590,7 +590,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
             self.addCleanup(thread.join, 5)
             return not entered.wait(0.2)
 
-        import secretary.restore as restore_module
+        import ummanu.restore as restore_module
 
         check = restore_module._check_restored_admission
         publish = restore_module._import_sprints
@@ -624,8 +624,8 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         client, cards = self._restore()
 
         self.assertEqual(cards, 1)
-        self.assertEqual(self.persisted_reference_count(client, "secretary-13"), 1)
-        self.assertEqual(TaskReader(client).show("secretary-13")["ref"], "secretary-13")  # type: ignore[arg-type]
+        self.assertEqual(self.persisted_reference_count(client, "ummanu-13"), 1)
+        self.assertEqual(TaskReader(client).show("ummanu-13")["ref"], "ummanu-13")  # type: ignore[arg-type]
         self.assertEqual(restore_state(self.target_data)["board_parity"], "complete")
 
     def test_repeated_restore_creates_one_entity_and_no_duplicate_records(self) -> None:
@@ -689,7 +689,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         # entities. A recovery that started under this build records the step from the
         # first live write, so an interruption cannot be read as nothing left to do.
         with (
-            mock.patch("secretary.restore._import_sprints", side_effect=RestoreError("stopped")),
+            mock.patch("ummanu.restore._import_sprints", side_effect=RestoreError("stopped")),
             self.assertRaisesRegex(RestoreError, "stopped"),
         ):
             import_normalized_board(self.target_data, client=self.make_target_client())  # type: ignore[arg-type]
@@ -730,7 +730,7 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
     def test_sql_restore_refuses_an_unlinked_current_task_before_writes(self) -> None:
         path = self.target_data / "board" / "sprints.json"
         payload = json.loads(path.read_text(encoding="utf-8"))
-        payload["sprints"][0]["current_task"] = "secretary:not-in-export"
+        payload["sprints"][0]["current_task"] = "ummanu:not-in-export"
         path.write_text(json.dumps(payload), encoding="utf-8")
         client = self.make_target_client()
 

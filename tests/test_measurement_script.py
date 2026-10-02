@@ -31,7 +31,7 @@ from types import ModuleType
 from typing import ClassVar
 from unittest import mock
 
-from secretary.web.app import ROUTES
+from ummanu.web.app import ROUTES
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "scripts" / "measure_dashboard.py"
@@ -39,7 +39,7 @@ SCRIPT = REPO_ROOT / "scripts" / "measure_dashboard.py"
 
 def _script() -> ModuleType:
     """The script, imported by path: `scripts/` is not an importable package (see `tests/broad.py`)."""
-    spec = importlib.util.spec_from_file_location("secretary_measure_dashboard", SCRIPT)
+    spec = importlib.util.spec_from_file_location("ummanu_measure_dashboard", SCRIPT)
     if spec is None or spec.loader is None:  # pragma: no cover - a missing script is a broken tree
         raise RuntimeError(f"the measurement script is unavailable at {SCRIPT}")
     cached = sys.modules.get(spec.name)
@@ -208,16 +208,16 @@ class AgainstAStubDashboard(unittest.TestCase):
         that does not (run 35542829308, `unit`).
         """
         self.enterContext(mock.patch.dict(os.environ, {}, clear=False))
-        os.environ.pop("SECRETARY_DATA_DIR", None)
-        os.environ.pop("SECRETARY_INSTANCE", None)
-        self.enterContext(mock.patch("secretary.onboarding.DEFAULT_INSTANCE", "/nonexistent/instance"))
+        os.environ.pop("UMMANU_DATA_DIR", None)
+        os.environ.pop("UMMANU_INSTANCE", None)
+        self.enterContext(mock.patch("ummanu.onboarding.DEFAULT_INSTANCE", "/nonexistent/instance"))
         self.enterContext(
             mock.patch.object(
                 measure, "resolve_data_dir", return_value=(Path("/nonexistent/data"), "a test fixture")
             )
         )
         # What these two resolve to for real is exercised in `DataDirectoryResolutionTests`.
-        self.enterContext(mock.patch.object(measure, "po_cookie", return_value="secretary_po=deadbeef"))
+        self.enterContext(mock.patch.object(measure, "po_cookie", return_value="ummanu_po=deadbeef"))
 
     def run_main(self, base_url: str, *extra: str) -> tuple[int, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -476,7 +476,7 @@ class MeasurementScriptTests(AgainstAStubDashboard):
             {"http_proxy": proxy, "HTTP_PROXY": proxy, "https_proxy": proxy, "all_proxy": proxy}
         )
 
-        sample = fresh.fetch(base, measure.PO_OVERVIEW, cookie="secretary_po=probe")
+        sample = fresh.fetch(base, measure.PO_OVERVIEW, cookie="ummanu_po=probe")
 
         self.assertEqual(sample.status, 200)
         self.assertIn(("GET", measure.PO_OVERVIEW), self.server.seen)  # type: ignore[attr-defined]
@@ -496,7 +496,7 @@ class MeasurementScriptTests(AgainstAStubDashboard):
             mock.patch.object(
                 fresh, "resolve_data_dir", return_value=(Path("/nonexistent/data"), "a test fixture")
             ),
-            mock.patch.object(fresh, "po_cookie", return_value="secretary_po=deadbeef"),
+            mock.patch.object(fresh, "po_cookie", return_value="ummanu_po=deadbeef"),
             mock.patch.object(fresh, "WARM_REQUESTS", 2),
             mock.patch.object(fresh, "POLL_INTERVAL_SECONDS", self.TOKEN_INTERVAL_SECONDS),
             contextlib.redirect_stdout(io.StringIO()),
@@ -513,7 +513,7 @@ class MeasurementScriptTests(AgainstAStubDashboard):
         base = self.serve(redirect=("/", f"{outside}/elsewhere"))
 
         with self.assertRaises(measure.Unmeasurable) as refused:
-            measure.fetch(base, "/", cookie="secretary_po=deadbeef")
+            measure.fetch(base, "/", cookie="ummanu_po=deadbeef")
 
         self.assertIn("302", str(refused.exception))
         self.assertEqual(self.outside.seen, [])  # type: ignore[attr-defined]
@@ -573,7 +573,7 @@ class MeasurementScriptTests(AgainstAStubDashboard):
     def test_the_session_it_polls_is_one_whose_own_json_says_a_turn_is_running(self) -> None:
         """Criterion 4 and 5's fidelity: the page's poll exists only while a turn runs.
 
-        `src/secretary/web/pages.py` installs the 3000 ms `setInterval` inside `if (__RUNNING__)`
+        `src/ummanu/web/pages.py` installs the 3000 ms `setInterval` inside `if (__RUNNING__)`
         and clears it when the turn ends, so an idle session is one no browser is polling. Here the
         overview lists an idle session first and a running one second, and the running one has to
         be the target — chosen by reading each candidate's own JSON at the route that would be
@@ -1279,8 +1279,8 @@ class DataDirectoryResolutionTests(unittest.TestCase):
     """Where the documented command finds the installation, with nothing in the environment.
 
     The reviewer ran `python3 scripts/measure_dashboard.py` in an ordinary checkout shell on this
-    host. That shell does not inherit the service unit's `SECRETARY_DATA_DIR` or
-    `SECRETARY_INSTANCE`, so the script resolved no data directory, could not read the PO token,
+    host. That shell does not inherit the service unit's `UMMANU_DATA_DIR` or
+    `UMMANU_INSTANCE`, so the script resolved no data directory, could not read the PO token,
     and measured the concurrency without the poll while an open session existed. It now falls
     through to the instance the CLI itself defaults to, read with the product's own resolution.
     """
@@ -1303,7 +1303,7 @@ class DataDirectoryResolutionTests(unittest.TestCase):
         instance, data = self.instance()
         with (
             mock.patch.dict(os.environ, {}, clear=True),
-            mock.patch("secretary.onboarding.DEFAULT_INSTANCE", str(instance)),
+            mock.patch("ummanu.onboarding.DEFAULT_INSTANCE", str(instance)),
         ):
             resolved, source = measure.resolve_data_dir(None)
 
@@ -1313,20 +1313,20 @@ class DataDirectoryResolutionTests(unittest.TestCase):
 
     def test_the_documented_order_is_the_argument_then_the_two_variables(self) -> None:
         instance, data = self.instance()
-        with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(instance)}, clear=True):
+        with mock.patch.dict(os.environ, {"UMMANU_INSTANCE": str(instance)}, clear=True):
             resolved, source = measure.resolve_data_dir(None)
             self.assertEqual(resolved, data)
-            self.assertIn("SECRETARY_INSTANCE", source)
+            self.assertIn("UMMANU_INSTANCE", source)
 
-        with mock.patch.dict(os.environ, {"SECRETARY_DATA_DIR": "/from/env"}, clear=True):
-            self.assertEqual(measure.resolve_data_dir(None), (Path("/from/env"), "SECRETARY_DATA_DIR"))
+        with mock.patch.dict(os.environ, {"UMMANU_DATA_DIR": "/from/env"}, clear=True):
+            self.assertEqual(measure.resolve_data_dir(None), (Path("/from/env"), "UMMANU_DATA_DIR"))
             # The argument still wins over both.
             self.assertEqual(measure.resolve_data_dir("/from/flag"), (Path("/from/flag"), "--data-dir"))
 
     def test_an_unresolvable_installation_is_refused_rather_than_silently_dropped(self) -> None:
         """`except Exception: return None` was the same quiet downgrade a third time."""
         with (
-            mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": "/nowhere/at/all"}, clear=True),
+            mock.patch.dict(os.environ, {"UMMANU_INSTANCE": "/nowhere/at/all"}, clear=True),
             self.assertRaises(measure.Unmeasurable) as refused,
         ):
             measure.resolve_data_dir(None)
@@ -1344,8 +1344,8 @@ class MeasurementScriptDocumentationTests(unittest.TestCase):
         text = (REPO_ROOT / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
 
         self.assertIn(self.COMMAND, text)
-        self.assertIn("journalctl -u secretary-web.service", text)
-        self.assertIn("secretary status", text)
+        self.assertIn("journalctl -u ummanu-web.service", text)
+        self.assertIn("ummanu status", text)
 
     def test_the_script_adds_no_dependency(self) -> None:
         """Criterion 9: standard library only, and nothing new in `pyproject.toml`."""
@@ -1360,9 +1360,9 @@ class MeasurementScriptDocumentationTests(unittest.TestCase):
             if isinstance(node, ast.Import)
             for alias in node.names
         }
-        # `secretary` is this repository, not a dependency: the PO cookie rule is imported from the
+        # `ummanu` is this repository, not a dependency: the PO cookie rule is imported from the
         # product rather than copied. Everything else has to be in the standard library.
-        outside = imported - set(sys.stdlib_module_names) - {"secretary", ""}
+        outside = imported - set(sys.stdlib_module_names) - {"ummanu", ""}
         self.assertEqual(outside, set())
 
 

@@ -16,10 +16,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
 
-import secretary.board
-from secretary import state_repo, upgrade
-from secretary.board import migrate, provision, schema, store
-from secretary.board.store import (
+import ummanu.board
+from ummanu import state_repo, upgrade
+from ummanu.board import migrate, provision, schema, store
+from ummanu.board.store import (
     ROLES,
     STORE_ENV,
     STORE_FILE,
@@ -32,20 +32,20 @@ from secretary.board.store import (
     resolve_with_lifecycle,
     store_path,
 )
-from secretary.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
+from ummanu.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
 from tests import container_cleanup
 from tests import sql_backend_fixtures
 
 COMPLETE = {
-    "SECRETARY_DB_HOST": "127.0.0.1",
-    "SECRETARY_DB_PORT": "5432",
-    "SECRETARY_DB_NAME": "secretary",
-    "SECRETARY_DB_OWNER_USER": "secretary_owner",
-    "SECRETARY_DB_OWNER_PASSWORD": "owner-secret",
-    "SECRETARY_DB_APP_USER": "secretary_app",
-    "SECRETARY_DB_APP_PASSWORD": "app-secret",
-    "SECRETARY_DB_READ_USER": "secretary_read",
-    "SECRETARY_DB_READ_PASSWORD": "read-secret",
+    "UMMANU_DB_HOST": "127.0.0.1",
+    "UMMANU_DB_PORT": "5432",
+    "UMMANU_DB_NAME": "ummanu",
+    "UMMANU_DB_OWNER_USER": "ummanu_owner",
+    "UMMANU_DB_OWNER_PASSWORD": "owner-secret",
+    "UMMANU_DB_APP_USER": "ummanu_app",
+    "UMMANU_DB_APP_PASSWORD": "app-secret",
+    "UMMANU_DB_READ_USER": "ummanu_read",
+    "UMMANU_DB_READ_PASSWORD": "read-secret",
 }
 
 
@@ -69,15 +69,15 @@ class ConnectionFileTests(unittest.TestCase):
         self.assertEqual(
             STORE_ENV,
             (
-                "SECRETARY_DB_HOST",
-                "SECRETARY_DB_PORT",
-                "SECRETARY_DB_NAME",
-                "SECRETARY_DB_OWNER_USER",
-                "SECRETARY_DB_OWNER_PASSWORD",
-                "SECRETARY_DB_APP_USER",
-                "SECRETARY_DB_APP_PASSWORD",
-                "SECRETARY_DB_READ_USER",
-                "SECRETARY_DB_READ_PASSWORD",
+                "UMMANU_DB_HOST",
+                "UMMANU_DB_PORT",
+                "UMMANU_DB_NAME",
+                "UMMANU_DB_OWNER_USER",
+                "UMMANU_DB_OWNER_PASSWORD",
+                "UMMANU_DB_APP_USER",
+                "UMMANU_DB_APP_PASSWORD",
+                "UMMANU_DB_READ_USER",
+                "UMMANU_DB_READ_PASSWORD",
             ),
         )
 
@@ -86,10 +86,10 @@ class ConnectionFileTests(unittest.TestCase):
 
         config = resolve(self.instance)
 
-        self.assertEqual((config.host, config.port, config.dbname), ("127.0.0.1", 5432, "secretary"))
+        self.assertEqual((config.host, config.port, config.dbname), ("127.0.0.1", 5432, "ummanu"))
         self.assertEqual(
             [(role, resolve_role(self.instance, role).user) for role in ROLES],
-            [("owner", "secretary_owner"), ("app", "secretary_app"), ("read", "secretary_read")],
+            [("owner", "ummanu_owner"), ("app", "ummanu_app"), ("read", "ummanu_read")],
         )
         self.assertNotEqual(
             resolve_role(self.instance, "app").password,
@@ -98,13 +98,13 @@ class ConnectionFileTests(unittest.TestCase):
         )
 
     def test_the_conninfo_escapes_a_password_that_carries_a_space_or_a_quote(self) -> None:
-        values = dict(COMPLETE, SECRETARY_DB_APP_PASSWORD="a b'c\\d")
+        values = dict(COMPLETE, UMMANU_DB_APP_PASSWORD="a b'c\\d")
         write_store(self.instance, values)
 
         conninfo = resolve_role(self.instance, "app").conninfo()
 
         self.assertIn("password='a b\\'c\\\\d'", conninfo)
-        self.assertIn("user='secretary_app'", conninfo)
+        self.assertIn("user='ummanu_app'", conninfo)
 
     def test_a_missing_file_refuses_with_a_reason(self) -> None:
         with self.assertRaisesRegex(BoardStoreError, "board store configuration is missing"):
@@ -118,7 +118,7 @@ class ConnectionFileTests(unittest.TestCase):
                     resolve(self.instance)
 
     def test_an_empty_value_is_a_partial_file_and_not_an_empty_password(self) -> None:
-        write_store(self.instance, dict(COMPLETE, SECRETARY_DB_APP_PASSWORD=""))
+        write_store(self.instance, dict(COMPLETE, UMMANU_DB_APP_PASSWORD=""))
 
         with self.assertRaisesRegex(BoardStoreError, "line 7 is invalid"):
             resolve(self.instance)
@@ -126,8 +126,8 @@ class ConnectionFileTests(unittest.TestCase):
     def test_an_unknown_or_repeated_key_refuses_the_whole_file(self) -> None:
         path = store_path(self.instance)
         for body, line in (
-            ("".join(f"{k}={v}\n" for k, v in COMPLETE.items()) + "SECRETARY_DB_EXTRA=x\n", 10),
-            ("SECRETARY_DB_HOST=a\n" + "".join(f"{k}={v}\n" for k, v in COMPLETE.items()), 2),
+            ("".join(f"{k}={v}\n" for k, v in COMPLETE.items()) + "UMMANU_DB_EXTRA=x\n", 10),
+            ("UMMANU_DB_HOST=a\n" + "".join(f"{k}={v}\n" for k, v in COMPLETE.items()), 2),
         ):
             with self.subTest(line=line):
                 path.write_text(body, encoding="utf-8")
@@ -160,7 +160,7 @@ class ConnectionFileTests(unittest.TestCase):
     def test_a_port_that_is_not_a_tcp_port_refuses(self) -> None:
         for port in ("0", "70000", "5432a"):
             with self.subTest(port=port):
-                write_store(self.instance, dict(COMPLETE, SECRETARY_DB_PORT=port))
+                write_store(self.instance, dict(COMPLETE, UMMANU_DB_PORT=port))
                 with self.assertRaisesRegex(BoardStoreError, "not a TCP port"):
                     resolve(self.instance)
 
@@ -214,12 +214,12 @@ class ProvisionDefinitionTests(unittest.TestCase):
         self.assertEqual(provision.IMAGE, f"postgres:{provision.POSTGRES_MAJOR}")
         self.assertIn("image: postgres:16", provision.COMPOSE_TEXT)
         self.assertIn("restart: unless-stopped", provision.COMPOSE_TEXT)
-        self.assertIn("127.0.0.1:${SECRETARY_DB_PORT}:5432", provision.COMPOSE_TEXT)
+        self.assertIn("127.0.0.1:${UMMANU_DB_PORT}:5432", provision.COMPOSE_TEXT)
         self.assertIn("board-db:/var/lib/postgresql/data", provision.COMPOSE_TEXT)
         self.assertIn(f"{PRODUCTION_BOARD_LABEL}: 'true'", provision.COMPOSE_TEXT)
         self.assertNotIn(TEST_BOARD_LABEL, provision.COMPOSE_TEXT)
-        self.assertNotIn("SECRETARY_DB_APP_PASSWORD", provision.COMPOSE_TEXT)
-        self.assertNotIn("SECRETARY_DB_READ_PASSWORD", provision.COMPOSE_TEXT)
+        self.assertNotIn("UMMANU_DB_APP_PASSWORD", provision.COMPOSE_TEXT)
+        self.assertNotIn("UMMANU_DB_READ_PASSWORD", provision.COMPOSE_TEXT)
 
     def test_absent_config_is_an_upgrade_noop_before_touching_docker(self) -> None:
         with TemporaryDirectory() as temporary, mock.patch.object(provision, "_exists") as inspect:
@@ -327,24 +327,24 @@ class ProvisionDefinitionTests(unittest.TestCase):
             "com.docker.compose.project": provision.PROJECT, "com.docker.compose.service": "postgres"}},
             "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"}, "PortBindings": {
                 "5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "5432"}]}},
-            "Mounts": [{"Type": "volume", "Name": "secretary-board-store_board-db",
+            "Mounts": [{"Type": "volume", "Name": "ummanu-board-store_board-db",
                         "Destination": "/var/lib/postgresql/data"}]}
         with mock.patch.object(provision, "_run", return_value=json.dumps([payload])):
             with self.assertRaisesRegex(BoardStoreError, "production ownership"):
-                provision._inspect_container("id", volume_name="secretary-board-store_board-db")
+                provision._inspect_container("id", volume_name="ummanu-board-store_board-db")
         payload["Config"]["Labels"][PRODUCTION_BOARD_LABEL] = "true"
         with mock.patch.object(provision, "_run", return_value=json.dumps([payload])):
-            provision._inspect_container("id", volume_name="secretary-board-store_board-db")
+            provision._inspect_container("id", volume_name="ummanu-board-store_board-db")
 
     def test_container_inspection_rejects_malformed_labels_fail_closed(self) -> None:
         payload = {"Config": {"Image": provision.IMAGE, "Labels": ["not-a-map"]},
                    "HostConfig": {"RestartPolicy": {"Name": "unless-stopped"}, "PortBindings": {
                        "5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "5432"}]}},
-                   "Mounts": [{"Type": "volume", "Name": "secretary-board-store_board-db",
+                   "Mounts": [{"Type": "volume", "Name": "ummanu-board-store_board-db",
                                "Destination": "/var/lib/postgresql/data"}]}
         with mock.patch.object(provision, "_run", return_value=json.dumps([payload])):
             with self.assertRaisesRegex(BoardStoreError, "ownership label"):
-                provision._inspect_container("id", volume_name="secretary-board-store_board-db")
+                provision._inspect_container("id", volume_name="ummanu-board-store_board-db")
 
     def test_reconcile_passes_only_the_private_file_path_not_credentials_on_argv(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -673,12 +673,12 @@ class MigrationScriptTests(unittest.TestCase):
     def test_the_po_request_vocabulary_is_one_list_in_code_schema_and_head_migration(self) -> None:
         """A `po_requests` operation the CHECK does not admit rolls back every write that records it.
 
-        `secretary.po.store.REQUEST_OPERATIONS` is what the code (and the unit tests' fake store)
+        `ummanu.po.store.REQUEST_OPERATIONS` is what the code (and the unit tests' fake store)
         records; `board/schema.py` and the revision that last widened the CHECK must say the same.
         """
         import re
 
-        from secretary.po.store import REQUEST_OPERATIONS
+        from ummanu.po.store import REQUEST_OPERATIONS
 
         [check] = [
             constraint
@@ -738,7 +738,7 @@ class MigrationScriptTests(unittest.TestCase):
     def test_the_script_directory_ships_inside_the_installed_package(self) -> None:
         self.assertTrue((migrate.SCRIPT_LOCATION / "env.py").is_file())
         self.assertTrue((migrate.SCRIPT_LOCATION / "script.py.mako").is_file())
-        self.assertEqual(migrate.SCRIPT_LOCATION.parent, Path(secretary.board.__file__).resolve().parent)
+        self.assertEqual(migrate.SCRIPT_LOCATION.parent, Path(ummanu.board.__file__).resolve().parent)
 
     def test_the_configuration_carries_no_connection_string_of_its_own(self) -> None:
         """§5.4 is the only place an installation's URL lives; an `alembic.ini` literal is not."""
@@ -780,14 +780,14 @@ class MigrationScriptTests(unittest.TestCase):
 
     def test_the_url_survives_a_password_a_url_would_otherwise_break(self) -> None:
         with TemporaryDirectory() as tmp:
-            write_store(Path(tmp), dict(COMPLETE, SECRETARY_DB_APP_PASSWORD="p@ss/w:rd"))
+            write_store(Path(tmp), dict(COMPLETE, UMMANU_DB_APP_PASSWORD="p@ss/w:rd"))
             credentials = resolve_role(Path(tmp), "app")
 
         url = migrate.sqlalchemy_url(credentials)
 
         self.assertEqual(url.drivername, "postgresql+psycopg")
         self.assertEqual(url.password, "p@ss/w:rd")
-        self.assertEqual(url.database, "secretary")
+        self.assertEqual(url.database, "ummanu")
         self.assertNotIn("p@ss/w:rd", str(url))  # never rendered, and never split into two fields
 
     def test_an_invocation_with_no_injected_connection_refuses_and_names_the_entry_point(self) -> None:
@@ -796,11 +796,11 @@ class MigrationScriptTests(unittest.TestCase):
         The runner holds `pg_advisory_lock` on the session it migrates on (§7.4), so `env.py`
         opening a connection of its own would migrate outside the lock — and would then reach the
         initial revision with none of §5.5's generated passwords. It refuses here instead, before
-        anything connects, naming `secretary.board.migrate`.
+        anything connects, naming `ummanu.board.migrate`.
         """
         from alembic import command
 
-        with self.assertRaisesRegex(RuntimeError, "migrations run only through secretary"):
+        with self.assertRaisesRegex(RuntimeError, "migrations run only through ummanu"):
             command.upgrade(migrate.alembic_config(), "heads")
 
     def test_the_advisory_key_is_a_fixed_literal(self) -> None:
@@ -945,7 +945,7 @@ class ExclusionEnforcementTests(InstanceRepository):
         config = resolve(self.instance)
 
         self.assertTrue(self.ignored(), "resolve must make the exclusion durable, not report it")
-        self.assertEqual(config.owner_user, "secretary_owner")
+        self.assertEqual(config.owner_user, "ummanu_owner")
 
     def test_an_absent_store_refuses_without_writing_the_repository(self) -> None:
         """A read of an installation that has no store -- `status`, `doctor` -- leaves it as it was."""
@@ -982,7 +982,7 @@ class ExclusionEnforcementTests(InstanceRepository):
         self.assertTrue(self.ignored())
 
     def test_migrating_a_tracked_configuration_refuses_before_it_connects(self) -> None:
-        from secretary.board import migrate as board_migrate
+        from ummanu.board import migrate as board_migrate
 
         write_store(self.instance)
         self.git("add", "-f", STORE_FILE)
@@ -1063,7 +1063,7 @@ class HeldExclusionTests(InstanceRepository):
             config, outcome = resolve_with_lifecycle(self.instance)
             resolve_role(self.instance, "app")
 
-        self.assertEqual(config.owner_user, "secretary_owner")
+        self.assertEqual(config.owner_user, "ummanu_owner")
         self.assertFalse(outcome.changed)
         self.assertEqual(self.gitignore(), "")
 
@@ -1181,12 +1181,12 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertIn("connection refused", result.detail)
 
     def test_a_partial_configuration_fails_before_any_driver_is_reached(self) -> None:
-        write_store(self.instance, {k: v for k, v in COMPLETE.items() if k != "SECRETARY_DB_NAME"})
+        write_store(self.instance, {k: v for k, v in COMPLETE.items() if k != "UMMANU_DB_NAME"})
 
         result = upgrade.step_board_store(self.context())
 
         self.assertTrue(result.failed)
-        self.assertIn("SECRETARY_DB_NAME", result.detail)
+        self.assertIn("UMMANU_DB_NAME", result.detail)
 
 
 if __name__ == "__main__":

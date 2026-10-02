@@ -1,4 +1,4 @@
-"""The window between merge and `secretary upgrade`: installed units against the new product tree.
+"""The window between merge and `ummanu upgrade`: installed units against the new product tree.
 
 The production checkout follows main, so at merge the gate script and the source tree change under
 units a host installed earlier; their `ExecStart` is not re-rendered until the next upgrade. Each
@@ -18,8 +18,8 @@ import unittest
 import venv
 from pathlib import Path
 
-from secretary.host import SystemdLayout, render_systemd_unit
-from secretary.runtime.state import PRECHECK_BOARD_UNREACHABLE
+from ummanu.host import SystemdLayout, render_systemd_unit
+from ummanu.runtime.state import PRECHECK_BOARD_UNREACHABLE
 
 ROOT = Path(__file__).resolve().parents[1]
 UNITS = ROOT / "packaging" / "systemd"
@@ -75,10 +75,10 @@ class InstalledUnitAgainstNewTreeTests(unittest.TestCase):
         )
 
     def run_unit(self, agent: str) -> subprocess.CompletedProcess:
-        payload = render_systemd_unit((UNITS / f"secretary-{agent}.service").read_bytes(), self.layout)
+        payload = render_systemd_unit((UNITS / f"ummanu-{agent}.service").read_bytes(), self.layout)
         exec_start, environment, working_directory = _unit_settings(payload)
         # The ExecStart every installed host already has; this card must not need a re-render.
-        self.assertEqual(exec_start, f"{self.product}/scripts/secretary-agent-gate.sh {agent}")
+        self.assertEqual(exec_start, f"{self.product}/scripts/ummanu-agent-gate.sh {agent}")
         self.assertEqual(environment["TA_RUNTIME_PYTHONPATH"], str(self.product))
         Path(working_directory).mkdir(parents=True, exist_ok=True)
         env = {
@@ -112,7 +112,7 @@ class InstalledUnitAgainstNewTreeTests(unittest.TestCase):
                 self.assertIn(f"[ta-{agent}] precheck: board unreachable after 1 attempts", result.stderr)
 
     def test_curator_runs_its_precheck_and_defers_a_busy_settlement(self) -> None:
-        state = self.home / "secretary-data" / "automation-state" / "curator"
+        state = self.home / "ummanu-data" / "automation-state" / "curator"
         state.mkdir(parents=True, exist_ok=True)
         with (state / "cursor-settlement.lock").open("a+", encoding="utf-8") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)

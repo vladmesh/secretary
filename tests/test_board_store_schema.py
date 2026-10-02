@@ -38,17 +38,17 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import upgrade
-from secretary.board import migrate, provision, schema, schema_gate
-from secretary.board.backend import record_key
-from secretary.board.store import BoardStoreConfig
-from secretary.runtime.container_labels import TEST_BOARD_LABEL
-from secretary.host_apply import SystemdUnitInstaller
+from ummanu import upgrade
+from ummanu.board import migrate, provision, schema, schema_gate
+from ummanu.board.backend import record_key
+from ummanu.board.store import BoardStoreConfig
+from ummanu.runtime.container_labels import TEST_BOARD_LABEL
+from ummanu.host_apply import SystemdUnitInstaller
 from tests.container_cleanup import cleanup_test_project, remove_test_container
 
 IMAGE = "postgres:16"
 DATABASE = "board_store_test"
-OWNER = "secretary_owner"
+OWNER = "ummanu_owner"
 OWNER_PASSWORD = "throwaway-owner-password"
 #: Deliberately awkward: it carries the three characters that break a URL, a `text()` construct
 #: and a naive SQL literal respectively.
@@ -138,13 +138,13 @@ class ProductionLayoutUpgradeTests(unittest.TestCase):
             original = compose.stat()
             config = root / "board-store.env"
             config.write_text("\n".join((
-                "SECRETARY_DB_HOST=127.0.0.1", "SECRETARY_DB_PORT=5432",
-                f"SECRETARY_DB_NAME={DATABASE}", f"SECRETARY_DB_OWNER_USER={OWNER}",
-                f"SECRETARY_DB_OWNER_PASSWORD={OWNER_PASSWORD}",
-                f"SECRETARY_DB_APP_USER={schema.APP_ROLE}",
-                f"SECRETARY_DB_APP_PASSWORD={APP_PASSWORD}",
-                f"SECRETARY_DB_READ_USER={schema.READ_ROLE}",
-                f"SECRETARY_DB_READ_PASSWORD={READ_PASSWORD}", "",
+                "UMMANU_DB_HOST=127.0.0.1", "UMMANU_DB_PORT=5432",
+                f"UMMANU_DB_NAME={DATABASE}", f"UMMANU_DB_OWNER_USER={OWNER}",
+                f"UMMANU_DB_OWNER_PASSWORD={OWNER_PASSWORD}",
+                f"UMMANU_DB_APP_USER={schema.APP_ROLE}",
+                f"UMMANU_DB_APP_PASSWORD={APP_PASSWORD}",
+                f"UMMANU_DB_READ_USER={schema.READ_ROLE}",
+                f"UMMANU_DB_READ_PASSWORD={READ_PASSWORD}", "",
             )), encoding="utf-8")
             config.chmod(0o600)
             elevated = [] if os.geteuid() == 0 else ["sudo", "-n"]
@@ -159,9 +159,9 @@ class ProductionLayoutUpgradeTests(unittest.TestCase):
                 )
                 with (
                     mock.patch.object(provision.provision, "__kwdefaults__", defaults),
-                    mock.patch("secretary.board.provision._run", return_value="container-id"),
-                    mock.patch("secretary.board.provision._inspect_container"),
-                    mock.patch("secretary.board.provision._wait_ready"),
+                    mock.patch("ummanu.board.provision._run", return_value="container-id"),
+                    mock.patch("ummanu.board.provision._inspect_container"),
+                    mock.patch("ummanu.board.provision._wait_ready"),
                 ):
                     result = upgrade.step_board_store_provision(context)
                 self.assertEqual(result.status, "changed", result.detail)
@@ -307,7 +307,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         )
 
     def test_0006_frozen_backfill_agrees_with_the_runtime_sprint_mapping(self) -> None:
-        revision = importlib.import_module("secretary.board.migrations.versions.0006_sprint_transport_key")
+        revision = importlib.import_module("ummanu.board.migrations.versions.0006_sprint_transport_key")
         self.assertFalse(hasattr(revision, "record_key"))
         for reference in ("sprint:0", "sprint:1596", "sprint:canary", "sprint:١"):
             with self.subTest(reference=reference):
@@ -389,7 +389,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
     def test_0026_release_migration_defaults_existing_sprints_and_accepts_exact_vectors(self) -> None:
         from alembic import command
 
-        from secretary.board.release_migrations import admit_additive
+        from ummanu.board.release_migrations import admit_additive
 
         connection = self.owner_connection()
         command.upgrade(migrate.alembic_config(connection=connection, passwords=self.passwords), "0025_card_waits_for_person")
@@ -400,7 +400,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.commit()
         self.assertEqual(self.run_migrations(connection, admit=admit_additive), ("0026_sprint_local_runs",))
         self.assertEqual(connection.exec_driver_sql("SELECT local_run_exceptions FROM sprints WHERE ref='sprint:7'").scalar(), [])
-        entries = [{"project": "secretary", "argv": ["docker", "run", "two words", ""], "rationale": "owner's exact probe"}]
+        entries = [{"project": "ummanu", "argv": ["docker", "run", "two words", ""], "rationale": "owner's exact probe"}]
         connection.exec_driver_sql("UPDATE sprints SET local_run_exceptions=%s::jsonb WHERE ref='sprint:7'", (json.dumps(entries),))
         connection.commit()
         self.assertEqual(connection.exec_driver_sql("SELECT local_run_exceptions FROM sprints WHERE ref='sprint:7'").scalar(), entries)
@@ -429,7 +429,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         """PostgreSQL's transactional DDL, which is why §7.4 needs no down migration.
 
         The failure is a real one rather than a fabricated statement: §5.5's `CREATE ROLE` is the
-        last thing the initial revision does, so a cluster that already has `secretary_app` fails it
+        last thing the initial revision does, so a cluster that already has `ummanu_app` fails it
         after all 21 tables have been created. Nothing may survive that.
         """
         import psycopg
@@ -479,13 +479,13 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.run_migrations(connection)
         connection.exec_driver_sql(
             "INSERT INTO products (product_id, board_key, title, created_at, updated_at) "
-            "VALUES ('secretary', %s, 'Secretary', now(), now())",
-            (record_key("product", "secretary"),),
+            "VALUES ('ummanu', %s, 'Ummanu', now(), now())",
+            (record_key("product", "ummanu"),),
         )
-        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('secretary')")
+        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('ummanu')")
         connection.exec_driver_sql(
             "INSERT INTO issues (issue_id, board_key, product_id, title, issue_kind, priority, "
-            "created_at, updated_at) VALUES ('2fdac531', %s, 'secretary', 'An issue', 'bug', "
+            "created_at, updated_at) VALUES ('2fdac531', %s, 'ummanu', 'An issue', 'bug', "
             "'P1', now(), now())",
             (record_key("issue", "2fdac531"),),
         )
@@ -503,7 +503,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection,
         ref: str,
         *,
-        project: str | None = "secretary",
+        project: str | None = "ummanu",
         sprint=None,
         task_type: str | None = "code",
         extensions: str = "{}",
@@ -630,13 +630,13 @@ class BoardStoreSchemaTests(unittest.TestCase):
         )
         connection.exec_driver_sql(
             "INSERT INTO product_comments (product_id, marker, body, actor_role, created_at) "
-            "VALUES ('secretary', 'product:note', 'product note', 'po', now())"
+            "VALUES ('ummanu', 'product:note', 'product note', 'po', now())"
         )
         self.assertEqual(
             connection.exec_driver_sql(
                 "SELECT product_id, marker, body, product_ref FROM product_comments"
             ).fetchall(),
-            [("secretary", "product:note", "product note", "product:secretary")],
+            [("ummanu", "product:note", "product note", "product:ummanu")],
         )
 
     def test_an_issue_keeps_the_metadata_keys_the_model_does_not_name(self) -> None:
@@ -663,14 +663,14 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.sprint(connection, "sprint:canary-terra-20260813", None)
         self.sprint(connection, "sprint:canary-terra-final-20260813", None)
         self.sprint(connection, "sprint:1037", 1037)
-        self.card(connection, "secretary-1438", sprint="sprint:canary-terra-20260813")
-        self.card(connection, "secretary-1439", sprint="sprint:canary-terra-final-20260813")
+        self.card(connection, "ummanu-1438", sprint="sprint:canary-terra-20260813")
+        self.card(connection, "ummanu-1439", sprint="sprint:canary-terra-final-20260813")
 
         self.assertEqual(
             connection.exec_driver_sql("SELECT task_ref, sprint_ref FROM tasks ORDER BY task_ref").fetchall(),
             [
-                ("secretary-1438", "sprint:canary-terra-20260813"),
-                ("secretary-1439", "sprint:canary-terra-final-20260813"),
+                ("ummanu-1438", "sprint:canary-terra-20260813"),
+                ("ummanu-1439", "sprint:canary-terra-final-20260813"),
             ],
         )
         self.assertEqual(
@@ -683,13 +683,13 @@ class BoardStoreSchemaTests(unittest.TestCase):
     def test_a_product_keeps_metadata_the_relational_model_does_not_name(self) -> None:
         connection = self.prepared()
         connection.exec_driver_sql(
-            "UPDATE products SET extensions = %s::jsonb WHERE product_id = 'secretary'",
+            "UPDATE products SET extensions = %s::jsonb WHERE product_id = 'ummanu'",
             ('{"extra": {"future_product_field": "kept"}}',),
         )
         self.assertEqual(
             connection.exec_driver_sql(
                 "SELECT extensions->'extra'->>'future_product_field' FROM products "
-                "WHERE product_id = 'secretary'"
+                "WHERE product_id = 'ummanu'"
             ).fetchone()[0],
             "kept",
         )
@@ -728,25 +728,25 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection = self.prepared()
         self.sprint(connection, "sprint:1", 1)
         self.sprint(connection, "sprint:2", 2)
-        self.card(connection, "secretary-1", sprint="sprint:2")
+        self.card(connection, "ummanu-1", sprint="sprint:2")
         connection.commit()
 
         with self.assertRaises(sa.exc.IntegrityError):
             connection.exec_driver_sql(
-                "UPDATE sprints SET current_task_ref = 'secretary-1' WHERE ref = 'sprint:1'"
+                "UPDATE sprints SET current_task_ref = 'ummanu-1' WHERE ref = 'sprint:1'"
             )
             connection.commit()
         connection.rollback()
 
         connection.exec_driver_sql(
-            "UPDATE sprints SET current_task_ref = 'secretary-1' WHERE ref = 'sprint:2'"
+            "UPDATE sprints SET current_task_ref = 'ummanu-1' WHERE ref = 'sprint:2'"
         )
         connection.commit()
         self.assertEqual(
             connection.exec_driver_sql(
                 "SELECT current_task_ref FROM sprints WHERE ref = 'sprint:2'"
             ).fetchone()[0],
-            "secretary-1",
+            "ummanu-1",
         )
 
     def test_section_9s_allocator_still_hands_out_numbers(self) -> None:
@@ -766,11 +766,11 @@ class BoardStoreSchemaTests(unittest.TestCase):
         """AC 5: `secretary-583` carries no `project`, and the board holds it anyway."""
         connection = self.prepared()
 
-        self.card(connection, "secretary-583", project=None)
+        self.card(connection, "ummanu-583", project=None)
 
         self.assertEqual(
             connection.exec_driver_sql(
-                "SELECT project_id FROM tasks WHERE task_ref = 'secretary-583'"
+                "SELECT project_id FROM tasks WHERE task_ref = 'ummanu-583'"
             ).fetchone()[0],
             None,
         )
@@ -783,7 +783,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.card(
             connection,
-            "secretary-583",
+            "ummanu-583",
             project=None,
             task_type=None,
             extensions='{"board_never_named": ["task_type"]}',
@@ -792,13 +792,13 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(
             connection.exec_driver_sql(
-                "SELECT task_type, extensions FROM tasks WHERE task_ref = 'secretary-583'"
+                "SELECT task_type, extensions FROM tasks WHERE task_ref = 'ummanu-583'"
             ).fetchone(),
             (None, {"board_never_named": ["task_type"]}),
         )
         # The vocabulary is still closed: NULL was added to what the column admits, not "any text".
         with self.assertRaises(sa.exc.IntegrityError):
-            self.card(connection, "secretary-584", task_type="chore")
+            self.card(connection, "ummanu-584", task_type="chore")
         connection.rollback()
 
     def test_0011_keeps_existing_cards_and_admits_the_new_kind_and_fields(self) -> None:
@@ -811,13 +811,13 @@ class BoardStoreSchemaTests(unittest.TestCase):
             migrate.alembic_config(connection=connection, passwords=self.passwords), "0010_po_session_close"
         )
         connection.commit()
-        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('secretary')")
-        self.card(connection, "secretary-1", task_type="code")
-        self.card(connection, "secretary-2", task_type="research")
-        self.card(connection, "secretary-3", task_type=None)
+        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('ummanu')")
+        self.card(connection, "ummanu-1", task_type="code")
+        self.card(connection, "ummanu-2", task_type="research")
+        self.card(connection, "ummanu-3", task_type=None)
         connection.commit()
         with self.assertRaises(sa.exc.IntegrityError):
-            self.card(connection, "secretary-4", task_type="infra")
+            self.card(connection, "ummanu-4", task_type="infra")
         connection.rollback()
 
         self.assertEqual(
@@ -847,20 +847,20 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "SELECT task_ref, task_type, review, live_impact FROM tasks ORDER BY task_ref"
             ).fetchall(),
             [
-                ("secretary-1", "code", None, False),
-                ("secretary-2", "research", None, False),
-                ("secretary-3", None, None, False),
+                ("ummanu-1", "code", None, False),
+                ("ummanu-2", "research", None, False),
+                ("ummanu-3", None, None, False),
             ],
         )
-        self.card(connection, "secretary-4", task_type="infra")
+        self.card(connection, "ummanu-4", task_type="infra")
         connection.exec_driver_sql(
-            "UPDATE tasks SET review = 'skipped', live_impact = true WHERE task_ref = 'secretary-2'"
+            "UPDATE tasks SET review = 'skipped', live_impact = true WHERE task_ref = 'ummanu-2'"
         )
         connection.commit()
         for statement in (
-            "UPDATE tasks SET review = 'sometimes' WHERE task_ref = 'secretary-1'",
-            "UPDATE tasks SET live_impact = true WHERE task_ref = 'secretary-4'",
-            "UPDATE tasks SET live_impact = true WHERE task_ref = 'secretary-3'",
+            "UPDATE tasks SET review = 'sometimes' WHERE task_ref = 'ummanu-1'",
+            "UPDATE tasks SET live_impact = true WHERE task_ref = 'ummanu-4'",
+            "UPDATE tasks SET live_impact = true WHERE task_ref = 'ummanu-3'",
         ):
             with self.subTest(statement=statement), self.assertRaises(sa.exc.IntegrityError):
                 connection.exec_driver_sql(statement)
@@ -871,13 +871,13 @@ class BoardStoreSchemaTests(unittest.TestCase):
         import sqlalchemy as sa
 
         connection = self.prepared()
-        self.card(connection, "secretary-1584")
-        self.card(connection, "secretary-1583")
+        self.card(connection, "ummanu-1584")
+        self.card(connection, "ummanu-1583")
 
         connection.exec_driver_sql(
             "INSERT INTO task_dependencies (task_ref, depends_on, depends_on_task) VALUES "
-            "('secretary-1584', 'memory-mcp-12', NULL), "
-            "('secretary-1584', 'secretary-1583', 'secretary-1583')"
+            "('ummanu-1584', 'memory-mcp-12', NULL), "
+            "('ummanu-1584', 'ummanu-1583', 'ummanu-1583')"
         )
         connection.commit()
 
@@ -885,19 +885,19 @@ class BoardStoreSchemaTests(unittest.TestCase):
             connection.exec_driver_sql(
                 "SELECT depends_on, depends_on_task FROM task_dependencies ORDER BY depends_on"
             ).fetchall(),
-            [("memory-mcp-12", None), ("secretary-1583", "secretary-1583")],
+            [("memory-mcp-12", None), ("ummanu-1583", "ummanu-1583")],
         )
         # The foreign key still means what it meant: a resolution that names another card, or a
         # card that is not there, is refused rather than silently kept.
         for depends_on, resolved in (
-            ("secretary-1583", "secretary-1582"),
+            ("ummanu-1583", "ummanu-1582"),
             ("triggered-agents-9", "triggered-agents-9"),
         ):
             with self.subTest(depends_on=depends_on):
                 with self.assertRaises(sa.exc.IntegrityError):
                     connection.exec_driver_sql(
                         "INSERT INTO task_dependencies (task_ref, depends_on, depends_on_task) "
-                        "VALUES ('secretary-1583', %s, %s)",
+                        "VALUES ('ummanu-1583', %s, %s)",
                         (depends_on, resolved),
                     )
                 connection.rollback()
@@ -950,8 +950,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.run_migrations(connection)
         connection.exec_driver_sql(
             "INSERT INTO products (product_id, board_key, title, created_at, updated_at) "
-            "VALUES ('secretary', %s, 'Secretary', now(), now())",
-            (record_key("product", "secretary"),),
+            "VALUES ('ummanu', %s, 'Ummanu', now(), now())",
+            (record_key("product", "ummanu"),),
         )
         connection.commit()
 
@@ -993,15 +993,15 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.run_migrations(connection)
         connection.exec_driver_sql(
             "INSERT INTO products (product_id, board_key, title, created_at, updated_at) "
-            "VALUES ('secretary', %s, 'Secretary', now(), now())",
-            (record_key("product", "secretary"),),
+            "VALUES ('ummanu', %s, 'Ummanu', now(), now())",
+            (record_key("product", "ummanu"),),
         )
         connection.commit()
 
         with self.engine("app").connect() as app:
             app.exec_driver_sql(
                 "INSERT INTO product_comments (product_id, body, created_at) "
-                "VALUES ('secretary', 'from app', now())"
+                "VALUES ('ummanu', 'from app', now())"
             )
             app.commit()
         with self.engine("read").connect() as reader:
@@ -1068,8 +1068,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
             path = self.write_store(instance)
             path.write_text(
                 path.read_text(encoding="utf-8").replace(
-                    f"SECRETARY_DB_OWNER_PASSWORD={OWNER_PASSWORD}",
-                    "SECRETARY_DB_OWNER_PASSWORD=not-the-password",
+                    f"UMMANU_DB_OWNER_PASSWORD={OWNER_PASSWORD}",
+                    "UMMANU_DB_OWNER_PASSWORD=not-the-password",
                 ),
                 encoding="utf-8",
             )
@@ -1085,7 +1085,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
             compose = root / "postgres-compose.yml"
-            project = f"secretary-provision-{root.name.lower()}"
+            project = f"ummanu-provision-{root.name.lower()}"
             with socket.socket() as listener:
                 listener.bind(("127.0.0.1", 0))
                 host_port = listener.getsockname()[1]
@@ -1093,15 +1093,15 @@ class BoardStoreSchemaTests(unittest.TestCase):
             config_path.write_text(
                 "\n".join(
                     (
-                        "SECRETARY_DB_HOST=127.0.0.1",
-                        f"SECRETARY_DB_PORT={host_port}",
-                        f"SECRETARY_DB_NAME={DATABASE}",
-                        f"SECRETARY_DB_OWNER_USER={OWNER}",
-                        f"SECRETARY_DB_OWNER_PASSWORD={OWNER_PASSWORD}",
-                        f"SECRETARY_DB_APP_USER={schema.APP_ROLE}",
-                        f"SECRETARY_DB_APP_PASSWORD={APP_PASSWORD}",
-                        f"SECRETARY_DB_READ_USER={schema.READ_ROLE}",
-                        f"SECRETARY_DB_READ_PASSWORD={READ_PASSWORD}",
+                        "UMMANU_DB_HOST=127.0.0.1",
+                        f"UMMANU_DB_PORT={host_port}",
+                        f"UMMANU_DB_NAME={DATABASE}",
+                        f"UMMANU_DB_OWNER_USER={OWNER}",
+                        f"UMMANU_DB_OWNER_PASSWORD={OWNER_PASSWORD}",
+                        f"UMMANU_DB_APP_USER={schema.APP_ROLE}",
+                        f"UMMANU_DB_APP_PASSWORD={APP_PASSWORD}",
+                        f"UMMANU_DB_READ_USER={schema.READ_ROLE}",
+                        f"UMMANU_DB_READ_PASSWORD={READ_PASSWORD}",
                         "",
                     )
                 ),
@@ -1164,15 +1164,15 @@ class BoardStoreSchemaTests(unittest.TestCase):
             "0013_budget_candidates",
         )
         connection.commit()
-        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('secretary')")
+        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('ummanu')")
         connection.exec_driver_sql(
             "INSERT INTO products (product_id, board_key, title, extensions, created_at, updated_at) "
-            "VALUES ('secretary', %s, 'Secretary', %s::jsonb, now(), now())",
-            (record_key("product", "secretary"), '{"retired_board": {"future_product_field": "kept"}}'),
+            "VALUES ('ummanu', %s, 'Ummanu', %s::jsonb, now(), now())",
+            (record_key("product", "ummanu"), '{"retired_board": {"future_product_field": "kept"}}'),
         )
         connection.exec_driver_sql(
             "INSERT INTO issues (issue_id, board_key, product_id, title, issue_kind, priority, "
-            "extensions, created_at, updated_at) VALUES ('2fdac531', %s, 'secretary', 'An issue', "
+            "extensions, created_at, updated_at) VALUES ('2fdac531', %s, 'ummanu', 'An issue', "
             "'bug', 'P1', %s::jsonb, now(), now())",
             (record_key("issue", "2fdac531"), '{"retired_board": {"slug": "an-issue", "swimlane": "Codegen"}}'),
         )
@@ -1184,7 +1184,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.exec_driver_sql(
             "INSERT INTO requests (request_id, operation, intent, status, protocol, entity_kind, "
             f"ref, created_at, settled_at) VALUES (%s, 'card.retire', '{{}}'::jsonb, %s, true, "
-            f"'card', 'secretary-1', now(), {settled})",
+            f"'card', 'ummanu-1', now(), {settled})",
             (request_id, status),
         )
 
@@ -1223,21 +1223,21 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection = self.at_0013()
         self.card(
             connection,
-            "secretary-1",
-            extensions='{"retired_board": {"swimlane": "secretary", "steward_report": "1"}}',
+            "ummanu-1",
+            extensions='{"retired_board": {"swimlane": "ummanu", "steward_report": "1"}}',
         )
         # `secretary-583`'s live shape: the bag and the importer's marker beside it.
         self.card(
             connection,
-            "secretary-583",
+            "ummanu-583",
             task_type=None,
-            extensions='{"retired_board": {"swimlane": "secretary"}, "board_never_named": ["task_type"]}',
+            extensions='{"retired_board": {"swimlane": "ummanu"}, "board_never_named": ["task_type"]}',
         )
-        self.card(connection, "secretary-2")
+        self.card(connection, "ummanu-2")
         # Both keys present: the two bags merge, and a field both name with one value is kept once.
         self.card(
             connection,
-            "secretary-3",
+            "ummanu-3",
             extensions='{"retired_board": {"note": "old", "same": "1"}, "extra": {"fresh": "new", "same": "1"}}',
         )
         # A committed done-retention record is history; it does not stop the revision.
@@ -1266,14 +1266,14 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.assertEqual(
             self.extensions_of(connection),
             {
-                "task:secretary-1": {"extra": {"swimlane": "secretary", "steward_report": "1"}},
-                "task:secretary-583": {
-                    "extra": {"swimlane": "secretary"},
+                "task:ummanu-1": {"extra": {"swimlane": "ummanu", "steward_report": "1"}},
+                "task:ummanu-583": {
+                    "extra": {"swimlane": "ummanu"},
                     "board_never_named": ["task_type"],
                 },
-                "task:secretary-2": {},
-                "task:secretary-3": {"extra": {"note": "old", "fresh": "new", "same": "1"}},
-                "product:secretary": {"extra": {"future_product_field": "kept"}},
+                "task:ummanu-2": {},
+                "task:ummanu-3": {"extra": {"note": "old", "fresh": "new", "same": "1"}},
+                "product:ummanu": {"extra": {"future_product_field": "kept"}},
                 "issue:2fdac531": {"extra": {"slug": "an-issue", "swimlane": "Codegen"}},
             },
         )
@@ -1294,7 +1294,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
     def test_0014_refuses_a_store_with_two_keys_besides_the_neutral_one(self) -> None:
         connection = self.at_0013()
-        self.card(connection, "secretary-1", extensions='{"unexpected": {"a": "1"}}')
+        self.card(connection, "ummanu-1", extensions='{"unexpected": {"a": "1"}}')
         connection.commit()
 
         self.assertRefused(connection, "'retired_board'", "'unexpected'")
@@ -1303,19 +1303,19 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection = self.at_0013()
         self.card(
             connection,
-            "secretary-1",
+            "ummanu-1",
             extensions='{"retired_board": {"note": "old"}, "extra": {"note": "new"}}',
         )
         connection.commit()
 
-        self.assertRefused(connection, "tasks:secretary-1:note")
+        self.assertRefused(connection, "tasks:ummanu-1:note")
 
     def test_0014_refuses_a_bag_that_is_not_an_object(self) -> None:
         connection = self.at_0013()
-        self.card(connection, "secretary-1", extensions='{"retired_board": "flat"}')
+        self.card(connection, "ummanu-1", extensions='{"retired_board": "flat"}')
         connection.commit()
 
-        self.assertRefused(connection, "tasks:secretary-1")
+        self.assertRefused(connection, "tasks:ummanu-1")
 
     def test_0014_refuses_a_non_committed_done_retention_request_and_names_it(self) -> None:
         connection = self.at_0013()
@@ -1409,7 +1409,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.exec_driver_sql(
             "INSERT INTO sprints (ref, board_key, sprint_number, goal, definition_of_done, product_id, "
             "status, created_at, updated_at) "
-            "VALUES ('sprint:7', %s, 7, 'goal', 'done', 'secretary', 'open', now(), now())",
+            "VALUES ('sprint:7', %s, 7, 'goal', 'done', 'ummanu', 'open', now(), now())",
             (record_key("sprint", "sprint:7"),),
         )
         connection.commit()
@@ -1459,13 +1459,13 @@ class BoardStoreSchemaTests(unittest.TestCase):
             migrate.alembic_config(connection=connection, passwords=self.passwords), "0016_sprint_po_session"
         )
         connection.commit()
-        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('secretary')")
+        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('ummanu')")
         for number, kind in enumerate(("code", "research", "infra", None), start=1):
-            self.card(connection, f"secretary-{number}", task_type=kind)
-        connection.exec_driver_sql("UPDATE tasks SET review = 'skipped' WHERE task_ref = 'secretary-3'")
+            self.card(connection, f"ummanu-{number}", task_type=kind)
+        connection.exec_driver_sql("UPDATE tasks SET review = 'skipped' WHERE task_ref = 'ummanu-3'")
         connection.commit()
         with self.assertRaises(sa.exc.IntegrityError):
-            self.card(connection, "secretary-5", task_type="decision")
+            self.card(connection, "ummanu-5", task_type="decision")
         connection.rollback()
 
         self.assertEqual(
@@ -1478,21 +1478,21 @@ class BoardStoreSchemaTests(unittest.TestCase):
                 "SELECT task_ref, task_type, review, live_impact FROM tasks ORDER BY task_ref"
             ).fetchall(),
             [
-                ("secretary-1", "code", None, False),
-                ("secretary-2", "research", None, False),
-                ("secretary-3", "infra", "skipped", False),
-                ("secretary-4", None, None, False),
+                ("ummanu-1", "code", None, False),
+                ("ummanu-2", "research", None, False),
+                ("ummanu-3", "infra", "skipped", False),
+                ("ummanu-4", None, None, False),
             ],
         )
-        self.card(connection, "secretary-5", task_type="decision")
-        self.card(connection, "secretary-6", task_type="operation")
+        self.card(connection, "ummanu-5", task_type="decision")
+        self.card(connection, "ummanu-6", task_type="operation")
         connection.commit()
         with self.assertRaisesRegex(Exception, "task_type_is_a_known_type_or_nothing"):
-            self.card(connection, "secretary-7", task_type="chore")
+            self.card(connection, "ummanu-7", task_type="chore")
         connection.rollback()
         # Live impact stays research-only for the new kinds too.
         with self.assertRaisesRegex(Exception, "task_live_impact_is_research_only"):
-            connection.exec_driver_sql("UPDATE tasks SET live_impact = true WHERE task_ref = 'secretary-5'")
+            connection.exec_driver_sql("UPDATE tasks SET live_impact = true WHERE task_ref = 'ummanu-5'")
         connection.rollback()
 
     # --- 0018: owner events ---------------------------------------------------------------------
@@ -1502,25 +1502,25 @@ class BoardStoreSchemaTests(unittest.TestCase):
         import sqlalchemy as sa
         from alembic import command
 
-        from secretary.board.owner_events import OwnerEventStore, ReadRefused, record, settle
+        from ummanu.board.owner_events import OwnerEventStore, ReadRefused, record, settle
 
         connection = self.owner_connection()
         command.upgrade(
             migrate.alembic_config(connection=connection, passwords=self.passwords), "0017_po_card_kinds"
         )
         connection.commit()
-        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('secretary')")
+        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('ummanu')")
         self.sprint(connection, "sprint:5", 5)
         mark = '{"extra": {"waiting_owner": "2026-09-26T15:00:00Z", "waiting_owner_reason": "pay", "waiting_owner_by": "po"}}'
-        self.card(connection, "secretary-1", sprint="sprint:5", task_type="decision", extensions=mark)
-        self.card(connection, "secretary-2", task_type="code")
+        self.card(connection, "ummanu-1", sprint="sprint:5", task_type="decision", extensions=mark)
+        self.card(connection, "ummanu-2", task_type="code")
         connection.commit()
         before = (
             connection.exec_driver_sql("SELECT * FROM sprints ORDER BY ref").fetchall(),
             connection.exec_driver_sql("SELECT * FROM tasks ORDER BY task_ref").fetchall(),
         )
         store = OwnerEventStore(self.credentials("app"))
-        with self.assertLogs("secretary.board.owner_events", level="WARNING"):
+        with self.assertLogs("ummanu.board.owner_events", level="WARNING"):
             self.assertFalse(record("sprint_closed", "sprint:5", "closed", "early", to=store))
 
         self.assertEqual(self.run_migrations(connection), ("0018_owner_events", "0019_po_session_title", "0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs"))
@@ -1535,8 +1535,8 @@ class BoardStoreSchemaTests(unittest.TestCase):
             before,
         )
         self.assertEqual([tuple(row[len(before[0][0]) :]) for row in sprints], [(3, 0, [])])
-        self.assertTrue(record("card_handed_to_owner", "secretary-1", "handed", "h-1", to=store))
-        self.assertFalse(record("card_handed_to_owner", "secretary-1", "again", "h-1", to=store))
+        self.assertTrue(record("card_handed_to_owner", "ummanu-1", "handed", "h-1", to=store))
+        self.assertFalse(record("card_handed_to_owner", "ummanu-1", "again", "h-1", to=store))
         self.assertTrue(record("sprint_closed", "sprint:5", "closed", "c-1", to=store))
         self.assertTrue(record("budget_signal", "sprint:5", "signal", "b-1", to=store))
         self.assertEqual(store.unread_count(), 3)
@@ -1551,9 +1551,9 @@ class BoardStoreSchemaTests(unittest.TestCase):
         self.assertIsNone(store.events()[0].read_at)
         self.assertEqual(store.unread_count(), 1)
 
-        connection.exec_driver_sql("UPDATE tasks SET extensions = '{\"extra\": {}}' WHERE task_ref = 'secretary-1'")
+        connection.exec_driver_sql("UPDATE tasks SET extensions = '{\"extra\": {}}' WHERE task_ref = 'ummanu-1'")
         connection.commit()
-        self.assertEqual(settle("secretary-1", to=store), 1)
+        self.assertEqual(settle("ummanu-1", to=store), 1)
         self.assertEqual(store.unread_count(), 0)
         self.assertEqual([event.kind for event in store.events(unread_only=True)], [])
 
@@ -1568,7 +1568,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             connection.rollback()
         reader = OwnerEventStore(self.credentials("read"))
         self.assertEqual(len(reader.events()), 3)
-        from secretary.board.owner_events import OwnerEventsUnavailable
+        from ummanu.board.owner_events import OwnerEventsUnavailable
 
         with self.assertRaises(OwnerEventsUnavailable):
             reader.mark_all_read()
@@ -1652,36 +1652,36 @@ class BoardStoreSchemaTests(unittest.TestCase):
         config = migrate.alembic_config(connection=connection, passwords=self.passwords)
         command.upgrade(config, "0019_po_session_title")
         connection.commit()
-        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('secretary')")
+        connection.exec_driver_sql("INSERT INTO projects (project_id) VALUES ('ummanu')")
         kinds = ("code", "research", "infra", "decision", "operation", None)
         for number, kind in enumerate(kinds, start=1):
-            self.card(connection, f"secretary-{number}", task_type=kind)
+            self.card(connection, f"ummanu-{number}", task_type=kind)
         connection.commit()
         before = connection.exec_driver_sql("SELECT * FROM tasks ORDER BY task_ref").fetchall()
         with self.assertRaises(sa.exc.IntegrityError):
-            self.card(connection, "secretary-7", task_type="wait")
+            self.card(connection, "ummanu-7", task_type="wait")
         connection.rollback()
 
         self.assertEqual(self.run_migrations(connection), ("0020_wait_card_kind", "0021_delegated_card_settled", "0022_origin_returns", "0023_sprint_e2e_budget", "0024_e2e_after_merge_kind", "0025_card_waits_for_person", "0026_sprint_local_runs"))
 
         self.assertEqual(connection.exec_driver_sql("SELECT * FROM tasks ORDER BY task_ref").fetchall(), before)
-        self.card(connection, "secretary-7", task_type="wait", extensions='{"extra": {"wait": "{}"}}')
+        self.card(connection, "ummanu-7", task_type="wait", extensions='{"extra": {"wait": "{}"}}')
         connection.commit()
         with self.assertRaisesRegex(Exception, "task_type_is_a_known_type_or_nothing"):
-            self.card(connection, "secretary-8", task_type="chore")
+            self.card(connection, "ummanu-8", task_type="chore")
         connection.rollback()
 
         # The downgrade restores 0017's vocabulary, which a wait card does not fit.
         with self.assertRaises(sa.exc.IntegrityError):
             command.downgrade(config, "0019_po_session_title")
         connection.rollback()
-        connection.exec_driver_sql("DELETE FROM tasks WHERE task_ref = 'secretary-7'")
+        connection.exec_driver_sql("DELETE FROM tasks WHERE task_ref = 'ummanu-7'")
         connection.commit()
         command.downgrade(config, "0019_po_session_title")
         connection.commit()
         self.assertEqual(migrate.current_revision(connection), "0019_po_session_title")
         with self.assertRaises(sa.exc.IntegrityError):
-            self.card(connection, "secretary-7", task_type="wait")
+            self.card(connection, "ummanu-7", task_type="wait")
         connection.rollback()
 
     # --- 0021: the owner event kind of a delegated card's returned result -----------------------
@@ -1691,12 +1691,12 @@ class BoardStoreSchemaTests(unittest.TestCase):
         import sqlalchemy as sa
         from alembic import command
 
-        from secretary.board.owner_events import DELEGATED_CARD_SETTLED, OwnerEventStore, record
+        from ummanu.board.owner_events import DELEGATED_CARD_SETTLED, OwnerEventStore, record
 
         def insert(kind: str, event_class: str, key: str) -> None:
             connection.exec_driver_sql(
                 'INSERT INTO owner_events (kind, "class", subject_ref, text, created_at, dedup_key) '
-                f"VALUES ('{kind}', '{event_class}', 'secretary-1', 'text', now(), '{key}')"
+                f"VALUES ('{kind}', '{event_class}', 'ummanu-1', 'text', now(), '{key}')"
             )
 
         connection = self.owner_connection()
@@ -1715,10 +1715,10 @@ class BoardStoreSchemaTests(unittest.TestCase):
 
         self.assertEqual(connection.exec_driver_sql("SELECT * FROM owner_events ORDER BY id").fetchall(), before)
         store = OwnerEventStore(self.credentials("app"))
-        self.assertTrue(record(DELEGATED_CARD_SETTLED, "secretary-1", "settled Done", "d-1", to=store))
-        self.assertFalse(record(DELEGATED_CARD_SETTLED, "secretary-1", "settled Done", "d-1", to=store))
+        self.assertTrue(record(DELEGATED_CARD_SETTLED, "ummanu-1", "settled Done", "d-1", to=store))
+        self.assertFalse(record(DELEGATED_CARD_SETTLED, "ummanu-1", "settled Done", "d-1", to=store))
         [event] = [event for event in store.events() if event.kind == DELEGATED_CARD_SETTLED]
-        self.assertEqual((event.event_class, event.subject_ref, event.dedup_key), ("notice", "secretary-1", "d-1"))
+        self.assertEqual((event.event_class, event.subject_ref, event.dedup_key), ("notice", "ummanu-1", "d-1"))
         # The class still follows the kind, and an unknown kind is still refused.
         for kind, event_class in ((DELEGATED_CARD_SETTLED, "needs_owner"), ("card_settled", "notice")):
             with self.subTest(kind=kind, event_class=event_class), self.assertRaises(sa.exc.IntegrityError):
@@ -1746,7 +1746,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         import sqlalchemy as sa
         from alembic import command
 
-        from secretary.board.owner_events import OwnerEventStore, record
+        from ummanu.board.owner_events import OwnerEventStore, record
 
         connection = self.owner_connection()
         config = migrate.alembic_config(connection=connection, passwords=self.passwords)
@@ -1769,7 +1769,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         connection.rollback()
         # The bell takes the new `needs_owner` kind, and only as `needs_owner`.
         store = OwnerEventStore(self.credentials("app"))
-        self.assertTrue(record("e2e_budget_spent", "secretary-1", "cap spent", "e-1", to=store))
+        self.assertTrue(record("e2e_budget_spent", "ummanu-1", "cap spent", "e-1", to=store))
         with self.assertRaises(sa.exc.IntegrityError):
             connection.exec_driver_sql(
                 "INSERT INTO owner_events (kind, class, subject_ref, text, created_at, dedup_key) "
@@ -1801,7 +1801,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         import sqlalchemy as sa
         from alembic import command
 
-        from secretary.board.owner_events import OwnerEventStore, record
+        from ummanu.board.owner_events import OwnerEventStore, record
 
         connection = self.owner_connection()
         config = migrate.alembic_config(connection=connection, passwords=self.passwords)
@@ -1810,11 +1810,11 @@ class BoardStoreSchemaTests(unittest.TestCase):
         store = OwnerEventStore(self.credentials("app"))
         # The operational store refuses a store at 0023 (`board.schema_gate`), so the earlier event
         # is seeded as that revision's own row.
-        with self.assertLogs("secretary.board.owner_events", level="WARNING"):
-            self.assertFalse(record("e2e_budget_spent", "secretary-1", "cap spent", "e-0", to=store))
+        with self.assertLogs("ummanu.board.owner_events", level="WARNING"):
+            self.assertFalse(record("e2e_budget_spent", "ummanu-1", "cap spent", "e-0", to=store))
         connection.exec_driver_sql(
             "INSERT INTO owner_events (kind, class, subject_ref, text, created_at, dedup_key) "
-            "VALUES ('e2e_budget_spent', 'needs_owner', 'secretary-1', 'cap spent', now(), 'e-0')"
+            "VALUES ('e2e_budget_spent', 'needs_owner', 'ummanu-1', 'cap spent', now(), 'e-0')"
         )
         connection.commit()
 
@@ -1824,7 +1824,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             connection.exec_driver_sql("SELECT kind, class FROM owner_events").fetchall(),
             [("e2e_budget_spent", "needs_owner")],
         )
-        self.assertTrue(record("e2e_after_merge", "secretary-2", "after-merge run cancelled", "e-1", to=store))
+        self.assertTrue(record("e2e_after_merge", "ummanu-2", "after-merge run cancelled", "e-1", to=store))
         with self.assertRaises(sa.exc.IntegrityError):
             connection.exec_driver_sql(
                 "INSERT INTO owner_events (kind, class, subject_ref, text, created_at, dedup_key) "
@@ -1857,7 +1857,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         import sqlalchemy as sa
         from alembic import command
 
-        from secretary.board.owner_events import OwnerEventStore
+        from ummanu.board.owner_events import OwnerEventStore
 
         connection = self.owner_connection()
         config = migrate.alembic_config(connection=connection, passwords=self.passwords)
@@ -1868,7 +1868,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
         )
         connection.exec_driver_sql(
             "INSERT INTO tasks (task_ref, task_number, title, task_type, state, sprint_ref, created_at, updated_at) "
-            "VALUES ('secretary-800', 800, 'PO decision', 'decision', 'in_progress', 'sprint:fixture', now(), now())"
+            "VALUES ('ummanu-800', 800, 'PO decision', 'decision', 'in_progress', 'sprint:fixture', now(), now())"
         )
         connection.exec_driver_sql(
             "INSERT INTO owner_events (kind, class, subject_ref, text, created_at, dedup_key) "
@@ -1901,7 +1901,7 @@ class BoardStoreSchemaTests(unittest.TestCase):
             "false",
             "the prior-runtime proof requires full Git history (actions/checkout fetch-depth: 0)",
         )
-        revision_path = "src/secretary/board/migrations/versions/0025_card_waits_for_person.py"
+        revision_path = "src/ummanu/board/migrations/versions/0025_card_waits_for_person.py"
         parents = subprocess.check_output(
             ["git", "log", "--diff-filter=A", "--format=%P", "-1", "--", revision_path], cwd=repository, text=True
         ).split()
@@ -1912,10 +1912,10 @@ class BoardStoreSchemaTests(unittest.TestCase):
             tree.extractall(prior_root, filter="data")
         script = """import json, sys
 from types import SimpleNamespace
-from secretary.board import migrate
-from secretary.board.owner_events import OwnerEventStore
-from secretary.board.sql_cards import SqlCardClient
-from secretary.tasks import TaskReader
+from ummanu.board import migrate
+from ummanu.board.owner_events import OwnerEventStore
+from ummanu.board.sql_cards import SqlCardClient
+from ummanu.tasks import TaskReader
 credentials = SimpleNamespace(conninfo=lambda: sys.argv[1])
 store = OwnerEventStore(credentials)
 events = store.events()
@@ -1923,8 +1923,8 @@ assert any(event.kind == 'card_waits_for_person' and event.event_class == 'needs
 assert store.unread_count() == 2
 assert store.insert('provider_red', None, 'prior runtime still writes', 'old-runtime')
 client = SqlCardClient(credentials, sys.argv[2])
-assert TaskReader(client).show('secretary-800')['state'] == 'in_progress'
-client.call('createComment', task_id=client.call('getTaskByReference', project_id=1, reference='secretary-800')['id'], user_id=0, content='old runtime still writes cards')
+assert TaskReader(client).show('ummanu-800')['state'] == 'in_progress'
+client.call('createComment', task_id=client.call('getTaskByReference', project_id=1, reference='ummanu-800')['id'], user_id=0, content='old runtime still writes cards')
 client.close()
 print(json.dumps({'head': migrate.EXPECTED_SCHEMA_REVISION, 'unread': store.unread_count()}))
 """

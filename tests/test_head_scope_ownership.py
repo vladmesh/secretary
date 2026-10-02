@@ -12,24 +12,24 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.po import store as po_store
-from secretary.dispatch.host import CommandHostRuntime, HostError
-from secretary.dispatch.launch import merge_launch_head_run
-from secretary.po.runner import PoRunner
-from secretary.runtime.head.identity import head_process_status, publish_heartbeat
-from secretary.runtime.head.local_pty import protocol
-from secretary.runtime.head.local_pty.client import LocalPtySpawnError, spawn_head
-from secretary.runtime.head.local_pty.journal import JournalWriter, RUN_STARTED, RUN_EXITED
-from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
-from secretary.runtime.head.memory import MemoryScopeError, scope_unit
-from secretary.runtime.head.run import HeadRun, StopInitiator
-from secretary.runtime.head.spec import HeadSpec
-from secretary.runtime.head.task_ref import TaskRef
-from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
-from secretary.runtime.head.command import HeadCommand
-from secretary.webproto.errors import RuntimeUnavailable
-from secretary.webproto.lifecycle import RunLifecycle
-from secretary.webproto.runs import ProductRun, RunStore, RAISING, RAISED, SETTLED, UNRESOLVED
+from ummanu.po import store as po_store
+from ummanu.dispatch.host import CommandHostRuntime, HostError
+from ummanu.dispatch.launch import merge_launch_head_run
+from ummanu.po.runner import PoRunner
+from ummanu.runtime.head.identity import head_process_status, publish_heartbeat
+from ummanu.runtime.head.local_pty import protocol
+from ummanu.runtime.head.local_pty.client import LocalPtySpawnError, spawn_head
+from ummanu.runtime.head.local_pty.journal import JournalWriter, RUN_STARTED, RUN_EXITED
+from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+from ummanu.runtime.head.memory import MemoryScopeError, scope_unit
+from ummanu.runtime.head.run import HeadRun, StopInitiator
+from ummanu.runtime.head.spec import HeadSpec
+from ummanu.runtime.head.task_ref import TaskRef
+from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
+from ummanu.runtime.head.command import HeadCommand
+from ummanu.webproto.errors import RuntimeUnavailable
+from ummanu.webproto.lifecycle import RunLifecycle
+from ummanu.webproto.runs import ProductRun, RunStore, RAISING, RAISED, SETTLED, UNRESOLVED
 from tests.po_fake_store import FakeBoard, FakePoStore
 
 
@@ -37,13 +37,13 @@ class ProductOwnershipTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.cgroups = self.root / "cgroups"
-        self.enterContext(mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", self.cgroups))
+        self.enterContext(mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", self.cgroups))
         self.spec = HeadSpec.from_profile("fixture", {"adapter": "claude", "memory_limit_mib": 96})
         self.store = RunStore(self.root)
         self.runtime = LocalPtyHeadRuntime(self.root / "heads", head_process_status=head_process_status, stop_timeout=0)
         self.lifecycle = RunLifecycle(self.store, self.runtime)
         self.enterContext(mock.patch.object(self.lifecycle, "_preflight"))
-        self.enterContext(mock.patch("secretary.webproto.lifecycle.render_head_command", return_value=HeadCommand(command="true", adapter="claude")))
+        self.enterContext(mock.patch("ummanu.webproto.lifecycle.render_head_command", return_value=HeadCommand(command="true", adapter="claude")))
         self.document = self.root / "task.md"
         self.document.write_text("fixture")
         directory = self.root / "heads" / "product"
@@ -65,8 +65,8 @@ class ProductOwnershipTests(unittest.TestCase):
         saved_head = HeadRun.from_json(self.store.get(self.ahead.run_id).head_run)
         self.assertTrue(saved_head.scope_generation)
         self.assertFalse(saved_head.handle)
-        with mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen", return_value=SimpleNamespace(wait=lambda: 7)), mock.patch(
-            "secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 1, stderr=b"transient refusal"),
+        with mock.patch("ummanu.runtime.head.local_pty.client.subprocess.Popen", return_value=SimpleNamespace(wait=lambda: 7)), mock.patch(
+            "ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 1, stderr=b"transient refusal"),
         ):
             with self.assertRaises(RuntimeUnavailable):
                 self.raise_head()
@@ -80,7 +80,7 @@ class ProductOwnershipTests(unittest.TestCase):
         self.assertFalse(Path(retained.pid_file).exists())
         self.assertFalse(Path(retained.journal_path).exists())
         membership.write_text("populated 0\n")
-        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stderr=b"")):
+        with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stderr=b"")):
             # A fresh service and runtime use only the original durable record.
             recovered = RunLifecycle(self.store, LocalPtyHeadRuntime(self.root / "heads", head_process_status=head_process_status, stop_timeout=0))
             settled = recovered.advance(retained, SETTLED, now=2)
@@ -119,8 +119,8 @@ class ProductOwnershipTests(unittest.TestCase):
                 owner = ScopedHeadLifecycle(self.ahead.run_id, 96, generation=generation)
                 owner.persist(directory)
                 before = ScopedHeadLifecycle.read_owner(directory)
-                with mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen") as launch, mock.patch(
-                    "secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
+                with mock.patch("ummanu.runtime.head.local_pty.client.subprocess.Popen") as launch, mock.patch(
+                    "ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
                 ) as stop:
                     with self.assertRaisesRegex(LocalPtySpawnError, "cannot replace") as refused:
                         spawn_head(root=self.root / "heads", run_id=self.ahead.run_id, role="worker", task="card:fixture",
@@ -139,8 +139,8 @@ class ProductOwnershipTests(unittest.TestCase):
         owner.stop_and_prove_empty()
         before = ScopedHeadLifecycle.read_owner(directory)
         # The unlocked first read precedes another caller's registration and cleanup.
-        with mock.patch("secretary.runtime.head.local_pty.client.ScopedHeadLifecycle.from_run_dir", return_value=None), mock.patch(
-            "secretary.runtime.head.local_pty.client.subprocess.Popen",
+        with mock.patch("ummanu.runtime.head.local_pty.client.ScopedHeadLifecycle.from_run_dir", return_value=None), mock.patch(
+            "ummanu.runtime.head.local_pty.client.subprocess.Popen",
         ) as launch:
             with self.assertRaisesRegex(LocalPtySpawnError, "cannot replace"):
                 spawn_head(root=self.root / "heads", run_id=self.ahead.run_id, role="worker", task="card:fixture",
@@ -153,7 +153,7 @@ class ProductOwnershipTests(unittest.TestCase):
         catalog = SimpleNamespace(head_profile=lambda _head: {"adapter": "claude"})
         for role in ("observer", "worker", "reviewer"):
             with self.subTest(role=role), mock.patch(
-                "secretary.dispatch.host._prepare_claude_provider_progress_source", side_effect=lambda run: run,
+                "ummanu.dispatch.host._prepare_claude_provider_progress_source", side_effect=lambda run: run,
             ):
                 host = CommandHostRuntime(catalog, self.root, production_runtime=SimpleNamespace())
                 identity = dict(role=role, workspace=str(self.root), task_ref=TaskRef.card("card:fixture"),
@@ -194,8 +194,8 @@ class ProductOwnershipTests(unittest.TestCase):
                 journal.append(RUN_STARTED, head_pid=222, supervisor_pid=333)
                 journal.append(RUN_EXITED, head_pid=222, exit_code=0)
             return SimpleNamespace(wait=lambda: 0)
-        with mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen", side_effect=launched), mock.patch(
-            "secretary.runtime.head.local_pty.client._identity_written", return_value=True,
+        with mock.patch("ummanu.runtime.head.local_pty.client.subprocess.Popen", side_effect=launched), mock.patch(
+            "ummanu.runtime.head.local_pty.client._identity_written", return_value=True,
         ):
             receipt = self.runtime.start(self.spec, str(self.root), original.task_ref, command="true",
                                          title="fixture", run=original, role="worker")
@@ -210,7 +210,7 @@ class ProductOwnershipTests(unittest.TestCase):
 class OwnershipTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", self.root / "cgroups"))
+        self.enterContext(mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", self.root / "cgroups"))
 
     def owner(self, run_id: str = "reused") -> ScopedHeadLifecycle:
         directory = self.root / run_id
@@ -242,7 +242,7 @@ class OwnershipTests(unittest.TestCase):
                 owner.stop_and_prove_empty()
             except Exception as exc:
                 errors.append(exc)
-        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=backend) as stop:
+        with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=backend) as stop:
             thread = threading.Thread(target=cleanup)
             thread.start()
             try:
@@ -273,14 +273,14 @@ class OwnershipTests(unittest.TestCase):
     def test_interrupted_backend_retains_closed_admission_and_releases_lock_for_retry(self) -> None:
         owner = self.owner()
         membership = self.membership(owner)
-        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=OSError("interrupted")):
+        with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=OSError("interrupted")):
             with self.assertRaises(MemoryScopeError):
                 owner.stop_and_prove_empty()
         record = ScopedHeadLifecycle.read_owner(owner.directory)
         self.assertFalse(record["launch_allowed"])
         self.assertFalse(record["cleanup_complete"])
         membership.write_text("populated 0\n")
-        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stderr=b"")):
+        with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stderr=b"")):
             ScopedHeadLifecycle.from_run_dir(owner.directory).stop_and_prove_empty()
         self.assertTrue(ScopedHeadLifecycle.read_owner(owner.directory)["cleanup_complete"])
 
@@ -291,8 +291,8 @@ class OwnershipTests(unittest.TestCase):
         runtime = LocalPtyHeadRuntime(root, head_process_status=head_process_status, stop_timeout=0)
         spec = HeadSpec.from_profile("fixture", {"adapter": "codex", "memory_limit_mib": 96})
         pid_file = self.root / "designated.pid"
-        with mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen", return_value=SimpleNamespace(wait=lambda: 7)), mock.patch(
-            "secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 1, stderr=b"transient refusal"),
+        with mock.patch("ummanu.runtime.head.local_pty.client.subprocess.Popen", return_value=SimpleNamespace(wait=lambda: 7)), mock.patch(
+            "ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 1, stderr=b"transient refusal"),
         ):
             started = runtime.start(spec, str(self.root), TaskRef.card("card:fixture"), command="true",
                                     run_id=owner.run_id, role="worker", pid_file=str(pid_file), title="fixture")
@@ -307,7 +307,7 @@ class OwnershipTests(unittest.TestCase):
         self.assertFalse((directory / protocol.PID_FILE_NAME).exists())
         self.assertFalse((directory / protocol.JOURNAL_NAME).exists())
         membership.write_text("populated 0\n")
-        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stderr=b"")):
+        with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stderr=b"")):
             stopped = runtime.stop(run, StopInitiator(actor="fixture"))
         self.assertTrue(stopped.ok, stopped.reason)
         self.assertTrue(stopped.run.settled)
@@ -320,7 +320,7 @@ class OwnershipTests(unittest.TestCase):
         runtime = LocalPtyHeadRuntime(self.root, head_process_status=head_process_status, stop_timeout=0)
         run = HeadRun(run_id=owner.run_id, spec=HeadSpec.from_profile("fixture", {"adapter": "codex"}),
                       workspace=str(self.root), task_ref=TaskRef.card("card:fixture"), role="worker", scope_generation=owner.generation)
-        with mock.patch.object(runtime, "_ask_to_stop") as socket, mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run") as backend:
+        with mock.patch.object(runtime, "_ask_to_stop") as socket, mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run") as backend:
             with owner.ownership():
                 self.assertFalse(runtime.stop(run, StopInitiator(actor="fixture")).ok)
             pid_file = owner.directory / protocol.PID_FILE_NAME
@@ -351,10 +351,10 @@ class OwnershipTests(unittest.TestCase):
                       workspace=str(self.root), task_ref=TaskRef.card("card:fixture"), role="worker",
                       scope_generation=owner.generation).finishing(initiator).exited()
         runtime = LocalPtyHeadRuntime(self.root, head_process_status=head_process_status, stop_timeout=0)
-        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 1, stderr=b"transient refusal")):
+        with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 1, stderr=b"transient refusal")):
             self.assertFalse(runtime.stop(run, StopInitiator(actor="workspace-cleanup")).ok)
         membership.write_text("populated 0\n")
-        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stderr=b"")):
+        with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stderr=b"")):
             for _ in range(2):
                 stopped = runtime.stop(run, StopInitiator(actor="workspace-cleanup"))
                 self.assertTrue(stopped.ok, stopped.reason)
@@ -368,7 +368,7 @@ class OwnershipTests(unittest.TestCase):
                       workspace=str(self.root), task_ref=TaskRef.card("card:fixture"), role="reviewer",
                       scope_generation=owner.generation).finishing(initiator)
         runtime = LocalPtyHeadRuntime(self.root, head_process_status=head_process_status, stop_timeout=0)
-        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run") as backend:
+        with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run") as backend:
             stopped = runtime.stop(run, initiator)
         self.assertTrue(stopped.ok, stopped.reason)
         self.assertTrue(stopped.run.settled)
@@ -383,9 +383,9 @@ class OwnershipTests(unittest.TestCase):
         record = ScopedHeadLifecycle.read_owner(owner.directory)
         record.update(launch_pid=123456, launch_identity="fixture-start:1")
         ScopedHeadLifecycle.update_owner(owner.directory, record)
-        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.launch_group_present", return_value=True), mock.patch(
-            "secretary.runtime.head.local_pty.scoped_lifecycle.os.killpg", side_effect=PermissionError("fixture"),
-        ), mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
+        with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.launch_group_present", return_value=True), mock.patch(
+            "ummanu.runtime.head.local_pty.scoped_lifecycle.os.killpg", side_effect=PermissionError("fixture"),
+        ), mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
                       return_value=subprocess.CompletedProcess([], 1, stderr=b"refused")):
             with self.assertRaisesRegex(MemoryScopeError, "launch group"):
                 owner.stop_and_prove_empty()
@@ -402,7 +402,7 @@ class OwnershipTests(unittest.TestCase):
             return read(path, *args, **kwargs)
 
         with mock.patch.object(Path, "read_text", unreadable), mock.patch(
-            "secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
+            "ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
             return_value=subprocess.CompletedProcess([], 0, stderr=b""),
         ):
             with self.assertRaisesRegex(MemoryScopeError, "verify empty head scope"):
@@ -413,7 +413,7 @@ class OwnershipTests(unittest.TestCase):
 class PoTerminalOwnershipTests(unittest.TestCase):
     def setUp(self) -> None:
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.enterContext(mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", self.root / "cgroups"))
+        self.enterContext(mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", self.root / "cgroups"))
         self.store = FakePoStore(FakeBoard())
         self.session, _ = self.store.claim_session(session_id="session", cli="claude", model="opus", cwd=str(self.root), cli_session_id=None, effort="high")
         self.failed, self.settled = [], []
@@ -526,7 +526,7 @@ class PoTerminalOwnershipTests(unittest.TestCase):
         self.files.prompt.write_text("prompt")
         with self.refuse(), self.assertRaises(MemoryScopeError):
             self.runner.stop_turn("session", 1)
-        with mock.patch("secretary.po.runner.spawn_head") as spawn:
+        with mock.patch("ummanu.po.runner.spawn_head") as spawn:
             with self.assertRaisesRegex(RuntimeError, "retained terminal intent"):
                 self.runner._scoped_launch(self.session, 1, ["true"], self.files, {},
                                           HeadSpec.from_profile("fixture", {"adapter": "claude"}))

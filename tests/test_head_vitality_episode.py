@@ -10,7 +10,7 @@ import json
 import unittest
 from dataclasses import replace as dataclass_replace
 
-from secretary.dispatch.head_vitality import (
+from ummanu.dispatch.head_vitality import (
     HeadVitalityError,
     ProcessState,
     ProgressState,
@@ -19,7 +19,7 @@ from secretary.dispatch.head_vitality import (
     TurnState,
     VitalitySnapshot,
 )
-from secretary.dispatch.head_vitality_episode import (
+from ummanu.dispatch.head_vitality_episode import (
     DEFAULT_VITALITY_THRESHOLDS,
     EPISODE_VERSION,
     VitalityEpisode,
@@ -895,7 +895,7 @@ class AnswerOwedTests(unittest.TestCase):
                 )
 
 
-class Secretary1517Tests(unittest.TestCase):
+class Ummanu1517Tests(unittest.TestCase):
     """The exact incident shape: live Codex PID, idle pane, provider cursor never admitted."""
 
     def _tick(self, previous, at: float):
@@ -1260,7 +1260,7 @@ class ThresholdTests(unittest.TestCase):
                 VitalityThresholds(suspect_after=bad, confirm_after=600.0)
 
     def test_defaults_align_with_the_watchdogs_idle_ceiling(self) -> None:
-        from secretary.dispatch.watchdog import IDLE_STALL_DEFAULT
+        from ummanu.dispatch.watchdog import IDLE_STALL_DEFAULT
 
         self.assertEqual(DEFAULT_VITALITY_THRESHOLDS.suspect_after, float(IDLE_STALL_DEFAULT))
         self.assertEqual(DEFAULT_VITALITY_THRESHOLDS.confirm_after, 2.0 * float(IDLE_STALL_DEFAULT))

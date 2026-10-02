@@ -1,5 +1,5 @@
 {
-  "body": "## Mechanical gate attestation — Assessment delivery\n\n- validated_sha: 895be2f12247fc979f347dab2eef87e2658de05b\n- base_sha: 49876188efb679ffc12d48c2db656709be6a34e8\n- gate_mode: github\n- required terminal checks:\n  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110107368115)\n  - test / component: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104895050)\n  - test / integration-board: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104894901)\n  - test / integration-dispatcher: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104894984)\n  - test / integration-heads: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104894997)\n  - test / integration-memory: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104895145)\n  - test / integration-recovery: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104894860)\n  - test / packaging: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104895019)\n  - test / runtime-component: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104895001)\n  - test / unit: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104894970)\n  - typecheck: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104894385)\n- completed_at: 2026-09-30T21:35:32+00:00\n- command_or_check_set_digest: 25f330d36fee62b36888baae7dabd2fa9900426c8429a21ab8aa1d2ddae52412\n\nThe observer consumes this fresh receipt, the worker report and the reviewer verdict before opening code or running any check.",
+  "body": "## Mechanical gate attestation — Assessment delivery\n\n- validated_sha: 895be2f12247fc979f347dab2eef87e2658de05b\n- base_sha: 49876188efb679ffc12d48c2db656709be6a34e8\n- gate_mode: github\n- required terminal checks:\n  - test: SUCCESS (https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110107368115)\n  - test / component: SUCCESS (https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104895050)\n  - test / integration-board: SUCCESS (https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104894901)\n  - test / integration-dispatcher: SUCCESS (https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104894984)\n  - test / integration-heads: SUCCESS (https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104894997)\n  - test / integration-memory: SUCCESS (https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104895145)\n  - test / integration-recovery: SUCCESS (https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104894860)\n  - test / packaging: SUCCESS (https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104895019)\n  - test / runtime-component: SUCCESS (https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104895001)\n  - test / unit: SUCCESS (https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104894970)\n  - typecheck: SUCCESS (https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104894385)\n- completed_at: 2026-09-30T21:35:32+00:00\n- command_or_check_set_digest: 25f330d36fee62b36888baae7dabd2fa9900426c8429a21ab8aa1d2ddae52412\n\nThe observer consumes this fresh receipt, the worker report and the reviewer verdict before opening code or running any check.",
   "receipt": {
     "base_sha": "49876188efb679ffc12d48c2db656709be6a34e8",
     "command_or_check_set_digest": "25f330d36fee62b36888baae7dabd2fa9900426c8429a21ab8aa1d2ddae52412",
@@ -9,57 +9,57 @@
       {
         "conclusion": "SUCCESS",
         "name": "test",
-        "url": "https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110107368115"
+        "url": "https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110107368115"
       },
       {
         "conclusion": "SUCCESS",
         "name": "test / component",
-        "url": "https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104895050"
+        "url": "https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104895050"
       },
       {
         "conclusion": "SUCCESS",
         "name": "test / integration-board",
-        "url": "https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104894901"
+        "url": "https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104894901"
       },
       {
         "conclusion": "SUCCESS",
         "name": "test / integration-dispatcher",
-        "url": "https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104894984"
+        "url": "https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104894984"
       },
       {
         "conclusion": "SUCCESS",
         "name": "test / integration-heads",
-        "url": "https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104894997"
+        "url": "https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104894997"
       },
       {
         "conclusion": "SUCCESS",
         "name": "test / integration-memory",
-        "url": "https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104895145"
+        "url": "https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104895145"
       },
       {
         "conclusion": "SUCCESS",
         "name": "test / integration-recovery",
-        "url": "https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104894860"
+        "url": "https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104894860"
       },
       {
         "conclusion": "SUCCESS",
         "name": "test / packaging",
-        "url": "https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104895019"
+        "url": "https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104895019"
       },
       {
         "conclusion": "SUCCESS",
         "name": "test / runtime-component",
-        "url": "https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104895001"
+        "url": "https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104895001"
       },
       {
         "conclusion": "SUCCESS",
         "name": "test / unit",
-        "url": "https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104894970"
+        "url": "https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104894970"
       },
       {
         "conclusion": "SUCCESS",
         "name": "typecheck",
-        "url": "https://github.com/vladmesh/secretary/actions/runs/36779255299/job/110104894385"
+        "url": "https://github.com/vladmesh/ummanu/actions/runs/36779255299/job/110104894385"
       }
     ],
     "validated_sha": "895be2f12247fc979f347dab2eef87e2658de05b"
@@ -70,7 +70,7 @@
     "kind": "commented",
     "ref": "secretary-1883",
     "actor": {
-      "id": "secretary-production",
+      "id": "ummanu-production",
       "role": "dispatcher"
     },
     "outcome": "success",

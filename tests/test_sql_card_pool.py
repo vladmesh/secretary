@@ -19,9 +19,9 @@ from unittest import mock
 
 import psycopg
 
-from secretary.board.migrate import EXPECTED_SCHEMA_REVISION
-from secretary.board.sql_cards import POOL_SIZE, SqlCardClient
-from secretary.tasks import TaskError
+from ummanu.board.migrate import EXPECTED_SCHEMA_REVISION
+from ummanu.board.sql_cards import POOL_SIZE, SqlCardClient
+from ummanu.tasks import TaskError
 
 #: Long enough that a test waiting on it has certainly failed, short enough to fail fast.
 _WAIT = 5.0

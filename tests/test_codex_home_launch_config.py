@@ -26,13 +26,13 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary import upgrade
-from secretary.installation import provision_codex_home
-from secretary.memory.client_config import bridge_executable, reconcile_clients
-from secretary.runtime.codex_home import managed_codex_homes
-from secretary.runtime.codex_preflight import CodexHomeLoginMissing, resolve_codex_home
-from secretary.runtime.head.command import render_head_command
 from tests.fakes.upgrade import FakeUnitInstaller
+from ummanu import upgrade
+from ummanu.installation import provision_codex_home
+from ummanu.memory.client_config import bridge_executable, reconcile_clients
+from ummanu.runtime.codex_home import managed_codex_homes
+from ummanu.runtime.codex_preflight import CodexHomeLoginMissing, resolve_codex_home
+from ummanu.runtime.head.command import render_head_command
 
 REPO = Path(__file__).resolve().parents[1]
 PACKAGED_HOME = REPO / "packaging" / "codex-home"
@@ -117,7 +117,7 @@ class _ManagedHomes(unittest.TestCase):
     """A temp product checkout with the packaged Codex home, a runtime home and a data dir."""
 
     def setUp(self) -> None:
-        temporary = tempfile.TemporaryDirectory(prefix="secretary-codex-home-launch.")
+        temporary = tempfile.TemporaryDirectory(prefix="ummanu-codex-home-launch.")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.workspace = self.root / "workspace"

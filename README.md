@@ -1,4 +1,4 @@
-# secretary
+# ummanu
 
 Portable personal appliance for running multiple AI agent heads across many projects from a remote
 VPS. The repository contains the CLI, the task and memory protocols, the dispatcher runtime, restore
@@ -22,7 +22,7 @@ and derived runtime state lives in a local data directory. Install and recovery 
 - [Operations](docs/OPERATIONS.md) — runbooks for a running installation
 - [Recovery](docs/RECOVERY.md) — the checkpoint contract, fresh install and restore
 - [Testing](docs/TESTING.md) — CI suite taxonomy and local test boundaries
-- [Rename](docs/RENAME.md) — secretary → ummanu: inventory of the old name and the transition design
+- [Rename](docs/RENAME.md) — ummanu → ummanu: inventory of the old name and the transition design
 
 ## Install
 
@@ -37,21 +37,21 @@ The editable install is required because the runtime also uses deployment assets
 Bootstrap the host first:
 
 ```bash
-sudo secretary bootstrap --instance-remote REMOTE --instance-dir INSTANCE \
+sudo ummanu bootstrap --instance-remote REMOTE --instance-dir INSTANCE \
   --installation-user INSTALL_USER
 ```
 
 For a new installation, continue with:
 
 ```bash
-sudo secretary install --instance-remote REMOTE --instance-dir INSTANCE \
+sudo ummanu install --instance-remote REMOTE --instance-dir INSTANCE \
   --installation-user INSTALL_USER
 ```
 
 To rebuild an existing installation from its private checkpoint, use `recover` instead of `install`:
 
 ```bash
-sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE \
+sudo ummanu recover --instance-remote REMOTE --instance-dir INSTANCE \
   --installation-user INSTALL_USER
 ```
 

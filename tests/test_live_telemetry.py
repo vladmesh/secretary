@@ -24,34 +24,34 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from secretary import host
-from secretary.automations.agents.steward import cli as steward_cli
-from secretary.automations.agents.steward import signals as steward_signals
-from secretary.automations.runtime import health, production_telemetry
-from secretary.board.backend import CARD, SPRINT
-from secretary.cli import build_parser
-from secretary.dispatch.bootstrap import default_data_dir, runtime_from_args
-from secretary.dispatch.observer import (
+from tests.fakes.dispatcher import FakeCatalog, FakeHost, dispatcher_seed
+from tests.retired_board import legacy_runtime_lines
+from tests.sql_backend_fixtures import card_store
+from ummanu import host
+from ummanu.automations.agents.steward import cli as steward_cli
+from ummanu.automations.agents.steward import signals as steward_signals
+from ummanu.automations.runtime import health, production_telemetry
+from ummanu.board.backend import CARD, SPRINT
+from ummanu.cli import build_parser
+from ummanu.dispatch.bootstrap import default_data_dir, runtime_from_args
+from ummanu.dispatch.observer import (
     STATE_PAUSE_STOP_PENDING,
     ObserverRecord,
     put_observers,
 )
-from secretary.dispatch.production import (
+from ummanu.dispatch.production import (
     TICK_TELEMETRY_DEGRADATIONS_KEPT,
     TICK_TELEMETRY_ERRORS_KEPT,
     TICK_TELEMETRY_UNHEALTHY_KEPT,
     record_tick_telemetry,
 )
-from secretary.dispatch.runtime import DispatcherRuntime
-from secretary.dispatch.watchdog import idle_stall_seconds
-from secretary.head_health import HeadHealth
-from secretary.head_registry import materialize_snapshot, record_source
-from secretary.runtime import role_env
-from secretary.runtime.state import PRECHECK_SKIP, AgentState
-from secretary.tasks import TaskError, TaskReader, TaskWriter, task_audit_for
-from tests.fakes.dispatcher import FakeCatalog, FakeHost, dispatcher_seed
-from tests.retired_board import legacy_runtime_lines
-from tests.sql_backend_fixtures import card_store
+from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.dispatch.watchdog import idle_stall_seconds
+from ummanu.head_health import HeadHealth
+from ummanu.head_registry import materialize_snapshot, record_source
+from ummanu.runtime import role_env
+from ummanu.runtime.state import PRECHECK_SKIP, AgentState
+from ummanu.tasks import TaskError, TaskReader, TaskWriter, task_audit_for
 
 
 class EmptyStewardReader:
@@ -118,8 +118,8 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         env = mock.patch.dict(
             os.environ,
             {
-                "SECRETARY_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
-                "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
+                "UMMANU_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
+                "UMMANU_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
             },
         )
         env.start()
@@ -137,13 +137,13 @@ class ProductionTickTelemetryTests(unittest.TestCase):
             self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
-            owner="secretary-pilot",
+            owner="ummanu-pilot",
         )
 
     def read_through_the_agent_reader(self) -> production_telemetry.TickTelemetry:
         """The record as the health line and the steward actually see it.
 
-        Reading it back through `secretary.automations` rather than out of the payload is the point:
+        Reading it back through `ummanu.automations` rather than out of the payload is the point:
         writer and reader live in different processes on the host, and the file is the only
         contract between them.
         """
@@ -201,7 +201,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "secretary.dispatch.production._reconcile_production",
+                "ummanu.dispatch.production._reconcile_production",
                 side_effect=RuntimeError("host is gone"),
             ),
             self.assertRaises(RuntimeError),
@@ -256,12 +256,12 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         over exactly this is the round-3 blocker.
         """
         return mock.patch(
-            "secretary.dispatch.production._reconcile_production",
+            "ummanu.dispatch.production._reconcile_production",
             return_value=[
                 {
                     "status": "degraded",
                     "step": "production-reconcile",
-                    "ref": "secretary-900",
+                    "ref": "ummanu-900",
                     "action": "launch-intent-stop-unconfirmed",
                     "reason": reason,
                 }
@@ -283,7 +283,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         self.assertEqual(
             telemetry.last["degradations"][0],
             {
-                "ref": "secretary-900",
+                "ref": "ummanu-900",
                 "step": "production-reconcile",
                 "status": "degraded",
                 "action": "launch-intent-stop-unconfirmed",
@@ -359,7 +359,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
 
         S1-4: the idle fence is gone; the same story is told by the verdict ladder -- a
         confirmed stall prompts first (degraded), then reclaims (degraded)."""
-        ref = "secretary-510"
+        ref = "ummanu-510"
         self.runtime.production_tick()  # claims the card and launches its worker
         self.host.worker_status_result = {
             "known": True,
@@ -403,11 +403,11 @@ class ProductionTickTelemetryTests(unittest.TestCase):
     def _age_worker_episode(self, seconds: float) -> None:
         """Move the persisted episode's quiet reference back, as operator clock-rewind."""
         payload = self.runtime.production_state.load()
-        episode = dict(payload["records"]["secretary-510"]["worker_vitality_episode"] or {})
+        episode = dict(payload["records"]["ummanu-510"]["worker_vitality_episode"] or {})
         for name in ("started_at", "updated_at"):
             if episode.get(name):
                 episode[name] -= seconds
-        payload["records"]["secretary-510"]["worker_vitality_episode"] = episode
+        payload["records"]["ummanu-510"]["worker_vitality_episode"] = episode
         self.runtime.production_state.save(payload)
 
     def test_a_blocked_card_is_the_dispatcher_working_not_a_degraded_tick(self) -> None:
@@ -419,12 +419,12 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         finish does that.
         """
         with mock.patch(
-            "secretary.dispatch.production._reconcile_production",
+            "ummanu.dispatch.production._reconcile_production",
             return_value=[
                 {
                     "status": "blocked",
                     "step": "production-recovery",
-                    "ref": "secretary-901",
+                    "ref": "ummanu-901",
                     "reason": "active task claim no longer matches production record",
                 }
             ],
@@ -448,7 +448,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "secretary.dispatch.production._production_tasks",
+                "ummanu.dispatch.production._production_tasks",
                 side_effect=TaskError("backend_unavailable", "board is down", 1),
             ),
             self.assertRaises(TaskError),
@@ -481,7 +481,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         """
         state = AgentState("steward", state_dir=self.data_dir / "steward")
         outage = mock.patch(
-            "secretary.dispatch.production._production_tasks",
+            "ummanu.dispatch.production._production_tasks",
             side_effect=TaskError("backend_unavailable", "board is down", 1),
         )
         with contextlib.ExitStack() as stack:
@@ -560,7 +560,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "secretary.dispatch.production._reconcile_production",
+                "ummanu.dispatch.production._reconcile_production",
                 side_effect=RuntimeError("host is gone"),
             ),
             self.assertRaises(RuntimeError),
@@ -575,13 +575,13 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         self.assertEqual(self.read_through_the_agent_reader().last["status"], "failed")
 
     def test_telemetry_is_found_through_the_instance_the_unit_passes(self) -> None:
-        """No TA_PRODUCTION_STATE, no SECRETARY_DATA_DIR: only `--instance`, as the unit runs it."""
+        """No TA_PRODUCTION_STATE, no UMMANU_DATA_DIR: only `--instance`, as the unit runs it."""
         instance = _instance(self.data_dir / "instance", self.data_dir)
         self.runtime.production_tick()
 
-        with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(instance)}, clear=False):
+        with mock.patch.dict(os.environ, {"UMMANU_INSTANCE": str(instance)}, clear=False):
             os.environ.pop("TA_PRODUCTION_STATE", None)
-            os.environ.pop("SECRETARY_DATA_DIR", None)
+            os.environ.pop("UMMANU_DATA_DIR", None)
             telemetry = production_telemetry.read()
 
         self.assertEqual(telemetry.path, self.runtime.production_state.path)
@@ -766,23 +766,23 @@ class ProductionStatePathTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.root = Path(self.tmpdir.name)
-        self.data_dir = self.root / "srv" / "secretary-data"
+        self.data_dir = self.root / "srv" / "ummanu-data"
         self.instance = _instance(self.root / "instance", self.data_dir)
         env = mock.patch.dict(os.environ, {"HOME": str(self.root / "home")})
         env.start()
         self.addCleanup(env.stop)
         for name in (
             "TA_PRODUCTION_STATE",
-            "SECRETARY_DATA_DIR",
-            "SECRETARY_INSTANCE",
+            "UMMANU_DATA_DIR",
+            "UMMANU_INSTANCE",
             "TA_RUNTIME_ENV_FILE",
         ):
             os.environ.pop(name, None)
 
     def test_instance_data_dir_is_the_dispatchers_own(self) -> None:
-        os.environ["SECRETARY_INSTANCE"] = str(self.instance)
+        os.environ["UMMANU_INSTANCE"] = str(self.instance)
 
-        # default_data_dir is what `secretary dispatcher production-tick --instance ...` resolves
+        # default_data_dir is what `ummanu dispatcher production-tick --instance ...` resolves
         # with no --data-dir: the reader must land on the same directory, not on a home default.
         self.assertEqual(production_telemetry.data_dir(), default_data_dir(self.instance))
         self.assertEqual(
@@ -796,13 +796,13 @@ class ProductionStatePathTests(unittest.TestCase):
             "offsite:\n  instance_remote: https://example.invalid/instance.git\n",
             encoding="utf-8",
         )
-        os.environ["SECRETARY_INSTANCE"] = str(self.instance)
+        os.environ["UMMANU_INSTANCE"] = str(self.instance)
 
         self.assertEqual(production_telemetry.data_dir(), self.instance / "data")
 
     def test_explicit_env_overrides_win_in_the_dispatchers_order(self) -> None:
-        os.environ["SECRETARY_INSTANCE"] = str(self.instance)
-        os.environ["SECRETARY_DATA_DIR"] = str(self.root / "elsewhere")
+        os.environ["UMMANU_INSTANCE"] = str(self.instance)
+        os.environ["UMMANU_DATA_DIR"] = str(self.root / "elsewhere")
         self.assertEqual(production_telemetry.data_dir(), self.root / "elsewhere")
 
         os.environ["TA_PRODUCTION_STATE"] = str(self.root / "state.json")
@@ -810,15 +810,15 @@ class ProductionStatePathTests(unittest.TestCase):
 
     def test_an_unusable_instance_falls_back_to_the_home_default(self) -> None:
         """A broken or absent instance file must not crash the command that reports host trouble."""
-        os.environ["SECRETARY_INSTANCE"] = str(self.root / "missing")
-        self.assertEqual(production_telemetry.data_dir(), self.root / "home" / "secretary-data")
+        os.environ["UMMANU_INSTANCE"] = str(self.root / "missing")
+        self.assertEqual(production_telemetry.data_dir(), self.root / "home" / "ummanu-data")
 
         (self.instance / "instance.yaml").write_text("data_dir: [not, a, path\n", encoding="utf-8")
-        os.environ["SECRETARY_INSTANCE"] = str(self.instance)
-        self.assertEqual(production_telemetry.data_dir(), self.root / "home" / "secretary-data")
+        os.environ["UMMANU_INSTANCE"] = str(self.instance)
+        self.assertEqual(production_telemetry.data_dir(), self.root / "home" / "ummanu-data")
 
     def test_a_missing_record_names_the_instance_resolved_path(self) -> None:
-        os.environ["SECRETARY_INSTANCE"] = str(self.instance)
+        os.environ["UMMANU_INSTANCE"] = str(self.instance)
 
         telemetry = production_telemetry.read()
 
@@ -833,18 +833,18 @@ class ProductionStatePathTests(unittest.TestCase):
 
         # An explicit instance still wins over the env-file's directory.
         other = _instance(self.root / "other-instance", self.root / "other-data")
-        os.environ["SECRETARY_INSTANCE"] = str(other)
+        os.environ["UMMANU_INSTANCE"] = str(other)
         self.assertEqual(production_telemetry.data_dir(), self.root / "other-data")
 
 
 class EnvDataDirConflictTests(unittest.TestCase):
-    """SECRETARY_DATA_DIR disagreeing with the instance must move writer and readers together.
+    """UMMANU_DATA_DIR disagreeing with the instance must move writer and readers together.
 
-    An installation (or a drop-in) can put SECRETARY_DATA_DIR in runtime.env, which the dispatcher
+    An installation (or a drop-in) can put UMMANU_DATA_DIR in runtime.env, which the dispatcher
     unit imports. If only the readers honored it, health and `steward scan` would report on a file
     nobody writes and call the silence healthy — the same blindness this card exists to end
     (secretary-833 review, round 3). So the rule is one rule: the dispatcher parser defaults
-    --data-dir to that variable, exactly as `secretary task` does.
+    --data-dir to that variable, exactly as `ummanu task` does.
     """
 
     def setUp(self) -> None:
@@ -859,7 +859,7 @@ class EnvDataDirConflictTests(unittest.TestCase):
         record_source(self.instance, Path(__file__).resolve().parents[1])
         env = mock.patch.dict(
             os.environ,
-            {"SECRETARY_INSTANCE": str(self.instance), "SECRETARY_DATA_DIR": str(self.env_data)},
+            {"UMMANU_INSTANCE": str(self.instance), "UMMANU_DATA_DIR": str(self.env_data)},
         )
         env.start()
         self.addCleanup(env.stop)
@@ -873,12 +873,12 @@ class EnvDataDirConflictTests(unittest.TestCase):
     def writer_state_path(self) -> Path:
         """Where the packaged unit's own command line lands, parsed by the real CLI parser."""
         args = build_parser().parse_args(["dispatcher", "production-tick", "--instance", str(self.instance)])
-        with mock.patch("secretary.dispatch.bootstrap.board_client") as selected:
+        with mock.patch("ummanu.dispatch.bootstrap.board_client") as selected:
             runtime = runtime_from_args(
                 args.instance,
                 args.data_dir,
                 host_mode="noop",
-                owner="secretary-production",
+                owner="ummanu-production",
             )
         selected.assert_called_once_with(self.instance, serves=(CARD, SPRINT))
         return runtime.production_state.path
@@ -896,7 +896,7 @@ class EnvDataDirConflictTests(unittest.TestCase):
             {
                 "status": "degraded",
                 "step": "production-tick",
-                "errors": [{"ref": "secretary-1", "code": "boom", "message": "host is gone"}],
+                "errors": [{"ref": "ummanu-1", "code": "boom", "message": "host is gone"}],
             },
         )
         _telemetry_state(writer, payload["tick_telemetry"])
@@ -933,18 +933,18 @@ class EnvDataDirConflictTests(unittest.TestCase):
 class PackagedStewardUnitEnvTests(unittest.TestCase):
     """The env the packaged steward units actually give the process that reads production state.
 
-    Setting SECRETARY_INSTANCE in a test proves the reader, not the installation: the steward runs
+    Setting UMMANU_INSTANCE in a test proves the reader, not the installation: the steward runs
     with whatever its rendered unit exports, through role_env's allowlist. So this renders the
     shipped templates and builds the role env exactly that way (secretary-833 review, round 2).
     """
 
-    UNITS = ("secretary-steward.service", "secretary-steward-deep-sweep.service")
+    UNITS = ("ummanu-steward.service", "ummanu-steward-deep-sweep.service")
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.root = Path(self.tmpdir.name)
-        self.data_dir = self.root / "srv" / "secretary-data"
+        self.data_dir = self.root / "srv" / "ummanu-data"
         self.instance = _instance(self.root / "instance", self.data_dir)
         # The live runtime.env carries leftover board lines and no instance path — the case the
         # reviewer found: role_env has nothing to forward unless the unit itself exports it.
@@ -977,7 +977,7 @@ class PackagedStewardUnitEnvTests(unittest.TestCase):
                     env_file=self.instance / "runtime.env",
                 )
 
-                self.assertEqual(env["SECRETARY_INSTANCE"], str(self.instance))
+                self.assertEqual(env["UMMANU_INSTANCE"], str(self.instance))
                 with mock.patch.dict(os.environ, env, clear=True):
                     self.assertEqual(
                         production_telemetry.state_path(),
@@ -987,7 +987,7 @@ class PackagedStewardUnitEnvTests(unittest.TestCase):
     def test_a_data_dir_in_runtime_env_reaches_the_steward_process_too(self) -> None:
         """The dispatcher unit imports runtime.env wholesale; the steward gets it through role_env.
 
-        Setting SECRETARY_DATA_DIR inside the reader's own process would prove nothing: on the live
+        Setting UMMANU_DATA_DIR inside the reader's own process would prove nothing: on the live
         host the variable arrives from that file, and the role allowlist decides whether it
         survives. Stripped, the steward resolves the instance's data_dir while the dispatcher
         writes to the env one, and every production signal it reads comes off a file nobody writes
@@ -995,7 +995,7 @@ class PackagedStewardUnitEnvTests(unittest.TestCase):
         """
         env_data = self.root / "env-data"
         (self.instance / "runtime.env").write_text(
-            legacy_runtime_lines() + f"SECRETARY_DATA_DIR={env_data}\n",
+            legacy_runtime_lines() + f"UMMANU_DATA_DIR={env_data}\n",
             encoding="utf-8",
         )
         # What the dispatcher unit's own EnvironmentFile gives its process, resolved by the real
@@ -1015,7 +1015,7 @@ class PackagedStewardUnitEnvTests(unittest.TestCase):
                     env_file=self.instance / "runtime.env",
                 )
 
-                self.assertEqual(env["SECRETARY_DATA_DIR"], str(env_data))
+                self.assertEqual(env["UMMANU_DATA_DIR"], str(env_data))
                 with mock.patch.dict(os.environ, env, clear=True):
                     self.assertEqual(
                         production_telemetry.state_path(),
@@ -1030,7 +1030,7 @@ class PackagedStewardUnitEnvTests(unittest.TestCase):
 class StewardResourceSignalTests(unittest.TestCase):
     """`resource_flip` reads the cache the running production dispatcher writes.
 
-    The dispatcher probes resources through `secretary.head_health.HeadHealth`, which caches under
+    The dispatcher probes resources through `ummanu.head_health.HeadHealth`, which caches under
     `<data_dir>/dispatcher/resource_health.json`. The pipeline worktree holds a same-named file the
     legacy agent path wrote; reading that one leaves the steward blind to a flip the current
     dispatcher just saw (secretary-833 review, round 3).
@@ -1040,14 +1040,14 @@ class StewardResourceSignalTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.root = Path(self.tmpdir.name)
-        self.data_dir = self.root / "srv" / "secretary-data"
+        self.data_dir = self.root / "srv" / "ummanu-data"
         self.instance = _instance(self.root / "instance", self.data_dir)
-        env = mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(self.instance)})
+        env = mock.patch.dict(os.environ, {"UMMANU_INSTANCE": str(self.instance)})
         env.start()
         self.addCleanup(env.stop)
         for name in (
             "TA_PRODUCTION_RESOURCE_HEALTH",
-            "SECRETARY_DATA_DIR",
+            "UMMANU_DATA_DIR",
             "TA_RUNTIME_ENV_FILE",
             "TA_PIPELINE_STATE_DIR",
         ):
@@ -1080,7 +1080,7 @@ class StewardResourceSignalTests(unittest.TestCase):
         path = (
             self.root
             / "workspaces"
-            / "secretary"
+            / "ummanu"
             / "pipeline"
             / "state"
             / "pipeline"
@@ -1147,7 +1147,7 @@ class HealthAgentStateTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.state_root = Path(self.tmpdir.name) / "automation-state"
-        patcher = mock.patch("secretary.runtime.state.STATE_ROOT", self.state_root)
+        patcher = mock.patch("ummanu.runtime.state.STATE_ROOT", self.state_root)
         patcher.start()
         self.addCleanup(patcher.stop)
         timer = mock.patch.object(health, "_timer_active", return_value=True)
@@ -1173,7 +1173,7 @@ class HealthAgentStateTests(unittest.TestCase):
         # TA_STATE is the same knob the units would use if they set one; health must follow it
         # rather than resolving a path of its own.
         elsewhere = Path(self.tmpdir.name) / "elsewhere"
-        with mock.patch("secretary.runtime.state.STATE_ROOT", elsewhere):
+        with mock.patch("ummanu.runtime.state.STATE_ROOT", elsewhere):
             state = AgentState("curator")
             state.ensure_dir()
             (state.dir / "runs.jsonl").write_text(
@@ -1232,7 +1232,7 @@ class HealthExpectedStateTests(unittest.TestCase):
         )
         instance.start()
         self.addCleanup(instance.stop)
-        product = mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(self.product_root)})
+        product = mock.patch.dict(os.environ, {"UMMANU_REPO": str(self.product_root)})
         product.start()
         self.addCleanup(product.stop)
 
@@ -1375,7 +1375,7 @@ class HealthPipelineLineTests(unittest.TestCase):
                     healthy=False,
                     reason="",
                     error_count=1,
-                    errors=[{"ref": "secretary-1", "code": "backend_unavailable", "message": "x"}],
+                    errors=[{"ref": "ummanu-1", "code": "backend_unavailable", "message": "x"}],
                 ),
                 "last_healthy_at": _ts(2),
                 "unhealthy": [],
@@ -1401,7 +1401,7 @@ class HealthPipelineLineTests(unittest.TestCase):
                     degraded_count=1,
                     degradations=[
                         {
-                            "ref": "secretary-900",
+                            "ref": "ummanu-900",
                             "step": "production-reconcile",
                             "status": "degraded",
                             "action": "launch-intent-stop-unconfirmed",
@@ -1418,7 +1418,7 @@ class HealthPipelineLineTests(unittest.TestCase):
         problems, _ = health._pipeline_status()
 
         self.assertIn("last tick unhealthy", problems[0])
-        self.assertIn("secretary-900 launch-intent-stop-unconfirmed", problems[0])
+        self.assertIn("ummanu-900 launch-intent-stop-unconfirmed", problems[0])
         self.assertIn("the head could not be stopped", problems[0])
 
     def test_stale_healthy_tick_is_red(self) -> None:
@@ -1603,17 +1603,17 @@ class StewardPipelineSignalTests(unittest.TestCase):
                 "status": "degraded",
                 "step": "production-tick",
                 "actions": [
-                    {"ref": "secretary-1", "step": "claim", "action": "start", "status": "failed"},
-                    {"ref": "secretary-2", "step": "claim", "action": "start", "status": "failed"},
-                    {"ref": "secretary-1", "step": "claim", "action": "start", "status": "degraded"},
+                    {"ref": "ummanu-1", "step": "claim", "action": "start", "status": "failed"},
+                    {"ref": "ummanu-2", "step": "claim", "action": "start", "status": "failed"},
+                    {"ref": "ummanu-1", "step": "claim", "action": "start", "status": "degraded"},
                 ],
                 "errors": [
-                    {"ref": "secretary-1", "code": "backend_unavailable"},
-                    {"ref": "secretary-2", "code": "backend_unavailable"},
-                    {"ref": "secretary-1", "code": "access_denied"},
+                    {"ref": "ummanu-1", "code": "backend_unavailable"},
+                    {"ref": "ummanu-2", "code": "backend_unavailable"},
+                    {"ref": "ummanu-1", "code": "access_denied"},
                     {},
-                    {"ref": "secretary-4", "code": "read_timeout"},
-                    {"ref": "secretary-unseen", "code": "unretained_error"},
+                    {"ref": "ummanu-4", "code": "read_timeout"},
+                    {"ref": "ummanu-unseen", "code": "unretained_error"},
                 ],
             },
         )
@@ -1649,19 +1649,19 @@ class StewardPipelineSignalTests(unittest.TestCase):
                         "step": "claim",
                         "action": "start",
                         "count": 3,
-                        "refs": ["secretary-1", "secretary-2"],
+                        "refs": ["ummanu-1", "ummanu-2"],
                     },
                     {"step": "observer", "action": "stop", "count": 1, "refs": ["sprint-9"]},
                 ],
                 "errors": [
-                    {"code": "access_denied", "count": 1, "refs": ["secretary-1"]},
+                    {"code": "access_denied", "count": 1, "refs": ["ummanu-1"]},
                     {
                         "code": "backend_unavailable",
                         "count": 2,
-                        "refs": ["secretary-1", "secretary-2"],
+                        "refs": ["ummanu-1", "ummanu-2"],
                     },
                     {"code": "later_error", "count": 1, "refs": ["sprint-9"]},
-                    {"code": "read_timeout", "count": 1, "refs": ["secretary-4"]},
+                    {"code": "read_timeout", "count": 1, "refs": ["ummanu-4"]},
                 ],
             },
         )
@@ -1914,7 +1914,7 @@ class StewardStaleColumnsTests(unittest.TestCase):
             looked_at.append(str(column))
             if column != "Assessment":
                 return []
-            return [{"reference": "secretary-1025", "date_moved": _LONG_AGO}]
+            return [{"reference": "ummanu-1025", "date_moved": _LONG_AGO}]
 
         class Reader:
             def active_cards(self, *, states=None, project=None):
@@ -1926,8 +1926,8 @@ class StewardStaleColumnsTests(unittest.TestCase):
 
         hits, notified = steward_signals._stale_signals({"notified_stale": {}}, Reader())
 
-        self.assertEqual(hits, [{"reference": "secretary-1025", "column": "Assessment", "since": _LONG_AGO}])
-        self.assertEqual(notified, {"secretary-1025": _LONG_AGO})
+        self.assertEqual(hits, [{"reference": "ummanu-1025", "column": "Assessment", "since": _LONG_AGO}])
+        self.assertEqual(notified, {"ummanu-1025": _LONG_AGO})
         self.assertIn("Assessment", looked_at)
         # Issues and Done stay out: an untriaged proposal and a finished card may sit forever.
         self.assertNotIn("Issues", looked_at)
@@ -1936,14 +1936,14 @@ class StewardStaleColumnsTests(unittest.TestCase):
     def test_a_stale_assessment_card_fires_only_once_per_dwell(self) -> None:
         class Reader:
             def active_cards(self, *, states=None, project=None):
-                return [{"reference": "secretary-1025", "column": "Assessment", "date_moved": _LONG_AGO}]
+                return [{"reference": "ummanu-1025", "column": "Assessment", "date_moved": _LONG_AGO}]
 
         hits, notified = steward_signals._stale_signals(
-            {"notified_stale": {"secretary-1025": _LONG_AGO}}, Reader()
+            {"notified_stale": {"ummanu-1025": _LONG_AGO}}, Reader()
         )
 
         self.assertEqual(hits, [])
-        self.assertEqual(notified, {"secretary-1025": _LONG_AGO})
+        self.assertEqual(notified, {"ummanu-1025": _LONG_AGO})
 
 
 class StewardSignalPortTests(unittest.TestCase):
@@ -1955,26 +1955,26 @@ class StewardSignalPortTests(unittest.TestCase):
             self.calls.append((states, project))
             cards = [
                 {
-                    "reference": "secretary-1",
+                    "reference": "ummanu-1",
                     "state": "blocked",
                     "column": "Blocked",
-                    "project": "secretary",
+                    "project": "ummanu",
                     "date_moved": _LONG_AGO,
                     "steward_report": "",
                 },
                 {
-                    "reference": "secretary-2",
+                    "reference": "ummanu-2",
                     "state": "ready",
                     "column": "Ready",
-                    "project": "secretary",
+                    "project": "ummanu",
                     "date_moved": _LONG_AGO,
                     "steward_report": "",
                 },
                 {
-                    "reference": "secretary-3",
+                    "reference": "ummanu-3",
                     "state": "blocked",
                     "column": "Blocked",
-                    "project": "secretary",
+                    "project": "ummanu",
                     "date_moved": _LONG_AGO,
                     "steward_report": "1",
                 },
@@ -2009,16 +2009,16 @@ class StewardSignalPortTests(unittest.TestCase):
                     mock.patch.object(steward_signals, "_resource_signals", return_value=({}, {}))
                 )
                 batch = steward_signals.scan(reader)
-                self.assertEqual(batch["signals"]["new_blocked"], ["secretary-1"])
+                self.assertEqual(batch["signals"]["new_blocked"], ["ummanu-1"])
                 self.assertIn(
-                    {"reference": "secretary-2", "column": "Ready", "since": _LONG_AGO},
+                    {"reference": "ummanu-2", "column": "Ready", "since": _LONG_AGO},
                     batch["signals"]["stale"],
                 )
                 self.assertEqual(batch["signals"]["new_orphan_workspaces"], [str(workspace / "999-orphan")])
                 state.ensure_dir()
                 state.pending_file.write_text(json.dumps({"notified_blocked": []}), encoding="utf-8")
                 self.assertEqual(steward_cli.cmd_advance(reader), 0)
-            self.assertEqual(state.load_watermark()["notified_blocked"], ["secretary-1"])
+            self.assertEqual(state.load_watermark()["notified_blocked"], ["ummanu-1"])
         self.assertIn((None, "other-project"), reader.calls)
 
 

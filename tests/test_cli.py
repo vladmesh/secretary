@@ -13,9 +13,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary import state_repo
-from secretary.cli import MEMORY_EXIT_PERMISSION, build_parser, main
 from tests.head_registry import write_installed_pair
+from ummanu import state_repo
+from ummanu.cli import MEMORY_EXIT_PERMISSION, build_parser, main
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"
@@ -24,7 +24,7 @@ EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"
 PROBE_SNAPSHOT = """resources:
   broken-probe:
     account: broken-account
-    probe: secretary-1464-no-such-probe --check
+    probe: ummanu-1464-no-such-probe --check
   green-probe:
     account: green-account
     probe: 'true'
@@ -101,13 +101,13 @@ class CliTests(unittest.TestCase):
         code, output = self.run_cli(["doctor", "--dry-run", "--instance", str(EXAMPLE_INSTANCE)])
 
         self.assertEqual(code, 0, output)
-        self.assertIn("Secretary doctor report", output)
+        self.assertIn("Ummanu doctor report", output)
         self.assertIn("mode: dry-run", output)
-        self.assertIn("name: example-secretary", output)
+        self.assertIn("name: example-ummanu", output)
         self.assertIn("projects: 1", output)
         self.assertIn("adapters: 1", output)
         self.assertIn("data manifest: present", output)
-        self.assertIn("memory model cache: /var/lib/secretary-data/memory/fastembed-cache", output)
+        self.assertIn("memory model cache: /var/lib/ummanu-data/memory/fastembed-cache", output)
         self.assertIn("host changes: none", output)
         self.assertIn("status: ok", output)
 
@@ -115,14 +115,14 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance = Path(tmpdir) / "instance.yaml"
             instance.write_text(
-                "version: 1\nname: temporary-cache\ndata_dir: /tmp/secretary-data\n"
+                "version: 1\nname: temporary-cache\ndata_dir: /tmp/ummanu-data\n"
                 "offsite:\n  instance_remote: git@example.invalid:x/y\n",
                 encoding="utf-8",
             )
             code, output = self.run_cli(["doctor", "--dry-run", "--instance", str(instance)])
 
         self.assertEqual(code, 0, output)
-        self.assertIn("memory model cache: /tmp/secretary-data/memory/fastembed-cache", output)
+        self.assertIn("memory model cache: /tmp/ummanu-data/memory/fastembed-cache", output)
         self.assertIn("warning: memory model cache is in a temporary directory", output)
 
     def test_doctor_accepts_instance_file_path(self):
@@ -155,7 +155,7 @@ class CliTests(unittest.TestCase):
     def test_doctor_warns_when_data_manifest_is_absent(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = Path(tmpdir) / "instance"
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             instance_dir.mkdir()
             (instance_dir / "instance.yaml").write_text(
                 "version: 1\n"
@@ -180,7 +180,7 @@ class CliTests(unittest.TestCase):
     def seed_checkpoint_instance(self, tmpdir: Path, production: dict) -> Path:
         """An instance repo with one commit and a production state to read."""
         instance_dir = tmpdir / "instance"
-        data_dir = tmpdir / "secretary-data"
+        data_dir = tmpdir / "ummanu-data"
         instance_dir.mkdir()
         (instance_dir / "instance.yaml").write_text(
             "version: 1\n"
@@ -211,7 +211,7 @@ class CliTests(unittest.TestCase):
         what production had while `python3` resolved to an interpreter without the product on it.
         """
         instance_dir = tmpdir / "instance"
-        data_dir = tmpdir / "secretary-data"
+        data_dir = tmpdir / "ummanu-data"
         instance_dir.mkdir()
         (instance_dir / "instance.yaml").write_text(
             "version: 1\n"
@@ -259,7 +259,7 @@ class CliTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = self.seed_probe_instance(Path(tmpdir), recorded=recorded)
-            with mock.patch("secretary.cli.run_probe") as run:
+            with mock.patch("ummanu.cli.run_probe") as run:
                 code, output = self.run_cli(
                     ["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)]
                 )
@@ -516,7 +516,7 @@ class CliTests(unittest.TestCase):
     def test_backup_create_accepts_kind_both(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = Path(tmpdir) / "instance"
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             instance_dir.mkdir()
             (instance_dir / "instance.yaml").write_text(
                 "version: 1\n"
@@ -527,7 +527,7 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with mock.patch("secretary.cli.create_backups") as create:
+            with mock.patch("ummanu.cli.create_backups") as create:
                 create.return_value = [
                     mock.Mock(archive=Path("/tmp/core.tar"), manifest={"version": 1, "backup_kind": "core"}),
                     mock.Mock(archive=Path("/tmp/full.tar"), manifest={"version": 1, "backup_kind": "full"}),
@@ -551,7 +551,7 @@ class CliTests(unittest.TestCase):
     def test_data_init_generates_manifest_that_doctor_finds(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = Path(tmpdir) / "instance"
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             instance_dir.mkdir()
             (instance_dir / "instance.yaml").write_text(
                 "version: 1\n"
@@ -626,14 +626,14 @@ class CliTests(unittest.TestCase):
             untouched = not (instance_dir / "relative-data").exists()
 
         self.assertEqual(code, 1, output)
-        self.assertIn("secretary data: 6 config problem(s):", output)
+        self.assertIn("ummanu data: 6 config problem(s):", output)
         self.assertIn("bad.yaml", output)
         self.assertTrue(untouched)
 
     def test_data_init_overwrites_broken_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = Path(tmpdir) / "instance"
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             instance_dir.mkdir()
             data_dir.mkdir()
             (data_dir / "data-manifest.json").write_text("{not-json", encoding="utf-8")
@@ -658,7 +658,7 @@ class CliTests(unittest.TestCase):
     def test_data_init_reports_manifest_publish_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = Path(tmpdir) / "instance"
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             instance_dir.mkdir()
             (instance_dir / "instance.yaml").write_text(
                 "version: 1\n"
@@ -670,19 +670,19 @@ class CliTests(unittest.TestCase):
             )
 
             with mock.patch(
-                "secretary.cli.init_layout",
+                "ummanu.cli.init_layout",
                 side_effect=RuntimeError("could not write data manifest: full"),
             ):
                 code, output = self.run_cli(["data", "init", "--instance", str(instance_dir)])
 
         self.assertEqual(code, 1)
-        self.assertIn("secretary data init: could not write data manifest", output)
+        self.assertIn("ummanu data init: could not write data manifest", output)
         self.assertNotIn("Traceback", output)
 
     def test_data_init_reports_layout_prepare_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = Path(tmpdir) / "instance"
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             instance_dir.mkdir()
             data_dir.write_text("not a directory", encoding="utf-8")
             (instance_dir / "instance.yaml").write_text(
@@ -697,13 +697,13 @@ class CliTests(unittest.TestCase):
             code, output = self.run_cli(["data", "init", "--instance", str(instance_dir)])
 
         self.assertEqual(code, 1)
-        self.assertIn("secretary data init: cannot prepare secretary-data layout", output)
+        self.assertIn("ummanu data init: cannot prepare ummanu-data layout", output)
         self.assertNotIn("Traceback", output)
 
     def test_data_init_reports_manifest_tempfile_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = Path(tmpdir) / "instance"
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             instance_dir.mkdir()
             (instance_dir / "instance.yaml").write_text(
                 "version: 1\n"
@@ -714,16 +714,16 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with mock.patch("secretary.data.tempfile.mkstemp", side_effect=PermissionError("denied")):
+            with mock.patch("ummanu.data.tempfile.mkstemp", side_effect=PermissionError("denied")):
                 code, output = self.run_cli(["data", "init", "--instance", str(instance_dir)])
 
         self.assertEqual(code, 1)
-        self.assertIn("secretary data init: could not write data manifest", output)
+        self.assertIn("ummanu data init: could not write data manifest", output)
         self.assertNotIn("Traceback", output)
 
     def _raw_dump_instance(self, tmpdir: str) -> Path:
         instance_dir = Path(tmpdir) / "instance"
-        data_dir = Path(tmpdir) / "secretary-data"
+        data_dir = Path(tmpdir) / "ummanu-data"
         instance_dir.mkdir()
         (instance_dir / "instance.yaml").write_text(
             "version: 1\n"
@@ -740,7 +740,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance_dir = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             state = root / "state"
             transcript_root = root / "transcripts"
             instance_dir.mkdir()
@@ -762,15 +762,15 @@ class CliTests(unittest.TestCase):
             commands = [
                 (
                     ["data", "export", "--instance", str(instance_dir)],
-                    "secretary data export: cannot prepare memory data dir",
+                    "ummanu data export: cannot prepare memory data dir",
                 ),
                 (
                     ["data", "export-board", "--instance", str(instance_dir)],
-                    "secretary data export-board: cannot prepare board data dir",
+                    "ummanu data export-board: cannot prepare board data dir",
                 ),
                 (
                     ["data", "export-memory", "--instance", str(instance_dir)],
-                    "secretary data export-memory: cannot prepare memory data dir",
+                    "ummanu data export-memory: cannot prepare memory data dir",
                 ),
                 (
                     [
@@ -781,7 +781,7 @@ class CliTests(unittest.TestCase):
                         "--state-dir",
                         str(state),
                     ],
-                    "secretary data export-runs: cannot prepare runs data dir",
+                    "ummanu data export-runs: cannot prepare runs data dir",
                 ),
                 (
                     [
@@ -792,7 +792,7 @@ class CliTests(unittest.TestCase):
                         "--root",
                         str(transcript_root),
                     ],
-                    "secretary data export-transcripts: cannot prepare transcripts data dir",
+                    "ummanu data export-transcripts: cannot prepare transcripts data dir",
                 ),
             ]
 
@@ -808,7 +808,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance_dir = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             instance_dir.mkdir()
             (instance_dir / "instance.yaml").write_text(
                 "version: 1\n"
@@ -820,7 +820,7 @@ class CliTests(unittest.TestCase):
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
             init_instance_repo(instance_dir)
-            facts = instance_dir / "state" / "memory" / "facts" / "secretary"
+            facts = instance_dir / "state" / "memory" / "facts" / "ummanu"
             facts.mkdir(parents=True)
             (facts / "fact.md").write_text("fact\n", encoding="utf-8")
 
@@ -835,7 +835,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance_dir = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             instance_dir.mkdir()
             (instance_dir / "instance.yaml").write_text(
                 "version: 1\n"
@@ -847,21 +847,21 @@ class CliTests(unittest.TestCase):
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
             init_instance_repo(instance_dir)
-            fact = instance_dir / "state" / "memory" / "facts" / "secretary" / "bad.md"
+            fact = instance_dir / "state" / "memory" / "facts" / "ummanu" / "bad.md"
             fact.parent.mkdir(parents=True)
             fact.write_bytes(b"\xff\xfe")
 
             code, output = self.run_cli(["data", "export-memory", "--instance", str(instance_dir)])
 
         self.assertEqual(code, 1)
-        self.assertIn("secretary data export-memory: could not decode memory fact", output)
+        self.assertIn("ummanu data export-memory: could not decode memory fact", output)
         self.assertNotIn("Traceback", output)
 
     def test_memory_protocol_commands_return_json(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance_dir = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             instance_dir.mkdir()
             (instance_dir / "instance.yaml").write_text(
                 "version: 1\n"
@@ -885,7 +885,7 @@ class CliTests(unittest.TestCase):
                     "--actor",
                     "curator:claude/session",
                     "--scope",
-                    "project:secretary",
+                    "project:ummanu",
                     "--slug",
                     "cli-fact",
                     "--file",
@@ -893,7 +893,7 @@ class CliTests(unittest.TestCase):
                     "--source",
                     "curator:claude/session",
                     "--tags",
-                    "secretary,memory",
+                    "ummanu,memory",
                 ]
             )
             proposal = json.loads(propose_output)
@@ -913,10 +913,10 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(propose_code, 0, propose_output)
         self.assertEqual(proposal["op"], "propose")
-        self.assertEqual(proposal["fact"], "secretary/cli-fact")
+        self.assertEqual(proposal["fact"], "ummanu/cli-fact")
         self.assertEqual(commit_code, 0, commit_output)
         self.assertEqual(committed["op"], "commit")
-        self.assertEqual(committed["changed_facts"], ["secretary/cli-fact"])
+        self.assertEqual(committed["changed_facts"], ["ummanu/cli-fact"])
         self.assertTrue(committed["commit"])
 
     def test_butler_proposes_through_the_cli_but_cannot_commit(self):
@@ -927,7 +927,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance_dir = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             instance_dir.mkdir()
             (instance_dir / "instance.yaml").write_text(
                 "version: 1\n"
@@ -996,7 +996,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance_dir = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             instance_dir.mkdir()
             (instance_dir / "instance.yaml").write_text(
                 "version: 1\n"
@@ -1019,7 +1019,7 @@ class CliTests(unittest.TestCase):
                     "--actor",
                     "curator:claude/session",
                     "--scope",
-                    "project:secretary",
+                    "project:ummanu",
                     "--slug",
                     "verified-cli",
                     "--file",
@@ -1060,7 +1060,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance_dir = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             instance_dir.mkdir()
             (instance_dir / "instance.yaml").write_text(
                 "version: 1\n"
@@ -1083,7 +1083,7 @@ class CliTests(unittest.TestCase):
                     "--actor",
                     "curator:claude/session",
                     "--scope",
-                    "project:secretary",
+                    "project:ummanu",
                     "--slug",
                     "cli-retryable",
                     "--file",
@@ -1095,7 +1095,7 @@ class CliTests(unittest.TestCase):
             proposal = json.loads(propose_output)
 
             with mock.patch(
-                "secretary.memory_write._publish_memory_export",
+                "ummanu.memory_write._publish_memory_export",
                 side_effect=RuntimeError("disk full"),
             ):
                 failed_code, failed_output = self.run_cli(
@@ -1129,7 +1129,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(propose_code, 0, propose_output)
         self.assertEqual(failed_code, 1, failed_output)
         self.assertEqual(failed["error"], "export")
-        self.assertEqual(failed["fact"], "secretary/cli-retryable")
+        self.assertEqual(failed["fact"], "ummanu/cli-retryable")
         self.assertTrue(failed["commit"])
         self.assertEqual(retry_code, 0, retry_output)
         self.assertEqual(retried["commit"], failed["commit"])
@@ -1139,7 +1139,7 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance_dir = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             instance_dir.mkdir()
             (instance_dir / "instance.yaml").write_text(
                 "version: 1\n"
@@ -1181,7 +1181,7 @@ class CliTests(unittest.TestCase):
                     "--actor",
                     "worker:codex/session",
                     "--scope",
-                    "project:secretary",
+                    "project:ummanu",
                     "--slug",
                     "cli-fact",
                     "--file",
@@ -1203,7 +1203,7 @@ class CliTests(unittest.TestCase):
             transcript_root.mkdir()
             (transcript_root / "session.jsonl").write_text("{}\n", encoding="utf-8")
             instance_dir = root / "instance"
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             instance_dir.mkdir()
             (instance_dir / "instance.yaml").write_text(
                 "version: 1\n"
@@ -1309,7 +1309,7 @@ class CliTests(unittest.TestCase):
     def test_bootstrap_empty_returns_machine_readable_plan(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance = Path(tmpdir) / "instance"
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             instance.mkdir()
             (instance / "instance.yaml").write_text(
                 "version: 1\nname: test\n"
@@ -1333,7 +1333,7 @@ class CliTests(unittest.TestCase):
             instance.mkdir()
             (instance / "instance.yaml").write_text(
                 "version: 1\nname: test\n"
-                f"data_dir: {root / 'secretary-data'}\n"
+                f"data_dir: {root / 'ummanu-data'}\n"
                 "offsite:\n  instance_remote: git@example.invalid:test/instance.git\n",
                 encoding="utf-8",
             )

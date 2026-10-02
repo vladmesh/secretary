@@ -15,11 +15,11 @@ from pathlib import Path
 
 import psycopg
 
-from secretary.po.runner import PoRunner
-from secretary.po.service import PoService
-from secretary.po.store import COMPLETED, PoStore, PoStoreError
 from tests.po_cli_fakes import FAKE_CLAUDE, eventually, unscoped_test_launch
 from tests.sql_backend_fixtures import PostgresBoard
+from ummanu.po.runner import PoRunner
+from ummanu.po.service import PoService
+from ummanu.po.store import COMPLETED, PoStore, PoStoreError
 
 
 class PoServiceReconnectTests(unittest.TestCase):

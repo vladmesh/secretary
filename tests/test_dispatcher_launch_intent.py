@@ -26,19 +26,32 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from secretary._fsutil import file_lock
-from secretary.dispatch import host as dispatcher_host_module
-from secretary.dispatch import launch as dispatcher_launch
-from secretary.dispatch import worker_continuation as dispatcher_worker_continuation
-from secretary.dispatch.gate import GateResult
-from secretary.dispatch.gate_receipt import GateReceipt, TerminalCheck
-from secretary.dispatch.git_workspace import GitWorkspaceManager
-from secretary.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
-from secretary.dispatch.host import CommandHostRuntime, InstanceCatalog
-from secretary.dispatch.launch import LAUNCH_DELIVERY_MAX_ATTEMPTS, launch_intent_liveness
-from secretary.dispatch.production import _budget_event_type
-from secretary.dispatch.runtime import DispatcherRuntime
-from secretary.dispatch.state import (
+from tests.dispatcher_fixtures import SupervisedBackend, card_audit, ensure_attempt
+from tests.fakes.dispatcher import (
+    FakeCatalog,
+    FakeHost,
+    FakeSprints,
+    _configure_production_shaped_codex_relaunch,
+    _legacy_unbound_v1_run,
+    dispatcher_seed,
+)
+from tests.fanout_fixtures import accepted_transport_run
+from tests.observer_identity import bind_observer
+from tests.production_runtime_fixtures import registered_production_runtime
+from tests.sql_backend_fixtures import card_store
+from ummanu._fsutil import file_lock
+from ummanu.dispatch import host as dispatcher_host_module
+from ummanu.dispatch import launch as dispatcher_launch
+from ummanu.dispatch import worker_continuation as dispatcher_worker_continuation
+from ummanu.dispatch.gate import GateResult
+from ummanu.dispatch.gate_receipt import GateReceipt, TerminalCheck
+from ummanu.dispatch.git_workspace import GitWorkspaceManager
+from ummanu.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
+from ummanu.dispatch.host import CommandHostRuntime, InstanceCatalog
+from ummanu.dispatch.launch import LAUNCH_DELIVERY_MAX_ATTEMPTS, launch_intent_liveness
+from ummanu.dispatch.production import _budget_event_type
+from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.dispatch.state import (
     DispatcherRecord,
     GatePrAuthorship,
     GatePublishedRef,
@@ -53,36 +66,36 @@ from secretary.dispatch.state import (
     PersistedLaunchIntent,
     PersistedRoutingHeadSnapshot,
 )
-from secretary.dispatch.tui import (
+from ummanu.dispatch.tui import (
     DeliveryEvidence,
     claude_project_dir_name,
     provider_progress_for_run,
 )
-from secretary.dispatch.types import (
+from ummanu.dispatch.types import (
     HeadLaunchAborted,
     HostError,
     LegacyDispatcherRecord,
     ReviewLaunch,
 )
-from secretary.dispatch.watchdog import (
+from ummanu.dispatch.watchdog import (
     head_process_status,
     initial_output_stall_seconds,
     pid_file_path,
 )
-from secretary.dispatch.worker_lifecycle import (
+from ummanu.dispatch.worker_lifecycle import (
     WorkerContinuation,
     WorkerContinuationStage,
 )
-from secretary.dispatch.worker_report import prompt_worker_report as deliver_worker_report_prompt
-from secretary.projects.contract import (
+from ummanu.dispatch.worker_report import prompt_worker_report as deliver_worker_report_prompt
+from ummanu.projects.contract import (
     ContractVerdict,
     ModuleContract,
 )
-from secretary.projects.integration_base import resolve_integration_base
-from secretary.routing_journal import RoutingHeadSnapshot
-from secretary.routing_journal import attempts as routing_attempts
-from secretary.runtime.codex_preflight import codex_provider_source_descriptor
-from secretary.runtime.head import (
+from ummanu.projects.integration_base import resolve_integration_base
+from ummanu.routing_journal import RoutingHeadSnapshot
+from ummanu.routing_journal import attempts as routing_attempts
+from ummanu.runtime.codex_preflight import codex_provider_source_descriptor
+from ummanu.runtime.head import (
     HEAD_ALIVE,
     HEAD_GONE,
     HEAD_OK,
@@ -91,26 +104,13 @@ from secretary.runtime.head import (
     StartReceipt,
     StopReceipt,
 )
-from secretary.runtime.head import operations as head_ops
-from secretary.runtime.head.command import with_pid_heartbeat
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
-from secretary.runtime.prompt_document import NUDGE_MAX_BYTES
-from secretary.tasks import TaskReader, TaskWriter, task_audit_for
-from tests.dispatcher_fixtures import SupervisedBackend, card_audit, ensure_attempt
-from tests.fakes.dispatcher import (
-    FakeCatalog,
-    FakeHost,
-    FakeSprints,
-    _configure_production_shaped_codex_relaunch,
-    _legacy_unbound_v1_run,
-    dispatcher_seed,
-)
-from tests.fanout_fixtures import accepted_transport_run
-from tests.observer_identity import bind_observer
-from tests.production_runtime_fixtures import registered_production_runtime
-from tests.sql_backend_fixtures import card_store
+from ummanu.runtime.head import operations as head_ops
+from ummanu.runtime.head.command import with_pid_heartbeat
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from ummanu.runtime.prompt_document import NUDGE_MAX_BYTES
+from ummanu.tasks import TaskReader, TaskWriter, task_audit_for
 
-REF = "secretary-510"
+REF = "ummanu-510"
 # Above the default pid_max, so `kill(pid, 0)` raises and the heartbeat reads as a head that died.
 DEAD_PID = 999999
 
@@ -463,7 +463,7 @@ class DispatcherLaunchRecoveryStateTests(unittest.TestCase):
             "codex",
             role="worker",
             workspace="/tmp/card",
-            task_ref=head_ops.TaskRef.card("secretary-1", document="/tmp/card/TASK.md"),
+            task_ref=head_ops.TaskRef.card("ummanu-1", document="/tmp/card/TASK.md"),
             pid_file="/tmp/card.pid",
             run_id="run-1",
         )
@@ -474,7 +474,7 @@ class DispatcherLaunchRecoveryStateTests(unittest.TestCase):
             workspace="/tmp/card",
             pid_file="/tmp/card.pid",
             run_id="run-1",
-            task="card:secretary-1",
+            task="card:ummanu-1",
             attempt_id="attempt-1",
             round_number=1,
             opens_round=True,
@@ -531,8 +531,8 @@ class LaunchIntentTests(unittest.TestCase):
         env = mock.patch.dict(
             os.environ,
             {
-                "SECRETARY_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
-                "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
+                "UMMANU_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
+                "UMMANU_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
             },
         )
         env.start()
@@ -554,7 +554,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.board.save_metadata(12, sprint_ref="sprint:1031")
         bind_observer(self, "sprint:1031")
         # And that sprint reserves the card's project, which is what lets its observer decide.
-        self.board.add_sprint("sprint:1031", status="open", sprint_reservations='["secretary"]')
+        self.board.add_sprint("sprint:1031", status="open", sprint_reservations='["ummanu"]')
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
@@ -562,7 +562,7 @@ class LaunchIntentTests(unittest.TestCase):
             self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
-            owner="secretary-pilot",
+            owner="ummanu-pilot",
             sprints=self.sprints,
         )
         self.runtime.production_state.save(
@@ -2391,7 +2391,7 @@ class LaunchIntentTests(unittest.TestCase):
     def test_a_worker_whose_pointer_stayed_in_the_composer_is_not_a_successful_claim(self) -> None:
         """`issue:2fdac531`, through the launch path and then through the adoption path.
 
-        Secretary wrote the TASK pointer into the composer and sent Enter three times in 12
+        Ummanu wrote the TASK pointer into the composer and sent Enter three times in 12
         seconds; Orca answered `accepted` with one byte written each time, the cursor never moved,
         and the prompt stayed in the composer. Recovery then adopted the live HeadRun as
         successfully claimed and cleared the launch intent — 80 minutes to a manual Enter.
@@ -2997,7 +2997,7 @@ class LaunchIntentTests(unittest.TestCase):
         """A launch that keeps aborting past the ceiling leaves one operator note, not a per-tick one."""
         self.run_to_validate()
         self.host.fail_freeze_worker_reason = "orca refused to close the worker pane"
-        with mock.patch.dict(os.environ, {"SECRETARY_REVIEW_LAUNCH_ABORT_STUCK": "3"}):
+        with mock.patch.dict(os.environ, {"UMMANU_REVIEW_LAUNCH_ABORT_STUCK": "3"}):
             aborts = self.tick()  # first abort, count 1
             self.assertEqual(aborts["action"], "review-launch-aborted")
             for _ in range(4):
@@ -3020,7 +3020,7 @@ class LaunchIntentTests(unittest.TestCase):
         """Below the ceiling the abort is still just a degraded tick the steward already carries."""
         self.run_to_validate()
         self.host.fail_freeze_worker_reason = "orca refused to close the worker pane"
-        with mock.patch.dict(os.environ, {"SECRETARY_REVIEW_LAUNCH_ABORT_STUCK": "5"}):
+        with mock.patch.dict(os.environ, {"UMMANU_REVIEW_LAUNCH_ABORT_STUCK": "5"}):
             self.assertEqual(self.tick()["action"], "review-launch-aborted")
 
         notes = [
@@ -3361,12 +3361,12 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
 
             def broad_check_verdict(self, project: str) -> ContractVerdict:
                 # The worker task packet resolves this to print an exact broad-check command
-                # (issue:8b39e60e4df361c6138e). Secretary's adapter declares one, and an adapter
+                # (issue:8b39e60e4df361c6138e). Ummanu's adapter declares one, and an adapter
                 # that declares none is refused by name now, so a real catalog answers a declared
                 # contract here and this stub answers the same shape.
                 return ContractVerdict.as_fit(
-                    ModuleContract(sys.executable, "secretary", module="tests.broad"),
-                    "secretary",
+                    ModuleContract(sys.executable, "ummanu", module="tests.broad"),
+                    "ummanu",
                 )
 
             def adapter(self, project: str) -> dict[str, Any]:
@@ -3376,7 +3376,7 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
 
     def test_unavailable_project_is_rejected_before_any_workspace_or_head_activation(self) -> None:
         (self.repo / ".git").rmdir()
-        task = {"ref": "secretary-1", "project": "codegen-orchestrator", "workspace": {}}
+        task = {"ref": "ummanu-1", "project": "codegen-orchestrator", "workspace": {}}
         record = SimpleNamespace(workspace=str(self.data_dir / "workspaces" / "existing"), review_head="reviewer")
 
         with (
@@ -3421,7 +3421,7 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
             ):
                 with self.subTest(project=project), self.assertRaisesRegex(HostError, reason):
                     self.host.prepare_worker(
-                        {"ref": "secretary-1", "project": project, "workspace": {}},
+                        {"ref": "ummanu-1", "project": project, "workspace": {}},
                         "card-1",
                         "worker",
                     )
@@ -3596,12 +3596,12 @@ class HostLaunchContourTests(unittest.TestCase):
                     mock.patch.object(ingress, "bind_before_delivery", record_bind),
                     mock.patch.object(self.host, "_worker_task_doc", return_value="# Rework\n"),
                     mock.patch.object(self.host.catalog, "integration_base", return_value="main", create=True),
-                    mock.patch("secretary.dispatch.host._provider_turn_started", return_value=False),
+                    mock.patch("ummanu.dispatch.host._provider_turn_started", return_value=False),
                 ):
                     if report:
                         self.host.prompt_worker_report({"ref": REF}, record)
                     else:
-                        self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
+                        self.host.resume_worker({"ref": REF, "project": "ummanu", "workspace": {}}, record)
                 self.assertEqual(events, (["SIGCONT"] if stopped else []) + ["bind", "send"])
                 self.assertEqual(record.worker_head_run["fanout_policy"]["provider_source"]["state"], "bound")
                 self.assertTrue(record.worker_delivery_evidence["provider_bound"])
@@ -3632,7 +3632,7 @@ class HostLaunchContourTests(unittest.TestCase):
         runtime = SimpleNamespace(
             host=self.host, save_records=lambda *_: saves.append("persist"),
             writer=SimpleNamespace(comment=lambda **kwargs: comments.append(kwargs["body"])),
-            owner="secretary-dispatcher",
+            owner="ummanu-dispatcher",
         )
         runtime.bind_codex_provider_ingress = lambda *args, **kwargs: DispatcherRuntime.bind_codex_provider_ingress(
             runtime, *args, **kwargs
@@ -3650,7 +3650,7 @@ class HostLaunchContourTests(unittest.TestCase):
     # a failure raised after the head was started ---------------------------
 
     def launch_worker(self):
-        with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir)}):
+        with mock.patch.dict(os.environ, {"UMMANU_DISPATCHER_BODY_DIR": str(self.data_dir)}):
             with mock.patch.object(self.host.catalog, "prepare_head_workspace", lambda *a, **k: None, create=True):
                 with mock.patch.object(self.host.catalog, "head_launch", lambda *a, **k: HeadCommand("run-worker", prompt_after_start=True), create=True):
                     with mock.patch.object(self.host, "_launched", lambda *a, **k: "launched"):
@@ -3660,8 +3660,8 @@ class HostLaunchContourTests(unittest.TestCase):
                             "codex",
                             "TASK.md",
                             role="worker",
-                            env_name="SECRETARY_UNSET_COMMAND",
-                            task={"ref": REF, "project": "secretary"},
+                            env_name="UMMANU_UNSET_COMMAND",
+                            task={"ref": REF, "project": "ummanu"},
                         )
 
     def started_head(self, handle: str = "run:worker") -> head_ops.HeadRun:
@@ -3858,9 +3858,9 @@ class HostLaunchContourTests(unittest.TestCase):
 
         self.backend.on_deliver = delivered
 
-        self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
+        self.host.resume_worker({"ref": REF, "project": "ummanu", "workspace": {}}, record)
 
-        self.assertIn("worker-report-done-secretary-510-3", task_at_delivery[0])
+        self.assertIn("worker-report-done-ummanu-510-3", task_at_delivery[0])
         # The document the worker is sent back to and the prompt that wakes it name one round.
         self.assertIn("Generation 3", prompt_at_delivery[0])
         self.assertIn("not an earlier turn's", prompt_at_delivery[0])
@@ -3921,11 +3921,11 @@ class HostLaunchContourTests(unittest.TestCase):
 
         with mock.patch.object(self.host, "_signal_head", die_after_continuing):
             with self.assertRaises(DispatcherDied):
-                self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
+                self.host.resume_worker({"ref": REF, "project": "ummanu", "workspace": {}}, record)
         self.assertEqual(self.backend.deliveries, [], "the first attempt died before its send")
 
-        with mock.patch("secretary.dispatch.tui.latest_claude_user_turn_for", return_value=None):
-            self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
+        with mock.patch("ummanu.dispatch.tui.latest_claude_user_turn_for", return_value=None):
+            self.host.resume_worker({"ref": REF, "project": "ummanu", "workspace": {}}, record)
 
         self.assertFalse(head_process_status(record.worker_pid_file).get("stopped"))
         self.assertEqual(len(self.backend.deliveries), 1, "a running head is not proof of delivery")
@@ -3963,8 +3963,8 @@ class HostLaunchContourTests(unittest.TestCase):
             json.dumps({"type": "user", "timestamp": "2099-01-02T03:04:05Z"}) + "\n",
             encoding="utf-8",
         )
-        with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(projects)}):
-            self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
+        with mock.patch.dict(os.environ, {"UMMANU_CLAUDE_PROJECTS": str(projects)}):
+            self.host.resume_worker({"ref": REF, "project": "ummanu", "workspace": {}}, record)
 
         self.assertEqual(self.backend.deliveries, [])
 
@@ -3994,7 +3994,7 @@ class HostLaunchContourTests(unittest.TestCase):
         )
         self.track_worker(record)
 
-        self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
+        self.host.resume_worker({"ref": REF, "project": "ummanu", "workspace": {}}, record)
 
         self.assertEqual(self.backend.deliveries, [])
 
@@ -4021,7 +4021,7 @@ class HostLaunchContourTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(HostError, "session exited"):
-            self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
+            self.host.resume_worker({"ref": REF, "project": "ummanu", "workspace": {}}, record)
 
     def test_a_stopped_retained_worker_with_no_workspace_refuses_continuation(self) -> None:
         head = subprocess.Popen(["sleep", "30"])
@@ -4051,7 +4051,7 @@ class HostLaunchContourTests(unittest.TestCase):
         _wait_for_process_stop(head.pid)
 
         with self.assertRaisesRegex(HostError, "workspace is missing"):
-            self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
+            self.host.resume_worker({"ref": REF, "project": "ummanu", "workspace": {}}, record)
 
     def test_a_head_nothing_names_cannot_be_reported_as_stopped(self) -> None:
         record = DispatcherRecord(
@@ -4141,8 +4141,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         env = mock.patch.dict(
             os.environ,
             {
-                "SECRETARY_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
-                "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
+                "UMMANU_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
+                "UMMANU_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
             },
         )
         env.start()
@@ -4164,7 +4164,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.board.save_metadata(12, sprint_ref="sprint:1031")
         bind_observer(self, "sprint:1031")
         # And that sprint reserves the card's project, which is what lets its observer decide.
-        self.board.add_sprint("sprint:1031", status="open", sprint_reservations='["secretary"]')
+        self.board.add_sprint("sprint:1031", status="open", sprint_reservations='["ummanu"]')
         self.runtime = DispatcherRuntime(
             self.reader,
             self.writer,
@@ -4172,7 +4172,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
-            owner="secretary-pilot",
+            owner="ummanu-pilot",
             sprints=self.sprints,
         )
 
@@ -4316,7 +4316,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.writer.move(
             role="po",
             actor="operator",
-            reference="secretary-511",
+            reference="ummanu-511",
             target="issues",
             reason="park the neighbour",
             request_id="park-neighbor",
@@ -4336,7 +4336,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.writer.move(
             role="po",
             actor="operator",
-            reference="secretary-511",
+            reference="ummanu-511",
             target="issues",
             reason="make the requeue claimable",
             sprint_override=True,

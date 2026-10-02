@@ -20,11 +20,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary import _proc, head_health, state_repo
-from secretary.dispatch import host as dispatcher_host_module
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.types import HostError
 from tests.fakes.dispatcher import FakeCatalog
+from ummanu import _proc, head_health, state_repo
+from ummanu.dispatch import host as dispatcher_host_module
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.types import HostError
 
 # A remote helper Git forks into its own process group for `hang::` URLs: it records its pid and
 # hangs, as a `git-remote-https` stuck in a transport operation does.
@@ -155,9 +155,9 @@ class TickChildCleanupTests(unittest.TestCase):
         started = time.monotonic()
         with (
             mock.patch.dict(os.environ, {"PATH": path}),
-            mock.patch("secretary.state_repo.os.getuid", return_value=0),
-            mock.patch("secretary.state_repo.pwd.getpwuid", return_value=mock.Mock(pw_name="runtime")),
-            mock.patch("secretary.state_repo.git_command", return_value=hanging_git),
+            mock.patch("ummanu.state_repo.os.getuid", return_value=0),
+            mock.patch("ummanu.state_repo.pwd.getpwuid", return_value=mock.Mock(pw_name="runtime")),
+            mock.patch("ummanu.state_repo.git_command", return_value=hanging_git),
             mock.patch.object(_proc.os, "killpg", side_effect=PermissionError(1, "Operation not permitted")),
             mock.patch.object(_proc, "_REAP_GRACE_SECONDS", 0.5),
             self.assertRaises(state_repo.StateRepoError) as caught,

@@ -15,15 +15,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.codex_provider_events import (
+from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
+from tests.fanout_fixtures import accepted_transport_run
+from tests.production_runtime_fixtures import registered_production_runtime
+from ummanu.codex_provider_events import (
     CodexProviderEventIngress,
 )
-from secretary.dispatch import launch as dispatcher_launch
-from secretary.dispatch import observer as dispatcher_observer
-from secretary.dispatch import review as dispatcher_review
-from secretary.dispatch import worker_continuation
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.launch import (
+from ummanu.dispatch import launch as dispatcher_launch
+from ummanu.dispatch import observer as dispatcher_observer
+from ummanu.dispatch import review as dispatcher_review
+from ummanu.dispatch import worker_continuation
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
     confirm_launch_intent,
@@ -31,32 +34,32 @@ from secretary.dispatch.launch import (
     resolve_launch_intent,
     write_launch_intent,
 )
-from secretary.dispatch.observer import (
+from ummanu.dispatch.observer import (
     OBSERVER_ROLE,
     ObserverRecord,
     _bind_codex_provider_ingress,
 )
-from secretary.dispatch.observer import (
+from ummanu.dispatch.observer import (
     _adopt_launch_intent as adopt_observer_launch_intent,
 )
-from secretary.dispatch.observer import (
+from ummanu.dispatch.observer import (
     _write_launch_intent as write_observer_launch_intent,
 )
-from secretary.dispatch.provider_failure import provider_failure_for_persisted_run, provider_failure_for_run
-from secretary.dispatch.runtime import DispatcherRuntime
-from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatch.tui import provider_progress_for_persisted_run, provider_progress_for_run
-from secretary.dispatch.types import HostError
-from secretary.dispatch.worker_launch import bring_up_worker_head
-from secretary.dispatch.worker_lifecycle import WorkerContinuationLiveness
-from secretary.head_health import HeadReadiness
-from secretary.projects.contract import (
+from ummanu.dispatch.provider_failure import provider_failure_for_persisted_run, provider_failure_for_run
+from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.tui import provider_progress_for_persisted_run, provider_progress_for_run
+from ummanu.dispatch.types import HostError
+from ummanu.dispatch.worker_launch import bring_up_worker_head
+from ummanu.dispatch.worker_lifecycle import WorkerContinuationLiveness
+from ummanu.head_health import HeadReadiness
+from ummanu.projects.contract import (
     ContractVerdict,
     ModuleContract,
 )
-from secretary.projects.integration_base import resolve_integration_base
-from secretary.runtime import codex_preflight
-from secretary.runtime.head import (
+from ummanu.projects.integration_base import resolve_integration_base
+from ummanu.runtime import codex_preflight
+from ummanu.runtime.head import (
     HEAD_OK,
     DeliverReceipt,
     HeadCommand,
@@ -65,12 +68,9 @@ from secretary.runtime.head import (
     StartReceipt,
     TaskRef,
 )
-from secretary.runtime.head import operations as head_ops
-from secretary.runtime.head_run_binding import head_run_binding
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
-from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
-from tests.fanout_fixtures import accepted_transport_run
-from tests.production_runtime_fixtures import registered_production_runtime
+from ummanu.runtime.head import operations as head_ops
+from ummanu.runtime.head_run_binding import head_run_binding
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 
 
 class CodexProviderEventIngressTests(unittest.TestCase):
@@ -1298,7 +1298,7 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
             "codex-extra",
             "TASK.md",
             role=WORKER_ROLE,
-            env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
+            env_name="UMMANU_DISPATCHER_WORKER_COMMAND",
             prompt_document=str(self.workspace / "TASK.md"),
             task={"ref": reference},
             heartbeat_run_id="rework-run-2",
@@ -1546,12 +1546,12 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
 
         def broad_check_verdict(self, _project: str) -> ContractVerdict:
             # The worker task packet resolves the project's broad-check contract to print an exact
-            # command (issue:8b39e60e4df361c6138e). Secretary's own adapter declares one, and an
+            # command (issue:8b39e60e4df361c6138e). Ummanu's own adapter declares one, and an
             # adapter that declares none is refused by name now, so a `fit` here is a declared
             # contract; this stub answers the same shape a real catalog does.
             return ContractVerdict.as_fit(
-                ModuleContract(sys.executable, "secretary", module="tests.broad"),
-                "secretary",
+                ModuleContract(sys.executable, "ummanu", module="tests.broad"),
+                "ummanu",
             )
 
         def head_run(self, task: dict, *, role: str, head: str, workspace: str, **_kwargs) -> HeadRun:
@@ -1578,13 +1578,13 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.workspace = self.root / "workspace"
         self.workspace.mkdir()
-        workspace_python = self.workspace / ".secretary-task-env" / "venv" / "bin" / "python3"
+        workspace_python = self.workspace / ".ummanu-task-env" / "venv" / "bin" / "python3"
         workspace_python.parent.mkdir(parents=True)
         workspace_python.symlink_to(sys.executable)
-        (self.workspace / ".secretary-task-env" / "owner.json").write_text(
+        (self.workspace / ".ummanu-task-env" / "owner.json").write_text(
             json.dumps(
                 {
-                    "owner": "secretary-dispatcher",
+                    "owner": "ummanu-dispatcher",
                     "schema_version": 1,
                     "workspace": str(self.workspace.resolve()),
                 },
@@ -1593,7 +1593,7 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        (self.workspace / ".secretary-task-env" / "ready").write_text("ready\n", encoding="utf-8")
+        (self.workspace / ".ummanu-task-env" / "ready").write_text("ready\n", encoding="utf-8")
         self.repo = self.root / "repo"
         (self.repo / ".git").mkdir(parents=True)
         self.binary = self.root / "codex"
@@ -1626,9 +1626,9 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         self.env = mock.patch.dict(
             os.environ,
             {
-                "SECRETARY_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
-                "SECRETARY_DISPATCHER_PROMPT_DIR": str(self.root / "prompts"),
-                "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "workspaces"),
+                "UMMANU_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
+                "UMMANU_DISPATCHER_PROMPT_DIR": str(self.root / "prompts"),
+                "UMMANU_DISPATCHER_WORKSPACES_ROOT": str(self.root / "workspaces"),
             },
         )
         self.env.start()
@@ -1765,7 +1765,7 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
 
     def test_worker_route_persists_the_callback_run_before_confirm_then_adopts_and_refreshes(self) -> None:
         runtime = self._runtime()
-        task = {"ref": "secretary-1428", "project": "secretary", "workspace": {"base_branch": "main"}}
+        task = {"ref": "secretary-1428", "project": "ummanu", "workspace": {"base_branch": "main"}}
         record = self._record(str(self.workspace))
         records = {task["ref"]: record}
         payload: dict = {}
@@ -1892,7 +1892,7 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
 
     def test_reviewer_route_uses_the_external_document_identity_and_adopts_the_bound_run(self) -> None:
         runtime = self._runtime()
-        task = {"ref": "secretary-1428", "project": "secretary", "workspace": {"base_branch": "main"}}
+        task = {"ref": "secretary-1428", "project": "ummanu", "workspace": {"base_branch": "main"}}
         record = self._record(str(self.workspace))
         record.state = "review_starting"
         records = {task["ref"]: record}

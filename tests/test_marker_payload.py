@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import unittest
 
-from secretary.board.host import MarkerComment
-from secretary.board.marker_payload import DecisionPayload, ReportPayload, VerdictPayload
-from secretary.board.models import Actor, EventKind
+from ummanu.board.host import MarkerComment
+from ummanu.board.marker_payload import DecisionPayload, ReportPayload, VerdictPayload
+from ummanu.board.models import Actor, EventKind
 
 
 class MarkerPayloadTests(unittest.TestCase):

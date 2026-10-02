@@ -5,8 +5,8 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from secretary.dispatch import worker_report as dispatcher_worker_report
-from secretary.dispatch.state import DispatcherRecord, OutcomeTerminalPath
+from ummanu.dispatch import worker_report as dispatcher_worker_report
+from ummanu.dispatch.state import DispatcherRecord, OutcomeTerminalPath
 
 
 class WorkerReportBoundaryTests(unittest.TestCase):

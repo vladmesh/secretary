@@ -9,11 +9,11 @@ from unittest import mock
 
 import yaml
 
-from secretary.config import load_config, validate
-from secretary.gate import _timed_out, run_gate
-from secretary.onboarding import ScannerError, project_add
-from secretary.provision import apply_provision_result, start_provision
 from tests.support.git import git, make_repo
+from ummanu.config import load_config, validate
+from ummanu.gate import _timed_out, run_gate
+from ummanu.onboarding import ScannerError, project_add
+from ummanu.provision import apply_provision_result, start_provision
 
 
 class GateTests(unittest.TestCase):
@@ -149,7 +149,7 @@ class GateTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "stale")
         self.assertFalse(load_config(self.binding)["enabled"])
-        # Leftovers from an older secretary are inert: the gate neither reads them nor
+        # Leftovers from an older ummanu are inert: the gate neither reads them nor
         # touches them, so an operator removes them on their own schedule.
         self.assertTrue(manifest.exists())
         self.assertTrue(record.exists())
@@ -214,7 +214,7 @@ class GateTests(unittest.TestCase):
 
     def test_publication_failure_rolls_back_all_enabled_state(self):
         self.provision()
-        with mock.patch("secretary.gate.publish_state_atomic", side_effect=OSError(5, "injected")):
+        with mock.patch("ummanu.gate.publish_state_atomic", side_effect=OSError(5, "injected")):
             code, result = run_gate(str(self.instance), "sample-project")
         self.assertEqual(code, 1)
         self.assertEqual(result["findings"][0]["code"], "publication.failed")
@@ -261,7 +261,7 @@ class GateTests(unittest.TestCase):
 
     def test_failure_result_publication_error_is_structured(self):
         self.provision(setup="false")
-        with mock.patch("secretary.gate.publish_state_atomic", side_effect=OSError(5, "injected")):
+        with mock.patch("ummanu.gate.publish_state_atomic", side_effect=OSError(5, "injected")):
             code, result = run_gate(str(self.instance), "sample-project")
         self.assertEqual(code, 1)
         self.assertEqual(result["findings"][0]["code"], "publication.failed")
@@ -269,7 +269,7 @@ class GateTests(unittest.TestCase):
     def test_command_timeout_is_a_redacted_stage_failure(self):
         self.provision(setup="slow command")
         expired = subprocess.TimeoutExpired("slow command", 300, output="AKIAABCDEFGHIJKLMNOP", stderr="")
-        with mock.patch("secretary.gate._command", return_value=_timed_out(expired)):
+        with mock.patch("ummanu.gate._command", return_value=_timed_out(expired)):
             code, result = run_gate(str(self.instance), "sample-project")
         self.assertEqual(code, 1)
         self.assertEqual(result["checks"]["setup"]["status"], "failed")
@@ -278,7 +278,7 @@ class GateTests(unittest.TestCase):
     def test_scan_failure_invalidates_enabled_project_without_traceback(self):
         self.provision()
         self.assertEqual(run_gate(str(self.instance), "sample-project")[0], 0)
-        with mock.patch("secretary.gate.scan_repo", side_effect=ScannerError("injected")):
+        with mock.patch("ummanu.gate.scan_repo", side_effect=ScannerError("injected")):
             code, result = run_gate(str(self.instance), "sample-project")
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "stale")
@@ -287,7 +287,7 @@ class GateTests(unittest.TestCase):
 
     def test_scan_failure_on_disabled_project_is_structured_stale(self):
         self.provision()
-        with mock.patch("secretary.gate.scan_repo", side_effect=ScannerError("injected")):
+        with mock.patch("ummanu.gate.scan_repo", side_effect=ScannerError("injected")):
             code, result = run_gate(str(self.instance), "sample-project")
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "stale")

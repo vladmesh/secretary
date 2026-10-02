@@ -1,0 +1,11 @@
+[Unit]
+Description=Run ummanu retro daily
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=300
+Persistent=true
+Unit=ummanu-retro.service
+
+[Install]
+WantedBy=timers.target

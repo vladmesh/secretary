@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "data_dir": "/var/lib/secretary-data",
+  "data_dir": "/var/lib/ummanu-data",
   "components": {
     "board": {"path": "board"},
     "memory": {

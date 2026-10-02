@@ -22,44 +22,44 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from secretary.board import po_origin as origin_field
-from secretary.board.owner_events import (
+from tests.origin_outbox_fakes import FakeOriginOutbox, SimulatedCrash
+from tests.owner_event_fakes import FakeOwnerEvents
+from tests.po_card_fakes import DECISION_BODY, DispatcherFixture, Forbidden, card
+from tests.po_fake_store import FakePoStore
+from ummanu.board import po_origin as origin_field
+from ummanu.board.owner_events import (
     DELEGATED_CARD_SETTLED,
     NOTICE,
     OwnerEventsUnavailable,
     class_of,
 )
-from secretary.board.po_origin import origin_text, origin_view, return_state
-from secretary.board.production_rights import (
+from ummanu.board.po_origin import origin_text, origin_view, return_state
+from ummanu.board.production_rights import (
     DELEGATED_RESULT_INPUT,
     RIGHTS_HEADING,
     card_facts,
     facts_problem,
     rights_note,
 )
-from secretary.board.task_routing import TaskReview
-from secretary.cli import main
-from secretary.dispatch.origin_returns import (
+from ummanu.board.task_routing import TaskReview
+from ummanu.cli import main
+from ummanu.dispatch.origin_returns import (
     notice_key,
     pending_returns,
     reconcile_origin_returns,
     return_request_id,
     successor_request_id,
 )
-from secretary.po.client import ServiceUnavailable
-from secretary.po.store import RequestConflict, SessionClosed, SessionNotFound
-from secretary.tasks import TaskError, _po_card_create_refusal
-from tests.origin_outbox_fakes import FakeOriginOutbox, SimulatedCrash
-from tests.owner_event_fakes import FakeOwnerEvents
-from tests.po_card_fakes import DECISION_BODY, DispatcherFixture, Forbidden, card
-from tests.po_fake_store import FakePoStore
+from ummanu.po.client import ServiceUnavailable
+from ummanu.po.store import RequestConflict, SessionClosed, SessionNotFound
+from ummanu.tasks import TaskError, _po_card_create_refusal
 
 SPRINT = "sprint:1"
 SESSION = "po-session-1"
 REQUEST = "web-owner-7"
-REF = "secretary-1950"
-PR = "https://github.com/vladmesh/secretary/pull/590"
-RUN = "https://github.com/vladmesh/secretary/actions/runs/4242"
+REF = "ummanu-1950"
+PR = "https://github.com/vladmesh/ummanu/pull/590"
+RUN = "https://github.com/vladmesh/ummanu/actions/runs/4242"
 
 
 def delegated(
@@ -80,7 +80,7 @@ def delegated(
         "description": "Do the thing.",
         "type": kind,
         "state": state,
-        "project": "secretary",
+        "project": "ummanu",
         "sprint": sprint,
         "review": "required",
         "blocked_by": None,
@@ -197,7 +197,7 @@ class FakePo:
         self.submits.append(request_id)
         if self.down:
             self.down -= 1
-            raise ServiceUnavailable("the PO service is not running (secretary-po.service)")
+            raise ServiceUnavailable("the PO service is not running (ummanu-po.service)")
         known = self.inputs.get(request_id)
         if known is not None:
             if (known["session_id"], known["text"], known["card"]) != (session_id, text, card):
@@ -249,7 +249,7 @@ class ReturnCase(unittest.TestCase):
     def runtime(self) -> SimpleNamespace:
         """A new dispatcher process: nothing in common with the last one but the board and the PO."""
         return SimpleNamespace(
-            owner="secretary-dispatcher",
+            owner="ummanu-dispatcher",
             reader=self.board,
             writer=self.board,
             audit=self.board,
@@ -375,7 +375,7 @@ class DeliveryTests(ReturnCase):
         event_id = self.done_code_card()
         self.board.client.owner_events.failing = OwnerEventsUnavailable("the board store did not answer")
 
-        with self.assertLogs("secretary.board.owner_events", level="WARNING"):
+        with self.assertLogs("ummanu.board.owner_events", level="WARNING"):
             [failed] = self.tick()
 
         self.assertEqual((failed["status"], failed["action"]), ("degraded", "origin-return-notice-failed"))
@@ -398,7 +398,7 @@ class DeliveryTests(ReturnCase):
         event_id = self.done_code_card()
         self.board.client = SimpleNamespace(origin_outbox=self.board.outbox)
 
-        with self.assertLogs("secretary.board.owner_events", level="INFO"):
+        with self.assertLogs("ummanu.board.owner_events", level="INFO"):
             [outcome] = self.tick()
 
         self.assertEqual(outcome["action"], "origin-returned")
@@ -611,7 +611,7 @@ class BacklogTests(ReturnCase):
         first, second = self.arrange_backlog()
         self.board.client.owner_events.failing = OwnerEventsUnavailable("the board store did not answer")
 
-        with self.assertLogs("secretary.board.owner_events", level="WARNING"):
+        with self.assertLogs("ummanu.board.owner_events", level="WARNING"):
             [failed] = self.tick()
 
         self.assertEqual((failed["action"], failed["event_id"]), ("origin-return-notice-failed", first))
@@ -669,7 +669,7 @@ class BacklogTests(ReturnCase):
         self.assertEqual(self.tick(), [])
 
     def test_a_delivered_row_is_never_selected_again_and_the_pass_reads_no_card_list(self) -> None:
-        self.arrange(delegated(), delegated("secretary-1951", origin=None))
+        self.arrange(delegated(), delegated("ummanu-1951", origin=None))
         event_id = self.done_code_card()
         self.board.list = mock.Mock(side_effect=AssertionError("the pass scans no card listing"))
 
@@ -683,9 +683,9 @@ class BacklogTests(ReturnCase):
 
     def test_the_store_owes_nothing_for_a_card_with_no_origin_a_wait_card_or_a_move_out(self) -> None:
         self.arrange(
-            delegated(), delegated("secretary-1951", origin=None), delegated("secretary-1952", kind="wait")
+            delegated(), delegated("ummanu-1951", origin=None), delegated("ummanu-1952", kind="wait")
         )
-        for ref in ("secretary-1951", "secretary-1952"):
+        for ref in ("ummanu-1951", "ummanu-1952"):
             self.board.move(ref, "in_progress", "claimed")
             self.board.move(ref, "done", "done")
         self.board.move(REF, "in_progress", "claimed")
@@ -799,12 +799,12 @@ class OutOfSprintCardTests(DispatcherFixture):
         self.assertEqual(self.record().po_submission.card["sprint_ref"], "")
         self.assertEqual(return_state(self.cards.card).executor, session)
         self.settled(session, 1)
-        [call] = [call for call in self.calls() if "secretary-1900" in call["prompt"]]
+        [call] = [call for call in self.calls() if "ummanu-1900" in call["prompt"]]
         self.assertIn(
             "(outside every sprint; you cut it in this session, so this session executes it)", call["prompt"]
         )
         self.assertNotIn("## Comments of", call["prompt"])
-        self.assertIn("task complete --ref secretary-1900 --role po --kind decision", call["prompt"])
+        self.assertIn("task complete --ref ummanu-1900 --role po --kind decision", call["prompt"])
 
         self.cards.complete_as_po("decision", DECISION_BODY)
         self.assertEqual(self.tick(runtime)["action"], "po-card-closed")
@@ -813,7 +813,7 @@ class OutOfSprintCardTests(DispatcherFixture):
             "record_type": "board.protocol_event",
             "event_id": "evt_done",
             "request_id": "complete-1",
-            "ref": "secretary-1900",
+            "ref": "ummanu-1900",
             "kind": "card.moved",
             "reason": "[completion:decision]",
             "transition": {"source": "in_progress", "target": "done"},
@@ -880,21 +880,21 @@ class CreateRuleTests(unittest.TestCase):
                 self.assertEqual(_po_card_create_refusal(kind, role="po", sprint=SPRINT, **common), "")
 
     def test_the_cli_reads_the_origin_from_a_po_turn_for_the_po_only(self) -> None:
-        turn = {"SECRETARY_PO_SESSION": "s-7", "SECRETARY_PO_REQUEST": "web-42"}
+        turn = {"UMMANU_PO_SESSION": "s-7", "UMMANU_PO_REQUEST": "web-42"}
         for role, environment, expected in (
             ("po", turn, {"session": "s-7", "request": "web-42"}),
-            ("po", {"SECRETARY_PO_SESSION": "s-7"}, {"session": "s-7", "request": ""}),
+            ("po", {"UMMANU_PO_SESSION": "s-7"}, {"session": "s-7", "request": ""}),
             ("po", {}, None),
             ("observer", turn, None),
         ):
             with self.subTest(role=role, environment=environment):
                 writer = mock.Mock()
                 writer.return_value.create.return_value = {"action": "created"}
-                clean = {k: v for k, v in os.environ.items() if not k.startswith("SECRETARY_PO_")}
+                clean = {k: v for k, v in os.environ.items() if not k.startswith("UMMANU_PO_")}
                 with (
                     mock.patch.dict(os.environ, {**clean, **environment}, clear=True),
-                    mock.patch("secretary.task_commands.TaskWriter", writer),
-                    mock.patch("secretary.task_commands.card_client"),
+                    mock.patch("ummanu.task_commands.TaskWriter", writer),
+                    mock.patch("ummanu.task_commands.card_client"),
                     contextlib.redirect_stdout(io.StringIO()),
                     tempfile.TemporaryDirectory() as tmp,
                 ):
@@ -909,7 +909,7 @@ class CreateRuleTests(unittest.TestCase):
                             "--data-dir",
                             tmp,
                             "--project",
-                            "secretary",
+                            "ummanu",
                             "--type",
                             "research",
                             "--title",
@@ -926,15 +926,15 @@ class CreateRuleTests(unittest.TestCase):
             ("complete", ["--kind", "decision", "--body-file", "BODY"]),
             ("handover", ["--to", "owner", "--reason", "Pay the relay."]),
         ):
-            for environment, expected in (({"SECRETARY_PO_SESSION": "s-7"}, "s-7"), ({}, "")):
+            for environment, expected in (({"UMMANU_PO_SESSION": "s-7"}, "s-7"), ({}, "")):
                 with self.subTest(verb=verb, environment=environment):
                     writer = mock.Mock()
                     getattr(writer.return_value, verb).return_value = {"action": verb}
-                    clean = {k: v for k, v in os.environ.items() if not k.startswith("SECRETARY_PO_")}
+                    clean = {k: v for k, v in os.environ.items() if not k.startswith("UMMANU_PO_")}
                     with (
                         mock.patch.dict(os.environ, {**clean, **environment}, clear=True),
-                        mock.patch("secretary.task_commands.TaskWriter", writer),
-                        mock.patch("secretary.task_commands.card_client"),
+                        mock.patch("ummanu.task_commands.TaskWriter", writer),
+                        mock.patch("ummanu.task_commands.card_client"),
                         contextlib.redirect_stdout(io.StringIO()),
                         tempfile.TemporaryDirectory() as tmp,
                     ):
@@ -965,7 +965,7 @@ class CreateRuleTests(unittest.TestCase):
                 self.subTest(flag=flag),
                 contextlib.redirect_stdout(io.StringIO()),
                 contextlib.redirect_stderr(io.StringIO()),
-                mock.patch("secretary.task_commands.TaskWriter") as writer,
+                mock.patch("ummanu.task_commands.TaskWriter") as writer,
             ):
                 code = main(
                     [
@@ -974,7 +974,7 @@ class CreateRuleTests(unittest.TestCase):
                         "--role",
                         "po",
                         "--project",
-                        "secretary",
+                        "ummanu",
                         "--type",
                         "research",
                         "--title",

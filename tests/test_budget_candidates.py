@@ -37,20 +37,20 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from secretary.board import budget_candidates, sql_audit
-from secretary.board.migrate import SCRIPT_LOCATION
-from secretary.board.sql_audit import SqlTaskAudit
-from secretary.board.sql_cards import SqlCardClient
-from secretary.board.terminal_taxonomy import TerminalTaxonomyValidationError
-from secretary.dispatch import production
-from secretary.dispatch.production import (
+from tests.sql_backend_fixtures import PostgresBoard
+from ummanu.board import budget_candidates, sql_audit
+from ummanu.board.migrate import SCRIPT_LOCATION
+from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.board.sql_cards import SqlCardClient
+from ummanu.board.terminal_taxonomy import TerminalTaxonomyValidationError
+from ummanu.dispatch import production
+from ummanu.dispatch.production import (
     _budget_event_type,
     _event_sprint,
     _reconcile_sprint_budget,
     _record_unlinked_budget_event,
 )
-from secretary.tasks import TaskError
-from tests.sql_backend_fixtures import PostgresBoard
+from ummanu.tasks import TaskError
 
 BOARD: PostgresBoard
 
@@ -96,7 +96,7 @@ def _event(
     *,
     shape: str,
     kind: str,
-    ref: str = "secretary-1",
+    ref: str = "ummanu-1",
     marker: str | None = None,
     target: str | None = None,
     source: str | None = None,
@@ -331,7 +331,7 @@ def _every_shape() -> list[dict[str, Any]]:
             "claimed",
             "reported",
         ),
-        "ref": ("secretary-1", "secretary-2", "sprint:1", ""),
+        "ref": ("ummanu-1", "ummanu-2", "sprint:1", ""),
         "marker": (None, "review:red", "review:green"),
         "target": (None, "blocked", "ready", "in_progress", "done", "validate", "assessment"),
         "source": (None, "in_progress", "validate", "assessment", "ready", "blocked"),
@@ -350,7 +350,7 @@ def _every_shape() -> list[dict[str, Any]]:
 
 def _realistic() -> tuple[list[dict[str, Any]], dict[str, str]]:
     """A sprint's life: linked and unlinked cards, green cycles, every budget event, noise."""
-    links = {"secretary-1": SPRINT, "secretary-2": SPRINT, "secretary-3": "sprint:2", "secretary-9": ""}
+    links = {"ummanu-1": SPRINT, "ummanu-2": SPRINT, "ummanu-3": "sprint:2", "ummanu-9": ""}
     records: list[dict[str, Any]] = []
     serial = itertools.count()
 
@@ -371,8 +371,8 @@ def _realistic() -> tuple[list[dict[str, Any]], dict[str, str]]:
         add(shape="typed", kind="card.blocked", ref=card, target="blocked", taxonomy="drop")
         add(shape="typed", kind="card.blocked", ref=card, target="blocked", taxonomy="malformed")
         add(kind="moved", ref=card, source="in_progress", target="done")
-    add(kind="created", ref="secretary-4", budget_event="hotfix", sprint=SPRINT)
-    add(shape="typed", kind="created", ref="secretary-5", budget_event="recreated_task", sprint="")
+    add(kind="created", ref="ummanu-4", budget_event="hotfix", sprint=SPRINT)
+    add(shape="typed", kind="created", ref="ummanu-5", budget_event="recreated_task", sprint="")
     add(kind="moved", ref=SPRINT, target="blocked")
     return records, links
 
@@ -455,7 +455,7 @@ class TickTests(unittest.TestCase):
         store = _Store(self)
         late = store.connect(self)
         late_audit = SqlTaskAudit(late)
-        runtime = _runtime(store.audit, {"secretary-1": SPRINT}, store.root)
+        runtime = _runtime(store.audit, {"ummanu-1": SPRINT}, store.root)
         with _writer(store.audit) as writer, contextlib.ExitStack() as held:
             held.enter_context(late.transaction())
             late_audit._claim_row(
@@ -488,12 +488,12 @@ class TickTests(unittest.TestCase):
         store = _Store(self)
         store.seed(
             [
-                _event("stuck-red", shape="generic", kind="verdict", ref="secretary-2", marker="review:red"),
-                _event("fine-red", shape="generic", kind="verdict", ref="secretary-1", marker="review:red"),
+                _event("stuck-red", shape="generic", kind="verdict", ref="ummanu-2", marker="review:red"),
+                _event("fine-red", shape="generic", kind="verdict", ref="ummanu-1", marker="review:red"),
             ]
         )
-        runtime = _runtime(store.audit, {"secretary-1": SPRINT, "secretary-2": SPRINT}, store.root)
-        runtime.reader.failing.add("secretary-2")
+        runtime = _runtime(store.audit, {"ummanu-1": SPRINT, "ummanu-2": SPRINT}, store.root)
+        runtime.reader.failing.add("ummanu-2")
         with _writer(store.audit) as writer:
             for tick in range(30):
                 if tick % 7 == 3:

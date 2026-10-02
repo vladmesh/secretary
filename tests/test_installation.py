@@ -20,13 +20,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import _proc, installation, restore_commands, secret_store, state_repo
-from secretary.checkpoint import CheckpointPusher
-from secretary.cli import main
-from secretary.config import InstanceReport
-from secretary.data import export_runs
-from secretary.host import CollectResult, HostInventory
-from secretary.installation import (
+from tests.fakes.installation import CARD, PRODUCT_ROOT, SPRINT, _checkpoint, _git, split_board
+from tests.retired_board import RETIRED_STORE, STALE_FILE, legacy_runtime_lines, write_stale_leftovers
+from ummanu import _proc, installation, restore_commands, secret_store, state_repo
+from ummanu.checkpoint import CheckpointPusher
+from ummanu.cli import main
+from ummanu.config import InstanceReport
+from ummanu.data import export_runs
+from ummanu.host import CollectResult, HostInventory
+from ummanu.installation import (
     InstallError,
     _clone_or_reuse,
     _ensure_installation_user,
@@ -39,17 +41,15 @@ from secretary.installation import (
     provision_codex_home,
     provision_project_checkouts,
 )
-from secretary.projects.availability import ProjectAvailability
-from secretary.routing_journal import attempts
-from secretary.runtime_env import RuntimeEnvError
-from secretary.secret_words import RECOVERY_WORDS
-from secretary.upgrade import UpgradeResult, step_host
-from tests.fakes.installation import CARD, PRODUCT_ROOT, SPRINT, _checkpoint, _git, split_board
-from tests.retired_board import RETIRED_STORE, STALE_FILE, legacy_runtime_lines, write_stale_leftovers
+from ummanu.projects.availability import ProjectAvailability
+from ummanu.routing_journal import attempts
+from ummanu.runtime_env import RuntimeEnvError
+from ummanu.secret_words import RECOVERY_WORDS
+from ummanu.upgrade import UpgradeResult, step_host
 
 
 # The checkout these tests run out of, which is the one they have. Nothing resolves it for them:
-# an install materializes the configured checkout or `~/secretary`, and neither exists on a machine
+# an install materializes the configured checkout or `~/ummanu`, and neither exists on a machine
 # that only checked this branch out somewhere.
 class InstallationTests(unittest.TestCase):
     def _recovery_divergence_fixture(
@@ -207,7 +207,7 @@ class InstallationTests(unittest.TestCase):
                 return result
 
             with (
-                mock.patch("secretary.installation.state_repo.run_git", side_effect=interrupt_after_merge),
+                mock.patch("ummanu.installation.state_repo.run_git", side_effect=interrupt_after_merge),
                 self.assertRaises(KeyboardInterrupt),
             ):
                 _clone_or_reuse(remote.as_uri(), target, recovery=True, dry_run=False)
@@ -297,8 +297,8 @@ class InstallationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             _, remote, target, local, _ = self._recovery_divergence_fixture(Path(temporary))
-            (target / ".secretary-bootstrap").write_text("bootstrap\n", encoding="utf-8")
-            (target / ".git" / "info" / "exclude").write_text(".secretary-bootstrap\n", encoding="utf-8")
+            (target / ".ummanu-bootstrap").write_text("bootstrap\n", encoding="utf-8")
+            (target / ".git" / "info" / "exclude").write_text(".ummanu-bootstrap\n", encoding="utf-8")
             with self.assertRaisesRegex(InstallError, "fast-forward instance checkout"):
                 _clone_or_reuse(remote.as_uri(), target, recovery=False, dry_run=False)
             self.assertEqual(state_repo.head(target), local)
@@ -388,13 +388,13 @@ class InstallationTests(unittest.TestCase):
                 raise InstallError("stop after ordering proof")
 
             with (
-                mock.patch("secretary.installation._ensure_installation_user"),
-                mock.patch("secretary.installation._validated_instance", return_value=report),
+                mock.patch("ummanu.installation._ensure_installation_user"),
+                mock.patch("ummanu.installation._validated_instance", return_value=report),
                 mock.patch(
-                    "secretary.installation._establish_recovery_ownership_barrier",
+                    "ummanu.installation._establish_recovery_ownership_barrier",
                     side_effect=barrier,
                 ),
-                mock.patch("secretary.installation._clone_or_reuse", side_effect=reuse),
+                mock.patch("ummanu.installation._clone_or_reuse", side_effect=reuse),
             ):
                 result = installation.install(args)
 
@@ -469,7 +469,7 @@ class InstallationTests(unittest.TestCase):
                 "true\n",
             )
             child_source = root / "child-source"
-            shutil.copytree(Path.cwd() / "src" / "secretary", child_source / "secretary")
+            shutil.copytree(Path.cwd() / "src" / "ummanu", child_source / "ummanu")
             for staged in (child_source, *child_source.rglob("*")):
                 mode = staged.stat().st_mode & 0o777
                 staged.chmod(mode | (0o055 if staged.is_dir() else 0o044))
@@ -482,7 +482,7 @@ class InstallationTests(unittest.TestCase):
                     sys.executable,
                     "-c",
                     (
-                        "import os,sys; from secretary.secret_store import load_installation_key; "
+                        "import os,sys; from ummanu.secret_store import load_installation_key; "
                         "load_installation_key(sys.argv[1]); print(os.geteuid())"
                     ),
                     str(instance),
@@ -665,9 +665,9 @@ class InstallationTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "secretary.installation.RemoteExecution.run_clone", autospec=True, side_effect=clone
+                    "ummanu.installation.RemoteExecution.run_clone", autospec=True, side_effect=clone
                 ),
-                mock.patch("secretary.installation._validate_initial_clone") as validate,
+                mock.patch("ummanu.installation._validate_initial_clone") as validate,
             ):
                 installation._clone_instance("remote", target, bootstrap_credential=None)
 
@@ -687,9 +687,9 @@ class InstallationTests(unittest.TestCase):
 
                 with (
                     mock.patch(
-                        "secretary.installation.RemoteExecution.run_clone", autospec=True, side_effect=clone
+                        "ummanu.installation.RemoteExecution.run_clone", autospec=True, side_effect=clone
                     ),
-                    mock.patch("secretary.installation._validate_initial_clone", side_effect=failure),
+                    mock.patch("ummanu.installation._validate_initial_clone", side_effect=failure),
                     self.assertRaises(type(failure)),
                 ):
                     installation._clone_instance("remote", target, bootstrap_credential=None)
@@ -708,10 +708,10 @@ class InstallationTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "secretary.installation.RemoteExecution.run_clone", autospec=True, side_effect=clone
+                    "ummanu.installation.RemoteExecution.run_clone", autospec=True, side_effect=clone
                 ),
-                mock.patch("secretary.installation._validate_initial_clone"),
-                mock.patch("secretary.installation.os.replace", side_effect=OSError("fixture")),
+                mock.patch("ummanu.installation._validate_initial_clone"),
+                mock.patch("ummanu.installation.os.replace", side_effect=OSError("fixture")),
                 self.assertRaisesRegex(InstallError, "atomic replacement failed"),
             ):
                 installation._clone_instance("remote", target, bootstrap_credential=None)
@@ -729,11 +729,11 @@ class InstallationTests(unittest.TestCase):
 
             with (
                 mock.patch(
-                    "secretary.installation.RemoteExecution.run_clone", autospec=True, side_effect=clone
+                    "ummanu.installation.RemoteExecution.run_clone", autospec=True, side_effect=clone
                 ),
-                mock.patch("secretary.installation._validate_initial_clone"),
+                mock.patch("ummanu.installation._validate_initial_clone"),
                 mock.patch(
-                    "secretary.installation._set_installation_owner",
+                    "ummanu.installation._set_installation_owner",
                     side_effect=InstallError("ownership handoff failed"),
                 ),
                 self.assertRaisesRegex(InstallError, "ownership handoff failed"),
@@ -776,7 +776,7 @@ class InstallationTests(unittest.TestCase):
             target.mkdir()
             (target / ".git").mkdir()
             with (
-                mock.patch("secretary.installation.state_repo.git", return_value="other\n"),
+                mock.patch("ummanu.installation.state_repo.git", return_value="other\n"),
                 self.assertRaisesRegex(InstallError, "different instance remote"),
             ):
                 _clone_or_reuse("expected", target, recovery=True, dry_run=False)
@@ -784,7 +784,7 @@ class InstallationTests(unittest.TestCase):
             marker.write_text("untouched", encoding="utf-8")
             with (
                 mock.patch(
-                    "secretary.installation.state_repo.git", side_effect=("expected\n", " M marker\n")
+                    "ummanu.installation.state_repo.git", side_effect=("expected\n", " M marker\n")
                 ),
                 self.assertRaisesRegex(InstallError, "local changes"),
             ):
@@ -805,8 +805,8 @@ class InstallationTests(unittest.TestCase):
     def test_prerequisite_probe_reads_the_installation_s_board_store(self):
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch("secretary.installation.board_client") as selected,
-            mock.patch("secretary.installation.TaskReader") as reader,
+            mock.patch("ummanu.installation.board_client") as selected,
+            mock.patch("ummanu.installation.TaskReader") as reader,
         ):
             check_prerequisites(instance_dir=Path(tmp))
 
@@ -829,10 +829,10 @@ class InstallationTests(unittest.TestCase):
         )
         unlocked = installation.SecretRecovery(store_present=True, unlocked=True)
         with (
-            mock.patch("secretary.installation._ensure_installation_user"),
-            mock.patch("secretary.installation._clone_or_reuse", return_value="reused checkpoint checkout"),
-            mock.patch("secretary.installation._open_secret_store", return_value=unlocked),
-            mock.patch("secretary.installation.read_runtime_env", side_effect=RuntimeEnvError("unsafe mode")),
+            mock.patch("ummanu.installation._ensure_installation_user"),
+            mock.patch("ummanu.installation._clone_or_reuse", return_value="reused checkpoint checkout"),
+            mock.patch("ummanu.installation._open_secret_store", return_value=unlocked),
+            mock.patch("ummanu.installation.read_runtime_env", side_effect=RuntimeEnvError("unsafe mode")),
         ):
             result = install(args)
 
@@ -848,11 +848,11 @@ class InstallationTests(unittest.TestCase):
                 return UpgradeResult()
 
             with (
-                mock.patch("secretary.installation.validate_instance", return_value=SimpleNamespace(ok=True)),
+                mock.patch("ummanu.installation.validate_instance", return_value=SimpleNamespace(ok=True)),
                 mock.patch(
-                    "secretary.installation.resolve_runtime_owner", return_value=("operator", root / "home")
+                    "ummanu.installation.resolve_runtime_owner", return_value=("operator", root / "home")
                 ),
-                mock.patch("secretary.installation.run_steps", side_effect=run),
+                mock.patch("ummanu.installation.run_steps", side_effect=run),
             ):
                 installation.materialize_host(
                     root / "instance", root / "product", before_host=lambda _context: events.append("restore")
@@ -866,13 +866,13 @@ class InstallationTests(unittest.TestCase):
             instance = root / "instance"
             source = instance / "state" / "runs"
             source.mkdir(parents=True)
-            record = {"event": "claim", "reference": "secretary-1"}
+            record = {"event": "claim", "reference": "ummanu-1"}
             (source / "runs.ndjson").write_text(
                 json.dumps({"source": "runs.jsonl", "line": 1, "record": record}) + "\n",
                 encoding="utf-8",
             )
             state_dir = (
-                root / "home" / "orca" / "workspaces" / "secretary" / "pipeline" / "state" / "pipeline"
+                root / "home" / "orca" / "workspaces" / "ummanu" / "pipeline" / "state" / "pipeline"
             )
 
             first = materialize_pipeline_state(instance, state_dir)
@@ -1086,13 +1086,13 @@ class InstallationTests(unittest.TestCase):
                 "default_branch": "main",
             }
             timeout = installation.CredentialError("clone: command timed out", code="timeout")
-            with mock.patch("secretary.installation.RemoteExecution.run_clone", side_effect=timeout):
+            with mock.patch("ummanu.installation.RemoteExecution.run_clone", side_effect=timeout):
                 rows = provision_project_checkouts([binding], None, instance_dir=instance)
             self.assertEqual((rows[0].code, rows[0].retryable), ("timeout", True))
             self.assertFalse((root / "slow").exists())
             self.assertEqual(list(root.glob(".slow.clone-*")), [])
             with (
-                mock.patch("secretary.installation.RemoteExecution.run_clone", side_effect=KeyboardInterrupt),
+                mock.patch("ummanu.installation.RemoteExecution.run_clone", side_effect=KeyboardInterrupt),
                 self.assertRaises(KeyboardInterrupt),
             ):
                 provision_project_checkouts([binding], None, instance_dir=instance)
@@ -1115,7 +1115,7 @@ class InstallationTests(unittest.TestCase):
                     "default_branch": "main",
                 }
                 failure = installation.CredentialError("contains-secret-value", code=code)
-                with mock.patch("secretary.installation.RemoteExecution.run_clone", side_effect=failure):
+                with mock.patch("ummanu.installation.RemoteExecution.run_clone", side_effect=failure):
                     row = provision_project_checkouts([binding], None, instance_dir=instance)[0]
                 self.assertEqual((row.code, row.retryable), (code, retryable))
                 self.assertNotIn("contains-secret-value", row.reason)
@@ -1153,9 +1153,9 @@ class InstallationTests(unittest.TestCase):
                 return str(path)
 
             with (
-                mock.patch("secretary.installation.tempfile.mkdtemp", side_effect=staging),
+                mock.patch("ummanu.installation.tempfile.mkdtemp", side_effect=staging),
                 mock.patch(
-                    "secretary.installation.RemoteExecution.run_clone", autospec=True, side_effect=clone
+                    "ummanu.installation.RemoteExecution.run_clone", autospec=True, side_effect=clone
                 ),
             ):
                 first = provision_project_checkouts(bindings, None, instance_dir=instance)
@@ -1167,7 +1167,7 @@ class InstallationTests(unittest.TestCase):
                 (target / ".git").mkdir()
 
             with mock.patch(
-                "secretary.installation.RemoteExecution.run_clone", autospec=True, side_effect=repaired
+                "ummanu.installation.RemoteExecution.run_clone", autospec=True, side_effect=repaired
             ):
                 second = provision_project_checkouts(bindings, None, instance_dir=instance)
             self.assertEqual([row.outcome for row in second], ["unchanged", "cloned", "unchanged"])
@@ -1186,7 +1186,7 @@ class InstallationTests(unittest.TestCase):
                 )
             ]
         )
-        result.add("status", "degraded", "core ready; rerun secretary recover with the same inputs")
+        result.add("status", "degraded", "core ready; rerun ummanu recover with the same inputs")
         self.assertEqual(result.status, "degraded")
         self.assertIn("status: degraded", result.render())
         args = SimpleNamespace(
@@ -1196,7 +1196,7 @@ class InstallationTests(unittest.TestCase):
         )
         output = io.StringIO()
         with (
-            mock.patch("secretary.installation.install", return_value=result),
+            mock.patch("ummanu.installation.install", return_value=result),
             contextlib.redirect_stdout(output),
         ):
             code = installation.run_install(args)
@@ -1356,11 +1356,11 @@ class InstallationTests(unittest.TestCase):
                 return UpgradeResult()
 
             with (
-                mock.patch("secretary.installation.validate_instance", return_value=report),
+                mock.patch("ummanu.installation.validate_instance", return_value=report),
                 mock.patch(
-                    "secretary.installation.resolve_runtime_owner", return_value=(None, root / "home")
+                    "ummanu.installation.resolve_runtime_owner", return_value=(None, root / "home")
                 ),
-                mock.patch("secretary.installation.run_steps", side_effect=run),
+                mock.patch("ummanu.installation.run_steps", side_effect=run),
             ):
                 installation.materialize_host(
                     root / "instance",
@@ -1429,28 +1429,28 @@ class InstallationTests(unittest.TestCase):
                 return host_result
 
             with (
-                mock.patch("secretary.installation._ensure_installation_user"),
+                mock.patch("ummanu.installation._ensure_installation_user"),
                 mock.patch(
-                    "secretary.installation._clone_or_reuse", return_value="reused checkpoint checkout"
+                    "ummanu.installation._clone_or_reuse", return_value="reused checkpoint checkout"
                 ),
                 mock.patch(
-                    "secretary.installation._open_secret_store",
+                    "ummanu.installation._open_secret_store",
                     return_value=installation.SecretRecovery(store_present=True, unlocked=True),
                 ),
-                mock.patch("secretary.installation.read_runtime_env", return_value={}),
-                mock.patch("secretary.installation.check_prerequisites"),
-                mock.patch("secretary.installation._validated_instance", return_value=report),
-                mock.patch("secretary.installation.import_normalized_board", return_value=1),
-                mock.patch("secretary.installation.rebuild_memory_index", return_value=1),
-                mock.patch("secretary.installation.provision_codex_home", return_value=0),
+                mock.patch("ummanu.installation.read_runtime_env", return_value={}),
+                mock.patch("ummanu.installation.check_prerequisites"),
+                mock.patch("ummanu.installation._validated_instance", return_value=report),
+                mock.patch("ummanu.installation.import_normalized_board", return_value=1),
+                mock.patch("ummanu.installation.rebuild_memory_index", return_value=1),
+                mock.patch("ummanu.installation.provision_codex_home", return_value=0),
                 mock.patch(
-                    "secretary.installation.materialize_pipeline_state",
+                    "ummanu.installation.materialize_pipeline_state",
                     return_value=installation.PipelineStateMaterialization(0, True),
                 ),
-                mock.patch("secretary.installation.materialize_host", side_effect=host) as materialize,
-                mock.patch("secretary.installation.mark_reconcile_applied"),
-                mock.patch("secretary.installation.restore_findings", return_value=[]),
-                mock.patch("secretary.installation._set_installation_owner") as owner,
+                mock.patch("ummanu.installation.materialize_host", side_effect=host) as materialize,
+                mock.patch("ummanu.installation.mark_reconcile_applied"),
+                mock.patch("ummanu.installation.restore_findings", return_value=[]),
+                mock.patch("ummanu.installation._set_installation_owner") as owner,
             ):
                 result = installation.install(args)
 
@@ -1522,27 +1522,27 @@ class InstallationTests(unittest.TestCase):
                 raise InstallError("safe materializer tail failed")
 
             with (
-                mock.patch("secretary.installation._ensure_installation_user"),
+                mock.patch("ummanu.installation._ensure_installation_user"),
                 mock.patch(
-                    "secretary.installation._clone_or_reuse", return_value="reused checkpoint checkout"
+                    "ummanu.installation._clone_or_reuse", return_value="reused checkpoint checkout"
                 ),
                 mock.patch(
-                    "secretary.installation._open_secret_store",
+                    "ummanu.installation._open_secret_store",
                     return_value=installation.SecretRecovery(store_present=True, unlocked=True),
                 ),
-                mock.patch("secretary.installation.read_runtime_env", return_value={}),
-                mock.patch("secretary.installation.check_prerequisites"),
-                mock.patch("secretary.installation._validated_instance", return_value=report),
-                mock.patch("secretary.installation.import_normalized_board", return_value=0),
-                mock.patch("secretary.installation.rebuild_memory_index", return_value=0),
-                mock.patch("secretary.installation.provision_project_checkouts", return_value=[]),
-                mock.patch("secretary.installation.provision_codex_home", return_value=0),
-                mock.patch("secretary.installation.pipeline_state_path", return_value=run_state),
-                mock.patch("secretary.installation.materialize_pipeline_state", side_effect=restore_runs),
-                mock.patch("secretary.installation.materialize_host", side_effect=fail_after_pipeline_state),
-                mock.patch("secretary.installation._set_installation_owner") as owner,
+                mock.patch("ummanu.installation.read_runtime_env", return_value={}),
+                mock.patch("ummanu.installation.check_prerequisites"),
+                mock.patch("ummanu.installation._validated_instance", return_value=report),
+                mock.patch("ummanu.installation.import_normalized_board", return_value=0),
+                mock.patch("ummanu.installation.rebuild_memory_index", return_value=0),
+                mock.patch("ummanu.installation.provision_project_checkouts", return_value=[]),
+                mock.patch("ummanu.installation.provision_codex_home", return_value=0),
+                mock.patch("ummanu.installation.pipeline_state_path", return_value=run_state),
+                mock.patch("ummanu.installation.materialize_pipeline_state", side_effect=restore_runs),
+                mock.patch("ummanu.installation.materialize_host", side_effect=fail_after_pipeline_state),
+                mock.patch("ummanu.installation._set_installation_owner") as owner,
                 mock.patch(
-                    "secretary.installation._establish_recovery_ownership_barrier",
+                    "ummanu.installation._establish_recovery_ownership_barrier",
                     wraps=installation._establish_recovery_ownership_barrier,
                 ) as barrier,
             ):
@@ -1602,24 +1602,24 @@ class InstallationTests(unittest.TestCase):
                 host_fixture=None,
             )
             with (
-                mock.patch("secretary.installation._ensure_installation_user"),
+                mock.patch("ummanu.installation._ensure_installation_user"),
                 mock.patch(
-                    "secretary.installation._clone_or_reuse", return_value="reused checkpoint checkout"
+                    "ummanu.installation._clone_or_reuse", return_value="reused checkpoint checkout"
                 ),
                 mock.patch(
-                    "secretary.installation._open_secret_store",
+                    "ummanu.installation._open_secret_store",
                     return_value=installation.SecretRecovery(True, True),
                 ),
-                mock.patch("secretary.installation.read_runtime_env", return_value={}),
-                mock.patch("secretary.installation.check_prerequisites"),
-                mock.patch("secretary.installation._validated_instance", return_value=report),
+                mock.patch("ummanu.installation.read_runtime_env", return_value={}),
+                mock.patch("ummanu.installation.check_prerequisites"),
+                mock.patch("ummanu.installation._validated_instance", return_value=report),
                 mock.patch(
-                    "secretary.installation.import_normalized_board",
+                    "ummanu.installation.import_normalized_board",
                     side_effect=installation.RestoreError("parity failed"),
                 ),
-                mock.patch("secretary.installation.provision_project_checkouts") as projects,
-                mock.patch("secretary.installation.materialize_host") as host,
-                mock.patch("secretary.installation._set_installation_owner"),
+                mock.patch("ummanu.installation.provision_project_checkouts") as projects,
+                mock.patch("ummanu.installation.materialize_host") as host,
+                mock.patch("ummanu.installation._set_installation_owner"),
             ):
                 result = installation.install(args)
             self.assertEqual(result.status, "failed")
@@ -1636,7 +1636,7 @@ class InstallationTests(unittest.TestCase):
             (source / "config.toml").write_text("model = 'test'\n", encoding="utf-8")
             data_dir = root / "data"
             target = data_dir / "codex-home"
-            with mock.patch("secretary.installation._set_installation_owner"):
+            with mock.patch("ummanu.installation._set_installation_owner"):
                 # With no data dir there is no managed home to seed (secretary-1723).
                 self.assertEqual(provision_codex_home(product, "dev"), 0)
                 self.assertEqual(provision_codex_home(product, "dev", data_dir=data_dir), 2)
@@ -1653,7 +1653,7 @@ class InstallationTests(unittest.TestCase):
             (source / "AGENTS.md").write_text("agents\n", encoding="utf-8")
             (source / "config.toml").write_text(
                 'model = "test"\n\n[mcp_servers.memory]\nurl = "http://127.0.0.1:8077/mcp"\n'
-                'bearer_token_env_var = "SECRETARY_MEMORY_ACCESS_TOKEN"\n',
+                'bearer_token_env_var = "UMMANU_MEMORY_ACCESS_TOKEN"\n',
                 encoding="utf-8",
             )
             data_dir = root / "data"
@@ -1663,12 +1663,12 @@ class InstallationTests(unittest.TestCase):
                 'model = "operator-choice"\n\n[mcp_servers.memory]\nurl = "http://127.0.0.1:8077/mcp"\n',
                 encoding="utf-8",
             )
-            with mock.patch("secretary.installation._set_installation_owner"):
+            with mock.patch("ummanu.installation._set_installation_owner"):
                 self.assertEqual(provision_codex_home(product, "dev", data_dir=data_dir), 2)
 
             rendered = (target / "config.toml").read_text(encoding="utf-8")
             self.assertIn('model = "operator-choice"', rendered)
-            self.assertIn('bearer_token_env_var = "SECRETARY_MEMORY_ACCESS_TOKEN"', rendered)
+            self.assertIn('bearer_token_env_var = "UMMANU_MEMORY_ACCESS_TOKEN"', rendered)
 
     def _codex_product(self, root: Path) -> Path:
         product = root / "product"
@@ -1677,7 +1677,7 @@ class InstallationTests(unittest.TestCase):
         (source / "AGENTS.md").write_text("agents\n", encoding="utf-8")
         (source / "config.toml").write_text(
             'model = "test"\n\n[mcp_servers.memory]\nurl = "http://127.0.0.1:8077/mcp"\n'
-            'bearer_token_env_var = "SECRETARY_MEMORY_ACCESS_TOKEN"\n',
+            'bearer_token_env_var = "UMMANU_MEMORY_ACCESS_TOKEN"\n',
             encoding="utf-8",
         )
         return product
@@ -1691,8 +1691,8 @@ class InstallationTests(unittest.TestCase):
             legacy = root / "home" / ".config" / "orca" / "codex-runtime-home" / "home"
             account = SimpleNamespace(pw_dir=str(root / "home"), pw_uid=os.getuid(), pw_gid=os.getgid())
             with (
-                mock.patch("secretary.installation.pwd.getpwnam", return_value=account),
-                mock.patch("secretary.installation._set_installation_owner"),
+                mock.patch("ummanu.installation.pwd.getpwnam", return_value=account),
+                mock.patch("ummanu.installation._set_installation_owner"),
             ):
                 # Only the data-dir home is seeded: the legacy one is not managed (secretary-1723).
                 self.assertEqual(provision_codex_home(product, "dev", data_dir=data_dir), 2)
@@ -1718,8 +1718,8 @@ class InstallationTests(unittest.TestCase):
             (legacy / "config.toml").write_text(unreconciled, encoding="utf-8")
             account = SimpleNamespace(pw_dir=str(root / "home"), pw_uid=os.getuid(), pw_gid=os.getgid())
             with (
-                mock.patch("secretary.installation.pwd.getpwnam", return_value=account),
-                mock.patch("secretary.installation._set_installation_owner"),
+                mock.patch("ummanu.installation.pwd.getpwnam", return_value=account),
+                mock.patch("ummanu.installation._set_installation_owner"),
             ):
                 # No login anywhere: the data-dir home is seeded and the legacy one is left as found
                 # (A20 step 7, secretary-1723). It used to be reconciled while it was the active one.
@@ -1737,11 +1737,11 @@ class InstallationTests(unittest.TestCase):
     def test_prerequisites_need_no_orca_binary(self):
         """A20 step 9 (secretary-1726): recovery probes the board store and runs no `orca`."""
         with (
-            mock.patch("secretary.installation.os.geteuid", return_value=0),
-            mock.patch("secretary.installation.shutil.which", return_value=None) as which,
-            mock.patch("secretary.installation._run") as run,
-            mock.patch("secretary.installation.board_client"),
-            mock.patch("secretary.installation.TaskReader") as reader,
+            mock.patch("ummanu.installation.os.geteuid", return_value=0),
+            mock.patch("ummanu.installation.shutil.which", return_value=None) as which,
+            mock.patch("ummanu.installation._run") as run,
+            mock.patch("ummanu.installation.board_client"),
+            mock.patch("ummanu.installation.TaskReader") as reader,
         ):
             check_prerequisites(Path("/tmp/instance"))
 
@@ -1760,13 +1760,13 @@ class InstallationTests(unittest.TestCase):
             (target / "runtime.env").write_text("EXAMPLE_API_TOKEN=existing\n", encoding="utf-8")
 
             with (
-                mock.patch("secretary.installation.state_repo.git", return_value="remote\n"),
+                mock.patch("ummanu.installation.state_repo.git", return_value="remote\n"),
                 self.assertRaisesRegex(InstallError, "choose --recover"),
             ):
                 _clone_or_reuse("remote", target, recovery=False, dry_run=True)
 
-            (target / ".secretary-bootstrap").write_text("bootstrap\n", encoding="utf-8")
-            with mock.patch("secretary.installation.state_repo.git", side_effect=("remote\n", "")):
+            (target / ".ummanu-bootstrap").write_text("bootstrap\n", encoding="utf-8")
+            with mock.patch("ummanu.installation.state_repo.git", side_effect=("remote\n", "")):
                 self.assertEqual(
                     _clone_or_reuse("remote", target, recovery=False, dry_run=True),
                     "reused checkpoint checkout",
@@ -1776,7 +1776,7 @@ class InstallationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "instance"
             (target / ".git").mkdir(parents=True)
-            with mock.patch("secretary.installation.state_repo.git", side_effect=("remote\n", "")) as git:
+            with mock.patch("ummanu.installation.state_repo.git", side_effect=("remote\n", "")) as git:
                 self.assertEqual(
                     _clone_or_reuse("remote", target, recovery=True, dry_run=True),
                     "reused checkpoint checkout",
@@ -1823,7 +1823,7 @@ class InstallationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             target = Path(temporary) / "instance"
             target.mkdir()
-            (target / ".secretary-bootstrap").write_text("bootstrap\n", encoding="utf-8")
+            (target / ".ummanu-bootstrap").write_text("bootstrap\n", encoding="utf-8")
             args = SimpleNamespace(
                 instance_dir=str(target),
                 instance_remote="remote",
@@ -1834,12 +1834,12 @@ class InstallationTests(unittest.TestCase):
                 runtime_env=None,
             )
             with (
-                mock.patch("secretary.installation._ensure_installation_user") as ensure_user,
+                mock.patch("ummanu.installation._ensure_installation_user") as ensure_user,
                 mock.patch(
-                    "secretary.installation._clone_or_reuse", return_value="reused checkpoint checkout"
+                    "ummanu.installation._clone_or_reuse", return_value="reused checkpoint checkout"
                 ),
                 mock.patch(
-                    "secretary.installation.read_runtime_env",
+                    "ummanu.installation.read_runtime_env",
                     side_effect=RuntimeEnvError("stop after user check"),
                 ),
             ):
@@ -1921,9 +1921,9 @@ class InstallationTests(unittest.TestCase):
                 "kind": "routing",
                 "occurred_at": "2026-07-24T00:00:00Z",
                 "outcome": "success",
-                "actor": {"role": "dispatcher", "id": "secretary-dispatcher"},
+                "actor": {"role": "dispatcher", "id": "ummanu-dispatcher"},
                 "task_id": f"task_{RETIRED_STORE}_1",
-                "ref": "secretary-1",
+                "ref": "ummanu-1",
                 "backend": {"kind": RETIRED_STORE, "task_id": 1, "revision": "updated_at:x"},
                 "request_id": "routing-verdict",
                 "payload": {
@@ -1958,7 +1958,7 @@ class InstallationTests(unittest.TestCase):
                 for line in (data / "board" / "events.ndjson").read_text(encoding="utf-8").splitlines()
                 if line.strip()
             ]
-            history = attempts(restored, "secretary-1")
+            history = attempts(restored, "ummanu-1")
             self.assertEqual(len(history), 1)
             self.assertEqual(history[0].reviewer.head, "claude-opus")
             self.assertEqual(history[0].outcome, "red")
@@ -2008,7 +2008,7 @@ class InstallationTests(unittest.TestCase):
             with self.assertRaisesRegex(InstallError, "out of sequence"):
                 materialize_checkpoint(instance, data)
 
-    def test_non_secretary_data_target_is_refused_without_overwrite(self):
+    def test_non_ummanu_data_target_is_refused_without_overwrite(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
@@ -2027,7 +2027,7 @@ class InstallationTests(unittest.TestCase):
         self._assert_clean_target_recovers(layout="flat")
 
     def test_clean_target_recovers_from_a_split_layout_checkpoint(self):
-        """secretary-1656: `secretary recover` restores the board from the split layout too."""
+        """secretary-1656: `ummanu recover` restores the board from the split layout too."""
         self._assert_clean_target_recovers(layout="split")
 
     def _assert_clean_target_recovers(self, *, layout: str) -> None:
@@ -2060,7 +2060,7 @@ class InstallationTests(unittest.TestCase):
             _git(source, "commit", "-m", "remote identity")
             _git(source, "push", str(remote), "HEAD:master")
 
-            # An install materializes the checkout it is told to, and this one is not `~/secretary`.
+            # An install materializes the checkout it is told to, and this one is not `~/ummanu`.
             base = [
                 "--instance-remote",
                 str(remote),
@@ -2076,14 +2076,14 @@ class InstallationTests(unittest.TestCase):
             host = SimpleNamespace(steps=[SimpleNamespace(status="changed")])
             patches = (
                 mock.patch(
-                    "secretary.installation.check_prerequisites",
+                    "ummanu.installation.check_prerequisites",
                     side_effect=(InstallError("simulated interrupted recovery"), None, None),
                 ),
-                mock.patch("secretary.installation.import_normalized_board", return_value=1),
-                mock.patch("secretary.installation.rebuild_memory_index", return_value=1),
-                mock.patch("secretary.installation.materialize_host", return_value=host),
-                mock.patch("secretary.installation.materialize_pipeline_state", return_value=0),
-                mock.patch("secretary.installation.restore_findings", return_value=[]),
+                mock.patch("ummanu.installation.import_normalized_board", return_value=1),
+                mock.patch("ummanu.installation.rebuild_memory_index", return_value=1),
+                mock.patch("ummanu.installation.materialize_host", return_value=host),
+                mock.patch("ummanu.installation.materialize_pipeline_state", return_value=0),
+                mock.patch("ummanu.installation.restore_findings", return_value=[]),
             )
             with (
                 patches[0],
@@ -2092,9 +2092,9 @@ class InstallationTests(unittest.TestCase):
                 patches[3],
                 patches[4],
                 patches[5],
-                mock.patch("secretary.installation._set_installation_owner") as set_owner,
+                mock.patch("ummanu.installation._set_installation_owner") as set_owner,
             ):
-                with mock.patch("secretary.installation._ensure_installation_user"):
+                with mock.patch("ummanu.installation._ensure_installation_user"):
                     first_code, first_output = self._cli(["install", *base])
                 second_code, second_output = self._cli(["recover", *base])
                 third_code, third_output = self._cli(["recover", *base])
@@ -2145,11 +2145,11 @@ class InstallationTests(unittest.TestCase):
             runtime.chmod(0o600)
 
             with (
-                mock.patch("secretary.installation.check_prerequisites") as prerequisites,
-                mock.patch("secretary.installation.import_normalized_board") as board,
-                mock.patch("secretary.installation.rebuild_memory_index") as memory,
-                mock.patch("secretary.installation.materialize_host") as host,
-                mock.patch("secretary.installation.mark_reconcile_applied") as reconcile,
+                mock.patch("ummanu.installation.check_prerequisites") as prerequisites,
+                mock.patch("ummanu.installation.import_normalized_board") as board,
+                mock.patch("ummanu.installation.rebuild_memory_index") as memory,
+                mock.patch("ummanu.installation.materialize_host") as host,
+                mock.patch("ummanu.installation.mark_reconcile_applied") as reconcile,
             ):
                 code, output = self._cli(
                     [
@@ -2191,7 +2191,7 @@ class InstallationTests(unittest.TestCase):
                 ["git", "clone", str(source), str(target)], check=True, capture_output=True, text=True
             )
 
-            with mock.patch("secretary.installation._ensure_installation_user"):
+            with mock.patch("ummanu.installation._ensure_installation_user"):
                 code, output = self._cli(
                     [
                         "install",
@@ -2231,10 +2231,10 @@ class InstallationTests(unittest.TestCase):
             args = SimpleNamespace(product_root=None)
 
             with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False):
-                os.environ.pop("TA_SECRETARY_REPO", None)
-                with self.assertRaisesRegex(InstallError, str(home / "secretary")):
+                os.environ.pop("UMMANU_REPO", None)
+                with self.assertRaisesRegex(InstallError, str(home / "ummanu")):
                     _product_root(args)
-                os.environ["TA_SECRETARY_REPO"] = str(PRODUCT_ROOT)
+                os.environ["UMMANU_REPO"] = str(PRODUCT_ROOT)
                 self.assertEqual(_product_root(args), PRODUCT_ROOT)
 
     @staticmethod
@@ -2275,7 +2275,7 @@ class BootstrapCheckoutRecoveryTests(unittest.TestCase):
         _git(source, "commit", "-m", "remote identity")
         _git(source, "push", str(self.remote), "HEAD:master")
         # What bootstrap leaves before any install: the clone and its stamp.
-        from secretary.bootstrap import _mark_bootstrap_checkout
+        from ummanu.bootstrap import _mark_bootstrap_checkout
 
         self.assertEqual(
             _clone_or_reuse(str(self.remote), self.target, recovery=True, dry_run=False),
@@ -2305,20 +2305,20 @@ class BootstrapCheckoutRecoveryTests(unittest.TestCase):
         )
         store = secrets or installation.SecretRecovery(store_present=False, unlocked=False)
         with (
-            mock.patch("secretary.installation._ensure_installation_user"),
-            mock.patch("secretary.installation._set_installation_owner"),
-            mock.patch("secretary.installation._open_secret_store", return_value=store),
-            mock.patch("secretary.installation.check_prerequisites", steps.check_prerequisites),
-            mock.patch("secretary.installation.import_normalized_board", steps.import_normalized_board),
-            mock.patch("secretary.installation.rebuild_memory_index", return_value=1),
-            mock.patch("secretary.installation.provision_project_checkouts", return_value=[]),
-            mock.patch("secretary.installation.provision_codex_home", return_value=0),
+            mock.patch("ummanu.installation._ensure_installation_user"),
+            mock.patch("ummanu.installation._set_installation_owner"),
+            mock.patch("ummanu.installation._open_secret_store", return_value=store),
+            mock.patch("ummanu.installation.check_prerequisites", steps.check_prerequisites),
+            mock.patch("ummanu.installation.import_normalized_board", steps.import_normalized_board),
+            mock.patch("ummanu.installation.rebuild_memory_index", return_value=1),
+            mock.patch("ummanu.installation.provision_project_checkouts", return_value=[]),
+            mock.patch("ummanu.installation.provision_codex_home", return_value=0),
             mock.patch(
-                "secretary.installation.materialize_host",
+                "ummanu.installation.materialize_host",
                 return_value=SimpleNamespace(steps=[SimpleNamespace(status="changed")]),
             ),
-            mock.patch("secretary.installation.materialize_pipeline_state", return_value=0),
-            mock.patch("secretary.installation.restore_findings", return_value=[]),
+            mock.patch("ummanu.installation.materialize_pipeline_state", return_value=0),
+            mock.patch("ummanu.installation.restore_findings", return_value=[]),
         ):
             return installation.install(args), steps
 

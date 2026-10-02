@@ -18,12 +18,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
+os.environ.setdefault("UMMANU_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
-from secretary.dispatch import runtime as dispatcher_module
-from secretary.dispatch.head_vitality_episode import VitalityVerdict
-from secretary.dispatch.state import DispatcherRecord, now_rfc3339
-from secretary.tasks import TaskReader, TaskWriter, task_audit_for
 from tests.dispatcher_fixtures import ensure_attempt
 from tests.fakes.dispatcher import (
     FakeCatalog,
@@ -33,8 +29,12 @@ from tests.fakes.dispatcher import (
 )
 from tests.observer_identity import bind_observer
 from tests.sql_backend_fixtures import card_store
+from ummanu.dispatch import runtime as dispatcher_module
+from ummanu.dispatch.head_vitality_episode import VitalityVerdict
+from ummanu.dispatch.state import DispatcherRecord, now_rfc3339
+from ummanu.tasks import TaskReader, TaskWriter, task_audit_for
 
-CARD_REF = "secretary-510"
+CARD_REF = "ummanu-510"
 
 
 class LegacyPathTests(unittest.TestCase):
@@ -44,7 +44,7 @@ class LegacyPathTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.data_dir = Path(self.tmpdir.name) / "data"
-        env = mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies")})
+        env = mock.patch.dict(os.environ, {"UMMANU_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies")})
         env.start()
         self.addCleanup(env.stop)
         self.board = card_store(self, dispatcher_seed(), instance_dir=self.data_dir)
@@ -61,7 +61,7 @@ class LegacyPathTests(unittest.TestCase):
             self.data_dir,
             self.catalog,
             self.host,
-            owner="secretary-pilot",
+            owner="ummanu-pilot",
             sprints=self.sprints,
         )
 
@@ -76,7 +76,7 @@ class LegacyPathTests(unittest.TestCase):
             "status": "open",
             "observer": {"kind": "head", "profile": "claude-observer"},
         }
-        self.board.add_sprint("sprint:1031", status="open", sprint_reservations='["secretary"]')
+        self.board.add_sprint("sprint:1031", status="open", sprint_reservations='["ummanu"]')
 
     def start_dispatcher(self) -> None:
         self.observed_sprint()
@@ -91,7 +91,7 @@ class LegacyPathTests(unittest.TestCase):
         )
 
     def tick(self) -> dict:
-        from secretary._fsutil import file_lock
+        from ummanu._fsutil import file_lock
 
         runtime = self.runtime
         with file_lock(runtime.production_state.tick_lock):
@@ -286,7 +286,7 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         unchanged; the retained case is pinned separately in
         ``Issue02fe04d7RetainedWorkerTests``.
         """
-        from secretary.dispatch.gate import GateResult
+        from ummanu.dispatch.gate import GateResult
 
         self.start_dispatcher()
         self.host.gate_results = [
@@ -355,8 +355,8 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         dispatcher is not holding, so the card's retention is cleared before the suspension is
         observed.
         """
-        from secretary.dispatch.gate import GateResult
-        from secretary.dispatch.watchdog import suspension_response_window_seconds
+        from ummanu.dispatch.gate import GateResult
+        from ummanu.dispatch.watchdog import suspension_response_window_seconds
 
         self.start_dispatcher()
         self.host.gate_results = [
@@ -421,8 +421,8 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         A reviewer spawn refusing deterministically behind a pending gate must not sit out
         the six-hour rollup ceiling either; three sightings are enough for the policy.
         """
-        from secretary.dispatch.gate import GateResult
-        from secretary.dispatch.head_vitality_policy import (
+        from ummanu.dispatch.gate import GateResult
+        from ummanu.dispatch.head_vitality_policy import (
             DEFAULT_DETERMINISTIC_REFUSAL_LIMIT,
         )
 
@@ -474,7 +474,7 @@ class Issue02fe04d7RetainedWorkerTests(LegacyPathTests):
 
     def run_to_gate_pending(self, pending_ticks: int = 3) -> None:
         """Claim, report done (which retains the worker), and stamp a pending gate."""
-        from secretary.dispatch.gate import GateResult
+        from ummanu.dispatch.gate import GateResult
 
         self.host.fail_resume_worker_reason = ""
         self.start_dispatcher()
@@ -531,7 +531,7 @@ class Issue02fe04d7RetainedWorkerTests(LegacyPathTests):
         pinned unchanged by ``test_a_session_that_lost_its_suspension_before_the_red_gate_is
         _replaced_once`` in ``tests/test_dispatcher_launch_intent.py``.
         """
-        from secretary.dispatch.gate import GateResult
+        from ummanu.dispatch.gate import GateResult
 
         self.run_to_gate_pending(pending_ticks=3)
         self.host.worker_status_result = self.stopped_worker_status()

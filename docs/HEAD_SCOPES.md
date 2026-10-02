@@ -109,7 +109,7 @@ receipt edit or parallel compatibility subsystem. Scope records do not change.
 Disposable tests load the emitter function directly from that delivered Git object;
 CI runs it through real sudo, system scope, bootstrap, privilege drop, supervisor
 and PO head with a fake executable found only on prepared PATH. It also verifies
-`python3 -P -m secretary --help` resolves through the prepared product runtime.
+`python3 -P -m ummanu --help` resolves through the prepared product runtime.
 Local broad tests instrument the privileged effects; the real system scope, OOM,
 descendant and PO recovery proofs remain dispatcher-owned CI evidence.
 

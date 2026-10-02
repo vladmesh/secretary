@@ -12,29 +12,29 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.runtime import role_env
-from secretary.runtime.head.command import wrap_role_command
 from tests.retired_board import LEGACY_ENV, STALE_FILE, legacy_runtime_lines, write_stale_leftovers
 from tests.support.managed_venv import managed_product_root
+from ummanu.runtime import role_env
+from ummanu.runtime.head.command import wrap_role_command
 
 
 class RuntimeEnvPathTests(unittest.TestCase):
     def test_both_documented_override_names_resolve_the_runtime_env_file(self) -> None:
         with mock.patch.dict(
-            os.environ, {"SECRETARY_RUNTIME_ENV_FILE": "/tmp/secretary-runtime.env"}, clear=True
+            os.environ, {"UMMANU_RUNTIME_ENV_FILE": "/tmp/ummanu-runtime.env"}, clear=True
         ):
-            self.assertEqual(role_env.runtime_env_path(), Path("/tmp/secretary-runtime.env"))
+            self.assertEqual(role_env.runtime_env_path(), Path("/tmp/ummanu-runtime.env"))
         with mock.patch.dict(os.environ, {"TA_RUNTIME_ENV_FILE": "/tmp/ta-runtime.env"}, clear=True):
             self.assertEqual(role_env.runtime_env_path(), Path("/tmp/ta-runtime.env"))
         with mock.patch.dict(
             os.environ,
             {
                 "TA_RUNTIME_ENV_FILE": "/tmp/ta-runtime.env",
-                "SECRETARY_RUNTIME_ENV_FILE": "/tmp/secretary-runtime.env",
+                "UMMANU_RUNTIME_ENV_FILE": "/tmp/ummanu-runtime.env",
             },
             clear=True,
         ):
-            self.assertEqual(role_env.runtime_env_path(), Path("/tmp/secretary-runtime.env"))
+            self.assertEqual(role_env.runtime_env_path(), Path("/tmp/ummanu-runtime.env"))
 
 
 class RuntimeEnvRoleTests(unittest.TestCase):
@@ -69,9 +69,9 @@ class RuntimeEnvRoleTests(unittest.TestCase):
             (root / ".venv").symlink_to(Path(sys.prefix), target_is_directory=True)
             base_env = {
                 "PATH": os.environ["PATH"],
-                "SECRETARY_INSTANCE": str(root),
-                "SECRETARY_RUNTIME_ENV_FILE": str(root / "runtime.env"),
-                "TA_SECRETARY_REPO": str(root),
+                "UMMANU_INSTANCE": str(root),
+                "UMMANU_RUNTIME_ENV_FILE": str(root / "runtime.env"),
+                "UMMANU_REPO": str(root),
             }
             for role in ("worker", "reviewer"):
                 with self.subTest(role=role):
@@ -114,8 +114,8 @@ class RuntimeEnvRoleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / "runtime.env"
             env_file.write_text(
-                legacy_runtime_lines() + "SECRETARY_OBSERVER_SPRINT=sprint:forged\n"
-                "SECRETARY_OBSERVER_GENERATION=forged\n",
+                legacy_runtime_lines() + "UMMANU_OBSERVER_SPRINT=sprint:forged\n"
+                "UMMANU_OBSERVER_GENERATION=forged\n",
                 encoding="utf-8",
             )
             env = role_env.runtime_env("observer", base_env={"PATH": "/usr/bin"}, env_file=env_file)
@@ -126,7 +126,7 @@ class RuntimeEnvRoleTests(unittest.TestCase):
     def test_memory_bearer_capability_can_only_come_from_the_launch_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / "runtime.env"
-            env_file.write_text("SECRETARY_MEMORY_ACCESS_TOKEN=forged\n", encoding="utf-8")
+            env_file.write_text("UMMANU_MEMORY_ACCESS_TOKEN=forged\n", encoding="utf-8")
             env = role_env.runtime_env("worker", base_env={"PATH": "/usr/bin"}, env_file=env_file)
             launched = role_env.runtime_env(
                 "worker",
@@ -140,7 +140,7 @@ class RuntimeEnvRoleTests(unittest.TestCase):
     def test_scheduled_memory_roles_accept_only_a_launch_bound_bearer(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env_file = Path(tmp) / "runtime.env"
-            env_file.write_text("SECRETARY_MEMORY_ACCESS_TOKEN=forged\n", encoding="utf-8")
+            env_file.write_text("UMMANU_MEMORY_ACCESS_TOKEN=forged\n", encoding="utf-8")
             for role in ("curator", "retro", "steward"):
                 with self.subTest(role=role):
                     env = role_env.runtime_env(role, base_env={"PATH": "/usr/bin"}, env_file=env_file)
@@ -163,10 +163,10 @@ class RuntimeEnvRoleTests(unittest.TestCase):
                 with self.subTest(role=role):
                     env = role_env.runtime_env(
                         role,
-                        base_env={"PATH": "/usr/bin", "SECRETARY_INSTANCE": str(instance)},
+                        base_env={"PATH": "/usr/bin", "UMMANU_INSTANCE": str(instance)},
                         env_file=env_file,
                     )
-                    self.assertEqual(env["SECRETARY_INSTANCE"], str(instance))
+                    self.assertEqual(env["UMMANU_INSTANCE"], str(instance))
                     for name in LEGACY_ENV:
                         self.assertNotIn(name, env)
                     self.assertFalse(any(STALE_FILE in value for value in env.values()))
@@ -176,10 +176,10 @@ class RuntimeEnvRoleTests(unittest.TestCase):
             instance = Path(tmp)
             env = role_env.runtime_env(
                 "worker",
-                base_env={"PATH": "/usr/bin", "SECRETARY_INSTANCE": str(instance)},
+                base_env={"PATH": "/usr/bin", "UMMANU_INSTANCE": str(instance)},
                 env_file=instance / "runtime.env",
             )
-        self.assertEqual(env["SECRETARY_INSTANCE"], str(instance))
+        self.assertEqual(env["UMMANU_INSTANCE"], str(instance))
 
 
 class NoBoardTransportGateTests(unittest.TestCase):
@@ -199,8 +199,8 @@ class NoBoardTransportGateTests(unittest.TestCase):
                         os.environ,
                         {
                             "PATH": "/usr/bin",
-                            "SECRETARY_INSTANCE": str(instance),
-                            "TA_SECRETARY_REPO": str(product),
+                            "UMMANU_INSTANCE": str(instance),
+                            "UMMANU_REPO": str(product),
                         },
                         clear=True,
                     ),
@@ -217,10 +217,10 @@ class NoBoardTransportGateTests(unittest.TestCase):
 
 def _dispatcher_unit_path(home: Path) -> str:
     """The PATH the production dispatcher unit hands the processes it starts."""
-    unit = role_env.REPO_ROOT / "packaging" / "systemd" / "secretary-dispatcher-production.service"
+    unit = role_env.REPO_ROOT / "packaging" / "systemd" / "ummanu-dispatcher-production.service"
     for line in unit.read_text(encoding="utf-8").splitlines():
         if line.startswith("Environment=PATH="):
-            return line[len("Environment=PATH=") :].replace("{{SECRETARY_RUNTIME_HOME}}", str(home))
+            return line[len("Environment=PATH=") :].replace("{{UMMANU_RUNTIME_HOME}}", str(home))
     raise AssertionError(f"{unit} sets no PATH")
 
 
@@ -228,7 +228,7 @@ class ManagedInterpreterTests(unittest.TestCase):
     """secretary-1708: a head of a role that runs the product's own CLI finds the product's venv."""
 
     ROLES = ("observer", "steward", "retro", "curator")
-    PROBE = "command -v python3; python3 -P -m secretary automations --help >/dev/null; echo rc=$?"
+    PROBE = "command -v python3; python3 -P -m ummanu automations --help >/dev/null; echo rc=$?"
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
@@ -242,9 +242,9 @@ class ManagedInterpreterTests(unittest.TestCase):
         self.product = managed_product_root(self.root)
         self.launcher_env = {
             "HOME": str(self.home),
-            "SECRETARY_INSTANCE": str(self.instance),
-            "SECRETARY_RUNTIME_ENV_FILE": str(self.instance / "runtime.env"),
-            "TA_SECRETARY_REPO": str(self.product),
+            "UMMANU_INSTANCE": str(self.instance),
+            "UMMANU_RUNTIME_ENV_FILE": str(self.instance / "runtime.env"),
+            "UMMANU_REPO": str(self.product),
         }
 
     def run_clean(self, command: str) -> subprocess.CompletedProcess[str]:
@@ -273,8 +273,8 @@ class ManagedInterpreterTests(unittest.TestCase):
 
     def test_the_helper_resolves_the_venv_of_the_checkout_the_role_imports(self) -> None:
         cases = (
-            ({"TA_SECRETARY_REPO": "/srv/repo"}, "/srv/repo"),
-            ({"TA_RUNTIME_PYTHONPATH": "/srv/runtime", "TA_SECRETARY_REPO": "/srv/repo"}, "/srv/runtime"),
+            ({"UMMANU_REPO": "/srv/repo"}, "/srv/repo"),
+            ({"TA_RUNTIME_PYTHONPATH": "/srv/runtime", "UMMANU_REPO": "/srv/repo"}, "/srv/runtime"),
             ({}, str(role_env.REPO_ROOT)),
         )
         for environ, root in cases:
@@ -299,7 +299,7 @@ class ManagedInterpreterTests(unittest.TestCase):
 
     def test_the_dispatcher_renders_an_observer_head_through_the_helper(self) -> None:
         """The command the dispatcher hands whichever backend holds an observer head."""
-        from secretary.dispatch.host import InstanceCatalog
+        from ummanu.dispatch.host import InstanceCatalog
 
         catalog = InstanceCatalog.__new__(InstanceCatalog)
         catalog._heads = {"profiles": {"head": {"adapter": "claude"}}}
@@ -339,7 +339,7 @@ class ManagedInterpreterTests(unittest.TestCase):
                 self.assertEqual(
                     env["PATH"].split(os.pathsep)[:2],
                     [
-                        str(self.product / "src/secretary/runtime/docker-bin"),
+                        str(self.product / "src/ummanu/runtime/docker-bin"),
                         str(workspace / role_env.WORKSPACE_ENV_DIR / "bin"),
                     ],
                 )
@@ -350,7 +350,7 @@ class ManagedInterpreterTests(unittest.TestCase):
         workspace = self.root / "workspace"
         (workspace / role_env.WORKSPACE_ENV_DIR).parent.mkdir(parents=True)
         (workspace / role_env.WORKSPACE_ENV_DIR).symlink_to(Path(sys.prefix), target_is_directory=True)
-        namespace = workspace / ".secretary-task-env"
+        namespace = workspace / ".ummanu-task-env"
         expected = {
             "PYTHONPYCACHEPREFIX": str(namespace / "pycache"),
             "RUFF_CACHE_DIR": str(namespace / "ruff-cache"),
@@ -399,7 +399,7 @@ class ManagedInterpreterTests(unittest.TestCase):
             for role in self.ROLES:
                 with self.subTest(state=state, role=role):
                     with mock.patch.dict(
-                        os.environ, {**self.launcher_env, "TA_SECRETARY_REPO": str(broken)}, clear=True
+                        os.environ, {**self.launcher_env, "UMMANU_REPO": str(broken)}, clear=True
                     ):
                         with self.assertRaisesRegex(
                             role_env.RoleEnvError, "no executable managed interpreter"
@@ -410,7 +410,7 @@ class ManagedInterpreterTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 125, result.stderr)
                     self.assertNotIn("started", result.stdout)
                     self.assertIn(f"no executable managed interpreter at '{python}'", result.stderr)
-                    self.assertIn(f"secretary upgrade --no-pull --product-root {broken}", result.stderr)
+                    self.assertIn(f"ummanu upgrade --no-pull --product-root {broken}", result.stderr)
 
 
 if __name__ == "__main__":

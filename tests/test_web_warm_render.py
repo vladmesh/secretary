@@ -29,19 +29,19 @@ from unittest import mock
 
 import yaml
 
-from secretary.board import store
-from secretary.board.sql_cards import SqlCardClient
-from secretary.board.sql_sprints import sprint_key
-from secretary.tasks import TaskReader
-from secretary.web.app import WebApp
-from secretary.web.commands import health_layers
-from secretary.web.provider_usage import ProviderUsageLayer
-from secretary.webproto.pause_reads import PauseReadLayer
-from secretary.webproto.reads import hold_store_exclusion
-from secretary.webproto.sprint_reads import SprintReadLayer
 from tests.fakes.tasks import reader_seed
 from tests.sql_backend_fixtures import PostgresBoard, seed_client, terminate_session
 from tests.web_fakes import Recording
+from ummanu.board import store
+from ummanu.board.sql_cards import SqlCardClient
+from ummanu.board.sql_sprints import sprint_key
+from ummanu.tasks import TaskReader
+from ummanu.web.app import WebApp
+from ummanu.web.commands import health_layers
+from ummanu.web.provider_usage import ProviderUsageLayer
+from ummanu.webproto.pause_reads import PauseReadLayer
+from ummanu.webproto.reads import hold_store_exclusion
+from ummanu.webproto.sprint_reads import SprintReadLayer
 
 #: The Definition of Done's ceiling for one warm render.
 MAX_WARM_STATEMENTS = 50
@@ -93,7 +93,7 @@ class WarmDashboardRenderTests(unittest.TestCase):
         # An older card projection is still on disk: the cold render's health collection
         # counts it, which is what shows the counter below sees the path it is asserting about.
         (self.data_dir / "board" / "cards.ndjson").write_text(
-            json.dumps({"ref": "secretary-468"}) + "\n", encoding="utf-8"
+            json.dumps({"ref": "ummanu-468"}) + "\n", encoding="utf-8"
         )
         self.instance = self._instance()
         config = BOARD.fresh_database()
@@ -121,15 +121,15 @@ class WarmDashboardRenderTests(unittest.TestCase):
             "offsite:\n  instance_remote: https://example.invalid/instance.git\n",
             encoding="utf-8",
         )
-        repo = self.tmp / "repos" / "secretary"
+        repo = self.tmp / "repos" / "ummanu"
         repo.mkdir(parents=True)
-        (instance / "projects" / "secretary.yaml").write_text(
+        (instance / "projects" / "ummanu.yaml").write_text(
             yaml.safe_dump(
                 {
-                    "id": "secretary",
+                    "id": "ummanu",
                     "repo": str(repo),
                     "enabled": True,
-                    "adapter": "secretary",
+                    "adapter": "ummanu",
                     "default_branch": "main",
                 }
             ),
@@ -219,7 +219,7 @@ class WarmDashboardRenderTests(unittest.TestCase):
         other_reader = SqlCardClient(self.config.for_role("read"), self.instance)
         self.addCleanup(other_reader.close)
         self.assertEqual(
-            TaskReader(other_reader).show("secretary-468")["title"], "Readonly task protocol"
+            TaskReader(other_reader).show("ummanu-468")["title"], "Readonly task protocol"
         )
         other_pid = other_reader.connection.info.backend_pid
 
@@ -232,7 +232,7 @@ class WarmDashboardRenderTests(unittest.TestCase):
 
         before = current_cards()
         self.assertIn(
-            ("secretary-468", "Readonly task protocol"),
+            ("ummanu-468", "Readonly task protocol"),
             [(card["ref"], card["title"]) for card in before],
         )
         client = app.reads._client()
@@ -243,16 +243,16 @@ class WarmDashboardRenderTests(unittest.TestCase):
         after = current_cards()
         self.assertEqual(after, before)
         self.assertNotEqual(client.connection.info.backend_pid, first_pid)
-        response = app.handle("GET", "/api/tasks/secretary-468")
+        response = app.handle("GET", "/api/tasks/ummanu-468")
         self.assertEqual(response.status, 200)
         card = json.loads(response.body)["card"]
         self.assertEqual(card["source"]["state"], "available")
         self.assertEqual(
             (card["value"]["ref"], card["value"]["title"]),
-            ("secretary-468", "Readonly task protocol"),
+            ("ummanu-468", "Readonly task protocol"),
         )
         self.assertEqual(
-            TaskReader(other_reader).show("secretary-468")["title"], "Readonly task protocol"
+            TaskReader(other_reader).show("ummanu-468")["title"], "Readonly task protocol"
         )
         self.assertEqual(other_reader.connection.info.backend_pid, other_pid)
 

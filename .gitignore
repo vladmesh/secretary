@@ -1,20 +1,20 @@
 __pycache__/
 *.py[cod]
 .venv/
-.secretary-task-env/
+.ummanu-task-env/
 build/
 dist/
 *.egg-info/
 
 # Live operational state written by the board/task CLI; never a git repo.
-secretary-data/
+ummanu-data/
 runtime.env
 
 # Dispatcher-generated handoff packets belong to the current workspace only.
 TASK.md
 REVIEW.md
 
-# Runtime state under role worktrees, for example secretary/pipeline/state.
+# Runtime state under role worktrees, for example ummanu/pipeline/state.
 /state/
 
 # Local secret drop-box: plaintext owner credentials, never committed.

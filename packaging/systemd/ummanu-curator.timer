@@ -1,0 +1,11 @@
+[Unit]
+Description=Run ummanu curator hourly
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=90
+Persistent=true
+Unit=ummanu-curator.service
+
+[Install]
+WantedBy=timers.target

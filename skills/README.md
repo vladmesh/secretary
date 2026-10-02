@@ -2,7 +2,7 @@
 
 The canon of skills is stored by role, not by shell:
 
-- `skills/roles/secretary/*`
+- `skills/roles/ummanu/*`
 - `skills/roles/curator/*`
 - `skills/roles/observer/*`
 - `skills/roles/po/*`
@@ -15,13 +15,13 @@ and can lose the link or resolve it in a different context. Copies are easier to
 Check:
 
 ```bash
-secretary role-skills audit --json
+ummanu role-skills audit --json
 ```
 
 Synchronise:
 
 ```bash
-secretary role-skills sync
+ummanu role-skills sync
 ```
 
 `skills/manifest.toml` declares the roles, their skills and the target directories. If a role needs a
@@ -38,13 +38,13 @@ A root written `@po/...` is inside the product owner's workspace, `<data_dir>/po
 may deliver a skill another role declares by naming it `<role>/<skill>`: the copy is read from that
 role's tree, so a shared skill keeps one source.
 
-Sync writes a `.secretary-role-skill` marker into every copy and removes a marked copy once no
+Sync writes a `.ummanu-role-skill` marker into every copy and removes a marked copy once no
 manifest declares that skill for its root. A copy delivered before markers existed is removed only
 when its `SKILL.md` is byte for byte a version the manifest's repository shipped under that name.
 Nothing else in a shell root is touched.
 
 `--product-root <checkout>` reads the manifest of another checkout instead of the one this command
-was installed from. `secretary upgrade --product-root` passes it for you, so an upgrade delivers the
+was installed from. `ummanu upgrade --product-root` passes it for you, so an upgrade delivers the
 skills of the version it is installing.
 
 ## The installation overlay
@@ -54,12 +54,12 @@ helper for one host. Those live in the private instance repository, not here. `r
 second manifest at `<instance>/skills/manifest.toml` and layers it over this one:
 
 ```bash
-secretary role-skills audit --instance PATH
-secretary role-skills sync --instance PATH
+ummanu role-skills audit --instance PATH
+ummanu role-skills sync --instance PATH
 ```
 
 `--instance` takes the instance directory or the `instance.yaml` inside it, and defaults to
-`SECRETARY_INSTANCE`. An installation with no overlay file is a complete installation; nothing warns
+`UMMANU_INSTANCE`. An installation with no overlay file is a complete installation; nothing warns
 about it.
 
 The overlay adds to a role, it does not replace one: a product skill stays delivered when an
@@ -88,7 +88,7 @@ registry leaves nothing half delivered.
 ## Command entry points
 
 A skill may ship one command the operator runs by name: an executable `<skill>.sh` beside its
-`SKILL.md`. `sync` links `~/bin/<skill>` (`SECRETARY_BIN_DIR` overrides the directory) at that
+`SKILL.md`. `sync` links `~/bin/<skill>` (`UMMANU_BIN_DIR` overrides the directory) at that
 script and makes the script executable. Nothing declares it in a manifest, so a skill carries its
 command with it when it moves between the product and an installation, and the documented entry
 point survives the move without anyone editing a link.

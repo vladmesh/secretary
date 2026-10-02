@@ -12,14 +12,14 @@ from unittest import mock
 
 import yaml
 
-from secretary import upgrade
-from secretary.memory.pack import (
+from tests.fakes.upgrade import FakeUnitInstaller
+from ummanu import upgrade
+from ummanu.memory.pack import (
     MemoryPackDegradedError,
     MemoryPackError,
     load_product_pack,
     materialize_product_pack,
 )
-from tests.fakes.upgrade import FakeUnitInstaller
 
 
 def git(repo: Path, *args: str) -> str:
@@ -40,18 +40,18 @@ def instance_repo(path: Path) -> Path:
 
 
 def write_pack(root: Path, facts: dict[str, str]) -> Path:
-    pack = root / "packaging" / "memory" / "product-secretary"
+    pack = root / "packaging" / "memory" / "product-ummanu"
     pack.mkdir(parents=True, exist_ok=True)
     entries = []
     for fact_id, text in facts.items():
         filename = f"{fact_id}.md"
-        raw = f"---\nsource: product:secretary\n---\n{text}\n".encode()
+        raw = f"---\nsource: product:ummanu\n---\n{text}\n".encode()
         (pack / filename).write_bytes(raw)
         entries.append({"id": fact_id, "path": filename, "sha256": hashlib.sha256(raw).hexdigest()})
     manifest = {
         "schema": 1,
-        "product": "secretary",
-        "namespace": "product:secretary",
+        "product": "ummanu",
+        "namespace": "product:ummanu",
         "status": "active",
         "ownership": "shipped",
         "fact_format": "markdown-frontmatter-v1",
@@ -94,15 +94,15 @@ class ProductMemoryPackTests(unittest.TestCase):
         export = self.data / "memory" / "export.ndjson"
         rows = [json.loads(line) for line in export.read_text(encoding="utf-8").splitlines()]
         ledger = json.loads(
-            (self.instance / "state/memory/packs/product-secretary.json").read_text(encoding="utf-8")
+            (self.instance / "state/memory/packs/product-ummanu.json").read_text(encoding="utf-8")
         )
 
         self.assertTrue(result.changed)
-        self.assertEqual({row["id"] for row in rows}, {"product-secretary/one", "product-secretary/two"})
-        self.assertEqual(ledger["namespace"], "product:secretary")
+        self.assertEqual({row["id"] for row in rows}, {"product-ummanu/one", "product-ummanu/two"})
+        self.assertEqual(ledger["namespace"], "product:ummanu")
 
     def test_overlay_collision_is_refused_before_any_instance_mutation(self):
-        local = self.instance / "state/memory/facts/product-secretary/one.md"
+        local = self.instance / "state/memory/facts/product-ummanu/one.md"
         local.parent.mkdir(parents=True)
         local.write_text("local\n", encoding="utf-8")
         self.commit_memory("local fact")
@@ -112,11 +112,11 @@ class ProductMemoryPackTests(unittest.TestCase):
             self.materialize()
 
         self.assertEqual(local.read_text(encoding="utf-8"), before)
-        self.assertFalse((self.instance / "state/memory/packs/product-secretary.json").exists())
+        self.assertFalse((self.instance / "state/memory/packs/product-ummanu.json").exists())
 
     def test_complete_manifest_deletes_only_previously_owned_ids_and_is_noop_when_unchanged(self):
         self.materialize()
-        overlay = self.instance / "state/memory/facts/product-secretary/local.md"
+        overlay = self.instance / "state/memory/facts/product-ummanu/local.md"
         overlay.write_text("local overlay\n", encoding="utf-8")
         project = self.instance / "state/memory/facts/project/local.md"
         project.parent.mkdir(parents=True)
@@ -127,7 +127,7 @@ class ProductMemoryPackTests(unittest.TestCase):
         changed = self.materialize()
         unchanged = self.materialize()
 
-        facts = self.instance / "state/memory/facts/product-secretary"
+        facts = self.instance / "state/memory/facts/product-ummanu"
         self.assertTrue((facts / "one.md").read_text(encoding="utf-8").endswith("one changed\n"))
         self.assertFalse((facts / "two.md").exists())
         self.assertTrue((facts / "three.md").exists())
@@ -137,7 +137,7 @@ class ProductMemoryPackTests(unittest.TestCase):
         self.assertFalse(unchanged.changed)
 
     def test_invalid_shipped_digest_fails_before_writing_the_instance(self):
-        fact = self.product / "packaging/memory/product-secretary/one.md"
+        fact = self.product / "packaging/memory/product-ummanu/one.md"
         fact.write_text("tampered\n", encoding="utf-8")
 
         with self.assertRaisesRegex(MemoryPackError, "digest mismatch"):
@@ -146,7 +146,7 @@ class ProductMemoryPackTests(unittest.TestCase):
         self.assertFalse((self.instance / "state").exists())
 
     def test_malformed_missing_escaping_and_symlinked_sources_fail_before_instance_mutation(self):
-        pack = self.product / "packaging/memory/product-secretary"
+        pack = self.product / "packaging/memory/product-ummanu"
         cases = {
             "malformed": lambda: (pack / "manifest.yaml").write_text("facts: [\n", encoding="utf-8"),
             "missing": lambda: self._rewrite_manifest_path("one", "missing.md"),
@@ -161,7 +161,7 @@ class ProductMemoryPackTests(unittest.TestCase):
                     instance = instance_repo(root / "instance")
                     self.product = product
                     self.instance = instance
-                    pack = product / "packaging/memory/product-secretary"
+                    pack = product / "packaging/memory/product-ummanu"
                     corrupt()
                     with self.assertRaises(MemoryPackError):
                         load_product_pack(product)
@@ -171,7 +171,7 @@ class ProductMemoryPackTests(unittest.TestCase):
 
     def test_state_repo_failure_is_a_typed_pack_error_and_recovers_the_worktree(self):
         with mock.patch(
-            "secretary.memory.pack.state_repo.commit",
+            "ummanu.memory.pack.state_repo.commit",
             side_effect=upgrade.state_repo.StateRepoError("state lock unavailable"),
         ):
             with self.assertRaisesRegex(MemoryPackError, "state lock unavailable"):
@@ -180,12 +180,12 @@ class ProductMemoryPackTests(unittest.TestCase):
 
     def test_failed_export_leaves_pending_ledger_and_no_pull_retry_converges(self):
         with mock.patch(
-            "secretary.memory.pack._publish_memory_export", side_effect=RuntimeError("data directory read-only")
+            "ummanu.memory.pack._publish_memory_export", side_effect=RuntimeError("data directory read-only")
         ):
             with self.assertRaisesRegex(MemoryPackDegradedError, "data directory read-only"):
                 self.materialize()
 
-        ledger_path = self.instance / "state/memory/packs/product-secretary.json"
+        ledger_path = self.instance / "state/memory/packs/product-ummanu.json"
         self.assertEqual(json.loads(ledger_path.read_text(encoding="utf-8"))["state"], "pending")
         retried = self.materialize()
         self.assertTrue(retried.changed)
@@ -193,13 +193,13 @@ class ProductMemoryPackTests(unittest.TestCase):
         self.assertTrue((self.data / "memory/export.ndjson").is_file())
 
     def test_root_handoff_precedes_state_commit_and_makes_export_runtime_owned(self):
-        report = SimpleNamespace(data_dir=self.data, host={"unit_prefix": "secretary-"})
+        report = SimpleNamespace(data_dir=self.data, host={"unit_prefix": "ummanu-"})
         context = upgrade.UpgradeContext(
             instance_path=self.instance,
             product_root=self.product,
             base_branch="main",
             dry_run=False,
-            units=FakeUnitInstaller(active={"secretary-memory.service"}),
+            units=FakeUnitInstaller(active={"ummanu-memory.service"}),
             report=report,
             runtime_user="operator",
         )
@@ -211,15 +211,15 @@ class ProductMemoryPackTests(unittest.TestCase):
             owned.add(Path(path))
 
         def commit(*args, **kwargs):
-            self.assertIn(self.instance / "state/memory/facts/product-secretary/one.md", owned)
-            self.assertIn(self.instance / "state/memory/packs/product-secretary.json", owned)
+            self.assertIn(self.instance / "state/memory/facts/product-ummanu/one.md", owned)
+            self.assertIn(self.instance / "state/memory/packs/product-ummanu.json", owned)
             return actual_commit(*args, **kwargs)
 
         with (
-            mock.patch("secretary.upgrade.os.geteuid", return_value=0),
-            mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
-            mock.patch("secretary.upgrade.os.chown", side_effect=chown),
-            mock.patch("secretary.memory.pack.state_repo.commit", side_effect=commit),
+            mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
+            mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=account),
+            mock.patch("ummanu.upgrade.os.chown", side_effect=chown),
+            mock.patch("ummanu.memory.pack.state_repo.commit", side_effect=commit),
         ):
             result = upgrade.step_memory_pack(context)
 
@@ -230,13 +230,13 @@ class ProductMemoryPackTests(unittest.TestCase):
         )
 
     def _rewrite_manifest_path(self, fact_id: str, path: str) -> None:
-        manifest_path = self.product / "packaging/memory/product-secretary/manifest.yaml"
+        manifest_path = self.product / "packaging/memory/product-ummanu/manifest.yaml"
         manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
         next(entry for entry in manifest["facts"] if entry["id"] == fact_id)["path"] = path
         manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
 
     def _symlink_pack_fact(self) -> None:
-        pack = self.product / "packaging/memory/product-secretary"
+        pack = self.product / "packaging/memory/product-ummanu"
         fact = pack / "one.md"
         outside = self.root / "outside.md"
         outside.write_text("outside\n", encoding="utf-8")
@@ -248,17 +248,17 @@ class ProductMemoryPackTests(unittest.TestCase):
         git(self.product, "init", "--initial-branch=main", "--quiet")
         git(self.product, "add", "-A")
         git(self.product, "-c", "user.name=T", "-c", "user.email=t@example.invalid", "commit", "-qm", "p")
-        report = SimpleNamespace(data_dir=self.data, host={"unit_prefix": "secretary-"})
+        report = SimpleNamespace(data_dir=self.data, host={"unit_prefix": "ummanu-"})
         context = upgrade.UpgradeContext(
             instance_path=self.instance,
             product_root=self.product,
             base_branch="main",
             dry_run=False,
-            units=FakeUnitInstaller(active={"secretary-memory.service"}),
+            units=FakeUnitInstaller(active={"ummanu-memory.service"}),
             pull=False,
             report=report,
         )
-        with mock.patch("secretary.upgrade.probe_memory") as probe:
+        with mock.patch("ummanu.upgrade.probe_memory") as probe:
             first = upgrade.step_memory_pack(context)
             restarted = upgrade.step_memory(context)
             second = upgrade.step_memory_pack(context)
@@ -266,7 +266,7 @@ class ProductMemoryPackTests(unittest.TestCase):
 
         self.assertEqual(first.status, "changed")
         self.assertEqual(restarted.status, "changed")
-        self.assertIn(("restart", "secretary-memory.service"), context.units.calls)
+        self.assertIn(("restart", "ummanu-memory.service"), context.units.calls)
         probe.assert_called_once()
         self.assertEqual(second.status, "unchanged")
         self.assertEqual(no_op.status, "unchanged")

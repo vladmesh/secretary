@@ -12,15 +12,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.dispatch import review, wait_vitality
-from secretary.dispatch.head_vitality_episode import VitalityVerdict
-from secretary.runtime.head.local_pty import protocol, scope_bootstrap, scope_launcher
-from secretary.runtime.head.local_pty.client import LocalPtySpawnError, spawn_head
-from secretary.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, JournalWriter, read_events
-from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
-from secretary.runtime.head.local_pty.supervisor import Supervisor, SupervisorStartupError
-from secretary.runtime.head.command import with_pid_heartbeat
-from secretary.runtime.head.memory import (
+from ummanu.dispatch import review, wait_vitality
+from ummanu.dispatch.head_vitality_episode import VitalityVerdict
+from ummanu.runtime.head.local_pty import protocol, scope_bootstrap, scope_launcher
+from ummanu.runtime.head.local_pty.client import LocalPtySpawnError, spawn_head
+from ummanu.runtime.head.local_pty.journal import RUN_EXITED, RUN_STARTED, JournalWriter, read_events
+from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+from ummanu.runtime.head.local_pty.supervisor import Supervisor, SupervisorStartupError
+from ummanu.runtime.head.command import with_pid_heartbeat
+from ummanu.runtime.head.memory import (
     DEFAULT_MEMORY_LIMIT_MIB,
     ScopeEvidence,
     read_oom_victim,
@@ -29,13 +29,13 @@ from secretary.runtime.head.memory import (
     scope_argv,
     scope_unit,
 )
-from secretary.runtime.head.spec import HeadSpec, HeadSpecError
-from secretary.runtime.local_pty_head import head_run_loss_reason
-from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
-from secretary.runtime.head.run import HeadRun, StopInitiator
-from secretary.runtime.head.task_ref import TaskRef
-from secretary.runtime.head.memory import MemoryScopeError
-from secretary.webproto.run_state import _exit_status
+from ummanu.runtime.head.spec import HeadSpec, HeadSpecError
+from ummanu.runtime.local_pty_head import head_run_loss_reason
+from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
+from ummanu.runtime.head.run import HeadRun, StopInitiator
+from ummanu.runtime.head.task_ref import TaskRef
+from ummanu.runtime.head.memory import MemoryScopeError
+from ummanu.webproto.run_state import _exit_status
 
 
 class HeadMemoryTests(unittest.TestCase):
@@ -48,17 +48,17 @@ class HeadMemoryTests(unittest.TestCase):
             ("oom-kill:constraint=CONSTRAINT_MEMCG,task=head,pid=111", False),
         ):
             with self.subTest(message=message), mock.patch(
-                "secretary.runtime.head.memory.os.read",
+                "ummanu.runtime.head.memory.os.read",
                 side_effect=[f"3,22,1000,-;{message}\n".encode(), BlockingIOError()],
             ):
                 self.assertEqual(read_oom_victim(99, 111) is not None, expected)
         for failure in (OSError("lost records"), BlockingIOError()):
-            with mock.patch("secretary.runtime.head.memory.os.read", side_effect=[
+            with mock.patch("ummanu.runtime.head.memory.os.read", side_effect=[
                 b"3,22,1000,-;Memory cgroup out of memory: Killed process 111 (head) total-vm:100\n",
                 failure,
             ]):
                 self.assertEqual(read_oom_victim(99, 111) is None, not isinstance(failure, BlockingIOError))
-        with mock.patch("secretary.runtime.head.memory.os.read", side_effect=[
+        with mock.patch("ummanu.runtime.head.memory.os.read", side_effect=[
             b"11,22,1000,-;Memory cgroup out of memory: Killed process 111 (spoof) total-vm:100\n",
             BlockingIOError(),
         ]):
@@ -78,10 +78,10 @@ class HeadMemoryTests(unittest.TestCase):
                 if order.count("kernel") == 1:
                     return b"3,22,1000,-;Memory cgroup out of memory: Killed process 222 (child) total-vm:100\n"
                 raise BlockingIOError()
-            with (mock.patch("secretary.runtime.head.local_pty.supervisor.os.waitid",
+            with (mock.patch("ummanu.runtime.head.local_pty.supervisor.os.waitid",
                              side_effect=lambda *_: order.append("reserve") or SimpleNamespace(si_pid=111)),
-                  mock.patch("secretary.runtime.head.memory.os.read", side_effect=read),
-                  mock.patch("secretary.runtime.head.local_pty.supervisor.os.waitpid",
+                  mock.patch("ummanu.runtime.head.memory.os.read", side_effect=read),
+                  mock.patch("ummanu.runtime.head.local_pty.supervisor.os.waitpid",
                              side_effect=lambda *_: order.append("release") or (111, 9))):
                 supervisor._reap()
             self.assertEqual(order, ["reserve", "kernel", "kernel", "release"])
@@ -107,8 +107,8 @@ class HeadMemoryTests(unittest.TestCase):
                 runtime = LocalPtyHeadRuntime(root, head_process_status=lambda *_args, **_kwargs: {"state": "dead"})
                 with (mock.patch.object(runtime, "_ask_to_stop", return_value={"ok": True}),
                       mock.patch.object(runtime, "_await_head_gone", return_value=True),
-                      mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
-                      mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
+                      mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                      mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
                                  return_value=SimpleNamespace(returncode=1, stderr=b"temporary failure"))):
                     refused = runtime.stop(run, StopInitiator(actor="owner"))
                 self.assertFalse(refused.ok)
@@ -118,8 +118,8 @@ class HeadMemoryTests(unittest.TestCase):
                 (cgroup / "cgroup.events").write_text("populated 0\n")
                 with (mock.patch.object(runtime, "_ask_to_stop", return_value={"ok": True}),
                       mock.patch.object(runtime, "_await_head_gone", return_value=True),
-                      mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
-                      mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
+                      mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                      mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
                                  return_value=SimpleNamespace(returncode=0, stderr=b""))):
                     self.assertTrue(runtime.stop(run, StopInitiator(actor="owner")).ok)
 
@@ -128,11 +128,11 @@ class HeadMemoryTests(unittest.TestCase):
             root = Path(temp)
             original = ScopedHeadLifecycle("pending", 96, directory=root)
             original.persist(root)
-            with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root / "cgroups"):
+            with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root / "cgroups"):
                 original.stop_and_prove_empty()
             replacement = ScopedHeadLifecycle("pending", 96, directory=root)
             replacement.persist(root)
-            with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen") as popen:
+            with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen") as popen:
                 self.assertEqual(scope_launcher.main([
                     temp, str(root / "scope.log"), "1", original.generation, "systemd-run",
                 ]), 1)
@@ -158,8 +158,8 @@ class HeadMemoryTests(unittest.TestCase):
             owner = ScopedHeadLifecycle("unreadable-membership", 96)
             owner.persist(root)
             (root / "system.slice" / scope_unit(owner.run_id)).mkdir(parents=True)
-            with (mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
-                  mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
+            with (mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                  mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
                              return_value=SimpleNamespace(returncode=0, stderr=b""))):
                 with self.assertRaisesRegex(MemoryScopeError, "no membership evidence"):
                     owner.stop_and_prove_empty()
@@ -209,9 +209,9 @@ class HeadMemoryTests(unittest.TestCase):
             self.assertIn(str(Path(scope_bootstrap.__file__).resolve()), argv)
             self.assertIn("-I", argv)
             self.assertIn("--property=Delegate=yes", argv)
-            owned = scope_argv("po-run", 96, ["/bin/true"], owner_unit="secretary-po.service")
-            self.assertIn("--property=BindsTo=secretary-po.service", owned)
-            self.assertIn("--property=After=secretary-po.service", owned)
+            owned = scope_argv("po-run", 96, ["/bin/true"], owner_unit="ummanu-po.service")
+            self.assertIn("--property=BindsTo=ummanu-po.service", owned)
+            self.assertIn("--property=After=ummanu-po.service", owned)
 
     def test_supervisor_refuses_until_its_own_scope_has_the_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -225,11 +225,11 @@ class HeadMemoryTests(unittest.TestCase):
             (cgroup / "pids.peak").write_text("1\n", encoding="ascii")
             supervisor = Supervisor(run_dir=Path(temp), run_id=run_id, role="worker",
                                     task="card:1", command="true", memory_limit_mib=1)
-            with (mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.own_cgroup", return_value=cgroup),
-                  mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.supervisor_oom_protected", return_value=True),
+            with (mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.own_cgroup", return_value=cgroup),
+                  mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.supervisor_oom_protected", return_value=True),
                   mock.patch.dict(os.environ, {OOM_STREAM_ENV: "99"}),
-                  mock.patch("secretary.runtime.head.local_pty.supervisor.os.fstat"),
-                  mock.patch("secretary.runtime.head.local_pty.supervisor.os.set_inheritable")):
+                  mock.patch("ummanu.runtime.head.local_pty.supervisor.os.fstat"),
+                  mock.patch("ummanu.runtime.head.local_pty.supervisor.os.set_inheritable")):
                 supervisor._prepare_memory_scope()
                 self.assertEqual(supervisor._memory_evidence, ScopeEvidence(cgroup, {"max": 0, "oom_kill": 0, "oom_group_kill": 0}))
                 (cgroup / "memory.max").write_text("2097152\n", encoding="ascii")
@@ -361,7 +361,7 @@ class HeadMemoryTests(unittest.TestCase):
     def test_child_oom_then_unrelated_head_kill_is_not_attributed(self) -> None:
         before = {"max": 0, "oom_kill": 0, "oom_group_kill": 0}
         child_only = {"max": 1, "oom_kill": 1, "oom_group_kill": 0}
-        with mock.patch("secretary.runtime.head.memory.os.read", side_effect=[
+        with mock.patch("ummanu.runtime.head.memory.os.read", side_effect=[
             b"3,22,1000,-;Memory cgroup out of memory: Killed process 222 (child) total-vm:1\n",
             BlockingIOError(),
         ]):
@@ -380,10 +380,10 @@ class HeadMemoryTests(unittest.TestCase):
                 return SimpleNamespace(returncode=0, stderr=b"")
 
             with (
-                mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen",
+                mock.patch("ummanu.runtime.head.local_pty.client.subprocess.Popen",
                            return_value=SimpleNamespace(wait=lambda: 0)),
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=stop) as systemctl,
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run", side_effect=stop) as systemctl,
             ):
                 with self.assertRaises(LocalPtySpawnError) as failure:
                     spawn_head(root=root / "runs", run_id=run_id, role="worker", task="card:1",
@@ -402,10 +402,10 @@ class HeadMemoryTests(unittest.TestCase):
             (cgroup / "cgroup.events").write_text("populated 1\n", encoding="ascii")
             run_dir = protocol.run_dir_for(root / "runs", run_id)
             with (
-                mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen",
+                mock.patch("ummanu.runtime.head.local_pty.client.subprocess.Popen",
                            return_value=SimpleNamespace(wait=lambda: 0)),
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
                            return_value=SimpleNamespace(returncode=1, stderr=b"failed")),
             ):
                 with self.assertRaises(LocalPtySpawnError) as failure:
@@ -416,8 +416,8 @@ class HeadMemoryTests(unittest.TestCase):
             owner = ScopedHeadLifecycle.from_run_dir(run_dir)
             self.assertIsNotNone(owner)
             with (
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
                            side_effect=lambda *_args, **_kwargs: (
                                (cgroup / "cgroup.events").write_text("populated 0\n", encoding="ascii")
                                and SimpleNamespace(returncode=0, stderr=b"")
@@ -433,10 +433,10 @@ class HeadMemoryTests(unittest.TestCase):
             cgroup.mkdir(parents=True)
             (cgroup / "cgroup.events").write_text("populated 1\n", encoding="ascii")
             with (
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root),
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.run",
                            return_value=SimpleNamespace(returncode=0, stderr=b"")),
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.time.monotonic",
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.time.monotonic",
                            side_effect=[0, 11]),
             ):
                 with self.assertRaisesRegex(RuntimeError, "still has members"):
@@ -457,7 +457,7 @@ class HeadMemoryTests(unittest.TestCase):
             client = mock.MagicMock()
             client.__enter__.return_value.stop.side_effect = stop
             with mock.patch(
-                "secretary.runtime.head.local_pty.client.SupervisorClient.connect",
+                "ummanu.runtime.head.local_pty.client.SupervisorClient.connect",
                 return_value=client,
             ) as connect:
                 lifecycle.cancel_started(
@@ -477,17 +477,17 @@ class HeadMemoryTests(unittest.TestCase):
                 started = {"kind": "run.started", "head_pid": 12, "supervisor_pid": 11}
                 fake_process = SimpleNamespace(wait=lambda: 0)
                 with (
-                    mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen", return_value=fake_process) as popen,
-                    mock.patch("secretary.runtime.head.local_pty.client.read_events", side_effect=[
+                    mock.patch("ummanu.runtime.head.local_pty.client.subprocess.Popen", return_value=fake_process) as popen,
+                    mock.patch("ummanu.runtime.head.local_pty.client.read_events", side_effect=[
                         SimpleNamespace(events=()), SimpleNamespace(events=(started,))
                     ]),
-                    mock.patch("secretary.runtime.head.local_pty.client._identity_written", return_value=True),
-                    mock.patch("secretary.runtime.head.local_pty.client._answers", return_value=True),
+                    mock.patch("ummanu.runtime.head.local_pty.client._identity_written", return_value=True),
+                    mock.patch("ummanu.runtime.head.local_pty.client._answers", return_value=True),
                 ):
                     handle = spawn_head(root=temp, run_id=run_id, role=role, task="card:1",
                                         command="true", memory_limit_mib=1)
                 argv = popen.call_args.args[0]
-                self.assertIn("secretary.runtime.head.local_pty.scope_launcher", argv)
+                self.assertIn("ummanu.runtime.head.local_pty.scope_launcher", argv)
                 self.assertIn("--property=MemoryMax=1048576", argv)
                 self.assertIn("--property=MemorySwapMax=0", argv)
                 self.assertEqual(argv[argv.index("--memory-limit-mib") + 1], "1")
@@ -502,10 +502,10 @@ class HeadMemoryTests(unittest.TestCase):
             scope = SimpleNamespace(pid=123, poll=mock.Mock(side_effect=AssertionError("started scope was polled")))
             started = SimpleNamespace(events=({"kind": RUN_STARTED},))
             with (
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen", return_value=scope) as popen,
-                mock.patch("secretary.runtime.head.local_pty.journal.read_events", side_effect=[SimpleNamespace(events=()), started]),
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.launch_identity", return_value="boot:123"),
-                mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.os.write"),
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen", return_value=scope) as popen,
+                mock.patch("ummanu.runtime.head.local_pty.journal.read_events", side_effect=[SimpleNamespace(events=()), started]),
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.launch_identity", return_value="boot:123"),
+                mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.os.write"),
             ):
                 result = scope_launcher.main([temp, str(Path(temp) / "scope.log"), "1", owner.generation, "systemd-run"])
             self.assertEqual(result, 0)
@@ -518,9 +518,9 @@ class HeadMemoryTests(unittest.TestCase):
             owner = ScopedHeadLifecycle("launcher", 1)
             owner.persist(Path(temp))
             scope = SimpleNamespace(pid=123, poll=lambda: 7)
-            with (mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen", return_value=scope),
-                  mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.launch_identity", return_value="boot:123"),
-                  mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.os.write")):
+            with (mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen", return_value=scope),
+                  mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.launch_identity", return_value="boot:123"),
+                  mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.os.write")):
                 result = scope_launcher.main([temp, str(Path(temp) / "scope.log"), "1", owner.generation, "systemd-run"])
             self.assertEqual(result, 7)
 
@@ -531,10 +531,10 @@ class HeadMemoryTests(unittest.TestCase):
             owner = ScopedHeadLifecycle("launcher", 1)
             owner.persist(run_dir)
             scope = SimpleNamespace(pid=123, wait=mock.Mock(return_value=0))
-            with (mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen",
+            with (mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen",
                             return_value=scope),
-                  mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.launch_identity", return_value="boot:123"),
-                  mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.os.write")):
+                  mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.launch_identity", return_value="boot:123"),
+                  mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.os.write")):
                 result = scope_launcher.main([temp, str(run_dir / "scope.log"), "1", owner.generation, "systemd-run"])
             self.assertEqual(result, 0)
             scope.wait.assert_called_once_with(timeout=5)
@@ -545,12 +545,12 @@ class HeadMemoryTests(unittest.TestCase):
             started = {"kind": RUN_STARTED, "seq": 1, "head_pid": 12, "supervisor_pid": 11}
             exited = {"kind": RUN_EXITED, "seq": 2, "head_pid": 12, "exit_code": 7}
             with (
-                mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen", return_value=SimpleNamespace(wait=lambda: 0)),
-                mock.patch("secretary.runtime.head.local_pty.client.read_events", side_effect=[
+                mock.patch("ummanu.runtime.head.local_pty.client.subprocess.Popen", return_value=SimpleNamespace(wait=lambda: 0)),
+                mock.patch("ummanu.runtime.head.local_pty.client.read_events", side_effect=[
                     SimpleNamespace(events=()), SimpleNamespace(events=(started, exited)),
                 ]),
-                mock.patch("secretary.runtime.head.local_pty.client._identity_written", return_value=True),
-                mock.patch("secretary.runtime.head.local_pty.client._answers", side_effect=AssertionError("dead socket probed")),
+                mock.patch("ummanu.runtime.head.local_pty.client._identity_written", return_value=True),
+                mock.patch("ummanu.runtime.head.local_pty.client._answers", side_effect=AssertionError("dead socket probed")),
             ):
                 handle = spawn_head(root=temp, run_id=run_id, role="worker", task="card:1",
                                     command="exit 7", memory_limit_mib=1)

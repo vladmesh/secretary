@@ -10,8 +10,8 @@ import base64
 import json
 import unittest
 
-from secretary.webproto.cursor import CURSOR_VERSION, POSITION_ORDINAL, Cursor, decode
-from secretary.webproto.errors import InvalidCursor
+from ummanu.webproto.cursor import CURSOR_VERSION, POSITION_ORDINAL, Cursor, decode
+from ummanu.webproto.errors import InvalidCursor
 
 
 def _document(document: dict[str, object]) -> str:
@@ -26,36 +26,36 @@ def released_offset_cursor(ref: str, offset: int) -> str:
 
 class CursorTests(unittest.TestCase):
     def test_a_cursor_round_trips_and_names_its_position(self) -> None:
-        encoded = Cursor(ref="secretary-1", offset=3).encode()
+        encoded = Cursor(ref="ummanu-1", offset=3).encode()
 
-        self.assertEqual(decode(encoded, ref="secretary-1"), Cursor(ref="secretary-1", offset=3))
+        self.assertEqual(decode(encoded, ref="ummanu-1"), Cursor(ref="ummanu-1", offset=3))
         padding = "=" * (-len(encoded) % 4)
         document = json.loads(base64.urlsafe_b64decode(encoded + padding))
         self.assertEqual(document["pos"], POSITION_ORDINAL)
 
     def test_a_released_byte_offset_cursor_is_refused_like_any_malformed_cursor(self) -> None:
         with self.assertRaises(InvalidCursor) as refused:
-            decode(released_offset_cursor("secretary-1", 4212), ref="secretary-1")
+            decode(released_offset_cursor("ummanu-1", 4212), ref="ummanu-1")
 
         self.assertEqual(refused.exception.code, "validation")
         self.assertIn("fresh task snapshot", str(refused.exception))
 
     def test_a_released_offset_spelling_is_refused_as_well(self) -> None:
-        stated = _document({"v": CURSOR_VERSION, "ref": "secretary-1", "offset": 7, "pos": "offset"})
+        stated = _document({"v": CURSOR_VERSION, "ref": "ummanu-1", "offset": 7, "pos": "offset"})
 
         with self.assertRaises(InvalidCursor):
-            decode(stated, ref="secretary-1")
+            decode(stated, ref="ummanu-1")
 
     def test_other_malformed_cursors_are_refused(self) -> None:
         for label, value in (
             ("empty", ""),
             ("not base64 json", "not-a-cursor"),
-            ("another card", Cursor(ref="secretary-2", offset=0).encode()),
-            ("negative", _document({"v": CURSOR_VERSION, "ref": "secretary-1", "offset": -1, "pos": POSITION_ORDINAL})),
-            ("unknown version", _document({"v": 99, "ref": "secretary-1", "offset": 0, "pos": POSITION_ORDINAL})),
+            ("another card", Cursor(ref="ummanu-2", offset=0).encode()),
+            ("negative", _document({"v": CURSOR_VERSION, "ref": "ummanu-1", "offset": -1, "pos": POSITION_ORDINAL})),
+            ("unknown version", _document({"v": 99, "ref": "ummanu-1", "offset": 0, "pos": POSITION_ORDINAL})),
         ):
             with self.subTest(label), self.assertRaises(InvalidCursor):
-                decode(value, ref="secretary-1")
+                decode(value, ref="ummanu-1")
 
 
 if __name__ == "__main__":

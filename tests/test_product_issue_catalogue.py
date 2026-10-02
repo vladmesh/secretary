@@ -21,10 +21,10 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary.product_issues import ProductIssueStore
-from secretary.tasks import TaskError
 from tests.sql_backend_fixtures import CardStoreClient, card_store
 from tests.webproto_sprint_fixtures import SprintProtocolFixture
+from ummanu.product_issues import ProductIssueStore
+from ummanu.tasks import TaskError
 
 #: A board mixed the way the live one is, at a tenth of the size the owner measured on: the budget
 #: below is a comparison between two sizes, not a count at one.
@@ -87,7 +87,7 @@ def _seed(board: CountingStore, *, scale: int = 1) -> None:
         )
     for index in range(OTHER_CARDS * scale):
         # Ordinary work cards: part of the live board, and not part of the catalogue.
-        board.add_card(10_000 + index, f"secretary-{index}", title=f"Card {index}")
+        board.add_card(10_000 + index, f"ummanu-{index}", title=f"Card {index}")
 
 
 class CatalogueBudgetTests(unittest.TestCase):

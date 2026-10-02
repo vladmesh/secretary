@@ -1,4 +1,4 @@
-"""PO head turns through `secretary.po.runner` with fake `claude`/`codex` against PostgreSQL 16.
+"""PO head turns through `ummanu.po.runner` with fake `claude`/`codex` against PostgreSQL 16.
 
 The fakes are scripts the runner is pointed at. Each one logs its argv, cwd and stdin, prints an
 event stream that carries reasoning and a tool call beside the final answer, and changes behaviour
@@ -19,8 +19,10 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from secretary.po import store as po_store
-from secretary.po.runner import (
+from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, SETTLE_SECONDS, eventually, unscoped_test_launch
+from tests.sql_backend_fixtures import PostgresBoard
+from ummanu.po import store as po_store
+from ummanu.po.runner import (
     PoRunner,
     RunnerError,
     claude_resolved_model,
@@ -28,25 +30,23 @@ from secretary.po.runner import (
     codex_thread_id,
     process_identity,
 )
-from secretary.po.store import PoStore, PoStoreError, TurnInProgress
-from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, SETTLE_SECONDS, eventually, unscoped_test_launch
-from tests.sql_backend_fixtures import PostgresBoard
+from ummanu.po.store import PoStore, PoStoreError, TurnInProgress
 
 BOARD: PostgresBoard
 
 SECRETS = ("THINKING-SECRET", "TOOL-CALL-SECRET")
 
-# A Claude stand-in that records how the PO workspace's `secretary` commands resolve inside a turn.
+# A Claude stand-in that records how the PO workspace's `ummanu` commands resolve inside a turn.
 RECORDING_CLAUDE = """#!/bin/sh
 cat >/dev/null
 {
   echo "python3=$(command -v python3)"
-  echo "secretary=$(command -v secretary)"
-  python3 -P -m secretary --help >/dev/null 2>&1; echo "module=$?"
-  secretary --help >/dev/null 2>&1; echo "script=$?"
+  echo "ummanu=$(command -v ummanu)"
+  python3 -P -m ummanu --help >/dev/null 2>&1; echo "module=$?"
+  ummanu --help >/dev/null 2>&1; echo "script=$?"
   echo "cwd=$(pwd)"
   echo "home=$HOME"
-  echo "mark=$SECRETARY_PO_MARK/$TA_PO_MARK"
+  echo "mark=$UMMANU_PO_MARK/$TA_PO_MARK"
 } > "$FAKE_LOG"
 printf '%s\\n' '{"type": "result", "subtype": "success", "is_error": false, "result": "recorded"}'
 """
@@ -150,7 +150,7 @@ class PoRunnerTests(unittest.TestCase):
 
     # --- first turn and resume -------------------------------------------------------------
 
-    def test_claude_first_turn_and_resume_use_the_secretarys_session_id(self) -> None:
+    def test_claude_first_turn_and_resume_use_the_ummanus_session_id(self) -> None:
         session = self.runner.create_session("claude", "opus", "high")
         self.assertEqual(session.cwd, str(self.data / "po"))
         self.assertIsNotNone(session.cli_session_id)
@@ -466,11 +466,11 @@ class PoRunnerTests(unittest.TestCase):
 
     # --- environment ------------------------------------------------------------------------
 
-    def test_a_turn_runs_the_secretary_cli_from_the_product_runtime_unless_env_is_given(self) -> None:
-        # A host whose system `python3` and `secretary` cannot import the product.
+    def test_a_turn_runs_the_ummanu_cli_from_the_product_runtime_unless_env_is_given(self) -> None:
+        # A host whose system `python3` and `ummanu` cannot import the product.
         system = self.root / "system-bin"
         system.mkdir()
-        for name in ("python3", "secretary"):
+        for name in ("python3", "ummanu"):
             path = system / name
             path.write_text(
                 "#!/bin/sh\necho \"No module named 'referencing'\" >&2\nexit 1\n", encoding="utf-8"
@@ -482,7 +482,7 @@ class PoRunnerTests(unittest.TestCase):
         service = {
             **os.environ,
             "PATH": f"{system}{os.pathsep}{os.environ.get('PATH', '')}",
-            "SECRETARY_PO_MARK": "kept",
+            "UMMANU_PO_MARK": "kept",
             "TA_PO_MARK": "kept",
             "FAKE_LOG": str(self.log),
         }
@@ -502,7 +502,7 @@ class PoRunnerTests(unittest.TestCase):
         seen = turn(built)
         runtime = Path(sys.executable).parent
         self.assertEqual(Path(seen["python3"]), runtime / "python3")
-        self.assertEqual(Path(seen["secretary"]), runtime / "secretary")
+        self.assertEqual(Path(seen["ummanu"]), runtime / "ummanu")
         self.assertEqual((seen["module"], seen["script"]), ("0", "0"))
         self.assertEqual(Path(seen["cwd"]).resolve(), (self.data / "po").resolve())
         self.assertEqual((seen["home"], seen["mark"]), (os.environ.get("HOME", ""), "kept/kept"))

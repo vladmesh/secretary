@@ -520,6 +520,18 @@ them with `--through move`), step 5 is the bootstrap's own, steps 6–12 run fro
     comment marked `[transition:done]`, with `## What was done` / `## How to verify` for the PO to complete
     the operation card the guard opened.
 
+**Runbook notes** (from the secretary-1930 review):
+
+- A step-2 refusal on `pause-stop-pending` does not clear by itself. It clears only after one manual
+  dispatcher tick (`sudo systemctl start ummanu-dispatcher-production.service`, or the old-prefix unit
+  `secretary-dispatcher-production.service` before step 2 completes), or after a rollback. Then rerun
+  the transition.
+- If step 5 fails between the fast-forward and a working new venv, `--rollback` cannot run yet: the
+  bootstrap finds neither a working `ummanu` CLI in the renamed tree nor the old package to run it
+  from. Recover forward (rerun `--apply`, which resumes at step 5), or put the checkout back with
+  `git -C ~/ummanu reset --hard <pre_transition_sha>` on `main` (the SHA from the journal) and then
+  run `--rollback`.
+
 **Rollback**: `scripts/transition-from-secretary.sh --rollback` (or `… transition from-secretary --rollback`),
 driven by the journal, before step 12 or if verify fails. It stops `ummanu-*` and the new store
 container; moves the Claude directories back and drops the trust entries it added; reverts the instance

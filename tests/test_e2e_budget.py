@@ -18,29 +18,29 @@ import unittest
 from typing import Any
 from unittest import mock
 
-from secretary.board import po_origin as origin_field
-from secretary.board.e2e_record import e2e_state
-from secretary.board.owner_events import OwnerEventStore
-from secretary.cli import main
-from secretary.dispatch import e2e_stage
-from secretary.dispatch.gate import GateResult
-from secretary.dispatch.gate_receipt import mint_gate_receipt
-from secretary.dispatch.runtime import DispatcherRuntime
-from secretary.dispatch.state import DispatcherRecord
-from secretary.sprint_observer import head_choice
-from secretary.sprints import SprintReader, SprintWriter
-from secretary.tasks import TaskError, TaskReader, TaskWriter
-from secretary.webproto.sprint_reads import _sprint_value
 from tests.dispatcher_fixtures import CARD_REF
 from tests.e2e_stage_fixtures import REPO, SHA, E2eStageFixture, SimulatedCrash
 from tests.fakes.sprints import SprintFixture
 from tests.integration_setup import require_disposable_board_fixture
 from tests.sql_backend_fixtures import CardStoreClient, PostgresBoard
+from ummanu.board import po_origin as origin_field
+from ummanu.board.e2e_record import e2e_state
+from ummanu.board.owner_events import OwnerEventStore
+from ummanu.cli import main
+from ummanu.dispatch import e2e_stage
+from ummanu.dispatch.gate import GateResult
+from ummanu.dispatch.gate_receipt import mint_gate_receipt
+from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.sprint_observer import head_choice
+from ummanu.sprints import SprintReader, SprintWriter
+from ummanu.tasks import TaskError, TaskReader, TaskWriter
+from ummanu.webproto.sprint_reads import _sprint_value
 
 SPRINT = "sprint:1031"
-OTHER = "secretary-520"
-THIRD = "secretary-521"
-DECISION_BODY = "## Decision\n\n{}\n\n## How to verify\n\n`secretary sprint show --ref sprint:1031`\n"
+OTHER = "ummanu-520"
+THIRD = "ummanu-521"
+DECISION_BODY = "## Decision\n\n{}\n\n## How to verify\n\n`ummanu sprint show --ref sprint:1031`\n"
 
 
 def setUpModule() -> None:
@@ -106,7 +106,7 @@ class BudgetStageFixture(E2eStageFixture):
         for run in state.runs:
             run.result = {"outcome": "target_reached", "conclusion": "failure", "summary": "red"}
             run.acted = True
-        self.writer.record_e2e_state(role="dispatcher", actor="secretary-pilot", reference=ref, state=state.text())
+        self.writer.record_e2e_state(role="dispatcher", actor="ummanu-pilot", reference=ref, state=state.text())
 
     def spend_on_other(self, *digits: str) -> None:
         """The other card dispatches one run per SHA, each concluded and acted on before the next."""
@@ -370,7 +370,7 @@ class SprintBudgetStageTests(BudgetStageFixture, unittest.TestCase):
             self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
-            owner="secretary-pilot",
+            owner="ummanu-pilot",
             sprints=self.sprints,
         )
         # Both passes decide to dispatch before either charges: the charge alone decides the race.
@@ -433,7 +433,7 @@ class OutOfSprintCapTests(BudgetStageFixture, unittest.TestCase):
             ]
         }
         self.writer.record_e2e_state(
-            role="dispatcher", actor="secretary-pilot", reference=CARD_REF, state=json.dumps(state)
+            role="dispatcher", actor="ummanu-pilot", reference=CARD_REF, state=json.dumps(state)
         )
         self._run_worker_to_validate()
 
@@ -517,9 +517,9 @@ class SprintBudgetEntityTests(SprintFixture):
         for field, value in (
             ("role", "po"),
             ("actor", "operator"),
-            ("product", "secretary"),
+            ("product", "ummanu"),
             ("issues", ["issue:open"]),
-            ("projects", ["secretary"]),
+            ("projects", ["ummanu"]),
             ("observer", head_choice("codex-observer")),
         ):
             kwargs.setdefault(field, value)
@@ -550,20 +550,20 @@ class SprintBudgetEntityTests(SprintFixture):
 
     def test_the_cli_takes_the_budget_and_show_and_status_render_used_of_budget(self) -> None:
         code, _output, errors = self.cli(
-            "sprint", "create", "--role", "po", "--goal", "bad", "--product", "secretary", "--issue",
-            "issue:open", "--project", "secretary", "--observer", "codex-observer", "--e2e-budget", "-2",
+            "sprint", "create", "--role", "po", "--goal", "bad", "--product", "ummanu", "--issue",
+            "issue:open", "--project", "ummanu", "--observer", "codex-observer", "--e2e-budget", "-2",
         )
         self.assertEqual(code, 2, "argparse refuses a negative budget")
         self.assertIn("0 or more runs", errors)
         code, _output, errors = self.cli(
-            "sprint", "create", "--role", "po", "--goal", "cli", "--product", "secretary", "--issue",
-            "issue:open", "--project", "secretary", "--observer", "codex-observer", "--ref", "sprint:12",
+            "sprint", "create", "--role", "po", "--goal", "cli", "--product", "ummanu", "--issue",
+            "issue:open", "--project", "ummanu", "--observer", "codex-observer", "--ref", "sprint:12",
             "--e2e-budget", "2",
         )
         self.assertEqual(code, 0, errors)
         self.assertEqual(self.sprint("sprint:12")["e2e"]["summary"], "e2e: 0 of 2")
         # Two runs charged by two cards; the third finds nothing left.
-        for ref, dispatch in (("secretary-90", "d-1"), ("secretary-91", "d-2"), ("secretary-91", "d-3")):
+        for ref, dispatch in (("ummanu-90", "d-1"), ("ummanu-91", "d-2"), ("ummanu-91", "d-3")):
             with self.client.transaction():
                 answer = self.client.call(
                     "chargeSprintE2e", sprint_ref="sprint:12", task_ref=ref, dispatch_id=dispatch,
@@ -574,7 +574,7 @@ class SprintBudgetEntityTests(SprintFixture):
         code, output, errors = self.cli("sprint", "show", "--ref", "sprint:12")
         self.assertEqual(code, 0, errors)
         shown = json.loads(output)["e2e"]
-        self.assertEqual((shown["summary"], shown["cards"]), ("e2e: 2 of 2", ["secretary-90", "secretary-91"]))
+        self.assertEqual((shown["summary"], shown["cards"]), ("e2e: 2 of 2", ["ummanu-90", "ummanu-91"]))
         self.assertEqual([c["dispatch_id"] for c in shown["charges"]], ["d-1", "d-2"])
         status = SprintReader(self.client, data_dir=self.tmp.name).status("sprint:12")  # type: ignore[arg-type]
         self.assertEqual(status["e2e"]["summary"], "e2e: 2 of 2")

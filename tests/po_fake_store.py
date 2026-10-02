@@ -15,8 +15,8 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from secretary.po.sprints import SprintRecord, WhyDocument
-from secretary.po.store import (
+from ummanu.po.sprints import SprintRecord, WhyDocument
+from ummanu.po.store import (
     AGENT,
     COMPLETED,
     DEFAULT_EFFORT,
@@ -42,7 +42,7 @@ from secretary.po.store import (
     session_fingerprint,
     session_title,
 )
-from secretary.tasks import admit_role
+from ummanu.tasks import admit_role
 
 
 class FakeBoard:
@@ -328,7 +328,7 @@ class FakePoStore:
 
 
 class FakeSprints:
-    """The resolver's view of the sprints (`secretary.po.sprints.SprintSessions`), in memory.
+    """The resolver's view of the sprints (`ummanu.po.sprints.SprintSessions`), in memory.
 
     Every sprint is open unless `status` says otherwise, and allows the productions `allowed` names
     (none by default). A comment and a session record are kept by their request id and a repeat of one

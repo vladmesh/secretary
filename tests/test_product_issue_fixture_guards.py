@@ -5,9 +5,9 @@ import inspect
 import textwrap
 import unittest
 
-from secretary.tasks import TaskError
 from tests import test_product_issues as product_issue_tests
 from tests.product_issue_fixtures import ProductIssueFixture
+from ummanu.tasks import TaskError
 
 SWIMLANE_METHODS = {
     name
@@ -83,9 +83,9 @@ class ProductIssueFixtureBehaviorTests(ProductIssueFixture, unittest.TestCase):
     def test_named_failure_injects_one_supported_boundary_failure(self) -> None:
         with self.named_failure("record_create"), self.assertRaises(TaskError) as refused:
             self.create_product(
-                product_id="secretary",
-                projects=["secretary"],
-                title="Secretary",
+                product_id="ummanu",
+                projects=["ummanu"],
+                title="Ummanu",
                 description="",
                 actor="po",
                 request_id="fixture-failure",
@@ -94,7 +94,7 @@ class ProductIssueFixtureBehaviorTests(ProductIssueFixture, unittest.TestCase):
         # The store rolls the create back whole, so the refusal is a rolled-back transaction
         # (`backend_rejected` was the retired implementation's terminal `false` reply).
         self.assertEqual(refused.exception.code, "backend_error")
-        self.assertEqual(self.record_count("product:secretary"), 0)
+        self.assertEqual(self.record_count("product:ummanu"), 0)
 
 
 if __name__ == "__main__":

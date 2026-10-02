@@ -8,17 +8,17 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.board.audit_contract import require_claim
-from secretary.dispatch import gate_attestation, gate_lifecycle
-from secretary.dispatch.gate import GateResult
+from ummanu.board.audit_contract import require_claim
+from ummanu.dispatch import gate_attestation, gate_lifecycle
+from ummanu.dispatch.gate import GateResult
 
-from secretary.dispatch.gate_receipt import (
+from ummanu.dispatch.gate_receipt import (
     AcceptedGreenGate,
     GateReceipt,
     mint_gate_receipt,
 )
-from secretary.dispatch.state import DispatcherRecord
-from secretary.tasks import TaskError
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.tasks import TaskError
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 
 
@@ -38,7 +38,7 @@ class AttestationEffectTests(unittest.TestCase):
         self.saves = []
         self.now = datetime(2026, 9, 30, 21, 35, 32, tzinfo=UTC)
         self.runtime = SimpleNamespace(
-            owner="secretary-production",
+            owner="ummanu-production",
             audit=SimpleNamespace(committed_event=self.events.get, pending_event=lambda _: None),
             reader=SimpleNamespace(show=lambda _: {"comments": self.comments}),
             writer=SimpleNamespace(comment=self.comment),
@@ -50,7 +50,7 @@ class AttestationEffectTests(unittest.TestCase):
         self.enterContext(mock.patch.object(gate_lifecycle, "_validation_ci", side_effect=lambda *_: self.mode))
 
     def receipt(self) -> dict[str, object]:
-        with mock.patch("secretary.dispatch.gate_receipt.datetime") as clock:
+        with mock.patch("ummanu.dispatch.gate_receipt.datetime") as clock:
             clock.now.return_value = self.now
             receipt = mint_gate_receipt(
                 validated_sha=self.sha, base_sha="b" * 40, gate_mode=self.mode,
@@ -341,7 +341,7 @@ class AttestationLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
                             request_id=self._review_verdict_request_id("green"))
 
     def fresh_gate(self, task, record):
-        with mock.patch("secretary.dispatch.gate_receipt.datetime") as clock:
+        with mock.patch("ummanu.dispatch.gate_receipt.datetime") as clock:
             clock.now.return_value = self.now
             receipt = mint_gate_receipt(
                 validated_sha=self.host.commit, base_sha="b" * 40, gate_mode="github",
@@ -362,7 +362,7 @@ class AttestationLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         comments = [item for item in self.reader.show(CARD_REF)["comments"]
                     if "Mechanical gate attestation" in item["body"]]
         self.assertEqual(len(comments), 1)
-        from secretary.board.audit_contract import card_transition_of
+        from ummanu.board.audit_contract import card_transition_of
 
         transitions = [event for event in self.writer.audit.events(CARD_REF)
                        if (card_transition_of(event) or ("", ""))[1] == "assessment"]

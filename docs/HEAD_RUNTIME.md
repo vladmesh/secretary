@@ -9,7 +9,7 @@ only a marker on old durable records, which stay readable and are never launched
 
 The shared role launcher puts a product-owned executable named `docker` before native Docker
 for workers and reviewers, in the role environment and again after the login shell reads its
-profiles. Workspace Python and Ruff still come from `.secretary-task-env/venv`. The guard uses
+profiles. Workspace Python and Ruff still come from `.ummanu-task-env/venv`. The guard uses
 the configured product's managed Python and source tree with isolated Python startup; candidate
 modules, interpreters and inherited guard bindings do not choose its implementation. The launcher
 resolves native Docker before adding this PATH prefix and calls that absolute executable directly.
@@ -42,12 +42,12 @@ this heavy-operation restriction; all cleanup ownership checks below still apply
 must not require local Docker; report a declared broad-suite dependency on Docker on the card.
 
 `docker rm`, `stop` and `kill`, including `docker container remove` and their other `docker container`
-aliases, require every explicit target to have `secretary.test-board=<positive decimal owner PID>` and no
-`secretary.production-board` marker. PID values use ASCII digits without a sign, whitespace or
+aliases, require every explicit target to have `ummanu.test-board=<positive decimal owner PID>` and no
+`ummanu.production-board` marker. PID values use ASCII digits without a sign, whitespace or
 leading zero. The production value reserved for the later lifecycle is
-`secretary.production-board=true`; the presence of that key protects a container even if its value
+`ummanu.production-board=true`; the presence of that key protects a container even if its value
 is malformed or a valid test label is also present. The canonical names live in
-`secretary.runtime.container_labels`; the PostgreSQL board test fixture supplies the existing
+`ummanu.runtime.container_labels`; the PostgreSQL board test fixture supplies the existing
 test PID label. An image, name, Compose project or absent/malformed metadata grants no ownership.
 Unlabelled production containers are protected immediately, without provisioning changes.
 
@@ -104,8 +104,8 @@ still pending at the end. Quiet turn timing is unchanged.
 
 ## The runtime default
 
-`secretary.runtime.head_runtimes` owns the vocabulary and what an absent `runtime` means, and
-`secretary.runtime.head_runtime_backends` is the only place a name becomes a backend.
+`ummanu.runtime.head_runtimes` owns the vocabulary and what an absent `runtime` means, and
+`ummanu.runtime.head_runtime_backends` is the only place a name becomes a backend.
 
 - **Profile.** `HEAD_RUNTIMES` is `("local-pty",)` and `DEFAULT_HEAD_RUNTIME` is `local-pty`: a head
   profile with no `runtime` key is a `local-pty` head. A profile naming any other runtime, including
@@ -144,8 +144,8 @@ as they are and closes no report, and exits 1. A head an earlier tick raised fin
 own supervisor; the next tick with a usable profile finds it through `head_run.json` (busy-skip, or a
 bring-up over a head that has ended). To see the reason, read the last entry of
 `automation-state/<agent>/runs.jsonl` (under `TA_STATE`, by default
-`~/secretary-data/automation-state`): `action="no-supervised-head"`, `result="error"`, the cause in
-`error`. The unit's journal (`journalctl -u secretary-<agent>.service`) has the same reason on stderr. A
+`~/ummanu-data/automation-state`): `action="no-supervised-head"`, `result="error"`, the cause in
+`error`. The unit's journal (`journalctl -u ummanu-<agent>.service`) has the same reason on stderr. A
 `terminal_handle.json` left in the agent's state by the pane backend before A20 step 4 is refused the
 same way (`action="supervised-owner-conflict"`, exit 1) whenever the file exists, even empty, unreadable
 or without a `handle`: the tick never deletes it and never raises a head beside it. Remove it once the
@@ -253,7 +253,7 @@ commits on `main`.
 | --- | --- | --- |
 | A head is launched and survives the end of the tick that started it | proven live | secretary-1698 (e0b9706); secretary-1699 (4e102c9): scheduler units `KillMode=process`, `_proc.run_isolated` cleans up its own group. Live: every local-pty head of this sprint, including observer run `327b521eaa6c474abda60078668ce850`. |
 | A prompt is typed and submitted, and an event wakes the observer, through the runtime | proven live | PR #534 (fae497b). Live: that observer run was woken by a PO comment at 2026-09-23 20:10Z (journal `observer-wake`, then `observer-wake:submit`). |
-| A card workspace is a plain `git worktree`, not an Orca worktree | proven live | secretary-1700 (24931d6). Live: secretary-1701 onward, workspaces under `/home/dev/secretary-data/workspaces/secretary/`. |
+| A card workspace is a plain `git worktree`, not an Orca worktree | proven live | secretary-1700 (24931d6). Live: secretary-1701 onward, workspaces under `/home/dev/ummanu-data/workspaces/ummanu/`. |
 | Worker and reviewer share one workspace as two supervised processes | proven live | secretary-1700 (24931d6). Live: secretary-1701, worker run `1d15915f…`, reviewer run `f5d8d2a2…`. |
 | A continuation reaches a retained (SIGSTOPped) worker | proven live | secretary-1702 (10392c6): the runtime runs the transport's `before_send` (SIGCONT) for a suspended head. Live: "retained worker resumed" on secretary-1703 at 2026-09-24 00:33Z. secretary-1719 runs the same hook for a running head too (row below). |
 | `head-status` reads a local-pty head (pid, heartbeat, lease, supervisor, journal tail) | proven live | secretary-1701 (5a1cba2). Live: secretary-1702's worker at 2026-09-23 23:36Z. |
@@ -263,7 +263,7 @@ commits on `main`.
 | Background agents run from the product's systemd units, with no Orca automations; the old top-level agents package is deleted | merged, live proof pending | secretary-1706 (6d866de), secretary-1707 (3240db2). Live proof: one tick per agent after the final upgrade. |
 | Role heads get the product venv on `PATH` | merged, live proof pending | secretary-1708 (d83f9b5). Live proof: the next observer, steward, retro and curator heads. |
 | The steward files proposals in Issues | merged, live proof pending | secretary-1709 (d148fa5). Live proof: the next steward tick that proposes. |
-| Codex heads use a `CODEX_HOME` under the data dir; card and observer workspace roots are disjoint | proven live | secretary-1710 (ca96b09); secretary-1723 removed the legacy rung. Live on 2026-09-24: `secretary doctor` reports `codex home: /home/dev/secretary-data/codex-home (data-dir home)`, every live Codex process has `CODEX_HOME=/home/dev/secretary-data/codex-home`, no `*.jsonl` under the legacy home's `sessions/` was written after 12:00Z (newest 08:38Z), and `resolve_codex_home` resolves all six installed Codex profiles to `/home/dev/secretary-data/codex-home` (`data-dir`). |
+| Codex heads use a `CODEX_HOME` under the data dir; card and observer workspace roots are disjoint | proven live | secretary-1710 (ca96b09); secretary-1723 removed the legacy rung. Live on 2026-09-24: `ummanu doctor` reports `codex home: /home/dev/ummanu-data/codex-home (data-dir home)`, every live Codex process has `CODEX_HOME=/home/dev/ummanu-data/codex-home`, no `*.jsonl` under the legacy home's `sessions/` was written after 12:00Z (newest 08:38Z), and `resolve_codex_home` resolves all six installed Codex profiles to `/home/dev/ummanu-data/codex-home` (`data-dir`). |
 | The Codex provider-ingress `before_send` (`bind_before_delivery`) runs for a running head | proven live | secretary-1719: `LocalPtyHeadRuntime._before_send` runs the transport's `before_send` once per admitted delivery, after admission and before the first byte, whatever the head's stop state. The run the hook returns is merged into the receipt (`post_delivery_run`). secretary-1741: every Codex worker continuation and report prompt with a provider source installs the durable run's ingress if needed, then `_nudge_worker` runs SIGCONT when needed and binds through that hook; the bound run and source state reach the record and dispatcher comment (merge `8856181`). Live: worker run `9d62f3356ea74b3094a656fde1a38c76` (secretary-1742, codex-sol-high), a retained-worker continuation at 2026-09-25T19:30:49Z; the dispatcher record has `provider_source.state=bound` and delivery evidence `provider_bound=True`. |
 | Vitality does not read a working resumed worker as stalled | merged, live proof pending | secretary-1719. Cause: `command_terminal_status` read the provider cursor only for a head in Orca's pane inventory, so a `local-pty` head's episode aged on the pid alone. Its `reason: "pid"` status now carries the run's provider cursor. secretary-1703's worker read `suspected_stall` (01:16Z) and `confirmed_stall` (01:21Z) while its supervisor journal logged output every minute. Live proof: the next retained-then-continued `local-pty` worker. |
 | The dashboard shows the steward's "Needs a human" | accepted | issue:57ddd3549f21eff1abda option (a) is merged: the steward files proposals in Issues (secretary-1709, d148fa5). The steward's own report stays readable on its Blocked report card and in the web's read-only head view of its journal (secretary-1703, 5b8336e). The dashboard showing it is a web feature, not something Orca gave a head, so it does not block removing Orca. The issue stays open for option (c). |
@@ -348,7 +348,7 @@ runtime. They go together, once curator routing no longer needs that root.
      pane `spawn` / `nudge` / `stop` (secretary-1725, PR #556).
 
    One rule in `tests/test_architecture.py` (`NoOrcaInSourceTests`, secretary-1725) holds it over
-   every module under `src/secretary`: no import of the pane host, the Orca backend or an `orca_rpc`
+   every module under `src/ummanu`: no import of the pane host, the Orca backend or an `orca_rpc`
    module, and no string constant whose program is `orca` or `orca-cli`. Since step 9 its allowlist
    holds only the two owner decisions of steps 8 and 11 (a record kind and a path, neither a
    program), and each entry excuses exactly one finding on its line.
@@ -356,7 +356,7 @@ runtime. They go together, once curator routing no longer needs that root.
    (`~/.config/orca/.../home`) in `codex_preflight.resolve_codex_home`, and its readers in
    `upgrade.py` and `installation.py` (secretary-1710). With no profile `codex_home`, no
    `TA_CODEX_HOME` and no data-dir login the resolver raises `CodexHomeLoginMissing`, whose message
-   names the fix; `secretary doctor` reports it as a red finding (`codex_home_login_missing`) when an
+   names the fix; `ummanu doctor` reports it as a red finding (`codex_home_login_missing`) when an
    installed profile runs Codex. Seeding and the Memory-client reconcile manage
    `<data_dir>/codex-home` only. One read-only reader is left: `runtime/codex_home.py`
    `session_roots` still scans the legacy home's `sessions/`, because the curator had not ingested
@@ -385,12 +385,12 @@ runtime. They go together, once curator routing no longer needs that root.
    `external_runtime.inactive`); bootstrap installs Docker and Compose only, with no Orca AppImage,
    `xvfb` or Electron runtime packages; recovery's prerequisites are the PostgreSQL store alone, with
    no `orca` binary; `SystemdLayout` has no `orca_executable` and templates no
-   `{{SECRETARY_ORCA_EXECUTABLE}}`; a new full backup writes no Orca state. An older full archive that
+   `{{UMMANU_ORCA_EXECUTABLE}}`; a new full backup writes no Orca state. An older full archive that
    carries the optional `debug/orca-state/inventory.json` (`debug_orca_state`) still verifies and
    restores: the entry is checksummed like any other, required by no policy, and never restored as
    data. The step-9 entries of the `NoOrcaInSourceTests` allowlist went with it. Why: after steps
    2–7 no tick, head or command called Orca, so ordering after it, requiring it or backing it up
-   protected nothing. `orca-server.service` and `xvfb.service` are host-owned units Secretary never
+   protected nothing. `orca-server.service` and `xvfb.service` are host-owned units Ummanu never
    wrote; stopping and disabling them, and uninstalling Orca, are PO actions after the merge and
    upgrade (step 10).
 10. **PO action, outside the product (requested on sprint:1461).** Leftover Orca automations and
@@ -398,7 +398,7 @@ runtime. They go together, once curator routing no longer needs that root.
     background agents to the product's units (secretary-1706); the Orca copies no longer run
     anything. The product never writes Orca state, so it removes none either.
 11. **Deferred, with step 8 (the owner's decision of 2026-09-24).** Role worktrees under
-    `~/orca/workspaces/secretary/{curator,pipeline,retro,steward}` (`data.py`, `cli.py`, the
+    `~/orca/workspaces/ummanu/{curator,pipeline,retro,steward}` (`data.py`, `cli.py`, the
     automations' default `TA_WORKSPACE`). An Orca-flavoured path with no Orca dependency, so it did
     not block removing Orca. The curator also routes by the `~/orca/workspaces` root, whatever the
     runtime: it is the base of the step-8 boundaries, and sources under

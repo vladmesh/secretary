@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from secretary.runtime.provider_models import (
+from ummanu.runtime.provider_models import (
     ProviderModels,
     claude_session_models,
     codex_rollout_path,

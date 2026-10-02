@@ -18,19 +18,19 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.broad_check import run_broad_check
-from secretary.cli import build_parser, run_residue_maintenance
-from secretary.dispatch.cleanup import CleanupJournal, CleanupOwner, UnknownProject, ownership_lock
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.observer import ObserverRecord
-from secretary.dispatch.production import _reconcile_production
-from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatch.types import HostError
-from secretary.infra import git_worktree
-from secretary.observer_root import observer_root_repo
-from secretary.runtime.head import HeadRun, HeadSpec, StopInitiator, TaskRef
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
-from secretary.runtime.role_env import workspace_tool_cache_env
+from ummanu.broad_check import run_broad_check
+from ummanu.cli import build_parser, run_residue_maintenance
+from ummanu.dispatch.cleanup import CleanupJournal, CleanupOwner, UnknownProject, ownership_lock
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.observer import ObserverRecord
+from ummanu.dispatch.production import _reconcile_production
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.types import HostError
+from ummanu.infra import git_worktree
+from ummanu.observer_root import observer_root_repo
+from ummanu.runtime.head import HeadRun, HeadSpec, StopInitiator, TaskRef
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from ummanu.runtime.role_env import workspace_tool_cache_env
 from tests.fakes.dispatcher import FakeCatalog, FakeHost
 from tests.production_runtime_fixtures import registered_production_runtime
 
@@ -132,7 +132,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.runtime.cleanup = self.owner
         args = argparse.Namespace(instance="unused", residue_replay=replay, residue_inventory=not replay,
                                   project=project, target=list(targets), manifest=list(digests))
-        with mock.patch("secretary.dispatch.bootstrap.runtime_from_args", return_value=self.runtime), mock.patch("builtins.print") as output:
+        with mock.patch("ummanu.dispatch.bootstrap.runtime_from_args", return_value=self.runtime), mock.patch("builtins.print") as output:
             self.assertEqual(run_residue_maintenance(args), expected_exit)
         return json.loads(output.call_args.args[0])
 
@@ -156,7 +156,7 @@ class OwnedCleanupTests(unittest.TestCase):
                 raise KeyboardInterrupt("Git interrupted before admin removal")
             return native(args, **kwargs)
         native = subprocess.run
-        with mock.patch("secretary.infra.git_worktree.subprocess.run", side_effect=interrupted):
+        with mock.patch("ummanu.infra.git_worktree.subprocess.run", side_effect=interrupted):
             with self.assertRaises(KeyboardInterrupt):
                 self.owner.replay_one(key)
         self.assertFalse(self.workspace.exists())
@@ -273,7 +273,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.head(generation="")
         key = self.request("archive")
         self.task["closed"] = True
-        with mock.patch("secretary.dispatch.cleanup.git_worktree.remove", return_value=False):
+        with mock.patch("ummanu.dispatch.cleanup.git_worktree.remove", return_value=False):
             result = self.maintenance(expected_exit=1)
         self.assertEqual([r["status"] for r in result["replay"]], ["pending"])
         self.assertEqual(result["residue"][0]["cleanup_ids"], [key])
@@ -316,7 +316,7 @@ class OwnedCleanupTests(unittest.TestCase):
 
     def test_observer_waits_for_refused_card_removal_then_replay(self):
         self.assert_observer_waits_for_failure(mock.patch(
-            "secretary.dispatch.cleanup.git_worktree.remove", return_value=False))
+            "ummanu.dispatch.cleanup.git_worktree.remove", return_value=False))
 
     def test_observer_waits_for_unreadable_card_git_then_replay(self):
         self.assert_observer_waits_for_failure(mock.patch.object(
@@ -447,7 +447,7 @@ class OwnedCleanupTests(unittest.TestCase):
 
     def test_partial_removal_unreadable_registration_retries_without_settlement(self):
         key = self.interrupt_git_directory_removal()
-        with mock.patch("secretary.dispatch.cleanup._registered", side_effect=HostError("registration unreadable")):
+        with mock.patch("ummanu.dispatch.cleanup._registered", side_effect=HostError("registration unreadable")):
             result = self.owner.replay_one(key)
         self.assertEqual(result["status"], "pending", result["reason"])
         self.assertEqual(self.task["claim"]["worker"], self.record.worker)
@@ -566,7 +566,7 @@ class OwnedCleanupTests(unittest.TestCase):
 
     def test_removal_failure_is_not_a_clean_receipt(self):
         key = self.request()
-        with mock.patch("secretary.dispatch.cleanup.git_worktree.remove", return_value=False):
+        with mock.patch("ummanu.dispatch.cleanup.git_worktree.remove", return_value=False):
             result = self.owner.replay_one(key)
         self.assertEqual(result["status"], "pending")
         self.assertTrue(self.workspace.exists())
@@ -596,13 +596,13 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertEqual(self.owner.replay_one(key)["status"], "completed")
 
     def test_interrupted_owned_environment_deletion_retains_its_exact_proof(self):
-        namespace = self.workspace / ".secretary-task-env"
+        namespace = self.workspace / ".ummanu-task-env"
         namespace.mkdir()
         (namespace / "owner.json").write_text("dispatcher-owned")
         (namespace / "venv-file").write_text("generated")
-        (self.repo / ".git" / "info" / "exclude").write_text(".secretary-task-env/\n")
+        (self.repo / ".git" / "info" / "exclude").write_text(".ummanu-task-env/\n")
         def ownership(path):
-            root = Path(path) / ".secretary-task-env"
+            root = Path(path) / ".ummanu-task-env"
             if not root.exists():
                 return "absent"
             if not (root / "owner.json").exists():
@@ -613,7 +613,7 @@ class OwnedCleanupTests(unittest.TestCase):
         def interrupted(path):
             (Path(path) / "owner.json").unlink()
             raise KeyboardInterrupt("interrupted environment removal")
-        with mock.patch("secretary.dispatch.cleanup.shutil.rmtree", side_effect=interrupted):
+        with mock.patch("ummanu.dispatch.cleanup.shutil.rmtree", side_effect=interrupted):
             with self.assertRaises(KeyboardInterrupt):
                 self.owner.replay_one(key)
         result = self.owner.replay_one(key)
@@ -621,7 +621,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertFalse(self.workspace.exists())
 
     def pipeline_generated_workspace(self):
-        """A merged, published Done workspace holding only what Secretary's own pipeline wrote.
+        """A merged, published Done workspace holding only what Ummanu's own pipeline wrote.
 
         Every artifact comes from its real producer: the environment claim, the install record,
         the prompt writer, a Python import and the broad-check writer under the head's cache env.
@@ -707,7 +707,7 @@ class OwnedCleanupTests(unittest.TestCase):
 
         cases = (("!! __pycache__/x.pyc", outside_cache), ("?? notes.txt", untracked_file),
                  ("src/sample.egg-info/SOURCES.txt", modified_install_output),
-                 ("!! .secretary-task-env/", unowned_namespace))
+                 ("!! .ummanu-task-env/", unowned_namespace))
         for named, introduce in cases:
             with self.subTest(named=named):
                 restore = introduce()
@@ -721,7 +721,7 @@ class OwnedCleanupTests(unittest.TestCase):
         owner_file.write_text(claim.replace(str(self.workspace), str(self.workspace) + "-other"))
         result = self.owner.replay_one(key)
         self.assertEqual(result["status"], "pending", result["reason"])
-        self.assertIn(".secretary-task-env", result["reason"])
+        self.assertIn(".ummanu-task-env", result["reason"])
         self.assertTrue(self.workspace.exists())
         owner_file.write_text(claim)
         # Each refusal above was the only obstacle: restored, the same intent completes.
@@ -784,7 +784,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertTrue(self.workspace.exists())
 
     def test_shared_git_removal_refuses_foreign_registration_and_ignored_files(self):
-        from secretary.infra.git_worktree import remove
+        from ummanu.infra.git_worktree import remove
         def capture(args, cwd):
             return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
         (self.workspace / "ignored").write_text("author work")
@@ -903,7 +903,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertEqual(self.owner.replay(), [])
 
     def test_newer_scope_owner_is_fenced_before_any_stop(self):
-        from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+        from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
         self.head()
         key = self.request()
         root = self.root / "heads"
@@ -943,7 +943,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertTrue(self.workspace.exists())
 
     def test_scope_binding_and_path_substitution_refuse_before_stop(self):
-        from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+        from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
         run = self.head()
         root = self.root / "heads"
         directory = root / run.run_id
@@ -968,7 +968,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertTrue(self.workspace.exists())
 
     def test_unknown_terminal_scope_needs_supported_native_disappearance_proof(self):
-        from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+        from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
         root = self.root / "heads"
         directory = root / "old-run"
         directory.mkdir(parents=True)
@@ -980,12 +980,12 @@ class OwnedCleanupTests(unittest.TestCase):
         self.host._local_pty_root = lambda: root
         self.host.fence_cleanup_scopes = lambda *args: CommandHostRuntime.fence_cleanup_scopes(self.host, *args)
         key = self.request()
-        with mock.patch("secretary.runtime.local_pty_head.runtime_scope_inventory", return_value=SimpleNamespace(
+        with mock.patch("ummanu.runtime.local_pty_head.runtime_scope_inventory", return_value=SimpleNamespace(
                 errors={}, disappeared=set())):
             result = self.owner.replay_one(key)
         self.assertEqual(result["status"], "pending")
         self.assertTrue(self.workspace.exists())
-        with mock.patch("secretary.runtime.local_pty_head.runtime_scope_inventory", return_value=SimpleNamespace(
+        with mock.patch("ummanu.runtime.local_pty_head.runtime_scope_inventory", return_value=SimpleNamespace(
                 errors={}, disappeared={record["unit"]})):
             result = self.owner.replay_one(key)
         self.assertEqual(result["status"], "completed", result["reason"])
@@ -1000,7 +1000,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertEqual(self.owner.journal.admission_refusal(self.task["ref"]), "")
 
     def test_production_probe_cannot_replay_or_capture_durable_cleanup(self):
-        from secretary.dispatch.production import _probe_runtime, ProbeAbort
+        from ummanu.dispatch.production import _probe_runtime, ProbeAbort
         self.request()
         before = self.owner.journal.path.read_bytes()
         self.runtime.cleanup = self.owner
@@ -1079,7 +1079,7 @@ class OwnedCleanupTests(unittest.TestCase):
             with self.assertRaisesRegex(HostError, "stop pending"):
                 host.stop_observer(observer)
             self.stop_failure = False
-            with mock.patch("secretary.dispatch.cleanup._registered",
+            with mock.patch("ummanu.dispatch.cleanup._registered",
                             side_effect=HostError("worktree registrations are unreadable")):
                 with self.assertRaisesRegex(HostError, "unreadable"):
                     host.stop_observer(observer)
@@ -1233,7 +1233,7 @@ class OwnedCleanupTests(unittest.TestCase):
         owner = self.request("close")
         self.task["closed"] = True
         duplicate = self.legacy_close_intent()
-        with mock.patch("secretary.dispatch.cleanup.git_worktree.remove", return_value=False):
+        with mock.patch("ummanu.dispatch.cleanup.git_worktree.remove", return_value=False):
             self.owner.replay_one(owner)
         result = self.owner.replay_one(duplicate)
         self.assertEqual(result["status"], "pending")
@@ -1321,8 +1321,8 @@ class OwnedCleanupTests(unittest.TestCase):
         key = self.legacy_close_intent()
         pid = self.root / "worker.pid"
         pid.write_text("1")
-        with mock.patch("secretary.dispatch.watchdog.pid_file_path", return_value=str(pid)), \
-                mock.patch("secretary.runtime.head.identity.head_process_status", return_value={"state": "alive"}):
+        with mock.patch("ummanu.dispatch.watchdog.pid_file_path", return_value=str(pid)), \
+                mock.patch("ummanu.runtime.head.identity.head_process_status", return_value={"state": "alive"}):
             result = self.owner.replay_one(key)
         self.assertEqual(result["status"], "pending")
         self.assertIn("pid file " + str(pid) + " names a live or unknown process", result["reason"])
@@ -1362,7 +1362,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.task["claim"]["worker"] = self.record.worker
         card = self.request("close")
         self.task["closed"] = True
-        with mock.patch("secretary.dispatch.cleanup.git_worktree.remove", return_value=False):
+        with mock.patch("ummanu.dispatch.cleanup.git_worktree.remove", return_value=False):
             self.assertEqual(self.owner.replay_one(card)["status"], "pending")
         path = Path(host.observer_workspace("sprint:1"))
         host._create_git_observer_workspace(path)
@@ -1535,9 +1535,9 @@ class OwnedCleanupTests(unittest.TestCase):
     def scoped_predecessor(self, *, role="observer", task="sprint:1", workspace=None, completed=True):
         """Launch 1 as a scoped run under a real local-PTY runtime root, replaced by launch 2."""
         from dataclasses import replace
-        from secretary.runtime.head.identity import head_process_status
-        from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
-        from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
+        from ummanu.runtime.head.identity import head_process_status
+        from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+        from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
         path, first, second, _, _ = self.replaced_observers()
         heartbeat = self.root / "observer.pid"
         old = replace(HeadRun.from_json(first.head_run), scope_generation="old-scope", pid_file=str(heartbeat))
@@ -1564,7 +1564,7 @@ class OwnedCleanupTests(unittest.TestCase):
         return path, first, heartbeat, backend, read
 
     def test_replaced_observer_conflicting_scope_owner_refuses_before_any_stop_effect(self):
-        from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+        from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
         path, first, _, backend, _ = self.scoped_predecessor(
             role="worker", task="card:foreign", workspace="/foreign/workspace", completed=False)
         with mock.patch.object(backend, "_ask_to_stop") as ask, \
@@ -1577,9 +1577,9 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertTrue(path.is_dir())
 
     def test_scoped_predecessor_settles_by_its_own_scope_not_the_shared_heartbeat(self):
-        from secretary.runtime.head.identity import head_process_status, publish_heartbeat
-        from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
-        from secretary.runtime.local_pty_head import MemoryScopeError
+        from ummanu.runtime.head.identity import head_process_status, publish_heartbeat
+        from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+        from ummanu.runtime.local_pty_head import MemoryScopeError
         path, first, heartbeat, _, read = self.scoped_predecessor()
         publish_heartbeat(str(heartbeat), {"run_id": "observer-run-2", "role": "observer", "task": "sprint:1"})
         with mock.patch.object(ScopedHeadLifecycle, "stop_owned",
@@ -1601,14 +1601,14 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertTrue(path.is_dir())
 
     def test_predecessor_cleanup_observer_never_reads_the_successor_workspace(self):
-        from secretary.dispatch.cleanup import _identity
+        from ummanu.dispatch.cleanup import _identity
         path, first, _, _, _ = self.replaced_observers()
         exists = Path.exists
         touched = []
         def watched(self_path, *args, **kwargs):
             touched.append(str(self_path))
             return exists(self_path, *args, **kwargs)
-        with mock.patch("secretary.dispatch.cleanup._identity", wraps=_identity) as identity, \
+        with mock.patch("ummanu.dispatch.cleanup._identity", wraps=_identity) as identity, \
                 mock.patch.object(Path, "exists", autospec=True, side_effect=watched):
             result = self.owner.cleanup_observer(first)
         self.assertEqual(result["status"], "preserved", result["reason"])
@@ -1635,7 +1635,7 @@ class OwnedCleanupTests(unittest.TestCase):
         return HeadRun(**values).finishing(StopInitiator(actor="review-verdict")).exited()
 
     def review_heartbeat(self, run_id, *, live=False):
-        from secretary.runtime.head.identity import publish_heartbeat
+        from ummanu.runtime.head.identity import publish_heartbeat
         identity = {"run_id": run_id, "role": "reviewer", "task": "card:" + self.task["ref"]}
         if live:
             publish_heartbeat(self.record.review_pid_file, identity)
@@ -1653,9 +1653,9 @@ class OwnedCleanupTests(unittest.TestCase):
         The worker's owner is live, the reviewers' terminal. Only the supervisor's stop request
         and the scope's native termination are simulated; each asked stop lands in `self.stops`.
         """
-        from secretary.runtime.head.identity import head_process_status
-        from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
-        from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
+        from ummanu.runtime.head.identity import head_process_status
+        from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+        from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
         root = self.data / "heads"
         for run in runs:
             directory = root / run.run_id
@@ -1772,7 +1772,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assert_placeholder_refused(self.placeholder_intent(self.placeholder(role="reviewer")))
 
     def test_scoped_generation_whose_own_heartbeat_names_another_run_still_refuses(self):
-        from secretary.runtime.head.identity import publish_heartbeat
+        from ummanu.runtime.head.identity import publish_heartbeat
         key = self.placeholder_intent()
         process = subprocess.Popen(["sleep", "30"])
         try:
@@ -1790,7 +1790,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertTrue(self.workspace.exists())
 
     def test_scoped_generation_whose_own_heartbeat_is_live_and_foreign_refuses_before_any_stop(self):
-        from secretary.runtime.head.identity import publish_heartbeat
+        from ummanu.runtime.head.identity import publish_heartbeat
         key = self.placeholder_intent()
         publish_heartbeat(str(self.data / "heads" / "run-reviewer-1" / "head.pid"),
                           {"run_id": "someone-else", "role": "reviewer", "task": "card:sample-1"})
@@ -1837,11 +1837,11 @@ class OwnedCleanupTests(unittest.TestCase):
         audit = self.runtime.audit
         self.runtime.audit = SimpleNamespace(events=lambda ref: refs.append(ref) or audit.events(ref))
         self.addCleanup(setattr, self.runtime, "audit", audit)
-        return calls, refs, mock.patch("secretary.dispatch.cleanup.subprocess.run", side_effect=run)
+        return calls, refs, mock.patch("ummanu.dispatch.cleanup.subprocess.run", side_effect=run)
 
     def test_project_inventory_and_replay_never_read_or_write_the_other_binding(self):
         second, foreign = self.second_project()
-        target = self.branch_only([{"kind": "card.started", "actor": {"role": "dispatcher", "id": "secretary-production"}}])
+        target = self.branch_only([{"kind": "card.started", "actor": {"role": "dispatcher", "id": "ummanu-production"}}])
         before = self.owner.journal.read()["intents"][foreign]
         calls, refs, patch = self.recorded_reads()
         with patch:
@@ -1863,7 +1863,7 @@ class OwnedCleanupTests(unittest.TestCase):
 
     def test_unknown_project_is_refused_before_any_read(self):
         self.request()
-        with mock.patch("secretary.dispatch.cleanup.subprocess.run", side_effect=AssertionError("Git read")), \
+        with mock.patch("ummanu.dispatch.cleanup.subprocess.run", side_effect=AssertionError("Git read")), \
                 mock.patch.object(CleanupJournal, "read", side_effect=AssertionError("journal read")):
             with self.assertRaises(UnknownProject):
                 self.owner.inventory(project="unknown")
@@ -1966,7 +1966,7 @@ class OwnedCleanupTests(unittest.TestCase):
     def test_global_replay_batch_no_longer_exists(self):
         self.request()
         before = self.owner.journal.path.read_bytes()
-        with mock.patch("secretary.dispatch.bootstrap.runtime_from_args", side_effect=AssertionError("runtime")):
+        with mock.patch("ummanu.dispatch.bootstrap.runtime_from_args", side_effect=AssertionError("runtime")):
             for kwargs in ({}, {"project": "sample"}, {"targets": ["x"], "digests": ["y"]},
                            {"project": "sample", "targets": ["x"]}):
                 args = argparse.Namespace(instance="unused", residue_replay=True, residue_inventory=False,
@@ -1981,7 +1981,7 @@ class OwnedCleanupTests(unittest.TestCase):
             build_parser().parse_args(["instance-maintenance", "--residue-replay", "--limit", "20"])
 
     def test_dispatcher_card_started_proves_branch_only_ownership(self):
-        target = self.branch_only([{"kind": "card.started", "actor": {"role": "dispatcher", "id": "secretary-production"}}])
+        target = self.branch_only([{"kind": "card.started", "actor": {"role": "dispatcher", "id": "ummanu-production"}}])
         inventory = self.owner.inventory(project="sample")
         self.assertEqual(inventory["residue"][0]["reason"], "owned branch-only residue; eligible for exact-tip replay")
         entry = self.entry(inventory, target)
@@ -1994,7 +1994,7 @@ class OwnedCleanupTests(unittest.TestCase):
 
     def test_other_role_card_started_does_not_prove_ownership(self):
         target = self.branch_only([{"kind": "card.started", "actor": {"role": "po", "id": "po"}},
-                                   {"kind": "card.moved", "actor": {"role": "dispatcher", "id": "secretary-production"}}])
+                                   {"kind": "card.moved", "actor": {"role": "dispatcher", "id": "ummanu-production"}}])
         entry = self.entry(self.owner.inventory(project="sample"), target)
         self.assertEqual((entry["outcome"], entry["reason"]), ("preserved", "card/project or audited claim proof missing"))
         result = self.owner.replay_targets("sample", [(target, entry["digest"])])
@@ -2003,7 +2003,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertEqual(git(self.repo, "rev-parse", "refs/heads/pipeline/sample-1"), self.base)
 
     def test_card_of_another_project_does_not_prove_ownership(self):
-        target = self.branch_only([{"kind": "card.started", "actor": {"role": "dispatcher", "id": "secretary-production"}}])
+        target = self.branch_only([{"kind": "card.started", "actor": {"role": "dispatcher", "id": "ummanu-production"}}])
         self.task["project"] = "instance"
         entry = self.entry(self.owner.inventory(project="sample"), target)
         self.assertEqual((entry["outcome"], entry["reason"]),
@@ -2089,7 +2089,7 @@ class OwnedCleanupTests(unittest.TestCase):
 
     def test_conflicting_foreign_owner_gets_a_scoped_refusal_entry(self):
         _, foreign = self.second_project()
-        from secretary.dispatch.cleanup import _identity
+        from ummanu.dispatch.cleanup import _identity
         value = self.owner.journal.read()
         value["intents"][foreign]["identity"] = _identity(self.repo, "", "pipeline/sample-1")
         self.owner.journal.save(value)
@@ -2112,7 +2112,7 @@ class OwnedCleanupTests(unittest.TestCase):
     def test_ref_with_a_worktree_is_preserved_despite_dispatcher_card_started(self):
         self.task["closed"] = True
         self.runtime.audit = SimpleNamespace(events=lambda ref: [
-            {"kind": "card.started", "actor": {"role": "dispatcher", "id": "secretary-production"}}])
+            {"kind": "card.started", "actor": {"role": "dispatcher", "id": "ummanu-production"}}])
         target = "refs/heads/pipeline/sample-1@" + self.base
         entry = self.entry(self.owner.inventory(project="sample"), target)
         self.assertEqual(entry["outcome"], "preserved")
@@ -2121,7 +2121,7 @@ class OwnedCleanupTests(unittest.TestCase):
         self.assertTrue(self.workspace.exists())
 
     def test_unmerged_or_unpublished_branch_only_ref_is_retained(self):
-        target = self.branch_only([{"kind": "card.started", "actor": {"role": "dispatcher", "id": "secretary-production"}}])
+        target = self.branch_only([{"kind": "card.started", "actor": {"role": "dispatcher", "id": "ummanu-production"}}])
         git(self.repo, "checkout", "--quiet", "pipeline/sample-1")
         (self.repo / "file").write_text("candidate\n")
         git(self.repo, "commit", "--quiet", "-am", "candidate")
@@ -2239,7 +2239,7 @@ class SettledHeadStopTests(unittest.TestCase):
         self.assert_only_card_runs_committed()
 
     def test_settled_reviewer_restop_still_fences_a_live_foreign_pid_file(self):
-        from secretary.runtime.head.identity import publish_heartbeat
+        from ummanu.runtime.head.identity import publish_heartbeat
         self.record.review_handle = "run:review-1"
         self.record.review_pid_file = str(self.root / "review.pid")
         self.record.review_head_run = self.stored_run("review-1", "reviewer", "codex-reviewer")

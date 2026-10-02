@@ -36,13 +36,13 @@ watermark (step 6):
 
 - Nothing needs a human → move to Done:
   ```
-  python3 -P -m secretary task move --role steward --ref <ref> --to done
+  python3 -P -m ummanu task move --role steward --ref <ref> --to done
   ```
 - There are items under "Needs a human" → instead of Done, move the report card itself to Blocked with
   the same "Needs a human" section as in the report comment as the move's reason (the file holds the
   `## Needs a human` heading and its items; the reason lands on the card as your comment):
   ```
-  python3 -P -m secretary task move --role steward --ref <ref> --to blocked --reason-file <file>
+  python3 -P -m ummanu task move --role steward --ref <ref> --to blocked --reason-file <file>
   ```
   That move is what puts a "needs the owner" event on the owner's bell, so the section goes in the move
   itself, never in a separate comment after it.
@@ -85,7 +85,7 @@ nothing on the board during the run.
 ## Memory
 
 Before working out how the system is built from scratch, search shared memory through `memory_search`.
-This standing head is granted only `project:secretary` and `product:secretary`; pass one of those scopes
+This standing head is granted only `project:ummanu` and `product:ummanu`; pass one of those scopes
 when narrowing is useful. Do not pass `caller`, and never retry an empty or denied search without a scope:
 the server resolves authority from the launch identity and a requested scope can only narrow it. When shared
 memory conflicts with personal memory, shared memory wins.
@@ -93,7 +93,7 @@ memory conflicts with personal memory, shared memory wins.
 ## What woke you
 
 ```
-python3 -P -m secretary automations steward scan --json
+python3 -P -m ummanu automations steward scan --json
 ```
 
 Run it from your own workspace (your starting working directory is the steward worktree). It returns
@@ -120,7 +120,7 @@ JSON with five kinds of signal, each of them a reason you were woken at all:
   watches it: a card there waits on the observer's release / rework / reslice decision, with no head
   running and no watchdog that could time it out. Your way out of it is the ordinary escalation,
   `task move --to blocked` with a reason file, and it is the only Assessment move this CLI will make: the
-  decision itself belongs to the observer and is written with `python3 -P -m secretary task move`.
+  decision itself belongs to the observer and is written with `python3 -P -m ummanu task move`.
 - `resource_flip` — a resource's health status changed since the previous run. Both a flip to red and a
   recovery to green are worth investigating after the fact. The source is the same live data plane as
   `pipeline_ticks`: the cache of verdicts the production dispatcher writes before launching a head. The
@@ -149,7 +149,7 @@ previous sweep.
 It has its own window, not the signal watermark:
 
 ```
-python3 -P -m secretary automations steward deep-sweep-since
+python3 -P -m ummanu automations steward deep-sweep-since
 ```
 
 It prints the timestamp of the last sweep, or null on the very first one (in which case take a reasonable
@@ -160,11 +160,11 @@ horizon, for example the last 48 hours). That watermark is independent of the si
 
 Do not limit yourself to the five detector signals. Over the window since the previous sweep:
 
-- **Blindness in the signals themselves.** Run `python3 -P -m secretary automations steward scan --json` and
+- **Blindness in the signals themselves.** Run `python3 -P -m ummanu automations steward scan --json` and
   compare it against what the signals SHOULD have caught in that window, by reading the raw sources
   directly: what is in the dispatcher's tick telemetry (is the tick sequence growing, is the last healthy
   timestamp fresh, what is in the unhealthy record), and whether the resource-health cache is fresh.
-  `python3 -P -m secretary automations health` is useful too, since it reads the same live sources. Silence from
+  `python3 -P -m ummanu automations health` is useful too, since it reads the same live sources. Silence from
   a signal does not mean "all clean" — it can mean "looking in the wrong place".
 - **The whole board**, not only Blocked: cards with no movement, disagreements between the local card
   cache and the board, duplicates, columns nobody has looked into.
@@ -174,22 +174,22 @@ Do not limit yourself to the five detector signals. Over the window since the pr
   ticking, is a precheck gate silently refusing somewhere, is anything flapping.
 - **Drift of systemd units and session-manager automations from the current specs**:
   ```
-  secretary upgrade --instance <instance dir> --dry-run --no-pull
+  ummanu upgrade --instance <instance dir> --dry-run --no-pull
   ```
   It shows what diverged from the canon without changing anything. The `host` step prints unit
   creations and updates and any conflicting names absent from the managed manifest; the `automations`
   step prints which automation fields (workspace, repo, prompt, precheck, enabled) drifted from
   `automation.toml`.
-- **Drift of role skills between heads** (secretary, curator, retro and steward must get their skills
+- **Drift of role skills between heads** (ummanu, curator, retro and steward must get their skills
   from the product's `skills/roles`, not from scattered shell directories):
   ```
-  python3 -P -m secretary automations steward role-skills --json
+  python3 -P -m ummanu automations steward role-skills --json
   ```
   It compares the product's `skills/manifest.toml` against the copies in each shell. When it is not ok,
   check the missing, drift and source-missing entries. If a copy was simply lost from the canon, you can
   synchronise:
   ```
-  secretary role-skills sync
+  ummanu role-skills sync
   ```
   If a new skill is needed, or the meaning of another role's skill changes, do not edit it yourself: file
   a card. The single source of truth is `skills/roles` in the product; spreading copies by hand across
@@ -208,7 +208,7 @@ precheck.
 ### Move the sweep watermark
 
 ```
-python3 -P -m secretary automations steward deep-sweep-advance
+python3 -P -m ummanu automations steward deep-sweep-advance
 ```
 
 Always the last step, instead of (not together with) the signal `steward advance`: the sweep touches only
@@ -219,7 +219,7 @@ its own watermark.
 ### 1. Work it out
 
 For each signal, find the root cause, not just the formal fact. Do not stop at what `scan` shows: if the
-signal is a new Blocked card, read the whole card (`python3 -P -m secretary task show --ref <ref>`, which includes the comments), the worker's and
+signal is a new Blocked card, read the whole card (`python3 -P -m ummanu task show --ref <ref>`, which includes the comments), the worker's and
 reviewer's transcripts, the local card cache, and if needed the code that produced the state. If the
 signal is an unhealthy dispatcher tick, look at the context around it (the dispatcher's journal, adjacent
 records in the tick telemetry) and if needed the defect in the dispatcher, worker or validation code. If
@@ -242,7 +242,7 @@ Investigation gives three outcomes, one per signal:
   on the board (check `task list` first) becomes a proposal in Issues, which the owner triages:
 
   ```
-  python3 -P -m secretary task create --role steward --state issues --project <project> \
+  python3 -P -m ummanu task create --role steward --state issues --project <project> \
     --type <code|research|infra> --title <...> --body-file <file>
   ```
 
@@ -253,7 +253,7 @@ Investigation gives three outcomes, one per signal:
 - **Escalate.** You cannot find the cause, or the fix needs a human decision (an architectural choice, a
   risk you are not prepared to take) → a card in **Blocked** with a full analysis of what happened and what
   is needed from a human. If the card already exists on the board (the Blocked card from the signal, or any
-  other active one) use `secretary task move --role steward --ref <ref> --to blocked` and put the analysis in a
+  other active one) use `ummanu task move --role steward --ref <ref> --to blocked` and put the analysis in a
   separate comment (step 3). If there is no card yet (you found the anomaly yourself), put the full
   analysis under "Needs a human" in the report; the report card itself goes to Blocked (step 5).
   Pulling an active in-progress or validate card out from under a live worker is a last resort (the
@@ -270,7 +270,7 @@ on without the full review loop** (a false positive, an external cause already f
 one-off mishap), you have a `Blocked → Done` override:
 
 ```
-python3 -P -m secretary task move --role steward --ref <ref> --to done \
+python3 -P -m ummanu task move --role steward --ref <ref> --to done \
   --reason-file <file: why skipping review is legitimate>
 ```
 
@@ -285,7 +285,7 @@ On every card you touched (fixed, created, escalated, overrode), leave a comment
 why:
 
 ```
-python3 -P -m secretary task comment --role steward --ref <ref> --body-file <file>
+python3 -P -m ummanu task comment --role steward --ref <ref> --body-file <file>
 ```
 
 The comment is not a duplicate of the report (step 4) but a short note on the card itself, so the history is
@@ -297,7 +297,7 @@ A comment on this wake-up's report card (the `<ref>` from `--card`, see above) �
 repository:
 
 ```
-python3 -P -m secretary task comment --role steward --ref <ref> --body-file <file>
+python3 -P -m ummanu task comment --role steward --ref <ref> --body-file <file>
 ```
 
 Report structure:
@@ -332,7 +332,7 @@ in In progress forever.
 ### 6. Move the watermark
 
 ```
-python3 -P -m secretary automations steward advance
+python3 -P -m ummanu automations steward advance
 ```
 
 Always the last step, after the report has been written as a comment on the card. If you did not get to the
@@ -349,6 +349,6 @@ on a state change of the cards you already filed).
   under the permissions above. Ordinary `git push`, no history rewriting.
 - **Secrets never reach** a card comment or a commit. If you see a raw key in a log or transcript, refer to it
   by name and do not copy the value.
-- **Do not touch the raw board API.** Go through `python3 -P -m secretary task ... --role steward`, which is where the role guards
+- **Do not touch the raw board API.** Go through `python3 -P -m ummanu task ... --role steward`, which is where the role guards
   live.
 - Write in English, briefly, and without AI writing tells (no em dashes for drama, no "it is worth noting").
