@@ -532,7 +532,7 @@ them with `--through move`), step 5 is the bootstrap's own, steps 6–12 run fro
   `git -C ~/ummanu reset --hard <pre_transition_sha>` on `main` (the SHA from the journal) and then
   run `--rollback`.
 
-**Post-transition repairs** (ummanu-1). Two pieces of state the one-shot run left unreadable are
+**Post-transition repairs** (ummanu-1, ummanu-5). Pieces of state the one-shot run left unreadable are
 repaired afterwards, in this order:
 
 1. Stop the heads still running from the old checkout.
@@ -545,6 +545,10 @@ repaired afterwards, in this order:
    each listed unit to `ummanu-head-*.scope`, and the original files are kept under
    `~/ummanu-transition/heads/`. Any other record that carries the old prefix is left as it is and
    reported, and the command exits non-zero.
+4. (ummanu-5) `ummanu transition from-secretary --repair-products --instance <instance>` shows the open
+   cutover canary `product:cutover-d9821c3499daaf9d`, still linked to the unregistered project
+   `secretary` and so blocking the checkpoint; `--apply` archives it, as §T2 archived `product:secretary`.
+   A closed Product's links are history and the checkpoint no longer checks them against the registry.
 
 **Rollback**: `scripts/transition-from-secretary.sh --rollback` (or `… transition from-secretary --rollback`),
 driven by the journal, before step 12 or if verify fails. It stops `ummanu-*` and the new store

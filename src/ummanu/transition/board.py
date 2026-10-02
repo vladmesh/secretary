@@ -1,4 +1,5 @@
-"""Board data across the rename (`docs/RENAME.md` §T2): dump, stop, restore, translate, count.
+"""Board data across the rename (`docs/RENAME.md` §T2): dump, stop, restore, translate, count, and
+afterwards archive one Product (`products`).
 
 The product's recovery primitives are used by module, and every name is passed in: the old store
 is read from the old `board-store.env` keys of the transition's own table, never through
@@ -335,6 +336,52 @@ def translate(config: board_store.BoardStoreConfig, old: Names, new: Names, *,
     }
 
 
+def product_state(connection: Any, product_id: str, *, lock: bool = False) -> dict[str, Any] | None:
+    """One Product's row, its projects, and its issues and sprints by state; None when it is absent."""
+    row = connection.execute(
+        "SELECT state, title FROM products WHERE product_id = %s" + (" FOR UPDATE" if lock else ""), (product_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    projects = connection.execute(
+        "SELECT project_id FROM product_projects WHERE product_id = %s ORDER BY project_id", (product_id,)
+    ).fetchall()
+    issues = connection.execute(
+        "SELECT state, count(*) FROM issues WHERE product_id = %s GROUP BY state ORDER BY state", (product_id,)
+    ).fetchall()
+    sprints = connection.execute(
+        "SELECT ref, status FROM sprints WHERE product_id = %s ORDER BY ref", (product_id,)
+    ).fetchall()
+    return {
+        "state": str(row[0]),
+        "title": str(row[1]),
+        "projects": [str(project[0]) for project in projects],
+        "issues": {str(state): int(count) for state, count in issues},
+        "sprints": [f"{ref} ({status})" for ref, status in sprints],
+    }
+
+
+def archive_product(
+    config: board_store.BoardStoreConfig, product_id: str, check: Any, *, apply: bool
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Read one Product and, with `apply`, archive it in the same owner transaction (the §T2.6 SQL).
+
+    `check(before)` decides on the locked row and raises `TransitionError` to refuse, or returns
+    whether the archive is still to be written. Returns the row before and after (`None` when
+    nothing was written). Only `products.state` changes: not `updated_at`, not its projects.
+    """
+    with _connect(config, "owner" if apply else "read") as connection, connection.transaction():
+        before = product_state(connection, product_id, lock=apply)
+        if not check(before) or not apply:
+            return before, None
+        changed = connection.execute(
+            "UPDATE products SET state = 'archived' WHERE product_id = %s AND state = 'active'", (product_id,)
+        ).rowcount
+        if changed != 1:
+            raise TransitionError(f"product {product_id} changed while it was archived; nothing written")
+        return before, product_state(connection, product_id)
+
+
 def verify_counts(before: dict[str, int], after: dict[str, int]) -> list[str]:
     """Problems with `after` against the dump: every table equal except the §T2.7 added rows."""
     problems = []
@@ -350,10 +397,12 @@ def verify_counts(before: dict[str, int], after: dict[str, int]) -> list[str]:
 
 __all__ = [
     "STORE_FILE",
+    "archive_product",
     "compose_argv",
     "dump",
     "inspect_source",
     "prepared_sprints",
+    "product_state",
     "provision_new_store",
     "read_store_env",
     "renamed_config",
