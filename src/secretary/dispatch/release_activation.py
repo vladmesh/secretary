@@ -20,6 +20,7 @@ from secretary.board.release_migrations import (
     MIGRATION_FAILED,
     UNCLASSIFIED_PENDING,
 )
+from secretary.dispatch.entrypoint_guard import ENTRYPOINT_MOVED, RUNBOOK
 from secretary.dispatch.production_checkout import ProductionActivationRefused
 from secretary.dispatch.state import ActivationRecovery, DispatcherRecord, request_token
 from secretary.dispatch.state import attempt_request_id as _attempt_request_id
@@ -151,9 +152,24 @@ def _landing_line(facts: dict[str, Any]) -> str:
     return f"{commit} landed on `{merge.get('base')}` ({via}) and stays there"
 
 
+def _transition_only(facts: dict[str, Any]) -> str:
+    """Why an `entrypoint_moved` refusal is not retried: what to do instead."""
+    return (
+        f"The production checkout `{facts['checkout']}` deliberately stays on the old commit "
+        f"`{str(facts['old'])[:12]}`: activation happens only through the transition runbook in "
+        f"`{RUNBOOK}`, not by retrying the release or running `upgrade`"
+    )
+
+
 def _reason(facts: dict[str, Any]) -> str:
     revision = f" at revision {facts['revision']}" if facts.get("revision") else ""
     operation = facts["operation"]
+    if facts["reason"] == ENTRYPOINT_MOVED:
+        return (
+            f"production activation refused ({facts['code']}: {facts['reason']}): {facts['message']}. "
+            f"The merge landed on main: {_landing_line(facts)}. {_transition_only(facts)}. "
+            f"Operation card: {operation}."
+        )
     return (
         f"production activation refused ({facts['code']}: {facts['reason']}{revision}): {facts['message']}. "
         f"Delivered to the remote: {_landing_line(facts)}; the production checkout {facts['checkout']} stays at "
@@ -162,14 +178,20 @@ def _reason(facts: dict[str, Any]) -> str:
 
 
 def _comment(facts: dict[str, Any]) -> str:
+    cause = (
+        f"does not keep the running entrypoint ({facts['reason']}); activation happens only through the "
+        f"transition runbook in `{RUNBOOK}`"
+        if facts["reason"] == ENTRYPOINT_MOVED
+        else f"was refused ({facts['reason']})"
+    )
+    subject = "" if facts["reason"] == ENTRYPOINT_MOVED else "the board schema of "
     return "\n".join(
         [
             HEADING,
             "",
             (
                 f"Delivered to the remote: {_landing_line(facts)}. Not activated: the production checkout "
-                f"`{facts['checkout']}` stays at `{facts['old']}`, because the board schema of `{facts['target']}` "
-                f"was refused ({facts['reason']})."
+                f"`{facts['checkout']}` stays at `{facts['old']}`, because {subject}`{facts['target']}` {cause}."
             ),
             "",
             f"Operation card: {facts['operation']}",
@@ -204,7 +226,39 @@ def _what_to_fix(facts: dict[str, Any]) -> str:
     return f"The release could not read or reach what it needed: {facts['message']}"
 
 
+def _entrypoint_description(task: dict[str, Any], facts: dict[str, Any]) -> str:
+    return "\n".join(
+        [
+            (
+                f"The dispatcher released {task['ref']} but did not activate it on production: the target "
+                "commit does not keep the entrypoint the live units execute, so the production checkout was "
+                "not moved and the board schema was not touched."
+            ),
+            "",
+            "## State",
+            "",
+            f"- The merge landed on `main`: {_landing_line(facts)}.",
+            f"- Production checkout `{facts['checkout']}`: deliberately still at `{facts['old']}` (old code).",
+            f"- Target code revision: `{facts['target']}`.",
+            f"- Refusal: `{facts['code']}` / `{facts['reason']}`: {facts['message']}",
+            "",
+            "## Supported recovery",
+            "",
+            (
+                f"Activation happens only through the transition runbook in `{RUNBOOK}`. Do not retry the "
+                "release and do not run `upgrade`: both refuse this target the same way, and every "
+                "later advance of this checkout is refused until the transition moves the installation."
+            ),
+            "",
+            f"1. Drain the pipeline and run the transition as `{RUNBOOK}` describes.",
+            "2. Verify the installation the transition reports, then complete this card with what was done.",
+        ]
+    )
+
+
 def _description(task: dict[str, Any], facts: dict[str, Any]) -> str:
+    if facts["reason"] == ENTRYPOINT_MOVED:
+        return _entrypoint_description(task, facts)
     applied = ", ".join(facts.get("applied") or []) or "none"
     pending = ", ".join(facts.get("pending") or []) or "none recorded"
     return "\n".join(

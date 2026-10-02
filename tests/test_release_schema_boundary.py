@@ -36,6 +36,7 @@ from secretary.dispatch import release_activation, release_lifecycle
 from secretary.dispatch.host import CommandHostRuntime
 from secretary.dispatch.production_checkout import ProductionActivationRefused
 from secretary.dispatch.runtime import DispatcherRuntime
+from secretary.dispatch.runtime_preflight import PACKAGE
 from secretary.dispatch.state import DispatcherRecord
 from secretary.dispatch.types import HostError
 from secretary.tasks import TaskError, TaskReader, TaskWriter
@@ -48,6 +49,9 @@ BRANCH = "pipeline/secretary-510"
 CANARY = "0025_release_canary"
 FAILING = "0026_release_canary_fails"
 SPRINT = "sprint:1031"
+#: The entrypoint the live units execute; a release must keep it to be activated (secretary-1929).
+PREFLIGHT = f"src/{PACKAGE}/dispatch/runtime_preflight.py"
+MANIFEST = f'[project]\nname = "product"\n\n[project.scripts]\n{PACKAGE} = "{PACKAGE}.cli:main"\n'
 
 
 def setUpModule() -> None:
@@ -246,6 +250,9 @@ class ReleaseFixture:
         bundle = production / release_migrations.MIGRATIONS_TREE
         shutil.copytree(migrate.SCRIPT_LOCATION, bundle, ignore=shutil.ignore_patterns("__pycache__"))
         (production / "README.md").write_text("old release\n", encoding="utf-8")
+        (production / PREFLIGHT).parent.mkdir(parents=True)
+        (production / PREFLIGHT).write_text("PACKAGE = 'x'\n", encoding="utf-8")
+        (production / "pyproject.toml").write_text(MANIFEST, encoding="utf-8")
         git(production, "add", "-A")
         git(production, "commit", "--quiet", "-m", "old release")
         git(production, "push", "--quiet", "origin", "main")
@@ -363,7 +370,8 @@ class ReleaseAppliesTheTargetSchemaFirstTests(ReleaseFixture, unittest.TestCase)
 
         self.assertEqual(seen[0][:3], ("before", old, target))
         self.assertEqual(seen[1], ("after", old, [CANARY]))
-        # Pin, then ancestry, then the schema, then and only then the fast-forward, read back.
+        # Pin, then ancestry, then the entrypoint (the preflight file, then the manifest), then the
+        # schema, then and only then the fast-forward, read back.
         self.assertEqual(
             host.labels[host.labels.index("post-merge fetch") :],
             [
@@ -371,12 +379,18 @@ class ReleaseAppliesTheTargetSchemaFirstTests(ReleaseFixture, unittest.TestCase)
                 "post-merge target",
                 "post-merge checkout head",
                 "post-merge ancestry",
+                "post-merge entrypoint guard",
+                "post-merge entrypoint guard",
                 "post-merge fast-forward",
                 "post-merge checkout head",
                 "post-merge landed commit",
             ],
         )
-        self.assertEqual(seen[0][3][-1], "post-merge ancestry", "the schema step follows the ancestry check")
+        self.assertEqual(
+            seen[0][3][-3:],
+            ["post-merge ancestry", "post-merge entrypoint guard", "post-merge entrypoint guard"],
+            "the schema step follows the ancestry check and the entrypoint guard",
+        )
         self.assertEqual(git(production, "rev-parse", "HEAD"), target)
         self.assertEqual((landing.sha, landing.path), (target, "push"))
         self.assertEqual(self.version(config), [CANARY])
@@ -678,7 +692,9 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
         DispatcherRuntimeFixture.setUp(self)
         self.release_fixture()
 
-    def arrange(self, *, ci: str = "local", partial: bool = False) -> tuple[DispatcherRecord, dict, dict]:
+    def arrange(
+        self, *, ci: str = "local", partial: bool = False, moved: bool = False
+    ) -> tuple[DispatcherRecord, dict, dict]:
         self.start_dispatcher()
         self.board.move(self.board.key_of(CARD_REF), "assessment")
         # The production board is the card board: the release migrates the store it then writes to.
@@ -691,7 +707,12 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
             # This case changes the schema, so discard its database before the ordinary fixture
             # cleanup can return it to the empty-row reuse pool.
             self.addCleanup(self.postgres.drop_database, self.board.credentials.dbname)
-        self.target = self.revisions(workspace, *revisions)
+        if moved:
+            # The rename: the package directory moves, so the live units' entrypoint is gone.
+            git(workspace, "mv", f"src/{PACKAGE}", "src/renamed_package")
+            self.target = self.commit(workspace, {}, "rename the package")
+        else:
+            self.target = self.revisions(workspace, *revisions)
         self.production, self.workspace = production, workspace
         releasing = _ReleaseHost(_Catalog(production, self.data_dir, ci), self.root, workspace, product_root=production)
         self.host.complete_green = lambda task, record: self.release(releasing, workspace)  # type: ignore[method-assign]
@@ -964,6 +985,51 @@ class RefusedActivationOnTheBoardTests(DispatcherRuntimeFixture, ReleaseFixture,
         self.assertEqual(card["state"], "blocked")
         self.assertEqual(len([c for c in card["comments"] if release_activation.HEADING in c["body"]]), 1)
         self.assertEqual(len(self.operations()), 1)
+
+    def test_an_entrypoint_moved_target_lands_stays_inactive_and_names_the_transition_runbook(self) -> None:
+        record, records, payload = self.arrange(moved=True)
+        with (
+            mock.patch.object(release_migrations, "prepare", side_effect=AssertionError("schema touched")),
+            mock.patch.object(release_lifecycle, "block_merge_path", side_effect=RuntimeError("tick died")),
+            self.assertRaisesRegex(RuntimeError, "tick died"),
+        ):
+            self.release_card(record, records, payload)
+        self.assertEqual(len(self.operations()), 1)
+
+        # The replay settles the same obligation: one reason, one operation, no second activation.
+        with mock.patch.object(self.host, "complete_green", side_effect=AssertionError("activation rerun")):
+            outcome = self.release_card(record, records, payload)
+
+        self.assertEqual((outcome["status"], outcome["reason"]), ("blocked", "production activation refused"))
+        refused = outcome["activation_refused"]
+        self.assertEqual((refused["code"], refused["reason"], refused["revision"]),
+                         ("entrypoint_moved", "entrypoint_moved", None))
+        self.assertEqual((refused["target"], refused["old"]), (self.target, self.old))
+        # The merge is kept on the remote; the checkout, its tree and the board schema are untouched.
+        self.assertEqual(git(self.workspace, "ls-remote", "origin", "main").split()[0], self.target)
+        self.assertEqual(git(self.production, "rev-parse", "HEAD"), self.old)
+        self.assertEqual(git(self.production, "status", "--porcelain"), "")
+        self.assertTrue((self.production / PREFLIGHT).is_file())
+        self.assertEqual(self.version(self.board_config()), [HEAD])
+        card = self.reader.show(CARD_REF)
+        self.assertEqual(card["state"], "blocked")
+        self.assertEqual(len([c for c in card["comments"] if release_activation.HEADING in c["body"]]), 1)
+        [blocked] = [e for e in self.writer.audit.events(CARD_REF)
+                     if (e.get("transition") or {}).get("target") == "blocked"]
+        for needle in ("entrypoint_moved", "The merge landed on main", "deliberately stays on the old commit",
+                       "docs/RENAME.md §T3", "not by retrying the release or running `upgrade`"):
+            self.assertIn(needle, str(blocked))
+        [operation] = self.operations()
+        self.assertIn(operation["ref"], str(blocked))
+        self.assertEqual((operation["sprint"], touches_production(operation)), (SPRINT, "secretary"))
+        for needle in ("docs/RENAME.md §T3", "The merge landed on `main`", "Do not retry the release",
+                       self.old, self.target):
+            self.assertIn(needle, operation["description"])
+        self.assertNotIn(CARD_REF, self.runtime.production_state.load()["records"])
+
+        self.runtime.production_tick()
+        self.assertEqual(len(self.operations()), 1)
+        self.assertEqual(git(self.production, "rev-parse", "HEAD"), self.old)
 
     def test_the_dispatcher_creates_no_other_operation(self) -> None:
         self.start_dispatcher()

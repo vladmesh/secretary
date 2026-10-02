@@ -2440,8 +2440,8 @@ class CommandHostRuntime:
         gh honours branch protection and refuses to merge while required checks are unsatisfied. The
         checkout tracks the project's default branch, not the card's base, and the refresh stays
         best-effort: the card is already merged by then, so a failed refresh is not the card's failure.
-        The one exception is the production checkout's schema refusal (`ProductionActivationRefused`):
-        the checkout stayed where it was because the board could not take the merged code's schema,
+        The one exception is the production checkout's activation refusal (`ProductionActivationRefused`):
+        the checkout stayed where it was because the merged code moved its entrypoint or its schema was refused,
         which is the release's to report, never a refresh to forget.
 
         `gh pr merge` lands the pull request in *its own* base, whatever that is, so the base is read
