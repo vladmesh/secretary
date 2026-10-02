@@ -12,13 +12,21 @@ checkpoint writes cannot overlap a green-card publish against the same checkout.
 Memory (`state/memory`) and knowledge (`state/knowledge`) are written by their own writers
 directly into the same repo, so both are deliberately outside this pathspec; `state_repo_lock`
 keeps their index operations from overlapping.
+
+`SnapshotExporter` grows the same staging and validation into the writer for a live root that is
+not a Git work tree: one cut per changed window (the export, `SNAPSHOT_ALLOWLIST` copied from the
+live root, `snapshot-manifest.json`) committed into a bare snapshot repository with Git plumbing.
+`tick_checkpoint_writer` picks one of the two for the tick.
 """
 
 from __future__ import annotations
 
+import fnmatch
 import hashlib
 import json
+import os
 import re
+import stat
 import subprocess
 import tempfile
 import time
@@ -48,9 +56,13 @@ from ummanu._fsutil import (
 from ummanu.board.backend import CARD, board_client
 from ummanu.board.checkpoint_layout import (
     FLAT,
+    LAYOUT_MARKER,
+    SEGMENT_FILES,
     CheckpointBoard,
     CheckpointLayoutError,
+    layout_marker_text,
     open_checkpoint_board,
+    part_name,
     publish_split_board,
 )
 from ummanu.board.models import Event
@@ -459,28 +471,7 @@ class CheckpointWriter:
 
     def _write(self) -> CheckpointResult:
         self._collect_abandoned_staging()
-        _, audit_owner = self._audit_owner()
-        try:
-            self._settle_stale_staged(audit_owner)
-            audit = audit_owner.status()
-        except TaskError as exc:
-            raise CheckpointBlocked(
-                f"the postgres task audit could not be read: {exc.message}"
-            ) from None
-        if not audit["ok"]:
-            raise CheckpointBlocked(
-                f"the postgres task audit has {audit['pending']} unresolved pending record(s)"
-                + _oldest_pending_text(audit_owner)
-            )
-
-        board, runs = self._regenerate()
-        self._prevent_run_history_loss()
-        from ummanu.secret_store import SecretStoreError, redaction_values
-
-        try:
-            secret_values = redaction_values(self.instance_dir)
-        except SecretStoreError as exc:
-            raise CheckpointBlocked(f"could not load checkpoint redaction values: {exc}") from None
+        board, runs, secret_values = self._open_window(self.instance_dir / "state" / "runs" / "runs.ndjson")
         self._publish(
             "board",
             BOARD_ENTRIES,
@@ -498,6 +489,38 @@ class CheckpointWriter:
             secret_values=secret_values,
         )
         return self._commit(board_cards=board, run_records=runs)
+
+    def _open_window(self, canonical_runs: Path | None) -> tuple[int, int, tuple[str, ...]]:
+        """The gate every cut passes before anything is staged: settled audit, fresh exports, intact
+        run history; returns the card and run counts and this installation's redaction values.
+
+        `canonical_runs` is the run journal last published, which the live export may only extend;
+        None when nothing was published yet.
+        """
+        _, audit_owner = self._audit_owner()
+        try:
+            self._settle_stale_staged(audit_owner)
+            audit = audit_owner.status()
+        except TaskError as exc:
+            raise CheckpointBlocked(
+                f"the postgres task audit could not be read: {exc.message}"
+            ) from None
+        if not audit["ok"]:
+            raise CheckpointBlocked(
+                f"the postgres task audit has {audit['pending']} unresolved pending record(s)"
+                + _oldest_pending_text(audit_owner)
+            )
+
+        board, runs = self._regenerate()
+        if canonical_runs is not None:
+            self._prevent_run_history_loss(canonical_runs)
+        from ummanu.secret_store import SecretStoreError, redaction_values
+
+        try:
+            secret_values = redaction_values(self.instance_dir)
+        except SecretStoreError as exc:
+            raise CheckpointBlocked(f"could not load checkpoint redaction values: {exc}") from None
+        return board, runs, secret_values
 
     def _settle_stale_staged(self, audit_owner: Any) -> None:
         """Let this tick settle what a dead writer left staged, before the gate counts it.
@@ -547,13 +570,12 @@ class CheckpointWriter:
             raise CheckpointBlocked(str(exc)) from None
         return board.count, runs.count
 
-    def _prevent_run_history_loss(self) -> None:
+    def _prevent_run_history_loss(self, canonical: Path) -> None:
         """Never truncate or rewrite canonical history from a live export.
 
         Normal operation appends history, so an empty replacement is an unsafe recovery signal, not
         routine compaction.
         """
-        canonical = self.instance_dir / "state" / "runs" / "runs.ndjson"
         live = self.data_dir / "runs" / "runs.ndjson"
         try:
             existing = _canonical_run_journals(canonical, "canonical run history")
@@ -592,15 +614,7 @@ class CheckpointWriter:
             raise CheckpointBlocked(f"could not stage checkpoint {component}: {exc}") from None
 
         try:
-            staged = self._stage(source, staging, entries, required, component)
-            validate(staging)
-            if component == "board":
-                _write_analytics_manifest(staging)
-                try:
-                    verify_analytics_checkpoint(staging)
-                except AnalyticsManifestError as exc:
-                    raise CheckpointBlocked(str(exc)) from None
-                staged = (*staged, ANALYTICS_MANIFEST)
+            staged = self._stage_validated(source, staging, entries, required, component, validate)
             _scan_for_secrets(
                 staging,
                 staged,
@@ -620,7 +634,28 @@ class CheckpointWriter:
             # already moved out of it, and any failure leaves only a partial copy behind.
             _cleanup_staging_dir(staging)
 
-        _write_text_atomic(destination / ".gitignore", "".join(f"{line}\n" for line in ignore))
+        _write_text_atomic(destination / ".gitignore", _ignore_text(ignore))
+
+    def _stage_validated(
+        self,
+        source: Path,
+        staging: Path,
+        entries: tuple[str, ...],
+        required: tuple[str, ...],
+        component: str,
+        validate: Callable[[Path], None],
+    ) -> tuple[str, ...]:
+        """Stage one component flat, validate it and, for the board, seal it; returns what was staged."""
+        staged = self._stage(source, staging, entries, required, component)
+        validate(staging)
+        if component == "board":
+            _write_analytics_manifest(staging)
+            try:
+                verify_analytics_checkpoint(staging)
+            except AnalyticsManifestError as exc:
+                raise CheckpointBlocked(str(exc)) from None
+            staged = (*staged, ANALYTICS_MANIFEST)
+        return staged
 
     def _stage(
         self,
@@ -712,6 +747,493 @@ class CheckpointWriter:
             detail = (result.stderr or result.stdout or "").strip().splitlines()
             raise CheckpointBlocked(f"{label} failed: {detail[-1] if detail else 'git error'}")
         return result
+
+
+# The snapshot exporter (docs/RECOVERY.md, "Layout" and "Writers"). Its identity and subject prefix
+# are what a later doctor check reads to tell an exporter commit from a foreign one.
+SNAPSHOT_BRANCH = "main"
+SNAPSHOT_REF = f"refs/heads/{SNAPSHOT_BRANCH}"
+SNAPSHOT_AUTHOR_NAME = "ummanu snapshot exporter"
+SNAPSHOT_AUTHOR_EMAIL = "snapshot-exporter@ummanu.invalid"
+SNAPSHOT_SUBJECT_PREFIX = "snapshot(instance): "
+SNAPSHOT_MANIFEST = "snapshot-manifest.json"
+SNAPSHOT_MANIFEST_FORMAT = "ummanu.instance-snapshot"
+SNAPSHOT_MANIFEST_VERSION = 1
+# The closed set of live-root paths a cut copies, byte for byte and at the same relative path. `*`
+# matches within one path segment, a trailing `**` everything below a directory. Everything else in
+# the live root stays out of the snapshot: generated heads files, onboarding and gate drafts, locks,
+# `state/board` and `state/runs` (a cut takes those from the export), and above all
+# `secrets/installation.key`, `runtime.env` and `board-store.env`.
+SNAPSHOT_ALLOWLIST = (
+    "instance.yaml",
+    "projects/*.yaml",
+    "adapters/*.yaml",
+    "heads/heads.toml",
+    "persona/**",
+    "skills/manifest.toml",
+    "secrets/catalog.yaml",
+    "secrets/installation-key.json",
+    "secrets/values/*.enc.json",
+    "state/knowledge/**",
+    "state/memory/**",
+)
+_REGULAR_MODE = "100644"
+_EXECUTABLE_MODE = "100755"
+
+
+def live_root_is_work_tree(instance_dir: Path) -> bool:
+    """Whether the live root is still a Git work tree, which keeps the tick on the legacy commit."""
+    return (Path(instance_dir).expanduser() / ".git").exists()
+
+
+def tick_checkpoint_writer(data_dir: Path, instance_dir: Path) -> CheckpointWriter:
+    """The tick's writer: today's commit into a live root that is a work tree, else the exporter."""
+    if live_root_is_work_tree(instance_dir):
+        return CheckpointWriter(data_dir, instance_dir)
+    return SnapshotExporter(data_dir, instance_dir)
+
+
+class SnapshotExporter(CheckpointWriter):
+    """Commit one cut of the installation per changed window into a bare snapshot repository.
+
+    A cut is the board and runs export, staged and validated as the legacy writer does; a byte copy
+    of `SNAPSHOT_ALLOWLIST` from the live root; and `snapshot-manifest.json`. It is built in staging
+    beside the snapshot repository, scanned for secrets file by file, and turned into a tree with Git
+    plumbing through a temporary index, so the snapshot never has a work tree. The only Git calls go
+    to the snapshot repository; the live root is read, never written, and its `.git` (if any) is not
+    used. Nothing is pushed.
+    """
+
+    def __init__(
+        self,
+        data_dir: Path,
+        instance_dir: Path,
+        *,
+        snapshot_repo: Path | None = None,
+        state_dir: Path = PIPELINE_STATE_DIR,
+        client: Any | None = None,
+        product_revision: str | None = None,
+        board_schema_head: str | None = None,
+    ) -> None:
+        super().__init__(data_dir, instance_dir, state_dir=state_dir, client=client)
+        self._snapshot_repo = Path(snapshot_repo).expanduser().resolve() if snapshot_repo else None
+        self._product_revision = product_revision
+        self._board_schema_head = board_schema_head
+
+    @property
+    def snapshot_repo(self) -> Path:
+        """`offsite.snapshot_repo` of the live root, unless the caller named one."""
+        if self._snapshot_repo is None:
+            from ummanu.config import DataDirError, instance_snapshot_repo
+
+            try:
+                self._snapshot_repo = instance_snapshot_repo(self.instance_dir, self.data_dir)
+            except DataDirError as exc:
+                raise CheckpointBlocked(f"could not resolve the snapshot repository: {exc}") from None
+        return self._snapshot_repo
+
+    def _write(self) -> CheckpointResult:
+        repo = self.snapshot_repo
+        self._ensure_repo(repo)
+        self._collect_abandoned_staging()
+        # The compare-and-swap base: whatever moves the branch after this read loses the window.
+        tip = self._tip(repo)
+        try:
+            work = Path(tempfile.mkdtemp(prefix=f".{repo.name}-cut-", suffix=".tmp", dir=repo.parent))
+        except OSError as exc:
+            raise CheckpointBlocked(f"could not stage snapshot cut: {exc}") from None
+        try:
+            self._hand_to_git_child(work, repo)
+            board, runs, secret_values = self._open_window(self._published_runs(repo, tip, work))
+            cut = work / "cut"
+            modes = self._stage_state(cut, work, repo, tip)
+            modes.update(self._copy_allowlist(cut))
+            self._write_manifest(cut, modes)
+            modes[SNAPSHOT_MANIFEST] = _REGULAR_MODE
+            self._scan_cut(cut, sorted(modes), secret_values)
+            self._hand_to_git_child(work, repo)
+            tree = self._build_tree(repo, cut, modes, work / "index")
+            if tip and tree == self._repo_git(repo, ["rev-parse", f"{tip}^{{tree}}"], "snapshot tree").strip():
+                return CheckpointResult(status="unchanged", board_cards=board, run_records=runs)
+            commit = self._commit_cut(repo, tree, tip, board_cards=board, run_records=runs)
+        except (OSError, RuntimeError) as exc:
+            raise CheckpointBlocked(f"snapshot cut failed: {exc}") from None
+        finally:
+            _cleanup_staging_dir(work)
+        return CheckpointResult(status="committed", commit=commit, board_cards=board, run_records=runs)
+
+    # -- the snapshot repository -------------------------------------------------------------------
+
+    def _ensure_repo(self, repo: Path) -> None:
+        """Create and initialise the bare repository when it is absent; refuse anything else there."""
+        if repo.is_symlink() or (repo.exists() and not repo.is_dir()):
+            raise CheckpointBlocked(f"snapshot repository {repo} is not a directory")
+        try:
+            populated = repo.is_dir() and any(repo.iterdir())
+        except OSError as exc:
+            raise CheckpointBlocked(f"could not read snapshot repository {repo}: {exc}") from None
+        if populated:
+            probe = self._repo_run(repo, ["rev-parse", "--is-bare-repository"], "snapshot repository")
+            if probe.returncode != 0 or probe.stdout.strip() != "true":
+                raise CheckpointBlocked(f"snapshot repository {repo} exists but is not a bare Git repository")
+            return
+        try:
+            repo.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise CheckpointBlocked(f"could not create snapshot repository {repo}: {exc}") from None
+        self._hand_to_git_child(repo, self.instance_dir)
+        result = state_repo.run_git(
+            repo, ["init", "--quiet", "--bare", "--initial-branch", SNAPSHOT_BRANCH], label="snapshot init"
+        )
+        if result.returncode != 0:
+            raise CheckpointBlocked(f"snapshot init failed: {_last_line(result)}")
+
+    def _tip(self, repo: Path) -> str:
+        result = self._repo_run(
+            repo, ["rev-parse", "--verify", "--quiet", f"{SNAPSHOT_REF}^{{commit}}"], "snapshot tip"
+        )
+        if result.returncode == 1 and not result.stdout.strip():
+            return ""
+        if result.returncode != 0:
+            raise CheckpointBlocked(f"snapshot tip failed: {_last_line(result)}")
+        return result.stdout.strip()
+
+    def _published_runs(self, repo: Path, tip: str, work: Path) -> Path | None:
+        """The run journal the tip carries, which the live export may only extend."""
+        if not tip:
+            return None
+        spec = f"{tip}:state/runs/runs.ndjson"
+        if self._repo_run(repo, ["cat-file", "-e", spec], "snapshot runs").returncode != 0:
+            return None
+        canonical = work / "published-runs.ndjson"
+        _write_text_atomic(canonical, self._repo_git(repo, ["cat-file", "blob", spec], "snapshot runs"))
+        return canonical
+
+    def _commit_cut(self, repo: Path, tree: str, tip: str, *, board_cards: int, run_records: int) -> str:
+        message = f"{SNAPSHOT_SUBJECT_PREFIX}{board_cards} card(s), {run_records} run record(s)"
+        parents = ["-p", tip] if tip else []
+        identity = {
+            "GIT_AUTHOR_NAME": SNAPSHOT_AUTHOR_NAME,
+            "GIT_AUTHOR_EMAIL": SNAPSHOT_AUTHOR_EMAIL,
+            "GIT_COMMITTER_NAME": SNAPSHOT_AUTHOR_NAME,
+            "GIT_COMMITTER_EMAIL": SNAPSHOT_AUTHOR_EMAIL,
+        }
+        commit = self._repo_git(
+            repo,
+            ["commit-tree", "--no-gpg-sign", tree, *parents, "-m", message],
+            "snapshot commit",
+            extra_env=identity,
+        ).strip()
+        # Compare-and-swap against the tip this window started from; an all-zero old value means
+        # "the branch must not exist yet".
+        expected = tip or "0" * len(commit)
+        moved = self._repo_run(repo, ["update-ref", "-m", message, SNAPSHOT_REF, commit, expected], "snapshot ref")
+        if moved.returncode != 0:
+            raise CheckpointBlocked(
+                f"snapshot branch moved during the window (expected {expected[:12]}): {_last_line(moved)}"
+            )
+        return commit
+
+    def _build_tree(self, repo: Path, cut: Path, modes: dict[str, str], index: Path) -> str:
+        """Write every cut file as a blob and the whole cut as one tree, through a temporary index."""
+        paths = sorted(modes)
+        hashed = self._repo_git(
+            repo,
+            ["hash-object", "-w", "--no-filters", "--stdin-paths"],
+            "snapshot blobs",
+            input="".join(f"{cut / path}\n" for path in paths),
+        ).split()
+        if len(hashed) != len(paths):
+            raise CheckpointBlocked(f"snapshot blobs: git hashed {len(hashed)} of {len(paths)} file(s)")
+        # `git_env` strips an inherited GIT_INDEX_FILE, so the temporary one is named explicitly.
+        index_env = {"GIT_INDEX_FILE": str(index)}
+        records = "".join(f"{modes[path]} {oid}\t{path}\0" for path, oid in zip(paths, hashed, strict=True))
+        self._repo_git(repo, ["update-index", "-z", "--index-info"], "snapshot index", input=records, extra_env=index_env)
+        return self._repo_git(repo, ["write-tree"], "snapshot tree", extra_env=index_env).strip()
+
+    def _repo_run(
+        self,
+        repo: Path,
+        args: list[str],
+        label: str,
+        *,
+        input: str | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        # `--git-dir` names the bare repository outright, so Git never discovers another one.
+        try:
+            return state_repo.run_git(
+                repo, ["--git-dir", str(repo), *args], label=label, input=input, extra_env=extra_env
+            )
+        except state_repo.StateRepoError as exc:
+            raise CheckpointBlocked(str(exc)) from None
+
+    def _repo_git(
+        self,
+        repo: Path,
+        args: list[str],
+        label: str,
+        *,
+        input: str | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> str:
+        result = self._repo_run(repo, args, label, input=input, extra_env=extra_env)
+        if result.returncode != 0:
+            raise CheckpointBlocked(f"{label} failed: {_last_line(result)}")
+        return result.stdout
+
+    def _hand_to_git_child(self, path: Path, owner_of: Path) -> None:
+        """A root run hands what it created to the identity its Git children run as."""
+        if os.getuid() != 0:
+            return
+        try:
+            child = state_repo.git_child_identity(owner_of)
+        except state_repo.StateRepoError as exc:
+            raise CheckpointBlocked(str(exc)) from None
+        if child.uid == 0:
+            return
+        try:
+            for root, directories, files in os.walk(path):
+                for name in (root, *(os.path.join(root, entry) for entry in (*directories, *files))):
+                    os.chown(name, child.uid, child.gid, follow_symlinks=False)
+        except OSError as exc:
+            raise CheckpointBlocked(f"could not hand {path} to the snapshot repository owner: {exc}") from None
+
+    def _collect_abandoned_staging(self) -> None:
+        """Remove cut staging an earlier run left beside the snapshot repository (under the lock)."""
+        repo = self.snapshot_repo
+        for candidate in repo.parent.glob(f".{repo.name}-cut-*.tmp"):
+            if candidate.is_dir() and not candidate.is_symlink():
+                _cleanup_staging_dir(candidate)
+
+    # -- the cut ---------------------------------------------------------------------------------
+
+    def _stage_state(self, cut: Path, work: Path, repo: Path, tip: str) -> dict[str, str]:
+        """`state/board` and `state/runs` of the cut, from the export, in the legacy writer's layout."""
+        modes: dict[str, str] = {}
+        flat = work / "board"
+        flat.mkdir()
+        self._stage_validated(
+            self.data_dir / "board",
+            flat,
+            BOARD_ENTRIES,
+            BOARD_REQUIRED,
+            "board",
+            lambda staging: _validate_board(staging, instance=self.instance_dir),
+        )
+        board = cut / "state" / "board"
+        board.mkdir(parents=True)
+        self._seed_segments(board, flat, repo, tip)
+        try:
+            publish_split_board(flat, board)
+        except CheckpointLayoutError as exc:
+            raise CheckpointBlocked(f"could not stage snapshot board: {exc}") from None
+        _write_text_atomic(board / ANALYTICS_MANIFEST, _read_text(flat / ANALYTICS_MANIFEST, ANALYTICS_MANIFEST))
+        _write_text_atomic(board / ".gitignore", _ignore_text(BOARD_IGNORE))
+
+        runs_flat = work / "runs"
+        runs_flat.mkdir()
+        staged = self._stage_validated(
+            self.data_dir / "runs", runs_flat, RUNS_ENTRIES, RUNS_REQUIRED, "runs", _validate_runs
+        )
+        runs = cut / "state" / "runs"
+        runs.mkdir(parents=True)
+        for entry in staged:
+            _write_text_atomic(runs / entry, _read_text(runs_flat / entry, entry))
+        _write_text_atomic(runs / ".gitignore", _ignore_text(RUNS_IGNORE))
+
+        for path in sorted(p for p in (cut / "state").rglob("*") if p.is_file()):
+            modes[path.relative_to(cut).as_posix()] = _REGULAR_MODE
+        return modes
+
+    def _seed_segments(self, board: Path, flat: Path, repo: Path, tip: str) -> None:
+        """Lay the tip's log segments out again, so a log that grew gains one segment, as in Git.
+
+        A segment is written back only from the new log's own bytes, and only while every one of
+        them hashes to the blob the tip holds; anything else leaves the log to be rewritten as one
+        segment, which is what the legacy writer does with history that does not extend.
+        """
+        if not tip:
+            return
+        listing = self._repo_git(
+            repo,
+            ["ls-tree", "-r", "-l", "--full-tree", tip, "--", "state/board/audit", "state/board/events"],
+            "snapshot segments",
+        )
+        parts: dict[str, list[tuple[str, str, int]]] = {}
+        for line in listing.splitlines():
+            meta, _, path = line.partition("\t")
+            fields = meta.split()
+            if len(fields) != 4 or fields[1] != "blob" or not fields[3].isdigit():
+                return
+            directory = path.split("/")[2]
+            parts.setdefault(directory, []).append((path, fields[2], int(fields[3])))
+        object_format = self._repo_git(repo, ["rev-parse", "--show-object-format"], "snapshot format").strip()
+        # The marker makes `publish_split_board` treat the seeded segments as the committed log.
+        _write_text_atomic(board / LAYOUT_MARKER, layout_marker_text())
+        for name, (directory, suffix) in SEGMENT_FILES.items():
+            entries = sorted(parts.get(directory, []))
+            payload = (flat / name).read_bytes()
+            expected = [f"state/board/{directory}/{part_name(index, suffix).as_posix()}" for index in range(len(entries))]
+            if [path for path, _, _ in entries] != expected:
+                continue
+            offset = 0
+            slices: list[tuple[str, bytes]] = []
+            for path, oid, size in entries:
+                piece = payload[offset : offset + size]
+                if len(piece) != size or _git_blob_id(piece, object_format) != oid:
+                    slices = []
+                    break
+                slices.append((path, piece))
+                offset += size
+            for path, piece in slices:
+                target = board / Path(path).relative_to("state/board")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(piece)
+
+    def _copy_allowlist(self, cut: Path) -> dict[str, str]:
+        """Copy every allowlisted regular file of the live root into the cut; refuse anything else."""
+        modes: dict[str, str] = {}
+        for relative in _allowlisted_files(self.instance_dir):
+            source = self.instance_dir / relative
+            try:
+                descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            except OSError as exc:
+                raise CheckpointBlocked(f"snapshot refuses {relative}: {exc.strerror or exc}") from None
+            try:
+                status = os.fstat(descriptor)
+                if not stat.S_ISREG(status.st_mode):
+                    raise CheckpointBlocked(f"snapshot refuses {relative}: not a regular file")
+                with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                    payload = handle.read()
+            finally:
+                os.close(descriptor)
+            target = cut / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(payload)
+            modes[relative] = _EXECUTABLE_MODE if status.st_mode & stat.S_IXUSR else _REGULAR_MODE
+        return modes
+
+    def _write_manifest(self, cut: Path, modes: dict[str, str]) -> None:
+        """`snapshot-manifest.json`: format, digests of every other file, revision, schema head; no clock."""
+        manifest = {
+            "format": SNAPSHOT_MANIFEST_FORMAT,
+            "version": SNAPSHOT_MANIFEST_VERSION,
+            "product_revision": self._revision(),
+            "board_schema_head": self._schema_head(),
+            "files": {path: hashlib.sha256((cut / path).read_bytes()).hexdigest() for path in sorted(modes)},
+        }
+        _write_text_atomic(cut / SNAPSHOT_MANIFEST, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+    def _revision(self) -> str:
+        if self._product_revision is None:
+            from ummanu.head_registry import product_revision
+
+            self._product_revision = product_revision(Path(__file__).resolve().parents[2])
+        return self._product_revision
+
+    def _schema_head(self) -> str:
+        if self._board_schema_head is None:
+            from ummanu.board.migrate import head_revision
+            from ummanu.board.store import BoardStoreError
+
+            try:
+                self._board_schema_head = head_revision()
+            except (BoardStoreError, ImportError, OSError) as exc:
+                raise CheckpointBlocked(f"could not read the board schema head: {exc}") from None
+        return self._board_schema_head
+
+    def _scan_cut(self, cut: Path, paths: list[str], secret_values: tuple[str, ...]) -> None:
+        """The whole cut leaves the host, so every file of it passes the secret scan."""
+        hits: list[str] = []
+        runtime_env = self.instance_dir / "runtime.env"
+        for path in paths:
+            text = (cut / path).read_bytes().decode("utf-8", errors="replace")
+            if redact(text, env_files=[runtime_env], secret_values=secret_values) != text:
+                hits.append(path)
+        if hits:
+            raise CheckpointBlocked(f"secret detected in snapshot: {', '.join(hits)}")
+
+
+def _allowlisted_files(live_root: Path) -> list[str]:
+    """Every live-root file `SNAPSHOT_ALLOWLIST` names, as sorted relative paths.
+
+    Nothing is followed: a symlink or any non-regular entry at an allowlisted path, or on the way
+    to one, blocks the window by its path.
+    """
+    found: set[str] = set()
+    for pattern in SNAPSHOT_ALLOWLIST:
+        *directories, last = pattern.split("/")
+        base = _allowlisted_directory(live_root, directories)
+        if base is None:
+            continue
+        if last == "**":
+            found.update(_regular_files_below(live_root, base))
+        elif any(character in last for character in "*?["):
+            for entry in _scan(base):
+                if fnmatch.fnmatchcase(entry.name, last):
+                    found.add(_require_regular(live_root, Path(entry.path)))
+        elif os.path.lexists(base / last):
+            found.add(_require_regular(live_root, base / last))
+    return sorted(found)
+
+
+def _allowlisted_directory(live_root: Path, directories: list[str]) -> Path | None:
+    current = live_root
+    for name in directories:
+        current = current / name
+        if not os.path.lexists(current):
+            return None
+        if current.is_symlink() or not current.is_dir():
+            raise CheckpointBlocked(f"snapshot refuses {current.relative_to(live_root)}: not a plain directory")
+    return current
+
+
+def _regular_files_below(live_root: Path, directory: Path) -> list[str]:
+    found: list[str] = []
+    for entry in _scan(directory):
+        path = Path(entry.path)
+        if entry.is_dir(follow_symlinks=False):
+            found.extend(_regular_files_below(live_root, path))
+        else:
+            found.append(_require_regular(live_root, path))
+    return found
+
+
+def _scan(directory: Path) -> list[os.DirEntry[str]]:
+    try:
+        with os.scandir(directory) as entries:
+            return sorted(entries, key=lambda entry: entry.name)
+    except OSError as exc:
+        raise CheckpointBlocked(f"could not list {directory}: {exc}") from None
+
+
+def _require_regular(live_root: Path, path: Path) -> str:
+    relative = path.relative_to(live_root).as_posix()
+    if path.is_symlink():
+        raise CheckpointBlocked(f"snapshot refuses {relative}: symlink at an allowlisted path")
+    if not stat.S_ISREG(path.lstat().st_mode):
+        raise CheckpointBlocked(f"snapshot refuses {relative}: not a regular file")
+    try:
+        relative.encode("utf-8")
+    except UnicodeError:
+        raise CheckpointBlocked(f"snapshot refuses {relative!r}: the name is not UTF-8") from None
+    if "\n" in relative or "\0" in relative:
+        raise CheckpointBlocked(f"snapshot refuses {relative!r}: the name holds a line break")
+    return relative
+
+
+def _git_blob_id(payload: bytes, object_format: str) -> str:
+    return hashlib.new(object_format, b"blob %d\0" % len(payload) + payload).hexdigest()
+
+
+def _ignore_text(ignore: tuple[str, ...]) -> str:
+    return "".join(f"{line}\n" for line in ignore)
+
+
+def _last_line(result: subprocess.CompletedProcess[str]) -> str:
+    detail = (result.stderr or result.stdout or "").strip().splitlines()
+    return detail[-1] if detail else "git error"
 
 
 class _GitFailure(Exception):

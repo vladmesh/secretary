@@ -15,12 +15,14 @@ from ummanu.backup import create_backups, verify_backup
 from ummanu.board.owner_event_commands import add_owner_event_subcommands
 from ummanu.check_commands import add_check_subcommands
 from ummanu.checkpoint import (
+    SnapshotExporter,
     checkpoint_snapshot,
     render_checkpoint_lines,
     rpo_problem,
 )
 from ummanu.config import DataDirError, instance_data_dir, load_config, validate, validate_instance
 from ummanu.data import (
+    PIPELINE_STATE_DIR,
     export_all,
     export_artifacts,
     export_board,
@@ -303,6 +305,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_instance(export_artifacts_command, data_dir=True)
     export_artifacts_command.set_defaults(handler=run_export_artifacts)
+
+    snapshot_command = data_subcommands.add_parser(
+        "snapshot",
+        help="run one snapshot-exporter window into an explicit bare repository; never pushes",
+    )
+    _add_instance(snapshot_command, data_dir=True)
+    snapshot_command.add_argument(
+        "--snapshot-repo",
+        required=True,
+        help="the bare snapshot repository to commit into; created when absent",
+    )
+    snapshot_command.add_argument("--state-dir", default=str(PIPELINE_STATE_DIR))
+    snapshot_command.set_defaults(handler=run_data_snapshot)
     data.set_defaults(handler=not_implemented("data"))
 
     backup = subparsers.add_parser("backup", help="create or verify backups")
@@ -1863,6 +1878,26 @@ def run_export_runs(args: argparse.Namespace) -> int:
     print(f"export: {result.path}")
     print("status: ok")
     return 0
+
+
+def run_data_snapshot(args: argparse.Namespace) -> int:
+    """One exporter window against `--snapshot-repo`, whatever the live root is.
+
+    The live root is only read (and its writer lock taken), so this works on a live root that is
+    still a Git work tree without touching its repository. Nothing is pushed.
+    """
+    data_dir = _data_dir_from_args(args, validate_tree=False)
+    if data_dir is None:
+        return 1
+    exporter = SnapshotExporter(
+        data_dir,
+        _instance_dir(args.instance),
+        snapshot_repo=Path(args.snapshot_repo),
+        state_dir=Path(args.state_dir),
+    )
+    result = exporter.write()
+    print(json.dumps({**result.to_json(), "snapshot_repo": str(exporter.snapshot_repo)}, sort_keys=True))
+    return 0 if result.status in {"committed", "unchanged"} else 1
 
 
 def run_export_transcripts(args: argparse.Namespace) -> int:

@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ummanu.board.backend import CARD, SPRINT, board_client
-from ummanu.checkpoint import CheckpointPusher, CheckpointWriter
+from ummanu.checkpoint import CheckpointPusher, live_root_is_work_tree, tick_checkpoint_writer
 from ummanu.config import DataDirError, instance_data_dir
 from ummanu.dispatch.git_workspace import orca_workspaces_root, workspace_roots_overlap
 from ummanu.dispatch.host import CommandHostRuntime, InstanceCatalog
@@ -54,6 +54,9 @@ def runtime_from_args(
     # The command host reads the same one, so TASK.md
     # feedback selection and report/verdict waits never disagree about what happened.
     audit = task_audit_for(client, data)
+    # A live root that is still a Git work tree keeps today's checkpoint commit and push; any other
+    # live root gets the snapshot exporter, which does not push (docs/RECOVERY.md, "Writers").
+    legacy_checkpoint = live_root_is_work_tree(catalog.instance_dir)
     return DispatcherRuntime(
         TaskReader(client),
         TaskWriter(client, data_dir=data),
@@ -62,6 +65,6 @@ def runtime_from_args(
         catalog,
         CommandHostRuntime(catalog, data, mode=host_mode, audit=audit, sprint_reader=SprintReader(client)),
         owner=owner,
-        checkpoint=CheckpointWriter(data, catalog.instance_dir),
-        checkpoint_push=CheckpointPusher(catalog.instance_dir),
+        checkpoint=tick_checkpoint_writer(data, catalog.instance_dir),
+        checkpoint_push=CheckpointPusher(catalog.instance_dir) if legacy_checkpoint else None,
     )

@@ -34,6 +34,11 @@
           "type": "string",
           "minLength": 1,
           "description": "Private git remote URL for this instance repo."
+        },
+        "snapshot_repo": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Bare Git repository the snapshot exporter commits into (docs/RECOVERY.md, Writers). Relative paths are resolved from data_dir; absent means <data_dir>/backup/instance.git."
         }
       }
     },
