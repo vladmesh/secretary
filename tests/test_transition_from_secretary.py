@@ -1053,5 +1053,39 @@ class ScopeOwnerRepairTests(unittest.TestCase):
         self.assertEqual(code, 2)
 
 
+class ProductRepairDecisionTests(unittest.TestCase):
+    """`--repair-products` decides on the canary's locked row; the writes are in test_transition_products."""
+
+    def setUp(self) -> None:
+        self.products = importlib.import_module(f"{PACKAGE}.transition.products")
+
+    def state(self, state: str = "active", projects: list[str] | None = None) -> dict[str, Any]:
+        return {"state": state, "title": "t", "projects": projects or [names.OLD.project_id],
+                "issues": {}, "sprints": []}
+
+    def test_an_open_canary_on_the_old_project_is_archived_and_an_archived_one_is_left(self) -> None:
+        self.assertTrue(self.products._check(self.state()))
+        self.assertFalse(self.products._check(self.state("archived")))
+
+    def test_a_missing_product_unexpected_projects_or_state_are_refused(self) -> None:
+        for state in (
+            None,
+            self.state(projects=[names.OLD.project_id, names.INSTANCE_PROJECT]),
+            self.state("archived", projects=[names.NEW.project_id]),
+            self.state("frozen"),
+        ):
+            with self.subTest(state=state), self.assertRaisesRegex(context.TransitionError, "nothing written"):
+                self.products._check(state)
+
+    def test_the_repair_does_not_combine_with_the_transition_modes_or_the_other_repair(self) -> None:
+        cli = importlib.import_module(f"{PACKAGE}.cli")
+        with tempfile.TemporaryDirectory() as home:
+            for extra in (["--plan"], ["--rollback"], ["--repair-scope-owners"]):
+                with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()):
+                    code, _ = quietly(cli.main, ["transition", f"from-{names.OLD.package}", "--repair-products",
+                                                 *extra, "--instance", home, "--home", home])
+                self.assertEqual(code, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

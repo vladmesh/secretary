@@ -84,7 +84,9 @@ def validate_product_issue_records(
             if not isinstance(record.get("title"), str) or not record["title"].strip():
                 raise ProductIssueValidationError("Product has no title")
             projects = _validated_product_projects(metadata.get(META_PRODUCT_PROJECTS))
-            if registered_project_ids is not None:
+            # An archived Product keeps its project links as history: a project retired from the
+            # registry afterwards (a rename's old id) must not make the board unrestorable.
+            if registered_project_ids is not None and not bool(record.get("closed")):
                 unknown = sorted(set(projects) - registered_project_ids)
                 if unknown:
                     raise ProductIssueValidationError(
