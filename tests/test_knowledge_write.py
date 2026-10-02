@@ -147,7 +147,10 @@ class KnowledgeWriteTests(KnowledgeRepoCase):
         self.assertTrue(result.commit.startswith("sha256:"), result.commit)
         self.assertEqual(self.head(), head, "the writer makes no commit; the tick does")
         self.assertEqual(self.staged(), "")
-        self.assertIn("?? state/knowledge/", git(self.instance_dir, "status", "--porcelain"))
+        self.assertIn(
+            f"?? state/knowledge/{DOCUMENT}",
+            git(self.instance_dir, "status", "--porcelain", "--untracked-files=all"),
+        )
 
     def test_the_write_touches_only_the_document(self):
         self.seed_board([CARD])

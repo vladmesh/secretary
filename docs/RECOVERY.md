@@ -616,7 +616,10 @@ preserve it, then remove it outside Ummanu or choose a fresh `--instance-dir`. A
 different origin, invalid repository or unsupported non-fast-forward is also left untouched and
 refused. A clean tree alone never proves product ownership.
 
-`runtime.env` and `board-store.env` are outside the export allowlist and are never committed.
+`runtime.env` and `board-store.env` are outside the export allowlist and are never committed. An
+untracked file the allowlist does not match (`secrets/installation.key`, `runtime.env`,
+`board-store.env`) is host-local and does not count as a local change of the checkout; every other
+change, tracked or untracked, does.
 
 ### Sequence
 

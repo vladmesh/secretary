@@ -355,7 +355,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         def inspect(_instance, args, **_kwargs):
             if args == ["remote", "get-url", "origin"]:
                 return remote + "\n"
-            if args == ["status", "--porcelain"]:
+            if args == ["status", "--porcelain", "-z", "--untracked-files=all"]:
                 return ""
             self.fail(f"unexpected local operation: {args}")
 
@@ -422,7 +422,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
             [call.args[1] for call in git.call_args_list],
             [
                 ["remote", "get-url", "origin"],
-                ["status", "--porcelain"],
+                ["status", "--porcelain", "-z", "--untracked-files=all"],
             ],
         )
         self.assertEqual(

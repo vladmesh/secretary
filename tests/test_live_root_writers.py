@@ -563,6 +563,56 @@ class ExclusionTests(LiveRootCase):
                 self.assertFalse(hasattr(state_repo, name))
 
 
+class RecoveryCheckoutChangesTests(LiveRootCase):
+    """Recovery's "local changes" check: host-local files the export never copies are not changes.
+
+    No product code writes a `.gitignore` entry for `installation.key`, `runtime.env` or
+    `board-store.env` any more, so a recovered checkout holds them untracked; a second `recover`
+    must still find the checkout clean, while every other change keeps refusing it.
+    """
+
+    def git(self, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(self.live), *args], text=True, capture_output=True, check=True
+        ).stdout
+
+    def setUp(self) -> None:
+        super().setUp()
+        (self.secrets).mkdir()
+        (self.secrets / "catalog.yaml").write_text("version: 1\nsecrets: []\n", encoding="utf-8")
+        (self.live / "persona").mkdir()
+        (self.live / "persona" / "rules.md").write_text("Be brief.\n", encoding="utf-8")
+        self.git("init", "--quiet", "--initial-branch", "main")
+        self.git("add", "-A")
+        self.git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "--quiet", "-m", "x")
+        for local in ("secrets/installation.key", "runtime.env", "board-store.env"):
+            (self.live / local).write_text("local\n", encoding="utf-8")
+
+    def changes(self) -> str:
+        from ummanu.installation import _checkout_changes
+
+        return _checkout_changes(self.live, label="test")
+
+    def test_untracked_host_local_files_are_not_local_changes(self):
+        self.assertEqual(self.changes(), "")
+
+    def test_every_other_change_still_counts(self):
+        (self.live / "persona" / "new").mkdir()
+        (self.live / "persona" / "new" / "voice.md").write_text("new\n", encoding="utf-8")
+        (self.secrets / "values").mkdir()
+        (self.secrets / "values" / "x.enc.json").write_text("{}\n", encoding="utf-8")
+        (self.live / "instance.yaml").write_text("version: 2\n", encoding="utf-8")
+
+        self.assertEqual(
+            sorted(self.changes().splitlines()),
+            [" M instance.yaml", "?? persona/new/voice.md", "?? secrets/values/x.enc.json"],
+        )
+
+    def tearDown(self) -> None:
+        # This case is a Git work tree by construction; the base check is for the writers alone.
+        pass
+
+
 class CloseoutPlanRevisionTests(unittest.TestCase):
     """Acceptance 4: the sprint-close closeout step stores the content revision, and a close whose
     plan was staged with a Git commit id still completes."""

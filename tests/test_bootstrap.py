@@ -248,8 +248,9 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(handed, [("chown", store_file, 4242, 4343)])
             # In order: the store steps first, then the handoff of the file they needed.
             self.assertLess(names.index("verify"), events.index(handed[0]))
-            for other in (".gitignore", BOOTSTRAP_STAMP):
-                self.assertIn(("chown", target / other, 4242, 4343), events, other)
+            self.assertIn(("chown", target / BOOTSTRAP_STAMP, 4242, 4343), events)
+            # The store's exclusion is the export allowlist: provisioning writes no `.gitignore`.
+            self.assertFalse((target / ".gitignore").exists())
             # The Compose definition is root's, outside the instance, and is never handed over.
             self.assertTrue(compose.is_file())
             self.assertEqual(compose.stat().st_mode & 0o777, 0o600)
