@@ -24,7 +24,7 @@ def claude_key(path: Path) -> str:
 
 def swap_prefix(value: str, prefixes: Prefixes) -> str:
     """`value` with the first matching path prefix replaced; a prefix matches whole components only,
-    so `/home/dev/secretary` never matches `/home/dev/secretary-instance`."""
+    so `~/secretary` never matches `~/secretary-instance`."""
     for old, new in prefixes:
         if value == old or value.startswith(old + "/"):
             return new + value[len(old):]

@@ -3,9 +3,9 @@
 #
 # Launched by the PO, detached from its own session, which step 2 kills:
 #   XDG_RUNTIME_DIR=/run/user/$(id -u) systemd-run --user --unit ummanu-transition --collect \
-#     /bin/bash -c '/home/dev/secretary/scripts/transition-from-secretary.sh > /home/dev/transition.log 2>&1'
-# Read the plan first: /home/dev/secretary/.venv/bin/secretary transition from-secretary --plan \
-#   --instance /home/dev/secretary-instance
+#     /bin/bash -c "$HOME/secretary/scripts/transition-from-secretary.sh > $HOME/transition.log 2>&1"
+# Read the plan first: $HOME/secretary/.venv/bin/secretary transition from-secretary --plan \
+#   --instance $HOME/secretary-instance
 #
 # Arguments go to the Python half (`--sprint sprint:N`, `--allow-extra-merge SHA`). A first argument
 # `--rollback` undoes what the journal (~/ummanu-transition.json) says was done.
