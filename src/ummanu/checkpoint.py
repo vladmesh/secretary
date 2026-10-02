@@ -21,6 +21,7 @@ live root, `snapshot-manifest.json`) committed into a bare snapshot repository w
 
 from __future__ import annotations
 
+import errno
 import fnmatch
 import hashlib
 import json
@@ -1092,26 +1093,30 @@ class SnapshotExporter(CheckpointWriter):
                 target.write_bytes(piece)
 
     def _copy_allowlist(self, cut: Path) -> dict[str, str]:
-        """Copy every allowlisted regular file of the live root into the cut; refuse anything else."""
+        """Copy every allowlisted regular file of the live root into the cut; refuse anything else.
+
+        Enumeration and copy both walk from one descriptor of the live root, and every byte copied is
+        read through `_open_beneath`, so a directory swapped for a symlink after enumeration blocks
+        the window instead of leading the copy out of the live root.
+        """
         modes: dict[str, str] = {}
-        for relative in _allowlisted_files(self.instance_dir):
-            source = self.instance_dir / relative
-            try:
-                descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-            except OSError as exc:
-                raise CheckpointBlocked(f"snapshot refuses {relative}: {exc.strerror or exc}") from None
-            try:
-                status = os.fstat(descriptor)
-                if not stat.S_ISREG(status.st_mode):
-                    raise CheckpointBlocked(f"snapshot refuses {relative}: not a regular file")
-                with os.fdopen(descriptor, "rb", closefd=False) as handle:
-                    payload = handle.read()
-            finally:
-                os.close(descriptor)
-            target = cut / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(payload)
-            modes[relative] = _EXECUTABLE_MODE if status.st_mode & stat.S_IXUSR else _REGULAR_MODE
+        root = _open_live_root(self.instance_dir)
+        try:
+            for relative in _allowlisted_entries(root):
+                descriptor = _open_beneath(root, relative.split("/"), want_directory=False)
+                assert descriptor is not None
+                try:
+                    status = os.fstat(descriptor)
+                    with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                        payload = handle.read()
+                finally:
+                    os.close(descriptor)
+                target = cut / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(payload)
+                modes[relative] = _EXECUTABLE_MODE if status.st_mode & stat.S_IXUSR else _REGULAR_MODE
+        finally:
+            os.close(root)
         return modes
 
     def _write_manifest(self, cut: Path, modes: dict[str, str]) -> None:
@@ -1156,63 +1161,136 @@ class SnapshotExporter(CheckpointWriter):
 
 
 def _allowlisted_files(live_root: Path) -> list[str]:
-    """Every live-root file `SNAPSHOT_ALLOWLIST` names, as sorted relative paths.
+    """Every live-root file `SNAPSHOT_ALLOWLIST` names, as sorted relative paths."""
+    root = _open_live_root(live_root)
+    try:
+        return _allowlisted_entries(root)
+    finally:
+        os.close(root)
+
+
+def _open_live_root(live_root: Path) -> int:
+    try:
+        return os.open(live_root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError as exc:
+        raise CheckpointBlocked(f"could not open the live root {live_root}: {exc}") from None
+
+
+def _allowlisted_entries(root: int) -> list[str]:
+    """`SNAPSHOT_ALLOWLIST` expanded beneath the live-root descriptor `root`.
 
     Nothing is followed: a symlink or any non-regular entry at an allowlisted path, or on the way
-    to one, blocks the window by its path.
+    to one, blocks the window by its path. Directories are entered only through `_open_beneath`.
     """
     found: set[str] = set()
     for pattern in SNAPSHOT_ALLOWLIST:
         *directories, last = pattern.split("/")
-        base = _allowlisted_directory(live_root, directories)
+        base = _open_beneath(root, directories, want_directory=True, missing_ok=True)
         if base is None:
             continue
-        if last == "**":
-            found.update(_regular_files_below(live_root, base))
-        elif any(character in last for character in "*?["):
-            for entry in _scan(base):
-                if fnmatch.fnmatchcase(entry.name, last):
-                    found.add(_require_regular(live_root, Path(entry.path)))
-        elif os.path.lexists(base / last):
-            found.add(_require_regular(live_root, base / last))
+        try:
+            if last == "**":
+                found.update(_regular_files_below(base, directories))
+            elif any(character in last for character in "*?["):
+                for name in _names(base, directories):
+                    if fnmatch.fnmatchcase(name, last):
+                        found.add(_require_regular(base, directories, name))
+            elif _entry_status(base, last) is not None:
+                found.add(_require_regular(base, directories, last))
+        finally:
+            os.close(base)
     return sorted(found)
 
 
-def _allowlisted_directory(live_root: Path, directories: list[str]) -> Path | None:
-    current = live_root
-    for name in directories:
-        current = current / name
-        if not os.path.lexists(current):
-            return None
-        if current.is_symlink() or not current.is_dir():
-            raise CheckpointBlocked(f"snapshot refuses {current.relative_to(live_root)}: not a plain directory")
-    return current
+def _open_beneath(
+    directory: int,
+    names: list[str],
+    *,
+    want_directory: bool,
+    prefix: list[str] | None = None,
+    missing_ok: bool = False,
+) -> int | None:
+    """Open `names` beneath the descriptor `directory` without following any symlink.
+
+    The one way the exporter opens live-root content: each component is opened relative to the
+    descriptor of its parent, `O_DIRECTORY | O_NOFOLLOW` for every directory and `O_NOFOLLOW` for a
+    file leaf (`O_NONBLOCK`, so a FIFO swapped in cannot hang the window), and every descriptor is
+    checked with `fstat`. Returns a new descriptor the caller closes; None only for a missing
+    component when `missing_ok`. Anything else blocks the window by the path it reached.
+    """
+    current = os.dup(directory)
+    try:
+        for index, name in enumerate(names):
+            as_directory = want_directory or index < len(names) - 1
+            shown = "/".join([*(prefix or []), *names[: index + 1]])
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+            flags |= os.O_DIRECTORY if as_directory else os.O_NONBLOCK
+            try:
+                opened = os.open(name, flags, dir_fd=current)
+            except FileNotFoundError:
+                if missing_ok:
+                    return None
+                raise CheckpointBlocked(f"snapshot refuses {shown}: it vanished during the window") from None
+            except OSError as exc:
+                # A refused symlink reads as ELOOP or, under O_DIRECTORY, ENOTDIR; name what is there.
+                status = _entry_status(current, name)
+                if status is not None and stat.S_ISLNK(status.st_mode):
+                    reason = "symlink at an allowlisted path"
+                elif exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    reason = "not a plain directory" if as_directory else "not a regular file"
+                else:
+                    reason = exc.strerror or str(exc)
+                raise CheckpointBlocked(f"snapshot refuses {shown}: {reason}") from None
+            os.close(current)
+            current = opened
+            mode = os.fstat(current).st_mode
+            if as_directory and not stat.S_ISDIR(mode):
+                raise CheckpointBlocked(f"snapshot refuses {shown}: not a plain directory")
+            if not as_directory and not stat.S_ISREG(mode):
+                raise CheckpointBlocked(f"snapshot refuses {shown}: not a regular file")
+        opened, current = current, -1
+        return opened
+    finally:
+        if current >= 0:
+            os.close(current)
 
 
-def _regular_files_below(live_root: Path, directory: Path) -> list[str]:
+def _regular_files_below(directory: int, parts: list[str]) -> list[str]:
     found: list[str] = []
-    for entry in _scan(directory):
-        path = Path(entry.path)
-        if entry.is_dir(follow_symlinks=False):
-            found.extend(_regular_files_below(live_root, path))
+    for name in _names(directory, parts):
+        status = _entry_status(directory, name)
+        if status is not None and stat.S_ISDIR(status.st_mode):
+            child = _open_beneath(directory, [name], want_directory=True, prefix=parts)
+            assert child is not None
+            try:
+                found.extend(_regular_files_below(child, [*parts, name]))
+            finally:
+                os.close(child)
         else:
-            found.append(_require_regular(live_root, path))
+            found.append(_require_regular(directory, parts, name))
     return found
 
 
-def _scan(directory: Path) -> list[os.DirEntry[str]]:
+def _names(directory: int, parts: list[str]) -> list[str]:
     try:
-        with os.scandir(directory) as entries:
-            return sorted(entries, key=lambda entry: entry.name)
+        return sorted(os.listdir(directory))
     except OSError as exc:
-        raise CheckpointBlocked(f"could not list {directory}: {exc}") from None
+        raise CheckpointBlocked(f"could not list {'/'.join(parts) or '.'}: {exc}") from None
 
 
-def _require_regular(live_root: Path, path: Path) -> str:
-    relative = path.relative_to(live_root).as_posix()
-    if path.is_symlink():
+def _entry_status(directory: int, name: str) -> os.stat_result | None:
+    try:
+        return os.stat(name, dir_fd=directory, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _require_regular(directory: int, parts: list[str], name: str) -> str:
+    relative = "/".join([*parts, name])
+    status = _entry_status(directory, name)
+    if status is not None and stat.S_ISLNK(status.st_mode):
         raise CheckpointBlocked(f"snapshot refuses {relative}: symlink at an allowlisted path")
-    if not stat.S_ISREG(path.lstat().st_mode):
+    if status is None or not stat.S_ISREG(status.st_mode):
         raise CheckpointBlocked(f"snapshot refuses {relative}: not a regular file")
     try:
         relative.encode("utf-8")

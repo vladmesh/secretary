@@ -17,7 +17,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from ummanu import secret_store, state_repo
+from ummanu import checkpoint, secret_store, state_repo
 from ummanu.checkpoint import (
     SNAPSHOT_ALLOWLIST,
     SNAPSHOT_AUTHOR_EMAIL,
@@ -483,6 +483,32 @@ class SnapshotFailClosedTests(SnapshotCase):
     def test_a_directory_where_a_file_is_allowlisted_blocks_the_window(self):
         (self.live / "adapters" / "odd.yaml").mkdir()
         self.assert_refused("adapters/odd.yaml")
+
+    def test_a_parent_swapped_for_a_symlink_after_enumeration_blocks_the_window(self):
+        """The copy walks descriptors from the live root, so a validated `persona/` that becomes a
+        symlink to an outside directory before `persona/rules.md` is read cannot lead it outside."""
+        outside = self.root / "outside"
+        (outside / "nested").mkdir(parents=True)
+        (outside / "rules.md").write_text("outside-secret\n", encoding="utf-8")
+        (outside / "nested" / "voice.md").write_text("outside-secret\n", encoding="utf-8")
+        real_entries = checkpoint._allowlisted_entries
+        swapped: list[list[str]] = []
+
+        def enumerate_then_swap(root):
+            entries = real_entries(root)
+            if not swapped:
+                (self.live / "persona").rename(self.root / "persona-validated")
+                (self.live / "persona").symlink_to(outside)
+                swapped.append(entries)
+            return entries
+
+        with mock.patch.object(checkpoint, "_allowlisted_entries", side_effect=enumerate_then_swap):
+            result = self.exporter().write()
+
+        self.assertIn("persona/rules.md", swapped[0])
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("snapshot refuses persona: symlink at an allowlisted path", result.reason)
+        self.assertEqual(self.tip(), "")
 
     def test_a_symlink_outside_the_allowlist_is_not_followed_or_refused(self):
         (self.live / "notes.md").symlink_to(self.live / "instance.yaml")
