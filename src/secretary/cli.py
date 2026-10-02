@@ -105,6 +105,7 @@ from secretary.sprint_commands import add_sprint_subcommands
 from secretary.state_repo import StateRepoError
 from secretary.status import collect_status, disk_free_bytes
 from secretary.task_commands import add_task_subcommands
+from secretary.transition.commands import add_transition_subcommands
 from secretary.upgrade import add_upgrade_command
 from secretary.web.commands import add_web_serve_subcommands
 from secretary.webfront.commands import add_web_front_subcommands
@@ -228,6 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
     status.set_defaults(handler=run_status)
 
     add_upgrade_command(subparsers)
+    add_transition_subcommands(subparsers)
     add_install_commands(subparsers)
     add_role_skills_subcommands(subparsers)
     add_sprint_subcommands(subparsers)
