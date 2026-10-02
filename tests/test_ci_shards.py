@@ -26,6 +26,7 @@ from scripts.ci_test_shards import (
     ManifestError,
     SuiteEvidence,
     TestRecord,
+    _changed_candidate_lines,
     _changed_line_report,
     _read_evidence,
     _suite_coverage_data,
@@ -649,6 +650,32 @@ class CiTestSuiteManifestTests(unittest.TestCase):
             [entry["classification"] for entry in report["lines"]],
             ["covered", "missed", "excluded", "not_executable"],
         )
+
+    def test_a_package_moved_into_the_source_root_reports_only_the_lines_it_changed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            before = root / "src" / "before"
+            before.mkdir(parents=True)
+            body = "".join(f"VALUE_{number} = {number}\n" for number in range(40))
+            (before / "module.py").write_text(body, encoding="utf-8")
+            (root / "README.md").write_text("fixture\n", encoding="utf-8")
+            self._commit_checkout(root)
+            base = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+            ).stdout.strip()
+            subprocess.run(["git", "-C", str(root), "mv", "src/before", "src/ummanu"], check=True)
+            moved = root / "src" / "ummanu" / "module.py"
+            moved.write_text(body.replace("VALUE_7 = 7", "VALUE_7 = 70"), encoding="utf-8")
+            (root / "src" / "ummanu" / "added.py").write_text("ADDED = 1\nMORE = 2\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+            subprocess.run(["git", "-C", str(root), "commit", "--quiet", "-m", "move"], check=True)
+            candidate = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+            ).stdout.strip()
+
+            changed = _changed_candidate_lines(root, base, candidate)
+
+        self.assertEqual(changed, {"src/ummanu/module.py": [8], "src/ummanu/added.py": [1, 2]})
 
     def test_coverage_configuration_enables_branch_scope_without_a_threshold(self) -> None:
         config = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")

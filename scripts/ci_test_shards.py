@@ -749,6 +749,12 @@ def _coverage_payload(path: Path) -> dict[str, object]:
 def _changed_candidate_lines(root: Path, base_sha: str, candidate_sha: str) -> dict[str, list[int]]:
     _exact_sha(base_sha, "base SHA")
     _exact_sha(candidate_sha, "candidate SHA")
+    # Diffed over the roots' parent directories with rename detection, so a file moved into a
+    # root from beside it (a package rename) reports the lines it changed, not every line as new.
+    # Only files under a root are kept below.
+    pathspecs = sorted(
+        {root_path.rsplit("/", 1)[0] if "/" in root_path else "." for root_path in COVERAGE_SOURCE_ROOTS}
+    )
     try:
         result = subprocess.run(
             [
@@ -756,10 +762,11 @@ def _changed_candidate_lines(root: Path, base_sha: str, candidate_sha: str) -> d
                 "diff",
                 "--no-ext-diff",
                 "--unified=0",
+                "--find-renames",
                 base_sha,
                 candidate_sha,
                 "--",
-                *COVERAGE_SOURCE_ROOTS,
+                *pathspecs,
             ],
             cwd=root,
             capture_output=True,
