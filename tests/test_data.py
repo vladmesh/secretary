@@ -889,18 +889,27 @@ class ExportTests(unittest.TestCase):
             )
             before_head = memory_head(instance_dir)
             before_count = memory_commit_count(instance_dir)
+            before_status = memory_status(instance_dir)
+            before_canon = {
+                path: path.read_bytes() for path in memory_facts_dir(instance_dir).rglob("*") if path.is_file()
+            }
 
             result = export_memory(data_dir, instance_dir)
             after_head = memory_head(instance_dir)
             after_count = memory_commit_count(instance_dir)
             exported = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
             status = memory_status(instance_dir)
+            after_canon = {
+                path: path.read_bytes() for path in memory_facts_dir(instance_dir).rglob("*") if path.is_file()
+            }
 
         self.assertEqual(result.count, 1)
         self.assertEqual(after_head, before_head)
         self.assertEqual(after_count, before_count)
         self.assertIn("protocol fact", exported)
-        self.assertEqual(status, "")
+        # The Git-free writer leaves its fact for the tick to commit; the export changes nothing.
+        self.assertEqual(status, before_status)
+        self.assertEqual(after_canon, before_canon)
 
     def test_export_memory_respects_live_journal_lock(self):
         with tempfile.TemporaryDirectory() as tmpdir:
