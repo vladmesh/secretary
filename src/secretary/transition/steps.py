@@ -27,6 +27,15 @@ RUNBOOK = "docs/RENAME.md §T3"
 FREEZE_REASON = f"transition from {OLD.package} to {NEW.package} ({RUNBOOK} step 2)"
 COMMIT_SUBJECT = f"Transition the installation from {OLD.package} to {NEW.package}"
 DISPATCHER_UNIT = f"{OLD.unit_prefix}dispatcher-production"
+#: The observer record state a refused freeze stop leaves (`dispatch.observer.STATE_PAUSE_STOP_PENDING`).
+OBSERVER_STOP_PENDING = "pause-stop-pending"
+#: Exits 0 only when importing the old package fails the way the DoD requires.
+IMPORT_CHECK = (
+    "import importlib, sys\n"
+    "try:\n    importlib.import_module(sys.argv[1])\n"
+    "except ModuleNotFoundError:\n    print('ModuleNotFoundError'); sys.exit(0)\n"
+    "print('importable'); sys.exit(1)\n"
+)
 
 
 @dataclass(frozen=True)
@@ -115,6 +124,8 @@ def apply_preconditions(ctx: Context) -> dict[str, Any]:
         raise TransitionError("preconditions unmet: " + ", ".join(failed))
     ctx.sprint = str(facts.get("sprint") or ctx.sprint)
     ctx.journal.record("pre_transition_sha", facts["checkout_sha"])
+    # The one commit step 5 may fast-forward to; origin/main moving later is a refusal there.
+    ctx.journal.record("target_sha", facts["origin_main"])
     ctx.journal.record("sprint", ctx.sprint)
     return facts
 
@@ -188,6 +199,33 @@ def plan_freeze(ctx: Context) -> list[str]:
     return lines
 
 
+def freeze_warnings(stdout: str) -> list[str]:
+    """The warnings of the freeze's own answer (its last JSON line); an unreadable answer is one."""
+    for line in reversed((stdout or "").strip().splitlines()):
+        try:
+            answer = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(answer, dict):
+            return [str(warning) for warning in answer.get("warnings") or []]
+    return ["the freeze printed no answer to check"]
+
+
+def pending_observer_stops(data_dir: Path) -> list[str]:
+    """Observer records a freeze left as a pending stop: their heads may still run."""
+    try:
+        payload = json.loads((data_dir / "dispatcher" / "production-state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    observers = payload.get("observers") if isinstance(payload, dict) else None
+    if not isinstance(observers, dict):
+        return []
+    return sorted(
+        ref for ref, record in observers.items()
+        if isinstance(record, dict) and record.get("state") == OBSERVER_STOP_PENDING
+    )
+
+
 def apply_freeze(ctx: Context) -> dict[str, Any]:
     layout, runner = ctx.layout, ctx.runner
     units = ctx.journal.fact("units")
@@ -211,7 +249,16 @@ def apply_freeze(ctx: Context) -> dict[str, Any]:
     if pause == "drain":
         runner.run(_old_pipeline(ctx, "resume"), env=environment)
     if pause != "freeze":
-        runner.run([*_old_pipeline(ctx, "pause", "freeze"), "--reason", FREEZE_REASON], env=environment)
+        result = runner.run([*_old_pipeline(ctx, "pause", "freeze"), "--reason", FREEZE_REASON], env=environment)
+        warnings = freeze_warnings(result.stdout)
+        if warnings:
+            raise TransitionError("the freeze did not stop everything: " + "; ".join(warnings))
+    pending = pending_observer_stops(layout.data_dir(OLD))
+    if pending:
+        raise TransitionError(
+            "observer heads the freeze could not stop are still on the books: " + ", ".join(pending)
+            + "; stop them, then rerun"
+        )
     present = [name for name in units if (layout.units_dir / name).exists()]
     if present:
         runner.sudo("systemctl", "disable", "--now", *present)
@@ -343,39 +390,61 @@ def apply_moves(ctx: Context) -> dict[str, Any]:
 
 def plan_checkout(ctx: Context) -> list[str]:
     root, state = ctx.layout.product_root(NEW), ctx.layout.state_dir
+    target = ctx.journal.fact("target_sha") or "<origin/main as step 1 journals it>"
     return [
         f"  (scripts/transition-from-{OLD.package}.sh, before the new venv exists)",
-        f"  $ git -C {root} fetch origin && git -C {root} merge --ff-only origin/main   (on branch main)",
+        f"  $ git -C {root} fetch origin   (refuses if origin/main moved away from {target})",
+        f"  $ git -C {root} merge --ff-only {target}   (on branch main)",
         f"  $ git -C {root} remote set-url origin {NEW.remote}",
-        f"  $ rm -rf {root / 'src' / (OLD.package + '.egg-info')}",
+        f"  $ rm -rf {root / 'src' / OLD.package} {root / 'src' / (OLD.package + '.egg-info')}",
         f"  $ mv {root / '.venv'} {state / 'old-venv'}   (kept for rollback: its scripts name the old path)",
         f"  $ python3 -m venv {root / '.venv'} && pip install -e '{root}[<extras recorded by step 4>]'",
+        f"  check: {ctx.layout.python(NEW)} -P -c 'import {OLD.package}' raises ModuleNotFoundError",
         f"  $ exec {ctx.layout.cli(NEW)} transition from-{OLD.package} --instance {ctx.layout.instance} --apply",
     ]
+
+
+def old_package_import(ctx: Context) -> tuple[bool, str]:
+    """Whether the new venv refuses `import <old package>` with ModuleNotFoundError, and what it said."""
+    environment = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    result = ctx.runner.run(
+        [str(ctx.layout.python(NEW)), "-P", "-c", IMPORT_CHECK, OLD.package],
+        check=False, env=environment, timeout=120,
+    )
+    said = ((result.stdout or "") + (result.stderr or "")).strip().splitlines()
+    return result.returncode == 0, said[-1] if said else f"exit {result.returncode}"
 
 
 def apply_checkout(ctx: Context) -> dict[str, Any]:
     """The bootstrap did the work; this verifies it before anything runs from the new tree."""
     root = ctx.layout.product_root(NEW)
+    target = ctx.journal.fact("target_sha")
     problems = []
     branch = ctx.runner.git_probe(root, "symbolic-ref", "--short", "HEAD")
     head = ctx.runner.git_probe(root, "rev-parse", "HEAD")
-    target = ctx.runner.git_probe(root, "rev-parse", "origin/main")
     remote = ctx.runner.git_probe(root, "remote", "get-url", "origin")
     if branch != "main":
         problems.append(f"{root} is on {branch or 'a detached HEAD'}, not main")
-    if not head or head != target:
-        problems.append(f"{root} is at {head}, origin/main at {target}")
+    if not target:
+        problems.append("the journal has no target commit from step 1")
+    elif head != target:
+        problems.append(f"{root} is at {head}, not at {target}, the origin/main step 1 checked")
     if remote != NEW.remote:
         problems.append(f"origin is {remote}, not {NEW.remote}")
     if not ctx.layout.cli(NEW).exists():
         problems.append(f"{ctx.layout.cli(NEW)} is missing")
-    if (root / "src" / f"{OLD.package}.egg-info").exists():
-        problems.append(f"{root / 'src' / (OLD.package + '.egg-info')} is still there")
+    for leftover in (root / "src" / OLD.package, root / "src" / f"{OLD.package}.egg-info"):
+        if leftover.exists():
+            problems.append(f"{leftover} is still there")
+    if not problems:
+        refused, said = old_package_import(ctx)
+        if not refused:
+            problems.append(f"the new venv imports {OLD.package} ({said})")
     if problems:
         raise TransitionError("the bootstrap's step 5 is not complete: " + "; ".join(problems))
     old_venv = ctx.layout.state_dir / "old-venv"
-    return {"new_sha": head, "old_venv": str(old_venv) if old_venv.exists() else ""}
+    return {"new_sha": head, "old_venv": str(old_venv) if old_venv.exists() else "",
+            "old_import": "ModuleNotFoundError"}
 
 
 # -- step 6 --------------------------------------------------------------------------------------
@@ -468,8 +537,17 @@ def apply_instance(ctx: Context) -> dict[str, Any]:
     committed = ctx.journal.fact("instance_commit")
     if committed:
         return {"commit": committed}
-    if runner.run(["git", "-C", str(instance), "diff", "--cached", "--quiet"], check=False).returncode:
-        raise TransitionError(f"{instance} has staged changes; the transition commits alone")
+    if not ctx.journal.fact("instance_rewrite_started"):
+        # The commit is the transition's alone: nothing staged, nothing pending in the paths it rewrites.
+        if runner.run(["git", "-C", str(instance), "diff", "--cached", "--quiet"], check=False).returncode:
+            raise TransitionError(f"{instance} has staged changes; the transition commits alone")
+        dirty = runner.git(instance, "status", "--porcelain", "--untracked-files=all", "--", *INSTANCE_PATHS)
+        if dirty:
+            raise TransitionError(
+                f"{instance} has uncommitted changes in the paths step 7 rewrites; commit or discard them first: "
+                + "; ".join(line.strip() for line in dirty.splitlines()[:10])
+            )
+        ctx.journal.record("instance_rewrite_started", True)
     for relative in ("instance.yaml", f"projects/{OLD.project_id}.yaml", f"adapters/{OLD.project_id}.yaml",
                      "heads/heads.toml", "secrets/catalog.yaml", "runtime.env", board.STORE_FILE):
         rewrite.backup(instance / relative, instance, copies)
@@ -515,8 +593,20 @@ def apply_instance(ctx: Context) -> dict[str, Any]:
     else:
         board.write_store_env(path, board.store_env_text(board.renamed_config(old_config, NEW), NEW))
 
-    present = [relative for relative in INSTANCE_PATHS if (instance / relative).exists()]
-    runner.git(instance, "add", "-A", "--", *present)
+    # Exactly the files the rewriters write; the moves and removals above staged themselves.
+    written = [
+        path for path in (
+            instance / "instance.yaml",
+            instance / "projects" / f"{NEW.project_id}.yaml",
+            *sorted((instance / "adapters").glob("*.yaml")),
+            instance / "heads" / "heads.toml",
+            instance / "secrets" / "catalog.yaml",
+            instance / "secrets" / secret_rewrap.KEY_PARAMS_NAME,
+            *sorted((instance / "secrets" / "values").glob(f"*{secret_rewrap.VALUE_SUFFIX}")),
+        )
+        if path.is_file()
+    ]
+    runner.git(instance, "add", "--", *(str(path.relative_to(instance)) for path in written))
     if runner.run(["git", "-C", str(instance), "diff", "--cached", "--quiet"], check=False).returncode:
         runner.git(instance, "commit", "-q", "-m", COMMIT_SUBJECT, "-m",
                    f"One-shot rewrite by the transition command ({RUNBOOK} step 7). The repository keeps its name.")
@@ -722,7 +812,8 @@ def plan_report(ctx: Context) -> list[str]:
     ]
 
 
-def report_text(ctx: Context, doctor: tuple[int, list[str]], units: list[str]) -> str:
+def report_text(ctx: Context, doctor: tuple[int, list[str]], units: list[str],
+                old_import: tuple[bool, str] = (False, "not checked")) -> str:
     steps = ctx.journal.data["steps"]
     board_facts = steps.get("board", {})
     before, after = board_facts.get("counts_before", {}), board_facts.get("counts_after", {})
@@ -757,6 +848,8 @@ def report_text(ctx: Context, doctor: tuple[int, list[str]], units: list[str]) -
         "```",
         *doctor[1],
         "```",
+        f"- `python -P -c 'import {OLD.package}'` in the new venv: "
+        + ("ModuleNotFoundError, as required." if old_import[0] else f"**did not fail** ({old_import[1]})."),
         f"- `{NEW.package} task show --ref {OLD.project_id}-1915` opens; the web front answers behind the password.",
         f"- `ls {ctx.layout.units_dir} | grep {OLD.unit_prefix}` prints nothing.",
         f"- Rollback copies stay in {ctx.layout.state_dir} until the owner removes them after the DoD.",
@@ -773,15 +866,17 @@ def apply_report(ctx: Context) -> dict[str, Any]:
     doctor = runner.run([cli, "doctor", "--instance", str(layout.instance)], check=False)
     doctor_tail = ((doctor.stdout or "") + (doctor.stderr or "")).strip().splitlines()[-30:]
     units = sorted(path.name for path in layout.units_dir.glob(f"{NEW.unit_prefix}*") if path.is_file())
+    refused, said = old_package_import(ctx)
     report = layout.state_dir / "report.md"
-    report.write_text(report_text(ctx, (doctor.returncode, doctor_tail), units), encoding="utf-8")
+    report.write_text(report_text(ctx, (doctor.returncode, doctor_tail), units, (refused, said)), encoding="utf-8")
     sprint = ctx.sprint or str(ctx.journal.fact("sprint") or "")
     if sprint:
         runner.run([cli, "sprint", "comment", "--ref", sprint, "--role", "po", "--actor", "transition",
                     "--request-id", f"transition-done-{sprint.replace(':', '-')}",
                     "--body-file", str(report), "--instance", str(layout.instance),
                     "--data-dir", str(layout.data_dir(NEW))])
-    return {"report": str(report), "doctor_exit": doctor.returncode, "units": units, "sprint": sprint}
+    return {"report": str(report), "doctor_exit": doctor.returncode, "units": units, "sprint": sprint,
+            "old_import_refused": refused}
 
 
 STEPS: tuple[Step, ...] = (

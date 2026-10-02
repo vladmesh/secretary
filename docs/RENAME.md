@@ -470,23 +470,29 @@ them with `--through move`), step 5 is the bootstrap's own, steps 6–12 run fro
 2. Stop the dispatcher timer and service, `secretary resume` if the pipeline is drained (a drain cannot
    become a freeze), `secretary pause freeze`, then `sudo -n systemctl disable --now` every `secretary-*`
    timer and service except the instance's `foreign_units` (this kills web, PO service and session).
-   Their enabled/active states and copies of the unit files go to the journal and
+   A freeze that answers with any warning, or leaves an observer record `pause-stop-pending`, refuses
+   the step (it stays unfinished, the message names what failed). Their enabled/active states and copies of the unit files go to the journal and
    `~/ummanu-transition/units/` for rollback.
 3. Dump the board (§T2.2), stop the old container (§T2.3).
 4. Record the old venv's extras, then `mv /home/dev/secretary /home/dev/ummanu`,
    `mv /home/dev/secretary-data /home/dev/ummanu-data`, `sudo mv /opt/secretary /opt/ummanu` and repoint
    `/usr/local/bin/orca`, `mv ~/.secretary-tools ~/.ummanu-tools` and repoint `~/.local/bin/uv`.
-5. Bootstrap, in `~/ummanu` on `main`: `git fetch && git merge --ff-only origin/main`; `git remote set-url
+5. Bootstrap, in `~/ummanu` on `main`: `git fetch`, refuse if `origin/main` moved away from the commit
+   step 1 checked and journalled, then `git merge --ff-only <that commit>`; `git remote set-url
    origin https://github.com/vladmesh/ummanu.git` (the owner has renamed the repo by now; before the
-   rename the old URL still works); delete `src/secretary.egg-info`; move the old `.venv` to
+   rename the old URL still works); delete `src/secretary` whole (ignored `__pycache__` leftovers would
+   otherwise import as a namespace package) and `src/secretary.egg-info`; move the old `.venv` to
    `~/ummanu-transition/old-venv` (its scripts name the old path, so it is kept whole for rollback) and
-   build a new one with the recorded extras, `pip install -e`. Then the script execs
-   `~/ummanu/.venv/bin/ummanu transition from-secretary --apply`, whose step 5 only verifies this.
+   build a new one with the recorded extras, `pip install -e`; refuse unless `python -P -c 'import
+   secretary'` in the new venv raises ModuleNotFoundError. Then the script execs
+   `~/ummanu/.venv/bin/ummanu transition from-secretary --apply`, whose step 5 verifies all of it (HEAD is
+   the journalled commit, no old package left, the import refused).
 6. Data-plane fix-ups: `git worktree repair` in `~/ummanu` and, per repository, for every worktree that
    moved with the data dir (product, observer root, codegen, instance), then `git worktree prune`;
    `production-state.json` path prefixes and `owner`; `data-manifest.json` `data_dir`; the live
    `codex-home/config.toml` project keys; the `~/.codex/config.toml` MCP block that runs the old checkout.
-7. Instance rewrite, committed to `secretary-instance` as one commit: `instance.yaml` (§4), rename
+7. Instance rewrite, committed to `secretary-instance` as one commit, refused if anything is staged or
+   the paths it rewrites have uncommitted changes, and staging exactly the files it writes: `instance.yaml` (§4), rename
    `projects/secretary.yaml` and `adapters/secretary.yaml` to `ummanu.yaml`; `.secretary-tools` in
    adapters; probes in `heads/heads.toml`; `secrets/catalog.yaml`. Re-wrap `secrets/installation-key.json`
    and re-encrypt every value from the old AAD/KDF constants and formats to the new ones; each value is
@@ -509,7 +515,8 @@ them with `--through move`), step 5 is the bootstrap's own, steps 6–12 run fro
 11. Remove the old unit files from `/etc/systemd/system` and `daemon-reload`. The copies stay in
     `~/ummanu-transition/units/`.
 12. `ummanu resume`; `ummanu doctor`; write `~/ummanu-transition/report.md` (counts before/after, unit
-    list, doctor result, old and new checkout SHA, secrets verified, dirs moved) and post it as a sprint
+    list, doctor result, old and new checkout SHA, secrets verified, dirs moved, `import secretary`
+    refused in the new venv) and post it as a sprint
     comment marked `[transition:done]`, with `## What was done` / `## How to verify` for the PO to complete
     the operation card the guard opened.
 

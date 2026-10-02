@@ -52,7 +52,7 @@ main() {
     fi
   fi
   if ! step_done "$journal" checkout; then
-    bootstrap_checkout "$new_root" "$state"
+    bootstrap_checkout "$new_root" "$state" "$(journal_fact "$journal" target_sha)"
   fi
   exec "$new_root/.venv/bin/$NEW_PACKAGE" transition "from-$OLD_PACKAGE" --home "$home" \
     --instance "$instance" --apply "$@"
@@ -76,6 +76,14 @@ run_old() {
   exit 1
 }
 
+journal_fact() {
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding="utf-8") as handle:
+    print(json.load(handle).get("facts", {}).get(sys.argv[2]) or "")
+PY
+}
+
 step_done() {
   python3 - "$1" "$2" <<'PY'
 import json, sys
@@ -88,19 +96,33 @@ sys.exit(0 if steps.get(sys.argv[2], {}).get("status") == "done" else 1)
 PY
 }
 
-# Step 5 (docs/RENAME.md §T3.5).
+# Step 5 (docs/RENAME.md §T3.5). The checkout moves to exactly the origin/main step 1 checked; a
+# ref that moved since is a refusal, not something to activate.
 bootstrap_checkout() {
-  local root="$1" state="$2"
-  local branch
+  local root="$1" state="$2" target="$3"
+  local branch head
+  if [ -z "$target" ]; then
+    echo "the journal names no target commit from step 1" >&2
+    exit 1
+  fi
   branch="$(git -C "$root" symbolic-ref --short HEAD)"
   if [ "$branch" != main ]; then
     echo "$root is on $branch, not main" >&2
     exit 1
   fi
-  git -C "$root" fetch --quiet origin
-  git -C "$root" merge --ff-only --quiet origin/main
+  head="$(git -C "$root" rev-parse HEAD)"
+  if [ "$head" != "$target" ]; then
+    git -C "$root" fetch --quiet origin
+    if [ "$(git -C "$root" rev-parse origin/main)" != "$target" ]; then
+      echo "origin/main moved since step 1 checked $target; refusing to activate anything else" >&2
+      exit 1
+    fi
+    git -C "$root" merge --ff-only --quiet "$target"
+  fi
   git -C "$root" remote set-url origin "$NEW_REMOTE"
-  rm -rf "$root/src/$OLD_PACKAGE.egg-info"
+  # The whole old package goes, ignored __pycache__ leftovers included: an empty directory there
+  # would still import as a namespace package.
+  rm -rf "$root/src/$OLD_PACKAGE" "$root/src/$OLD_PACKAGE.egg-info"
   if [ ! -x "$root/.venv/bin/$NEW_PACKAGE" ]; then
     mkdir -p "$state"
     # The old venv's scripts carry the old path in their shebangs: kept whole for rollback.
@@ -116,7 +138,16 @@ bootstrap_checkout() {
     "$python" -m venv --clear "$root/.venv"
     "$root/.venv/bin/python" -m pip install --quiet --disable-pip-version-check -e "$root[${extras:-dev}]"
   fi
-  echo "step 5: $root at $(git -C "$root" rev-parse HEAD), venv $root/.venv"
+  if ! env -u PYTHONPATH "$root/.venv/bin/python" -P -c "
+try:
+    import $OLD_PACKAGE
+except ModuleNotFoundError:
+    raise SystemExit(0)
+raise SystemExit(1)"; then
+    echo "the new venv still imports $OLD_PACKAGE; refusing to continue" >&2
+    exit 1
+  fi
+  echo "step 5: $root at $(git -C "$root" rev-parse HEAD), venv $root/.venv, import $OLD_PACKAGE refused"
 }
 
 main "$@"

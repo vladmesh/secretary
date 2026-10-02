@@ -72,6 +72,8 @@ class StubRunner(context.Runner):
     def __init__(self) -> None:
         self.calls: list[list[str]] = []
         self.fail: dict[str, int] = {}
+        #: stdout by a marker in the command line; the freeze answers like the real command.
+        self.answers: dict[str, str] = {"pause freeze": json.dumps({"status": "ok", "warnings": []}) + "\n"}
 
     def run(self, argv, *, cwd=None, check=True, env=None, timeout=900):  # type: ignore[override]
         argv = [str(part) for part in argv]
@@ -91,6 +93,9 @@ class StubRunner(context.Runner):
             return subprocess.CompletedProcess(argv, 0, "enabled\n", "")
         if command[:2] == ["systemctl", "is-active"]:
             return subprocess.CompletedProcess(argv, 0, "active\n", "")
+        for marker, stdout in self.answers.items():
+            if marker in " ".join(argv):
+                return subprocess.CompletedProcess(argv, 0, stdout, "")
         return subprocess.CompletedProcess(argv, 0, "ok\n", "")
 
     def privileged(self) -> list[list[str]]:
@@ -322,13 +327,18 @@ class Installation:
             board=board or FakeBoard(), require_renamed=False, **options,
         )
 
-    def bootstrap_checkout(self) -> None:
-        """What the shell bootstrap does for step 5."""
+    def bootstrap_checkout(self, *, target: str = "", keep_old_package: bool = False) -> None:
+        """What the shell bootstrap does for step 5: fast-forward to the commit step 1 journalled."""
         root = self.layout.product_root(NEW)
+        journal = context.Journal.load(self.layout.journal_path)
         git(root, "fetch", "-q", "origin")
-        git(root, "merge", "-q", "--ff-only", "origin/main")
+        git(root, "merge", "-q", "--ff-only", target or journal.fact("target_sha"))
         git(root, "remote", "set-url", "origin", NEW.remote)
         shutil.rmtree(root / "src" / f"{OLD.package}.egg-info")
+        if keep_old_package:
+            write(root / "src" / OLD.package / "__pycache__" / "cli.cpython-312.pyc", "")
+        else:
+            shutil.rmtree(root / "src" / OLD.package, ignore_errors=True)
         state = self.layout.state_dir
         state.mkdir(exist_ok=True)
         os.rename(root / ".venv", state / "old-venv")
@@ -601,6 +611,128 @@ class ApplyTests(FixtureTestCase):
         self.assertEqual((empty / "a").read_text(), "a")
 
 
+class ReviewFixTests(FixtureTestCase):
+    """The four points the observer asked for before the one live run (generation 3)."""
+
+    def to_move(self, install: Installation, runner: StubRunner | None = None) -> None:
+        quietly(engine.apply, install.context(runner=runner), through="move")
+
+    def test_origin_main_moving_after_step_one_is_refused(self) -> None:
+        install = self.install()
+        self.to_move(install)
+        journal = context.Journal.load(install.layout.journal_path)
+        self.assertEqual(journal.fact("target_sha"), install.target)
+        work = install.root / "work"
+        write(work / "LATER.md", "merged after the preconditions\n")
+        git(work, "add", "-A")
+        git(work, "commit", "-q", "-m", "a later card")
+        git(work, "push", "-q", "origin", "main")
+        moved = git(work, "rev-parse", "HEAD")
+        install.bootstrap_checkout(target=moved)
+        with self.assertRaises(context.TransitionError) as caught:
+            quietly(engine.apply, install.context(), through="checkout")
+        self.assertIn(f"not at {install.target}", str(caught.exception))
+        self.assertFalse(context.Journal.load(install.layout.journal_path).done("checkout"))
+        script = BootstrapScriptTests.SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('git -C "$root" merge --ff-only --quiet "$target"', script)
+        self.assertIn("origin/main moved since step 1", script)
+
+    def test_a_leftover_old_package_and_an_importable_one_are_refused(self) -> None:
+        install = self.install()
+        self.to_move(install)
+        install.bootstrap_checkout(keep_old_package=True)
+        with self.assertRaises(context.TransitionError) as caught:
+            quietly(engine.apply, install.context(), through="checkout")
+        self.assertIn(str(install.layout.product_root(NEW) / "src" / OLD.package), str(caught.exception))
+
+        shutil.rmtree(install.layout.product_root(NEW) / "src" / OLD.package)
+        runner = StubRunner()
+        runner.fail["-P -c"] = 1
+        with self.assertRaises(context.TransitionError) as caught:
+            quietly(engine.apply, install.context(runner=runner), through="checkout")
+        self.assertIn(f"the new venv imports {OLD.package}", str(caught.exception))
+        check = next(call for call in runner.calls if "-c" in call)
+        self.assertEqual((check[0], check[-1]), (str(install.layout.python(NEW)), OLD.package))
+
+        runner = StubRunner()
+        quietly(engine.apply, install.context(runner=runner))
+        self.assertTrue(context.Journal.load(install.layout.journal_path).done("report"))
+        report = (install.layout.state_dir / "report.md").read_text(encoding="utf-8")
+        self.assertIn(f"'import {OLD.package}'` in the new venv: ModuleNotFoundError", report)
+        script = BootstrapScriptTests.SCRIPT.read_text(encoding="utf-8")
+        self.assertIn('rm -rf "$root/src/$OLD_PACKAGE" "$root/src/$OLD_PACKAGE.egg-info"', script)
+        self.assertIn("except ModuleNotFoundError", script)
+
+    def test_the_import_check_itself_tells_a_missing_package_from_a_present_one(self) -> None:
+        import sys
+
+        missing = subprocess.run([sys.executable, "-P", "-c", steps.IMPORT_CHECK, "no_such_package_here"],
+                                 capture_output=True, text=True, check=False)
+        present = subprocess.run([sys.executable, "-P", "-c", steps.IMPORT_CHECK, "json"],
+                                 capture_output=True, text=True, check=False)
+        self.assertEqual((missing.returncode, missing.stdout.strip()), (0, "ModuleNotFoundError"))
+        self.assertEqual((present.returncode, present.stdout.strip()), (1, "importable"))
+
+    def run_to_checkout(self, install: Installation) -> None:
+        self.to_move(install)
+        install.bootstrap_checkout()
+        quietly(engine.apply, install.context(), through="data-plane")
+
+    def test_a_dirty_instance_path_is_refused_before_the_rewrite(self) -> None:
+        install = self.install()
+        self.run_to_checkout(install)
+        instance = install.layout.instance
+        heads = instance / "heads" / "heads.toml"
+        heads.write_text(heads.read_text() + "# an operator's unfinished edit\n")
+        before = git(instance, "rev-parse", "HEAD")
+        with self.assertRaises(context.TransitionError) as caught:
+            quietly(engine.apply, install.context(), through="instance")
+        self.assertIn("heads/heads.toml", str(caught.exception))
+        self.assertEqual(git(instance, "rev-parse", "HEAD"), before)
+        self.assertIn(f"name: {OLD.instance_name}", (instance / "instance.yaml").read_text())
+
+    def test_an_unrelated_change_is_not_committed(self) -> None:
+        install = self.install()
+        self.run_to_checkout(install)
+        instance = install.layout.instance
+        write(instance / "NOTES.md", "somebody's draft\n")
+        write(instance / "persona" / "AGENTS.md", "tracked prose\n")
+        quietly(engine.apply, install.context(), through="instance")
+        committed = git(instance, "show", "--name-only", "--format=", "HEAD").splitlines()
+        self.assertNotIn("NOTES.md", committed)
+        self.assertNotIn("persona/AGENTS.md", committed)
+        self.assertIn("instance.yaml", committed)
+        self.assertIn(f"projects/{NEW.project_id}.yaml", committed)
+        self.assertIn("secrets/installation-key.json", committed)
+        status = git(instance, "status", "--porcelain")
+        self.assertIn("NOTES.md", status)
+
+    def test_a_freeze_warning_refuses_step_two(self) -> None:
+        install = self.install()
+        runner = StubRunner()
+        runner.answers["pause freeze"] = json.dumps({
+            "status": "ok",
+            "warnings": ["observer heads could not be stopped and are retried by the next tick: sprint:1475"],
+        }) + "\n"
+        with self.assertRaises(context.TransitionError) as caught:
+            quietly(engine.apply, install.context(runner=runner), through="move")
+        self.assertIn("sprint:1475", str(caught.exception))
+        journal = context.Journal.load(install.layout.journal_path)
+        self.assertFalse(journal.done("freeze"))
+        self.assertFalse(any("disable" in call for call in runner.calls), "units were disabled anyway")
+
+        # The rerun finds the pipeline frozen, but the pending stop is still on the books.
+        write(install.layout.data_dir(OLD) / "dispatcher" / "pause.json", json.dumps({"mode": "freeze"}))
+        state = install.layout.data_dir(OLD) / "dispatcher" / "production-state.json"
+        payload = json.loads(state.read_text())
+        payload["observers"] = {"sprint:1475": {"state": steps.OBSERVER_STOP_PENDING}}
+        state.write_text(json.dumps(payload))
+        with self.assertRaises(context.TransitionError) as caught:
+            quietly(engine.apply, install.context(), through="move")
+        self.assertIn("still on the books: sprint:1475", str(caught.exception))
+        self.assertFalse(context.Journal.load(install.layout.journal_path).done("freeze"))
+
+
 class RollbackTests(FixtureTestCase):
     def test_rollback_restores_paths_units_secrets_dirs_and_the_checkout(self) -> None:
         install = self.install()
@@ -786,7 +918,7 @@ class BootstrapScriptTests(unittest.TestCase):
         self.assertTrue(os.access(self.SCRIPT, os.X_OK))
         self.assertIn("--through move", text)
         self.assertIn('exec "$new_root/.venv/bin/$NEW_PACKAGE" transition', text)
-        self.assertIn('merge --ff-only --quiet origin/main', text)
+        self.assertIn('merge --ff-only --quiet "$target"', text)
         self.assertIn(f"NEW_REMOTE={NEW.remote}", text)
 
 
