@@ -40,7 +40,7 @@ Installation secrets live in the recoverable store (`ummanu secret init/set/impo
 directory of the private repository) and are materialised into env files. The store contract is in
 [Recovery](RECOVERY.md#secrets). `runtime.env` next to `instance.yaml` can be a materialisation target;
 whether it is shows under `secret_store.materialize` in `ummanu status --json`. The product does
-not migrate it on its own. Either way the file is `0600`, gitignored and in no checkpoint or archive.
+not migrate it on its own. Either way the file is `0600`, outside the export allowlist and in no checkpoint or archive.
 `ummanu shell` receives the whole file; dispatcher-launched workers and reviewers receive
 non-secret runtime switches through the role-environment wrapper.
 
@@ -67,7 +67,7 @@ shipped head and verifies the owner/app/read logins and privilege boundary. Post
 container on this path and publishes only `127.0.0.1:5432`. Schema and roles are in
 [Board store](BOARD_STORE.md).
 
-`board-store.env` holds nine keys and three independent passwords, mode 0600, gitignored. Do not
+`board-store.env` holds nine keys and three independent passwords, mode 0600, outside the export allowlist. Do not
 print it, put its values on an argument list or commit it. An upgrade with no file reports PostgreSQL
 as not provisioned and continues. Once the file exists, an invalid file, unreachable server,
 unexpected image/volume/port, role drift or migration failure stops the upgrade before consumers

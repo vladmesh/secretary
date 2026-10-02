@@ -501,7 +501,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_subcommands = knowledge.add_subparsers(dest="knowledge_command")
     knowledge_write = knowledge_subcommands.add_parser(
         "write",
-        help="commit one markdown document into state/knowledge under the writer lock",
+        help="write one markdown document or directory into state/knowledge under the writer lock",
     )
     _add_instance(knowledge_write)
     knowledge_write.add_argument("--actor", required=True)
@@ -513,7 +513,6 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_source.add_argument(
         "--dir", help="source directory; replaces the whole target directory (20 MiB cap)"
     )
-    knowledge_write.add_argument("--message", help="commit subject; defaults to the document path")
     knowledge_write.set_defaults(handler=run_knowledge_write)
 
     knowledge_list = knowledge_subcommands.add_parser(
@@ -1799,7 +1798,6 @@ def run_knowledge_write(args: argparse.Namespace) -> int:
                 directory=args.path,
                 actor=args.actor,
                 source_dir=Path(args.dir),
-                message=args.message,
             )
         else:
             result = write_knowledge_document(
@@ -1807,7 +1805,6 @@ def run_knowledge_write(args: argparse.Namespace) -> int:
                 document=args.path,
                 actor=args.actor,
                 source_file=Path(args.file),
-                message=args.message,
             )
     except KnowledgeValidationError as exc:
         _print_json({"ok": False, "op": "write", "error": "validation", "message": str(exc)})

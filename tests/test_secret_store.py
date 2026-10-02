@@ -3,7 +3,6 @@ import io
 import json
 import os
 import re
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,14 +11,17 @@ from unittest import mock
 import yaml
 
 from tests.retired_board import LEGACY_ENV, LEGACY_SECRET_IDS, LEGACY_VALUES
-from ummanu import installation, secret_commands, secret_store, state_repo
+from ummanu import _fsutil, installation, secret_commands, secret_store, state_repo
 from ummanu.cli import main
 from ummanu.config import validate
+from ummanu.infra import export_allowlist
+from ummanu.infra.export_allowlist import is_exported
+from ummanu.memory.canon import CanonTransaction
 from ummanu.secret_store import (
     CATALOG_NAME,
-    GITIGNORE_ENTRY,
     KEY_NAME,
     KEY_PARAMS_NAME,
+    KEY_RELATIVE,
     RecoveryPhraseError,
     SecretStoreError,
     SecretStoreStateError,
@@ -35,14 +37,9 @@ from ummanu.secret_store import (
     restore_installation_key,
     set_secret,
     store_divergence,
+    store_revision,
 )
 from ummanu.secret_words import RECOVERY_WORDS
-
-
-def git(repo: Path, *args: str) -> str:
-    result = subprocess.run(["git", "-C", str(repo), *args], text=True, capture_output=True, check=True)
-    return result.stdout
-
 
 # Scrypt at the production work factor costs about a tenth of a second per call;
 # a test that initializes a store in every setUp would spend most of its time
@@ -62,7 +59,7 @@ def fast_key_params():
 
 
 class SecretStoreCase(unittest.TestCase):
-    """An instance repo with a store that has been initialized."""
+    """A live root (a plain directory, not a Git work tree) for a store to be initialized in."""
 
     phrase = " ".join(RECOVERY_WORDS[:16])
 
@@ -70,12 +67,7 @@ class SecretStoreCase(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.instance_dir = Path(self.tmpdir.name) / "secretary-instance"
         self.instance_dir.mkdir(parents=True)
-        git(self.instance_dir, "init", "--quiet", "--initial-branch", "main")
-        git(self.instance_dir, "config", "user.name", "operator")
-        git(self.instance_dir, "config", "user.email", "operator@example.invalid")
         (self.instance_dir / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
-        git(self.instance_dir, "add", "instance.yaml")
-        git(self.instance_dir, "commit", "--quiet", "-m", "config")
         self.kdf_patch = mock.patch.object(secret_store, "_new_key_params", side_effect=fast_key_params)
         self.kdf_patch.start()
         self.addCleanup(self.kdf_patch.stop)
@@ -84,38 +76,52 @@ class SecretStoreCase(unittest.TestCase):
     def initialize(self) -> None:
         initialize_store(self.instance_dir, phrase=self.phrase, actor="tester")
 
-    def tracked(self) -> list[str]:
-        return git(self.instance_dir, "ls-files").split()
+    def exported(self) -> list[str]:
+        """Every live-root file the snapshot export would copy."""
+        return sorted(
+            path.relative_to(self.instance_dir).as_posix()
+            for path in self.instance_dir.rglob("*")
+            if path.is_file() and is_exported(path.relative_to(self.instance_dir).as_posix())
+        )
+
+    def store_state(self) -> dict[str, bytes]:
+        """Every file under `secrets/`, by live-root path, with its bytes."""
+        root = self.instance_dir / "secrets"
+        if not root.exists():
+            return {}
+        return {
+            path.relative_to(self.instance_dir).as_posix(): path.read_bytes()
+            for path in sorted(root.rglob("*"))
+            if path.is_file()
+        }
+
+    def changed_since(self, before: dict[str, bytes]) -> list[str]:
+        """The `secrets/` files written, added or removed since `before`."""
+        after = self.store_state()
+        return sorted(name for name in set(before) | set(after) if before.get(name) != after.get(name))
 
     def catalog(self) -> dict:
         return yaml.safe_load((self.instance_dir / "secrets" / CATALOG_NAME).read_text(encoding="utf-8"))
 
 
 class InitCase(SecretStoreCase):
-    def test_init_creates_key_catalog_and_one_commit(self) -> None:
-        before = state_repo.head(self.instance_dir)
+    def test_init_creates_key_catalog_and_answers_the_store_revision(self) -> None:
         result = initialize_store(self.instance_dir, phrase=self.phrase, actor="tester")
-        head = state_repo.head(self.instance_dir)
-        self.assertNotEqual(before, head)
-        self.assertEqual(result.commit, head)
+        self.assertTrue(result.commit.startswith("sha256:"))
+        self.assertEqual(result.commit, store_revision(self.instance_dir))
         self.assertEqual(result.catalog_path, self.instance_dir / "secrets" / CATALOG_NAME)
         self.assertEqual(self.catalog(), {"version": secret_store.CATALOG_VERSION, "secrets": []})
-        tracked = self.tracked()
-        self.assertIn("secrets/catalog.yaml", tracked)
-        self.assertIn("secrets/installation-key.json", tracked)
-        self.assertIn(".gitignore", tracked)
+        self.assertEqual(self.exported(), ["instance.yaml", "secrets/catalog.yaml", "secrets/installation-key.json"])
+        self.assertFalse((self.instance_dir / ".gitignore").exists())
+        self.assertFalse((self.instance_dir / ".git").exists())
 
-    def test_installation_key_is_0600_and_never_committed(self) -> None:
+    def test_installation_key_is_0600_and_never_exported(self) -> None:
         self.initialize()
         key = self.instance_dir / "secrets" / KEY_NAME
         self.assertEqual(key.stat().st_mode & 0o777, 0o600)
-        self.assertNotIn(f"secrets/{KEY_NAME}", self.tracked())
-        self.assertIn(
-            GITIGNORE_ENTRY,
-            (self.instance_dir / ".gitignore").read_text(encoding="utf-8").split(),
-        )
-        every_commit = git(self.instance_dir, "log", "--all", "--name-only", "--format=")
-        self.assertNotIn(KEY_NAME, every_commit)
+        self.assertEqual(KEY_RELATIVE, f"secrets/{KEY_NAME}")
+        self.assertFalse(is_exported(KEY_RELATIVE))
+        self.assertNotIn(KEY_RELATIVE, self.exported())
 
     def test_key_params_are_open_and_hold_no_key_material(self) -> None:
         self.initialize()
@@ -129,12 +135,12 @@ class InitCase(SecretStoreCase):
 
     def test_second_init_refuses_and_changes_nothing(self) -> None:
         self.initialize()
-        head = state_repo.head(self.instance_dir)
+        head = self.store_state()
         key_before = (self.instance_dir / "secrets" / KEY_NAME).read_bytes()
         with self.assertRaises(SecretStoreStateError) as caught:
             initialize_store(self.instance_dir, phrase=self.phrase, actor="tester")
         self.assertIn("already initialized", str(caught.exception))
-        self.assertEqual(state_repo.head(self.instance_dir), head)
+        self.assertEqual(self.store_state(), head)
         self.assertEqual((self.instance_dir / "secrets" / KEY_NAME).read_bytes(), key_before)
 
 
@@ -261,10 +267,8 @@ class RoundTripCase(SecretStoreCase):
             "utf-8"
         )
         self.assertNotIn("plaintext-needle", envelope_text)
-        self.assertNotIn(
-            "plaintext-needle",
-            git(self.instance_dir, "log", "--all", "-p", "--format="),
-        )
+        for name in self.exported():
+            self.assertNotIn(b"plaintext-needle", (self.instance_dir / name).read_bytes(), name)
 
     def test_envelope_declares_its_format_kdf_and_aead_in_the_open(self) -> None:
         set_secret(
@@ -326,7 +330,8 @@ class RoundTripCase(SecretStoreCase):
         self.assertEqual(entries[0]["purpose"], "board api, rotated")
         self.assertEqual(read_secret(self.instance_dir, "service.api-token"), b"two")
 
-    def test_catalog_and_value_land_in_the_same_commit(self) -> None:
+    def test_catalog_and_value_land_in_the_same_write(self) -> None:
+        before = self.store_state()
         set_secret(
             self.instance_dir,
             secret_id="service.api-token",
@@ -335,15 +340,16 @@ class RoundTripCase(SecretStoreCase):
             purpose="board api",
             actor="tester",
         )
-        touched = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
         self.assertEqual(
-            sorted(touched),
+            self.changed_since(before),
             ["secrets/catalog.yaml", "secrets/values/service.api-token.enc.json"],
         )
 
-    def test_set_refuses_once_the_key_stops_being_ignored(self) -> None:
-        (self.instance_dir / ".gitignore").write_text("# nothing ignored\n", encoding="utf-8")
-        with self.assertRaises(SecretStoreError) as caught:
+    def test_set_refuses_once_the_key_would_be_exported(self) -> None:
+        exported = mock.patch.object(
+            export_allowlist, "SNAPSHOT_ALLOWLIST", (*export_allowlist.SNAPSHOT_ALLOWLIST, KEY_RELATIVE)
+        )
+        with exported, self.assertRaises(SecretStoreError) as caught:
             set_secret(
                 self.instance_dir,
                 secret_id="service.api-token",
@@ -352,11 +358,11 @@ class RoundTripCase(SecretStoreCase):
                 purpose="board api",
                 actor="tester",
             )
-        self.assertIn("committable key", str(caught.exception))
+        self.assertIn("export allowlist", str(caught.exception))
         self.assertEqual(list_secrets(self.instance_dir), ())
 
     def test_a_pasted_secret_in_an_open_field_stops_the_write(self) -> None:
-        head = state_repo.head(self.instance_dir)
+        head = self.store_state()
         with self.assertRaises(SecretStoreValidationError) as caught:
             set_secret(
                 self.instance_dir,
@@ -367,7 +373,7 @@ class RoundTripCase(SecretStoreCase):
                 actor="tester",
             )
         self.assertIn("secret detected", str(caught.exception))
-        self.assertEqual(state_repo.head(self.instance_dir), head)
+        self.assertEqual(self.store_state(), head)
         self.assertEqual(list_secrets(self.instance_dir), ())
 
     def test_bad_input_is_rejected_before_anything_is_written(self) -> None:
@@ -411,12 +417,11 @@ class InterruptedWriteCase(SecretStoreCase):
         self.assertEqual(store_divergence(self.instance_dir), ())
         for entry in list_secrets(self.instance_dir):
             self.assertTrue(read_secret(self.instance_dir, entry["id"]))
-        dirty = state_repo.status(self.instance_dir, ("secrets",))
-        self.assertEqual(dirty, "")
+        self.assertFalse((self.instance_dir / "secrets" / ".undo").exists())
 
     def test_interrupt_between_the_value_and_the_catalog_rolls_both_back(self) -> None:
-        head = state_repo.head(self.instance_dir)
-        real_replace = secret_store.os.replace
+        head = self.store_state()
+        real_replace = os.replace
         calls = {"count": 0}
 
         def failing_replace(source, destination):
@@ -425,7 +430,7 @@ class InterruptedWriteCase(SecretStoreCase):
                 raise OSError("interrupted between the value and the catalog")
             return real_replace(source, destination)
 
-        with mock.patch.object(secret_store.os, "replace", side_effect=failing_replace):
+        with mock.patch.object(_fsutil.os, "replace", side_effect=failing_replace):
             with self.assertRaises(SecretStoreError):
                 set_secret(
                     self.instance_dir,
@@ -435,17 +440,23 @@ class InterruptedWriteCase(SecretStoreCase):
                     purpose="interrupted",
                     actor="tester",
                 )
-        self.assertEqual(state_repo.head(self.instance_dir), head)
+        self.assertEqual(self.store_state(), head)
         self.assert_consistent()
         self.assertEqual([entry["id"] for entry in list_secrets(self.instance_dir)], ["first.secret"])
 
-    def test_interrupt_before_the_commit_leaves_a_consistent_pair_to_commit(self) -> None:
-        with (
-            mock.patch.object(
-                state_repo, "commit", side_effect=state_repo.StateRepoError("commit state failed")
-            ),
-            self.assertRaises(state_repo.StateRepoError),
-        ):
+    def test_interrupt_after_the_value_restores_both_files_byte_for_byte(self) -> None:
+        """No commit follows the write any more: a failure after the envelope is in restores it too."""
+        before = self.store_state()
+        real_write = CanonTransaction.write
+        calls: list[Path] = []
+
+        def write_then_fail(transaction, path, text):
+            calls.append(path)
+            real_write(transaction, path, text)
+            if len(calls) == 2:
+                raise RuntimeError("interrupted after the catalog")
+
+        with mock.patch.object(CanonTransaction, "write", write_then_fail), self.assertRaises(SecretStoreError):
             set_secret(
                 self.instance_dir,
                 secret_id="second.secret",
@@ -454,13 +465,8 @@ class InterruptedWriteCase(SecretStoreCase):
                 purpose="interrupted",
                 actor="tester",
             )
-        # The commit never happened, so the history still holds only the first
-        # secret; the worktree holds a matching catalog and value, so the retry
-        # commits a consistent pair rather than half of one.
-        committed = git(self.instance_dir, "ls-tree", "-r", "--name-only", "HEAD").split()
-        self.assertNotIn("secrets/values/second.secret.enc.json", committed)
-        self.assertEqual(store_divergence(self.instance_dir), ())
-        self.assertEqual(read_secret(self.instance_dir, "second.secret"), b"second")
+        self.assertEqual(self.store_state(), before)
+        self.assert_consistent()
 
         set_secret(
             self.instance_dir,
@@ -471,6 +477,7 @@ class InterruptedWriteCase(SecretStoreCase):
             actor="tester",
         )
         self.assert_consistent()
+        self.assertEqual(read_secret(self.instance_dir, "second.secret"), b"second")
 
     def test_divergence_is_reported_when_a_value_file_disappears(self) -> None:
         (self.instance_dir / "secrets" / "values" / "first.secret.enc.json").unlink()
@@ -599,13 +606,14 @@ class ImportCase(EnvStoreCase):
         self.assertEqual(read_secret(self.instance_dir, "example_api_user"), b"ummanu")
         self.assertEqual(store_divergence(self.instance_dir), ())
 
-    def test_import_lands_as_one_commit(self) -> None:
-        before = state_repo.head(self.instance_dir)
+    def test_import_lands_as_one_write(self) -> None:
+        before = self.store_state()
+        revision = store_revision(self.instance_dir)
         result = self.do_import()
-        self.assertNotEqual(result.commit, before)
-        touched = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
+        self.assertNotEqual(result.commit, revision)
+        self.assertEqual(result.commit, store_revision(self.instance_dir))
         self.assertEqual(
-            sorted(touched),
+            self.changed_since(before),
             [
                 "secrets/catalog.yaml",
                 "secrets/values/example_api_token.enc.json",
@@ -616,7 +624,7 @@ class ImportCase(EnvStoreCase):
 
     def test_reimporting_the_same_file_duplicates_nothing_and_writes_nothing(self) -> None:
         self.do_import()
-        head = state_repo.head(self.instance_dir)
+        head = self.store_state()
         envelope = self.instance_dir / "secrets" / "values" / "example_url.enc.json"
         sealed = envelope.read_bytes()
 
@@ -624,12 +632,13 @@ class ImportCase(EnvStoreCase):
         self.assertEqual(result.created, ())
         self.assertEqual(result.updated, ())
         self.assertEqual(result.unchanged, ("example_url", "example_api_user", "example_api_token"))
-        self.assertEqual(state_repo.head(self.instance_dir), head)
+        self.assertEqual(self.store_state(), head)
         self.assertEqual(envelope.read_bytes(), sealed)
         self.assertEqual(len(list_secrets(self.instance_dir)), 3)
 
     def test_reimport_names_the_variable_that_moved(self) -> None:
         self.do_import()
+        before = self.store_state()
         self.source.write_text(LIVE_RUNTIME_ENV.replace("=ummanu\n", "=ummanu-two\n"), encoding="utf-8")
         result = self.do_import()
         self.assertEqual(result.updated, ("example_api_user",))
@@ -637,9 +646,8 @@ class ImportCase(EnvStoreCase):
         self.assertEqual(result.unchanged, ("example_url", "example_api_token"))
         self.assertEqual(read_secret(self.instance_dir, "example_api_user"), b"ummanu-two")
         # Only the rotated envelope moves: the catalog says the same thing it did
-        # before, so the commit does not restate it.
-        touched = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
-        self.assertEqual(touched, ["secrets/values/example_api_user.enc.json"])
+        # before, so the write does not restate it.
+        self.assertEqual(self.changed_since(before), ["secrets/values/example_api_user.enc.json"])
 
     def test_import_keeps_created_at_across_a_rotation(self) -> None:
         self.do_import()
@@ -649,7 +657,7 @@ class ImportCase(EnvStoreCase):
         self.assertEqual(list_secrets(self.instance_dir)[0]["created_at"], created_at)
 
     def test_a_file_import_cannot_read_is_refused_before_anything_is_written(self) -> None:
-        head = state_repo.head(self.instance_dir)
+        head = self.store_state()
         cases = [
             "export EXAMPLE_URL=https://board\n",
             "EXAMPLE URL\n",
@@ -664,7 +672,7 @@ class ImportCase(EnvStoreCase):
                 with self.assertRaises(SecretStoreValidationError):
                     self.do_import()
         self.assertEqual(list_secrets(self.instance_dir), ())
-        self.assertEqual(state_repo.head(self.instance_dir), head)
+        self.assertEqual(self.store_state(), head)
 
     def test_a_file_the_store_could_not_reproduce_is_refused(self) -> None:
         """Anything the catalog cannot record is refused rather than dropped.
@@ -673,7 +681,7 @@ class ImportCase(EnvStoreCase):
         padded line, a CR or a missing final newline would come back out as
         different bytes, so the import says so instead.
         """
-        head = state_repo.head(self.instance_dir)
+        head = self.store_state()
         cases = {
             "no trailing newline": "EXAMPLE_URL=https://board\nEXAMPLE_API_USER=x",
             "blank line between": "EXAMPLE_URL=https://board\n\nEXAMPLE_API_USER=x\n",
@@ -690,7 +698,7 @@ class ImportCase(EnvStoreCase):
                 with self.assertRaises(SecretStoreValidationError):
                     self.do_import()
         self.assertEqual(list_secrets(self.instance_dir), ())
-        self.assertEqual(state_repo.head(self.instance_dir), head)
+        self.assertEqual(self.store_state(), head)
 
     def test_import_moves_an_earlier_variable_below_the_imported_block(self) -> None:
         set_secret(
@@ -722,7 +730,7 @@ class ImportCase(EnvStoreCase):
         # taking the file in would drop a line on the way back out.
         cased = Path(self.tmpdir.name) / "cased.env"
         cased.write_text("FOO=upper\nfoo=lower\n", encoding="utf-8")
-        head = state_repo.head(self.instance_dir)
+        head = self.store_state()
         with self.assertRaises(SecretStoreValidationError) as caught:
             self.do_import(source=cased)
         self.assertIn("differ only in case", str(caught.exception))
@@ -730,7 +738,7 @@ class ImportCase(EnvStoreCase):
         self.assertNotIn("lower", str(caught.exception))
         # Refused before the first write: no entry, no envelope, no commit.
         self.assertEqual(list(list_secrets(self.instance_dir)), [])
-        self.assertEqual(state_repo.head(self.instance_dir), head)
+        self.assertEqual(self.store_state(), head)
         self.assertEqual(list((self.instance_dir / "secrets" / "values").glob("*")), [])
         self.assertEqual(materialize_secrets(self.instance_dir), ())
         self.assertFalse(self.target.exists())
@@ -766,33 +774,29 @@ class RemoveCase(EnvStoreCase):
         super().setUp()
         self.do_import()
 
-    def test_remove_drops_the_entry_and_the_envelope_in_one_commit(self) -> None:
+    def test_remove_drops_the_entry_and_the_envelope_in_one_write(self) -> None:
         envelope = self.instance_dir / "secrets" / "values" / "example_url.enc.json"
+        before = self.store_state()
         result = remove_secret(self.instance_dir, secret_id="example_url", actor="tester")
-        self.assertEqual(result.commit, state_repo.head(self.instance_dir))
+        self.assertEqual(result.commit, store_revision(self.instance_dir))
         self.assertFalse(envelope.exists())
         self.assertEqual(
             [entry["id"] for entry in list_secrets(self.instance_dir)],
             ["example_api_token", "example_api_user"],
         )
         self.assertEqual(store_divergence(self.instance_dir), ())
-        self.assertEqual(state_repo.status(self.instance_dir, ("secrets",)), "")
-        touched = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
         self.assertEqual(
-            sorted(touched),
+            self.changed_since(before),
             ["secrets/catalog.yaml", "secrets/values/example_url.enc.json"],
         )
-        self.assertNotIn(
-            "secrets/values/example_url.enc.json",
-            git(self.instance_dir, "ls-tree", "-r", "--name-only", "HEAD").split(),
-        )
+        self.assertNotIn("secrets/values/example_url.enc.json", self.exported())
 
     def test_removing_a_secret_that_is_not_there_is_an_error(self) -> None:
-        head = state_repo.head(self.instance_dir)
+        head = self.store_state()
         with self.assertRaises(SecretStoreStateError) as caught:
             remove_secret(self.instance_dir, secret_id="never.stored", actor="tester")
         self.assertIn("no secret named", str(caught.exception))
-        self.assertEqual(state_repo.head(self.instance_dir), head)
+        self.assertEqual(self.store_state(), head)
         self.assertEqual(len(list_secrets(self.instance_dir)), 3)
 
 
@@ -886,6 +890,7 @@ class MaterializeCase(EnvStoreCase):
 
     def test_a_reordered_source_moves_the_lines_and_nothing_else(self) -> None:
         materialize_secrets(self.instance_dir)
+        before = self.store_state()
         reordered = "".join(reversed(LIVE_RUNTIME_ENV.splitlines(keepends=True)))
         self.source.write_text(reordered, encoding="utf-8")
         result = self.do_import()
@@ -894,8 +899,7 @@ class MaterializeCase(EnvStoreCase):
         # The middle line did not move, so only the two that swapped are updated.
         self.assertEqual(result.updated, ("example_api_token", "example_url"))
         self.assertEqual(result.unchanged, ("example_api_user",))
-        touched = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
-        self.assertEqual(touched, ["secrets/catalog.yaml"])
+        self.assertEqual(self.changed_since(before), ["secrets/catalog.yaml"])
         materialize_secrets(self.instance_dir)
         self.assertEqual(self.target.read_text(encoding="utf-8"), reordered)
 
@@ -918,8 +922,8 @@ class MaterializeCase(EnvStoreCase):
         only_runtime = materialize_secrets(self.instance_dir, target="runtime-env")
         self.assertEqual([result.path for result in only_runtime], [self.target])
 
-    def test_materialize_refuses_a_target_git_would_pick_up(self) -> None:
-        inside = self.instance_dir / "tracked.env"
+    def test_materialize_refuses_a_target_the_export_would_copy(self) -> None:
+        inside = self.instance_dir / "persona" / "tracked.env"
         set_secret(
             self.instance_dir,
             secret_id="app.token",
@@ -927,17 +931,29 @@ class MaterializeCase(EnvStoreCase):
             scope="installation",
             purpose="app credentials",
             environment="APP_TOKEN",
-            materialize={"target": "file", "path": "tracked.env"},
+            materialize={"target": "file", "path": "persona/tracked.env"},
             actor="tester",
         )
         with self.assertRaises(SecretStoreError) as caught:
             materialize_secrets(self.instance_dir, target="file")
-        self.assertIn("not gitignored", str(caught.exception))
+        self.assertIn("snapshot export copies", str(caught.exception))
         self.assertFalse(inside.exists())
 
-        (self.instance_dir / ".gitignore").write_text(f"{GITIGNORE_ENTRY}\ntracked.env\n", encoding="utf-8")
+        # The same target outside the export allowlist is written: exclusion is the allowlist, not Git.
+        set_secret(
+            self.instance_dir,
+            secret_id="app.token",
+            value=b"app-value",
+            scope="installation",
+            purpose="app credentials",
+            environment="APP_TOKEN",
+            materialize={"target": "file", "path": "local/tracked.env"},
+            actor="tester",
+        )
         materialize_secrets(self.instance_dir, target="file")
-        self.assertEqual(inside.read_text(encoding="utf-8"), "APP_TOKEN=app-value\n")
+        self.assertEqual(
+            (self.instance_dir / "local" / "tracked.env").read_text(encoding="utf-8"), "APP_TOKEN=app-value\n"
+        )
 
     def test_a_value_with_a_newline_never_becomes_an_env_line(self) -> None:
         set_secret(

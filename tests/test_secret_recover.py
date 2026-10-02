@@ -90,6 +90,10 @@ class RecoveryCase(unittest.TestCase):
             actor="tester",
             materialize={"target": secret_store.MATERIALIZE_RUNTIME_ENV},
         )
+        # The store writes files and makes no commit; the legacy tick commits its exported files
+        # (`checkpoint.LEGACY_LIVE_PATHS`), which is what a clone of the remote then carries.
+        _git(self.source, "add", "--", "secrets/catalog.yaml", "secrets/installation-key.json", "secrets/values")
+        _git(self.source, "commit", "-m", "checkpoint(state): the secret store")
         self.phrase_file = root / "phrase.txt"
         self.phrase_file.write_text(PHRASE + "\n", encoding="utf-8")
         # No terminal: nothing in a test run may block on a phrase prompt.

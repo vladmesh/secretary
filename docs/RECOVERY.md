@@ -100,7 +100,8 @@ Outside the canon, rebuilt or kept in an optional cold archive:
     catalog.yaml, installation-key.json, values/<id>.enc.json
 ```
 
-`secrets/installation.key` is the raw installation key, mode `0600`, outside Git and the checkpoint.
+`secrets/installation.key` is the raw installation key, mode `0600`, outside the checkpoint: the
+export allowlist does not match it (see [Local-file exclusion](#local-file-exclusion)).
 
 ### Snapshot repository
 
@@ -193,19 +194,23 @@ failure or divergence for the next window or operator action.
 
 ## Writers
 
-Six writers touch the instance repository, each with its own pathspec:
+Five writers touch the live root, each with its own paths. Only the tick and the head-registry
+writer make Git commits; the other three write files and start no Git child:
 
-- tick writer: `state/board`, `state/runs` (and, in legacy mode, `state/memory`; below), at the
-  cadence above, under the tick lock;
+- tick writer: `state/board`, `state/runs` (and, in legacy mode, the files the Git-free writers
+  leave uncommitted; below), at the cadence above, under the tick lock;
 - memory writer: `state/memory`, on `commit`/`supersede` and the memory pack of `upgrade`; it writes
   files only and makes no Git call (below);
-- knowledge writer: `state/knowledge`, on `ummanu knowledge write`;
-- secret writer: `secrets/`, on `secret init/set/import/remove` (`list` and `materialize` do not
-  commit);
+- knowledge writer: `state/knowledge`, on `ummanu knowledge write`, the sprint-close closeout and the
+  dispatcher's research-report transfer; it writes files only and makes no Git call (below);
+- secret writer: `secrets/`, on `secret init/set/import/remove`, `secret checkpoint-github set` and
+  every re-encryption of a value (`list` and `materialize` write no store file); it writes files
+  only and makes no Git call (below);
 - head-registry writer: `heads/heads.yaml`, `heads/source.yaml`, on `ummanu upgrade`; it commits and
-  immediately pushes the pair;
-- local-configuration writer: `.gitignore`, when local configuration such as `board-store.env`
-  needs a durable exclusion.
+  immediately pushes the pair.
+
+No writer maintains `.gitignore` any more: what leaves the host is decided by the export allowlist
+([Local-file exclusion](#local-file-exclusion)).
 
 Which periodic writer runs is decided by the live root. While it is a Git work tree (it has a
 `.git`), the tick keeps the commit and push above unchanged. When it is not, the tick runs the
@@ -280,16 +285,70 @@ byte changes it. `memory verify` compares the canon, `export.ndjson` and `index.
 set and per-fact content hash and names every missing, extra or changed id, not their counts. The
 memory service reads the canon files when no export is present.
 
-Because the memory writer no longer commits, the **legacy** tick (live root is a work tree) stages
-and commits `state/memory` in the same commit as `state/board` and `state/runs`, after scanning
-every file under it with the same redaction as the rest of the cut; a hit blocks the tick by path.
-Only `state/memory` joins: config and every other path stay out of that commit. In exporter mode the
-allowlisted `state/memory/**` reaches the next cut as before.
+**Knowledge writer.** `knowledge write --file` replaces one document under `state/knowledge` with one
+atomic rename; `--dir` swaps one directory in whole through `state/.knowledge-swap` (outside the
+allowlist and every pathspec below). A failure at any step puts the previous directory back and
+removes any parent the write created, so `state/knowledge` is byte-identical to before; a swap a
+crashed writer left behind is finished by the next writer under the lock. Content equal to what is on
+disk writes nothing. Where a commit id used to be, the result (`commit`), the sprint-close closeout
+step and the plan's `mark_written` carry the **content revision** of what was written: `sha256:` over
+the sorted paths below `state/knowledge`, each with the sha256 of its bytes
+(`_fsutil.content_revision`, the memory writer's formula). The same content gives the same revision.
+A close whose plan was staged with a Git commit id before this change keeps that value and completes.
+
+**Secret writer.** Every store write holds the shared lock and runs as one undo-guarded transaction
+over `secrets/` (the memory canon's transaction, its undo area in `secrets/.undo`): the prior bytes
+and mode of each path are kept before it is replaced or removed, a failure restores exactly that set
+and any directory the write created, so `secrets/` is byte-identical to before, and an undo a crashed
+writer left is restored by the next store operation before it reads the catalog. The catalog and the
+envelopes it names therefore never diverge. An envelope whose plaintext is unchanged is never
+rewritten or re-encrypted, and a write whose catalog entry and value are both unchanged writes
+nothing. Results carry the store's content revision in `commit`: the same formula over the exported
+store files (`secrets/catalog.yaml`, `secrets/installation-key.json`, `secrets/values/*.enc.json`;
+`secret_store.store_revision`), never over `installation.key`.
+
+Because the memory, knowledge and secret writers no longer commit, the **legacy** tick (live root is
+a work tree) stages and commits their files in the same commit as `state/board` and `state/runs`
+(`checkpoint.LEGACY_LIVE_PATHS`), with these added pathspecs and no others:
+
+```text
+state/memory
+state/knowledge
+secrets/catalog.yaml
+secrets/installation-key.json
+:(glob)secrets/values/*.enc.json
+```
+
+Each is staged only when it names a file on disk or in the index, so a removed file is committed as a
+removal and a live root without a store commits as before. `secrets/installation.key` and the undo
+area match none of them and are never staged, whatever `.gitignore` says. Before anything is staged,
+every file on disk under these pathspecs passes the same redaction scan as the rest of the cut; a
+hit blocks the tick by path. Config and every other path stay out of that commit. In exporter mode
+the allowlisted paths reach the next cut as before.
 
 Pathspecs do not overlap, and nobody uses `git add -A`, so uncommitted manual config edits are left
-alone. Every writer holds the shared repository lock while staging and committing. All writers except
-the tick writer and the memory writer commit synchronously; the next push carries their commits out. Explicit checkpoint
-users (install, recover) are also synchronous and bypass the periodic cadence.
+alone. Every writer holds the shared repository lock while it writes, stages or commits. The
+head-registry writer commits synchronously; everything else reaches Git through the tick's commit
+or cut, and the next push carries it out. Explicit checkpoint users (install, recover) are also
+synchronous and bypass the periodic cadence.
+
+### Local-file exclusion
+
+A local file that must never leave the host (`secrets/installation.key`, `runtime.env`,
+`board-store.env`) is excluded by **not matching the export allowlist**, not by Git ignoring it. One
+helper answers the question for every caller, `infra.export_allowlist.is_exported` (re-exported as
+`checkpoint.is_exported`, beside `SNAPSHOT_ALLOWLIST`); it reads no file and starts no process, so it
+answers the same on a live root with or without `.git`:
+
+- the secret store refuses to initialise or write when `secrets/installation.key` would be exported,
+  and `secret materialize` refuses a target inside the live root that would be;
+- `runtime_env.read_runtime_env(..., require_ignored=True)` refuses a `runtime.env` inside the live
+  root at an exported path and accepts one that is not (a file outside the live root is never
+  exported);
+- the board store refuses to materialise, resolve or migrate a `board-store.env` at an exported path,
+  and `doctor` names it.
+
+`.gitignore` is not exported, and no product code writes it.
 
 ## Checkpoint readers and freshness
 
@@ -356,7 +415,8 @@ checkpoint, records the reason in status and retries next tick:
   `export.json` match the line counts, the generated `cards.json`/`cards.ndjson` pair is identical and
   card references are unique, all before local export or canonical files are replaced;
 - memory staging is empty;
-- the secret scan of `state/` is clean, `state/memory` included in legacy mode (for the snapshot
+- the secret scan of `state/` is clean, in legacy mode with every file the tick commits beside board
+  and runs (`state/memory`, `state/knowledge` and the exported secret-store files; for the snapshot
   exporter: of every file of the cut). The memory and knowledge writers run the same scan over their
   own text before writing.
 
@@ -393,21 +453,22 @@ On remote divergence (remote commits not present locally) the push stops and `st
 
 ## Secrets
 
-The host `runtime.env` is mode `0600`, gitignored, outside the checkpoint, and may hold materialised
+The host `runtime.env` is mode `0600`, outside the export allowlist and the checkpoint, and may hold materialised
 installation secrets. `board-store.env` is local connection material that bootstrap generates,
 not restored from the secret store. Forge access and interactive head logins stay in the operator's password manager; the product
 never copies them to the host.
 
 The secret store (`ummanu/secret_store.py`, `secrets/`) is a recoverable canon in the same
-repository: a metadata catalog and versioned encrypted envelopes, tracked in Git and pushed with the
-checkpoint. The repository never contains the raw installation key (`secrets/installation.key`,
-gitignored, `0600`) or the recovery phrase, which `secret init` shows once and the product stores
+repository: a metadata catalog and versioned encrypted envelopes, exported (in legacy mode committed
+by the tick) and pushed with the checkpoint. The repository never contains the raw installation key
+(`secrets/installation.key`, not matched by the export allowlist, `0600`) or the recovery phrase, which `secret init` shows once and the product stores
 nowhere. With the phrase the key is rebuilt and values return byte for byte; without it `recover`
 prints a locked/missing report and writes nothing. Losing the phrase means reissuing secrets, not
 losing the installation. Command contracts are in [Protocols](PROTOCOLS.md#secrets).
 
 Security boundary: a trusted single-user host. Board and memory endpoints listen on loopback. External
-tokens are protected by host access control, `.gitignore` and the `state/` secret scan, not by
+tokens are protected by host access control, the export allowlist (a credential file is excluded by
+not matching it, [Local-file exclusion](#local-file-exclusion)) and the checkpoint secret scan, not by
 at-rest encryption on the host. The installation key belongs to the installation user; any process
 that can read `runtime.env` can read the key and open every secret. There is no broker, grant or
 per-worker isolation.
@@ -555,7 +616,7 @@ preserve it, then remove it outside Ummanu or choose a fresh `--instance-dir`. A
 different origin, invalid repository or unsupported non-fast-forward is also left untouched and
 refused. A clean tree alone never proves product ownership.
 
-`runtime.env` and `board-store.env` stay gitignored and are never committed.
+`runtime.env` and `board-store.env` are outside the export allowlist and are never committed.
 
 ### Sequence
 

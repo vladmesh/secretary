@@ -35,8 +35,10 @@ from ummanu.checkpoint import (
 )
 from ummanu.cli import main as cli_main
 from ummanu.data import DataExport
+from ummanu.infra.export_allowlist import is_exported
+from ummanu.knowledge_write import write_knowledge_document
 from ummanu.memory_write import commit_memory_proposal, propose_memory_fact
-from ummanu.secret_store import initialize_store, set_secret
+from ummanu.secret_store import initialize_store, remove_secret, set_secret
 from ummanu.secret_words import RECOVERY_WORDS
 
 CARD = {"id": 1, "reference": "ummanu-637", "title": "Snapshot exporter", "column": "Ready", "comments": []}
@@ -605,6 +607,17 @@ class SnapshotCredentialTests(SnapshotCase):
             self.assertTrue((self.live / credential).is_file(), credential)
             self.assertNotIn(credential, admitted)
 
+    def test_the_one_exclusion_helper_agrees_with_the_cut(self):
+        """`is_exported`, which every local-file exclusion asks, answers exactly what a cut copies."""
+        admitted = set(_allowlisted_files(self.live))
+
+        for credential in self.credentials:
+            self.assertFalse(is_exported(credential), credential)
+        for path in admitted:
+            self.assertTrue(is_exported(path), path)
+        for path in (p.relative_to(self.live).as_posix() for p in self.live.rglob("*") if p.is_file()):
+            self.assertEqual(is_exported(path), path in admitted, path)
+
 
 class SnapshotLegacyCompatibilityTests(SnapshotCase):
     """For one live state in today's layout, both writers produce the same canon."""
@@ -811,6 +824,152 @@ class MemoryWriterTickTests(SnapshotCase):
         manifest = json.loads(self.committed(SNAPSHOT_MANIFEST))
         self.assertEqual(manifest["files"][relative], hashlib.sha256(fact.read_bytes()).hexdigest())
         self.assertFalse([path for path in self.tree() if ".undo" in path or path.startswith("state/memory/.")])
+
+
+class KnowledgeAndSecretTickTests(SnapshotCase):
+    """The Git-free knowledge writer and secret store in both tick modes (docs/RECOVERY.md, "Writers")."""
+
+    make_work_tree = MemoryWriterTickTests.make_work_tree
+    write_fact = MemoryWriterTickTests.write_fact
+
+    LIVE_PREFIXES = ("state/board/", "state/runs/", "state/memory/", "state/knowledge/", "secrets/")
+
+    def write_store(self) -> None:
+        with cheap_key_params():
+            initialize_store(self.live, phrase=" ".join(RECOVERY_WORDS[:16]), actor="tester")
+        set_secret(
+            self.live,
+            secret_id="integration.token",
+            value=b"opaque-sealed-credential-5678",
+            scope="installation",
+            purpose="a sealed credential",
+            actor="tester",
+            environment="INTEGRATION_TOKEN",
+        )
+
+    def test_a_legacy_tick_commits_knowledge_and_the_store_with_board_runs_and_memory(self):
+        self.make_work_tree()
+        head = git(self.live, "rev-parse", "HEAD").strip()
+        document = write_knowledge_document(
+            self.live, document="decisions/two.md", actor="po", text="# Two\n\nLeft uncommitted.\n"
+        ).path
+        self.write_store()
+        self.write_fact("written", "a fact the writer leaves uncommitted\n")
+        self.assertEqual(git(self.live, "rev-parse", "HEAD").strip(), head, "no writer committed")
+        # The live root ignores nothing: the tick alone keeps the key out.
+        self.assertNotIn("installation.key", (self.live / ".gitignore").read_text("utf-8"))
+        (self.live / "persona" / "rules.md").write_text("Be briefer.\n", encoding="utf-8")
+
+        result = tick_checkpoint_writer(self.data_dir, self.live).write()
+
+        self.assertEqual(result.status, "committed", result.reason)
+        touched = git(self.live, "show", "--name-only", "--format=", "HEAD").split()
+        envelope = "secrets/values/integration.token.enc.json"
+        for path in (
+            "state/knowledge/decisions/two.md",
+            "secrets/catalog.yaml",
+            "secrets/installation-key.json",
+            envelope,
+            "state/memory/facts/global/written.md",
+            "state/runs/runs.ndjson",
+            "state/board/cards/0000/00000000.json",
+        ):
+            self.assertIn(path, touched)
+        self.assertEqual([path for path in touched if not path.startswith(self.LIVE_PREFIXES)], [])
+        self.assertEqual(git(self.live, "rev-list", "--count", f"{head}..HEAD").strip(), "1", "one commit")
+        self.assertEqual(git(self.live, "show", "HEAD:state/knowledge/decisions/two.md"), document.read_text("utf-8"))
+        for path in ("secrets/catalog.yaml", "secrets/installation-key.json", envelope):
+            self.assertEqual(blob_bytes(self.live, f"HEAD:{path}"), (self.live / path).read_bytes())
+        # The key is never staged: not in any commit, not in the index, still untracked.
+        self.assertNotIn("installation.key", git(self.live, "log", "--all", "--name-only", "--format="))
+        self.assertEqual(git(self.live, "ls-files", "--", "secrets/installation.key"), "")
+        self.assertEqual(git(self.live, "diff", "--cached", "--name-only"), "")
+        self.assertEqual(
+            git(self.live, "status", "--porcelain", "--untracked-files=all"),
+            " M persona/rules.md\n?? secrets/installation.key\n",
+        )
+
+    def test_a_legacy_tick_commits_a_removed_secret_as_a_removal(self):
+        self.make_work_tree()
+        self.write_store()
+        self.assertEqual(tick_checkpoint_writer(self.data_dir, self.live).write().status, "committed")
+        envelope = "secrets/values/integration.token.enc.json"
+        self.assertIn(envelope, git(self.live, "ls-files", "--", "secrets").split())
+
+        remove_secret(self.live, secret_id="integration.token", actor="tester")
+        result = tick_checkpoint_writer(self.data_dir, self.live).write()
+
+        self.assertEqual(result.status, "committed", result.reason)
+        self.assertEqual(
+            sorted(git(self.live, "ls-files", "--", "secrets").split()),
+            ["secrets/catalog.yaml", "secrets/installation-key.json"],
+        )
+        self.assertEqual(blob_bytes(self.live, "HEAD:secrets/catalog.yaml"), (self.live / "secrets/catalog.yaml").read_bytes())
+
+    def test_a_secret_pasted_into_a_knowledge_file_blocks_the_legacy_tick_by_path(self):
+        self.make_work_tree()
+        head = git(self.live, "rev-parse", "HEAD").strip()
+        write_knowledge_document(self.live, document="decisions/clean.md", actor="po", text="clean\n")
+        pasted = self.live / "state" / "knowledge" / "decisions" / "pasted.md"
+        pasted.write_text(f"token {TOKEN}\n", encoding="utf-8")
+
+        result = tick_checkpoint_writer(self.data_dir, self.live).write()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("secret detected in state/knowledge/decisions/pasted.md", result.reason)
+        self.assertNotIn("clean.md", result.reason)
+        self.assertEqual(git(self.live, "rev-parse", "HEAD").strip(), head)
+        self.assertEqual(git(self.live, "diff", "--cached", "--name-only"), "")
+
+    def test_the_legacy_pathspecs_are_exactly_the_exported_writer_paths(self):
+        self.assertEqual(
+            [pattern for _spec, pattern in checkpoint.LEGACY_LIVE_PATHS],
+            [
+                "state/memory/**",
+                "state/knowledge/**",
+                "secrets/catalog.yaml",
+                "secrets/installation-key.json",
+                "secrets/values/*.enc.json",
+            ],
+        )
+        for _spec, pattern in checkpoint.LEGACY_LIVE_PATHS:
+            self.assertIn(pattern, SNAPSHOT_ALLOWLIST)
+        for credential in ("secrets/installation.key", "runtime.env", "board-store.env"):
+            self.assertFalse(any(checkpoint.matches(p, credential) for _s, p in checkpoint.LEGACY_LIVE_PATHS))
+
+    def test_an_exporter_cut_carries_a_knowledge_document_and_a_store_change(self):
+        self.assertFalse(live_root_is_work_tree(self.live))
+        self.write_store()
+        first = self.exporter().write()
+        self.assertEqual(first.status, "committed", first.reason)
+
+        document = write_knowledge_document(
+            self.live, document="decisions/two.md", actor="po", text="# Two\n\nNo Git here.\n"
+        ).path
+        set_secret(
+            self.live,
+            secret_id="second.token",
+            value=b"opaque-second-credential-9012",
+            scope="installation",
+            purpose="a second sealed credential",
+            actor="tester",
+        )
+        self.assertFalse((self.live / ".git").exists())
+
+        result = self.exporter().write()
+
+        self.assertEqual(result.status, "committed", result.reason)
+        manifest = json.loads(self.committed(SNAPSHOT_MANIFEST))
+        for relative in (
+            "state/knowledge/decisions/two.md",
+            "secrets/catalog.yaml",
+            "secrets/values/second.token.enc.json",
+        ):
+            payload = (self.live / relative).read_bytes()
+            self.assertEqual(self.committed(relative), payload, relative)
+            self.assertEqual(manifest["files"][relative], hashlib.sha256(payload).hexdigest(), relative)
+        self.assertEqual(self.committed("state/knowledge/decisions/two.md"), document.read_bytes())
+        self.assertNotIn("secrets/installation.key", self.tree())
 
 
 class SnapshotPublishCase(SnapshotCase):

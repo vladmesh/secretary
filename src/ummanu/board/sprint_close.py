@@ -218,7 +218,12 @@ class SprintCloseConflict:
 
 @dataclass(frozen=True, slots=True)
 class SprintCloseoutPlan:
-    """The knowledge closeout frozen when the close transaction opens."""
+    """The knowledge closeout frozen when the close transaction opens.
+
+    `commit` is what the knowledge writer answered once the document was written: its content
+    revision (`sha256:...`) since the writer makes no Git commit. A plan a close staged before that
+    holds a Git commit id there; it is read and carried as it is, and the close still completes.
+    """
 
     document: str
     text: str

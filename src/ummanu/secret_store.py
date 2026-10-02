@@ -1,15 +1,14 @@
 """Recoverable secret store: envelope format, installation key, open catalog.
 
-Contract: docs/RECOVERY.md, "Secrets". The store lives in the private instance repo, so it rides
+Contract: docs/RECOVERY.md, "Secrets" and "Writers". The store lives in the live root, so it rides
 the same recovery chain as the board, the runs and the knowledge plane:
 
-    secretary-instance/
-      .gitignore              secrets/installation.key
+    <live root>/
       secrets/
-        catalog.yaml          open metadata, tracked, redact-scanned
-        installation-key.json open KDF parameters plus a verifier, tracked
-        installation.key      raw key, mode 0600, never committed
-        values/<id>.enc.json  one versioned envelope per secret
+        catalog.yaml          open metadata, exported, redact-scanned
+        installation-key.json open KDF parameters plus a verifier, exported
+        installation.key      raw key, mode 0600, never exported
+        values/<id>.enc.json  one versioned envelope per secret, exported
 
 Two keys, two jobs. The installation key opens the values after a reboot without a human. The
 recovery phrase exists only to rebuild that key on a clean host: it is generated here, shown once
@@ -20,9 +19,14 @@ Every envelope carries its own format version, KDF id, KDF parameters and AEAD i
 next to the ciphertext; nothing about how a value was sealed lives only in this module's
 constants. The primitives are `cryptography`'s (Scrypt, HKDF, ChaCha20-Poly1305).
 
-Store writes go through `state_repo.state_repo_lock` and land atomically in one store commit, so
-the catalog and the values it names can never diverge in history. The prior ignore-lifecycle
-commit is deliberately separate and happens before a local installation key can be written.
+The store starts no Git child. "Exported" means matched by the snapshot export allowlist
+(`infra.export_allowlist.is_exported`); `installation.key` is not, and every write refuses to run if
+it ever were. Store writes take `state_repo.state_repo_lock`, the live-root writer lock the tick
+holds while it commits or cuts, and land all or nothing: each one keeps the prior bytes of every
+path it replaces or removes in the undo area `secrets/.undo` (the memory canon's transaction), so a
+failure restores `secrets/` byte for byte and a crash is restored by the next writer before it reads
+anything. The catalog and the values it names therefore never diverge in a checkpoint. Where a commit
+id used to be, results carry the store's content revision (:func:`store_revision`).
 
 A secret read as an environment variable also carries a `materialize` record — variable name,
 file, line — which is what lets a recovered installation put its env files back without a human
@@ -43,7 +47,8 @@ import re
 import secrets as pysecrets
 import stat
 import tempfile
-from collections.abc import Container
+from collections.abc import Container, Iterator
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -57,20 +62,23 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from ummanu import state_repo
-from ummanu._fsutil import publish_state_atomic
+from ummanu._fsutil import files_revision
 from ummanu.config import _safe_yaml_error, validate
+from ummanu.infra.export_allowlist import is_exported
+from ummanu.memory.canon import CanonTransaction, canon_transaction, recover_canon_undo
 from ummanu.runtime import role_env
 from ummanu.runtime.redact import looks_like_credential, redact
 from ummanu.secret_words import RECOVERY_WORDS
-from ummanu.state_repo import SECRETS_PATHSPEC
 
 CATALOG_NAME = "catalog.yaml"
 KEY_PARAMS_NAME = "installation-key.json"
 KEY_NAME = "installation.key"
 VALUES_DIRNAME = "values"
+SECRETS_DIR_NAME = "secrets"
 VALUE_SUFFIX = ".enc.json"
 
-GITIGNORE_ENTRY = "secrets/installation.key"
+# The key's live-root path. It must never match the export allowlist; that is its whole exclusion.
+KEY_RELATIVE = "secrets/installation.key"
 CATALOG_VERSION = 1
 
 KEY_PARAMS_FORMAT = "ummanu.installation-key"
@@ -122,6 +130,10 @@ class SecretStoreStateError(SecretStoreError):
 
 class RecoveryPhraseError(SecretStoreError):
     """The recovery phrase does not open this installation key."""
+
+
+# Every result's `commit` is the store's content revision after the operation (`store_revision`), not
+# a Git commit: the store makes none. An operation that changed nothing answers the current revision.
 
 
 @dataclass(frozen=True)
@@ -311,11 +323,12 @@ def verify_recovery_phrase(instance_dir: Path, phrase: str) -> None:
 
 def restore_installation_key(instance_dir: Path, phrase: str) -> Path:
     """Rebuild the key file from the phrase. Wrong phrase writes nothing."""
-    instance_dir = state_repo.require_repo(instance_dir)
+    instance_dir = _live_root(instance_dir)
     params = _read_key_params(instance_dir)
     key = _derive_key(phrase, params)
     _check_verifier(key, params)
-    with state_repo.state_repo_lock(instance_dir):
+    with _locked_store(instance_dir):
+        _assert_key_not_exported()
         _write_key_file(key_path(instance_dir), key)
     return key_path(instance_dir)
 
@@ -585,44 +598,36 @@ def _materialize_summary(secrets: tuple[dict[str, Any], ...]) -> list[dict[str, 
 
 
 def initialize_store(instance_dir: Path, *, phrase: str, actor: str) -> InitResult:
-    """Create the key, the key parameters and an empty catalog. Never overwrites."""
+    """Create the key, the key parameters and an empty catalog, all or nothing. Never overwrites."""
     actor = _clean_actor(actor)
-    instance_dir = state_repo.require_repo(instance_dir)
+    instance_dir = _live_root(instance_dir)
     params = _new_key_params()
     key = _derive_key(phrase, params)
     params["verifier"] = _seal_verifier(key)
     catalog = {"version": CATALOG_VERSION, "secrets": []}
 
-    with state_repo.state_repo_lock(instance_dir):
+    with _locked_store(instance_dir):
         if key_params_path(instance_dir).exists() or catalog_path(instance_dir).exists():
             raise SecretStoreStateError(
                 "secret store is already initialized; init will not overwrite it. "
                 "Rotating the recovery phrase is a separate operation."
             )
-        secrets_dir(instance_dir).mkdir(parents=True, exist_ok=True)
-        # Ignore the key before it exists, so no window has an unignored key file.
-        _ensure_gitignore(instance_dir)
-        _write_key_file(key_path(instance_dir), key)
-        _assert_key_ignored(instance_dir)
+        # Checked before the key exists, so no window holds a key the export would copy.
+        _assert_key_not_exported()
         catalog_text = _catalog_text(catalog)
         params_text = json.dumps(params, indent=2, sort_keys=True) + "\n"
         _scan_open_file(f"secrets/{CATALOG_NAME}", catalog_text)
         _scan_open_file(f"secrets/{KEY_PARAMS_NAME}", params_text)
-        _publish(
-            [
-                (key_params_path(instance_dir), params_text),
-                (catalog_path(instance_dir), catalog_text),
-            ]
-        )
-        commit = state_repo.commit(
-            instance_dir, SECRETS_PATHSPEC, _commit_message("init", "store initialized", actor)
-        )
-        if commit is None:
-            raise SecretStoreError("secret store init produced nothing to commit")
+        with _store_write(instance_dir) as transaction:
+            transaction.guard(key_path(instance_dir))
+            _write_key_file(key_path(instance_dir), key)
+            _write(transaction, key_params_path(instance_dir), params_text)
+            _write(transaction, catalog_path(instance_dir), catalog_text)
+        revision = store_revision(instance_dir)
     return InitResult(
         key_path=key_path(instance_dir),
         catalog_path=catalog_path(instance_dir),
-        commit=commit,
+        commit=revision,
     )
 
 
@@ -637,7 +642,7 @@ def set_secret(
     environment: str | None = None,
     materialize: dict[str, Any] | None = None,
 ) -> SetResult:
-    """Seal one value and record its metadata, as a single commit."""
+    """Seal one value and record its metadata, as one all-or-nothing store write."""
     actor = _clean_actor(actor)
     secret_id = _clean_secret_id(secret_id)
     scope = _clean_scope(scope)
@@ -646,12 +651,12 @@ def set_secret(
     materialize = _clean_materialize(materialize)
     _check_value(value)
 
-    instance_dir = state_repo.require_repo(instance_dir)
-    with state_repo.state_repo_lock(instance_dir):
+    instance_dir = _live_root(instance_dir)
+    with _locked_store(instance_dir):
         key = load_installation_key(instance_dir)
-        # Re-checked on every write, not only at init: this commit is the moment
-        # a key that stopped being ignored would enter the history.
-        _assert_key_ignored(instance_dir)
+        # Re-checked on every write, not only at init: this is the moment a key that came to be
+        # exported would leave the host with the next checkpoint.
+        _assert_key_not_exported()
         catalog = load_catalog(instance_dir)
         entries = {entry["id"]: dict(entry) for entry in catalog["secrets"]}
         existing = entries.get(secret_id)
@@ -667,46 +672,37 @@ def set_secret(
         )
         catalog = _catalog(entries)
 
-        # A retried credential entry must not generate a new random envelope or
-        # a pointless store commit. This also makes the generic `secret set`
-        # operation safe to repeat when its requested metadata and plaintext
-        # already describe the canonical value.
-        if existing is not None and entries[secret_id] == existing:
-            try:
-                unchanged = _read_value(instance_dir, secret_id, key) == bytes(value)
-            except SecretStoreError:
-                unchanged = False
-            if unchanged and not state_repo.status(instance_dir, SECRETS_PATHSPEC):
-                return SetResult(
-                    secret_id=secret_id,
-                    scope=scope,
-                    path=value_path(instance_dir, secret_id),
-                    commit=state_repo.head(instance_dir) or "",
-                    created=False,
-                )
+        # A retried credential entry must not generate a new random envelope: an envelope whose
+        # plaintext is already this value is never rewritten or re-encrypted, and a request whose
+        # metadata is unchanged as well writes nothing at all. This makes the generic `secret set`
+        # safe to repeat when it already describes the canonical value.
+        stored = None if existing is None else _stored_value(instance_dir, secret_id, key)
+        value_unchanged = stored == bytes(value)
+        if value_unchanged and entries[secret_id] == existing:
+            return SetResult(
+                secret_id=secret_id,
+                scope=scope,
+                path=value_path(instance_dir, secret_id),
+                commit=store_revision(instance_dir),
+                created=False,
+            )
 
         catalog_text = _catalog_text(catalog)
         _scan_open_file(f"secrets/{CATALOG_NAME}", catalog_text)
-        envelope_text = json.dumps(seal_value(key, secret_id, bytes(value)), indent=2, sort_keys=True) + "\n"
-        # Never redact-scan ciphertext; a base64 coincidence must not erase a secret.
-        _publish(
-            [
-                (value_path(instance_dir, secret_id), envelope_text),
-                (catalog_path(instance_dir), catalog_text),
-            ]
-        )
-        commit = state_repo.commit(
-            instance_dir,
-            SECRETS_PATHSPEC,
-            _commit_message("set", secret_id, actor),
-        )
-        if commit is None:
-            commit = state_repo.head(instance_dir) or ""
+        with _store_write(instance_dir) as transaction:
+            if not value_unchanged:
+                # Never redact-scan ciphertext; a base64 coincidence must not erase a secret.
+                envelope_text = (
+                    json.dumps(seal_value(key, secret_id, bytes(value)), indent=2, sort_keys=True) + "\n"
+                )
+                _write(transaction, value_path(instance_dir, secret_id), envelope_text)
+            _write(transaction, catalog_path(instance_dir), catalog_text)
+        revision = store_revision(instance_dir)
     return SetResult(
         secret_id=secret_id,
         scope=scope,
         path=value_path(instance_dir, secret_id),
-        commit=commit,
+        commit=revision,
         created=existing is None,
     )
 
@@ -758,15 +754,15 @@ def redaction_values(instance_dir: Path) -> tuple[str, ...]:
 
 
 def remove_secret(instance_dir: Path, *, secret_id: str, actor: str) -> RemoveResult:
-    """Drop the catalog entry and its envelope in one commit.
+    """Drop the catalog entry and its envelope together, all or nothing.
 
     A missing id is an error, not a quiet success: hiding it turns a typo into a secret nobody knows
     is still stored under its real name.
     """
     actor = _clean_actor(actor)
     secret_id = _clean_secret_id(secret_id)
-    instance_dir = state_repo.require_repo(instance_dir)
-    with state_repo.state_repo_lock(instance_dir):
+    instance_dir = _live_root(instance_dir)
+    with _locked_store(instance_dir):
         catalog = load_catalog(instance_dir)
         entries = {entry["id"]: dict(entry) for entry in catalog["secrets"]}
         if secret_id not in entries:
@@ -775,16 +771,16 @@ def remove_secret(instance_dir: Path, *, secret_id: str, actor: str) -> RemoveRe
         catalog_text = _catalog_text(_catalog(entries))
         _scan_open_file(f"secrets/{CATALOG_NAME}", catalog_text)
         path = value_path(instance_dir, secret_id)
-        try:
-            publish_state_atomic([(catalog_path(instance_dir), catalog_text)], removes=[path])
-        except (OSError, RuntimeError) as exc:
-            raise SecretStoreError(f"could not remove {secret_id!r}: {exc}") from None
-        commit = state_repo.commit(
-            instance_dir, SECRETS_PATHSPEC, _commit_message("remove", secret_id, actor)
-        )
-        if commit is None:
-            commit = state_repo.head(instance_dir) or ""
-    return RemoveResult(secret_id=secret_id, path=path, commit=commit)
+        with _store_write(instance_dir) as transaction:
+            _write(transaction, catalog_path(instance_dir), catalog_text)
+            try:
+                transaction.remove(path)
+            except SecretStoreError:
+                raise
+            except RuntimeError as exc:
+                raise SecretStoreError(f"could not remove {secret_id!r}: {exc}") from None
+        revision = store_revision(instance_dir)
+    return RemoveResult(secret_id=secret_id, path=path, commit=revision)
 
 
 def import_env_file(
@@ -800,7 +796,7 @@ def import_env_file(
 
     The file's own line order is what the catalog records, so `materialize` puts the same bytes back.
     Idempotent by content: a variable whose sealed value and metadata already match is left alone,
-    envelope bytes included, so re-importing the same file adds no duplicates and no commit.
+    envelope bytes included, so re-importing the same file adds no duplicates and writes nothing.
     """
     actor = _clean_actor(actor)
     scope = _clean_scope(scope)
@@ -820,13 +816,13 @@ def import_env_file(
         raise SecretStoreValidationError(f"{source} defines no variables")
     _assert_distinct_secret_ids(variables, source=str(source))
 
-    instance_dir = state_repo.require_repo(instance_dir)
+    instance_dir = _live_root(instance_dir)
     created: list[str] = []
     updated: list[str] = []
     unchanged: list[str] = []
-    with state_repo.state_repo_lock(instance_dir):
+    with _locked_store(instance_dir):
         key = load_installation_key(instance_dir)
-        _assert_key_ignored(instance_dir)
+        _assert_key_not_exported()
         before = {entry["id"]: dict(entry) for entry in load_catalog(instance_dir)["secrets"]}
         entries = {name: dict(entry) for name, entry in before.items()}
         imported = {secret_id_for_variable(name) for name in variables}
@@ -879,23 +875,20 @@ def import_env_file(
                 created=(),
                 updated=(),
                 unchanged=tuple(unchanged),
-                commit=state_repo.head(instance_dir) or "",
+                commit=store_revision(instance_dir),
             )
         catalog_text = _catalog_text(_catalog(entries))
         _scan_open_file(f"secrets/{CATALOG_NAME}", catalog_text)
-        _publish([*writes, (catalog_path(instance_dir), catalog_text)])
-        commit = state_repo.commit(
-            instance_dir,
-            SECRETS_PATHSPEC,
-            _commit_message("import", f"{len(variables)} secrets from {source.name}", actor),
-        )
-        if commit is None:
-            commit = state_repo.head(instance_dir) or ""
+        with _store_write(instance_dir) as transaction:
+            for path, text in writes:
+                _write(transaction, path, text)
+            _write(transaction, catalog_path(instance_dir), catalog_text)
+        revision = store_revision(instance_dir)
     return ImportResult(
         created=tuple(created),
         updated=tuple(updated),
         unchanged=tuple(unchanged),
-        commit=commit,
+        commit=revision,
     )
 
 
@@ -913,8 +906,8 @@ def materialize_secrets(
         raise SecretStoreValidationError(
             f"unknown materialization target {target!r}; expected one of " + ", ".join(MATERIALIZE_TARGETS)
         )
-    instance_dir = state_repo.require_repo(instance_dir)
-    with state_repo.state_repo_lock(instance_dir):
+    instance_dir = _live_root(instance_dir)
+    with _locked_store(instance_dir):
         key = load_installation_key(instance_dir)
         groups: dict[Path, list[dict[str, Any]]] = {}
         for entry in list_secrets(instance_dir):
@@ -1140,7 +1133,7 @@ def _assert_one_secret_per_line(path: Path, entries: list[dict[str, Any]]) -> No
 
 
 def _assert_writable_target(instance_dir: Path, path: Path) -> None:
-    """Refuse a target that git would track, or that is not a plain file."""
+    """Refuse a target the snapshot export would copy, or that is not a plain file."""
     try:
         mode = path.lstat().st_mode
     except OSError:
@@ -1153,17 +1146,11 @@ def _assert_writable_target(instance_dir: Path, path: Path) -> None:
         relative = path.resolve().relative_to(instance_dir.resolve())
     except ValueError:
         return
-    try:
-        state_repo.git(
-            instance_dir,
-            ["check-ignore", "--quiet", "--", str(relative)],
-            label="verify the materialization target is gitignored",
-        )
-    except state_repo.StateRepoError:
+    if is_exported(relative.as_posix()):
         raise SecretStoreError(
-            f"materialization target {relative} is inside the instance repo but is not "
-            "gitignored; refusing to write plaintext where git can pick it up"
-        ) from None
+            f"materialization target {relative} is a live-root path the snapshot export copies; "
+            "refusing to write plaintext where a checkpoint can pick it up"
+        )
 
 
 def _publish_env_file(path: Path, text: str) -> bool:
@@ -1203,44 +1190,110 @@ def _publish_env_file(path: Path, text: str) -> bool:
     return True
 
 
-def _publish(writes: list[tuple[Path, str]]) -> None:
-    for path, _ in writes:
-        path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        publish_state_atomic(writes)
-    except (OSError, RuntimeError) as exc:
-        raise SecretStoreError(f"could not write the secret store: {exc}") from None
-
-
 def _scan_open_file(name: str, text: str) -> None:
     """The open half of the store leaves the host, so it passes the same gate.
 
-    `checkpoint.py` blocks a commit when `redact()` changes `state/`; the catalog is tracked
+    `checkpoint.py` blocks a checkpoint when `redact()` changes what it ships; the catalog is exported
     plaintext with the same reach, so a value pasted into a purpose field stops here.
     """
     if redact(text) != text:
         raise SecretStoreValidationError(f"secret detected in {name}")
 
 
-def _ensure_gitignore(instance_dir: Path) -> None:
-    try:
-        state_repo.ensure_ignored(instance_dir, GITIGNORE_ENTRY, _locked=True)
-    except state_repo.StateRepoError as exc:
-        raise SecretStoreError(f"could not update .gitignore: {exc}") from None
-
-
-def _assert_key_ignored(instance_dir: Path) -> None:
-    """Prove to git, not to ourselves, that the key cannot be committed."""
-    try:
-        state_repo.git(
-            instance_dir,
-            ["check-ignore", "--quiet", "--", GITIGNORE_ENTRY],
-            label="verify the installation key is gitignored",
-        )
-    except state_repo.StateRepoError:
+def _assert_key_not_exported() -> None:
+    """The key is excluded by not matching the export allowlist; refuse to keep it if it ever did."""
+    if is_exported(KEY_RELATIVE):
         raise SecretStoreError(
-            f"{GITIGNORE_ENTRY} is not ignored by this repo; refusing to keep a committable key"
-        ) from None
+            f"{KEY_RELATIVE} is matched by the snapshot export allowlist; refusing to keep a key "
+            "that would leave the host"
+        )
+
+
+def _live_root(instance_dir: Path) -> Path:
+    """The live root the store lives in: an existing directory, Git work tree or not."""
+    root = Path(instance_dir).expanduser().resolve()
+    if not root.is_dir():
+        raise SecretStoreStateError(f"instance directory not found: {root}")
+    return root
+
+
+def store_revision(instance_dir: Path) -> str:
+    """The store's content revision: `_fsutil.content_revision` over its exported files' bytes.
+
+    The files are the catalog, the key parameters and every envelope, named by their live-root
+    path; the installation key and the undo area are not part of it. The same store gives the same
+    revision wherever it is computed, and any changed byte changes it.
+    """
+    root = secrets_dir(instance_dir).parent
+    names = [
+        f"{SECRETS_DIR_NAME}/{name}"
+        for name in (CATALOG_NAME, KEY_PARAMS_NAME)
+        if _is_plain_file(secrets_dir(instance_dir) / name)
+    ]
+    values = secrets_dir(instance_dir) / VALUES_DIRNAME
+    if values.is_dir() and not values.is_symlink():
+        names.extend(
+            f"{SECRETS_DIR_NAME}/{VALUES_DIRNAME}/{path.name}"
+            for path in sorted(values.iterdir())
+            if _is_plain_file(path) and is_exported(f"{SECRETS_DIR_NAME}/{VALUES_DIRNAME}/{path.name}")
+        )
+    try:
+        return files_revision(root, names)
+    except RuntimeError as exc:
+        raise SecretStoreError(f"could not read the secret store: {exc}") from None
+
+
+def _is_plain_file(path: Path) -> bool:
+    return path.is_file() and not path.is_symlink()
+
+
+@contextmanager
+def _locked_store(instance_dir: Path) -> Iterator[None]:
+    """Hold the live-root writer lock, after restoring whatever a crashed store write left behind."""
+    with state_repo.state_repo_lock(instance_dir):
+        root = secrets_dir(instance_dir)
+        if root.is_dir():
+            try:
+                recover_canon_undo(root)
+            except (OSError, RuntimeError) as exc:
+                raise SecretStoreError(f"could not restore an interrupted secret store write: {exc}") from None
+        yield
+
+
+@contextmanager
+def _store_write(instance_dir: Path) -> Iterator[CanonTransaction]:
+    """One all-or-nothing write of `secrets/`, under :func:`_locked_store`.
+
+    A failure anywhere inside restores every path the block touched and removes the directories it
+    created, `secrets/` included, so the store is byte-identical to before.
+    """
+    root = secrets_dir(instance_dir)
+    existed = os.path.lexists(root)
+    try:
+        with canon_transaction(root, root, label="secret store") as transaction:
+            yield transaction
+    except BaseException as exc:
+        if not existed:
+            with suppress(OSError):
+                root.rmdir()
+        if isinstance(exc, RuntimeError) and not isinstance(exc, SecretStoreError):
+            raise SecretStoreError(f"could not write the secret store: {exc}") from None
+        raise
+
+
+def _write(transaction: CanonTransaction, path: Path, text: str) -> None:
+    """Replace `path` with `text` inside `transaction`, unless it already holds exactly that."""
+    try:
+        if _is_plain_file(path) and path.read_bytes() == text.encode("utf-8"):
+            return
+    except OSError:
+        pass
+    try:
+        transaction.write(path, text)
+    except SecretStoreError:
+        raise
+    except RuntimeError as exc:
+        raise SecretStoreError(f"could not write the secret store: {exc}") from None
 
 
 def _clean_actor(actor: str) -> str:
@@ -1395,20 +1448,6 @@ def _check_value(value: bytes) -> None:
         raise SecretStoreValidationError("secret value must be bytes")
     if not value:
         raise SecretStoreValidationError("secret value is empty")
-
-
-def _commit_message(operation: str, subject: str, actor: str) -> str:
-    return (
-        "\n".join(
-            [
-                f"secrets: {operation} {subject}",
-                "",
-                f"Principal: {actor}",
-                f"Operation: {operation}",
-            ]
-        )
-        + "\n"
-    )
 
 
 def _now() -> str:

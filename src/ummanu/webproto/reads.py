@@ -66,11 +66,10 @@ _SOURCE_FAILURES = (TaskError, HostError, OSError, ValueError, KeyError, TypeErr
 
 
 def hold_store_exclusion(instance: str | Path) -> str | None:
-    """Run the board store's git-exclusion guard once for this process; the refusal, if it refused.
+    """Run the board store's exclusion guard once for this process; the refusal, if it refused.
 
     For a long-lived reader, called before it serves: from then on every read of the store in this
-    process resolves it without a `git` call, and none can write `.gitignore`
-    (:func:`ummanu.board.store.hold_exclusion`). A refusal is held as well, and is returned here
+    process resolves it without running the guard again (:func:`ummanu.board.store.hold_exclusion`). A refusal is held as well, and is returned here
     so the caller can say it once; the reads that follow answer with it.
     """
     from ummanu.board.store import BoardStoreError, hold_exclusion

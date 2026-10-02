@@ -1,13 +1,13 @@
-"""The private instance repository as a shared commit target.
+"""The live root's writer lock and the private instance repository as a commit target.
 
-Contract: docs/RECOVERY.md, sections "Layout" and "Writers". The tick writer
-(`state/board`, `state/runs`, and `state/memory` in legacy mode), the knowledge writer
-(`state/knowledge`), the secret store (`secrets/`) and the local-configuration writer
-(`.gitignore` through :func:`ensure_ignored`) commit to the private instance repository. They own
-disjoint pathspecs and never `git add -A`, so none can pick up another's half-written tree, and
-`state_repo_lock` serializes the index operations git itself does not make concurrency-safe. The
-memory writer makes no Git call: it writes `state/memory` as files under the same lock, which is all
-it takes from this module.
+Contract: docs/RECOVERY.md, sections "Layout" and "Writers". Only two writers still commit to the
+instance repository: the legacy tick (`state/board`, `state/runs`, and in legacy mode the live-root
+paths the Git-free writers leave uncommitted, `checkpoint.LEGACY_LIVE_PATHS`) and the head-registry
+pair of `upgrade`. They own disjoint pathspecs and never `git add -A`. The memory writer, the
+knowledge writer and the secret store make no Git call: they write files under `state_repo_lock`,
+the live-root writer lock, which is all they take from this module. What leaves the host is decided
+by the snapshot export allowlist (`infra.export_allowlist`), not by `.gitignore`, which no writer
+here maintains any more.
 """
 
 from __future__ import annotations
@@ -21,20 +21,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ummanu import _proc
-from ummanu._fsutil import file_lock, write_text_atomic
+from ummanu._fsutil import file_lock
 
 STATE_LOCK_NAME = "ummanu-state-writer.lock"
 
 FALLBACK_IDENTITY = ("ummanu checkpoint", "ummanu-checkpoint@localhost")
 
-# Pathspec each writer owns. Disjoint by construction; see the module docstring.
+# Pathspec each committing writer owns. Disjoint by construction; see the module docstring.
 BOARD_RUNS_PATHSPEC = ("state/board", "state/runs")
 MEMORY_PATHSPEC = ("state/memory",)
-KNOWLEDGE_PATHSPEC = ("state/knowledge",)
-# The secret store sits beside `state/`, not inside it: the tick writer must never
-# pick it up, and the store commits its own catalog and envelopes.
-SECRETS_PATHSPEC = ("secrets",)
-GITIGNORE_PATHSPEC = (".gitignore",)
 # The installed head registry is a recovery-canon pair.  Keep the two files in
 # one writer's deliberately narrow ownership: no checkpoint or configuration
 # writer may pick either one up by accident.
@@ -432,96 +427,3 @@ def commit(instance_dir: Path, pathspec: tuple[str, ...], message: str) -> str |
         label="commit state",
     )
     return head(instance_dir)
-
-
-def ensure_ignored(
-    instance_dir: Path,
-    entry: str,
-    *,
-    dry_run: bool = False,
-    _locked: bool = False,
-) -> bool:
-    """Durably exclude one local file from an instance repository.
-
-    Returns whether the ignore file needs (or received) a change.  The caller
-    owns the semantic name of its local file; this module owns all index writes.
-    """
-    instance_dir = require_repo(instance_dir)
-    if _locked:
-        return _ensure_ignored_locked(instance_dir, entry, dry_run=dry_run)
-    # Reads of an already-configured local store can occur inside a larger
-    # state-repository transaction, notably while checkpoint export resolves
-    # the PostgreSQL board.  flock is not reentrant across separately opened
-    # file descriptions, so avoid taking it when the exact durable exclusion
-    # is already present.  A tracked entry remains a refusal even if ignored.
-    if is_tracked(instance_dir, entry):
-        raise StateRepoError(
-            f"{entry.lstrip('/')} is tracked; remove it from the instance repository before enabling this local file"
-        )
-    ignore = instance_dir / ".gitignore"
-    try:
-        if ignore.is_file() and entry in ignore.read_text(encoding="utf-8").splitlines():
-            # A later negation or re-inclusion can override this literal line.
-            # The lock-free checkpoint path may avoid an index-writing lock, but
-            # it must retain the same effective-ignore proof as the locked path.
-            git(
-                instance_dir,
-                ["check-ignore", "--quiet", "--", entry.lstrip("/")],
-                label="verify exclusion",
-            )
-            return False
-    except OSError as exc:
-        raise StateRepoError(f"read gitignore failed: {exc}") from None
-    with state_repo_lock(instance_dir):
-        return _ensure_ignored_locked(instance_dir, entry, dry_run=dry_run)
-
-
-def _ensure_ignored_locked(instance_dir: Path, entry: str, *, dry_run: bool) -> bool:
-    """Implementation for writers that already hold :func:`state_repo_lock`."""
-    if is_tracked(instance_dir, entry):
-        raise StateRepoError(
-            f"{entry.lstrip('/')} is tracked; remove it from the instance repository before enabling this local file"
-        )
-    ignore = instance_dir / ".gitignore"
-    try:
-        current = ignore.read_text(encoding="utf-8") if ignore.is_file() else ""
-    except OSError as exc:
-        raise StateRepoError(f"read gitignore failed: {exc}") from None
-    changed = entry not in current.splitlines()
-    if changed and not dry_run:
-        suffix = "" if not current or current.endswith("\n") else "\n"
-        try:
-            write_text_atomic(ignore, current + suffix + entry + "\n")
-        except RuntimeError as exc:
-            raise StateRepoError(f"write gitignore failed: {exc}") from None
-        _make_repo_user_owned(ignore, instance_dir)
-        commit(instance_dir, GITIGNORE_PATHSPEC, f"Ignore local {entry.lstrip('/')}")
-    try:
-        git(instance_dir, ["check-ignore", "--quiet", "--", entry.lstrip("/")], label="verify exclusion")
-    except StateRepoError:
-        if dry_run and changed:
-            return True
-        raise
-    return changed
-
-
-def is_ignored(instance_dir: Path, entry: str) -> bool:
-    """Whether Git's canonical matcher excludes one instance-relative entry."""
-    try:
-        git(instance_dir, ["check-ignore", "--quiet", "--", entry.lstrip("/")], label="verify exclusion")
-    except StateRepoError:
-        return False
-    return True
-
-
-def is_tracked(instance_dir: Path, entry: str) -> bool:
-    """Whether an entry is already in the instance index."""
-    try:
-        git(
-            instance_dir,
-            ["ls-files", "--error-unmatch", "--", entry.lstrip("/")],
-            label="inspect tracked entry",
-        )
-    except StateRepoError:
-        return False
-    return True

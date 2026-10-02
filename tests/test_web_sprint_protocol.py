@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import hashlib
 import inspect
 import io
 import json
 import re
-import subprocess
 import unittest
 from collections.abc import Iterator
 from pathlib import Path
@@ -36,6 +36,7 @@ from tests.webproto_sprint_fixtures import (
     SprintProtocolFixture,
 )
 from ummanu import sprints as sprints_module
+from ummanu._fsutil import content_revision
 from ummanu.board.audit_contract import PROTOCOL_EVENT_RECORD_TYPE
 from ummanu.cli import main
 from ummanu.config import validate
@@ -2930,14 +2931,19 @@ class CloseFixture(SprintProtocolFixture):
     def closeout_text(self, document: str) -> str:
         return (self.instance / "state" / "knowledge" / document).read_text(encoding="utf-8")
 
-    def knowledge_commits(self) -> list[str]:
-        result = subprocess.run(
-            ["git", "-C", str(self.instance), "log", "--format=%s"],
-            text=True,
-            capture_output=True,
-            check=True,
-        )
-        return [line for line in result.stdout.splitlines() if line.startswith("knowledge:")]
+    def knowledge_writes(self) -> dict[str, tuple[bytes, int, int]]:
+        """Every knowledge file with its bytes, inode and mtime: a write replaces the file, a no-op keeps it.
+
+        The knowledge writer makes no Git commit (docs/RECOVERY.md, "Writers"), so "wrote nothing
+        new" is read from the files themselves.
+        """
+        root = self.instance / "state" / "knowledge"
+        found: dict[str, tuple[bytes, int, int]] = {}
+        for path in sorted(root.rglob("*")) if root.is_dir() else ():
+            if path.is_file():
+                info = path.stat()
+                found[path.relative_to(root).as_posix()] = (path.read_bytes(), info.st_ino, info.st_mtime_ns)
+        return found
 
     def status_of(self, reference: str = "") -> str:
         value = self.reads().sprint_state(reference or self.reference)["sprint"]["value"]
@@ -3039,14 +3045,14 @@ class CloseOperationTests(CloseFixture):
 
     def test_a_repeat_of_the_same_request_closes_nothing_a_second_time(self) -> None:
         first = self.close()
-        documents, commits = self.knowledge(), self.knowledge_commits()
+        documents, writes = self.knowledge(), self.knowledge_writes()
         events = [event["event_id"] for event in self.audit_events()]
 
         repeated = self.close()
 
         self.assertEqual(repeated["event_id"], first["event_id"])
         self.assertEqual(self.knowledge(), documents)
-        self.assertEqual(self.knowledge_commits(), commits)
+        self.assertEqual(self.knowledge_writes(), writes)
         self.assertEqual([event["event_id"] for event in self.audit_events()], events)
 
     def test_a_repeat_that_states_another_closeout_is_refused(self) -> None:
@@ -3058,6 +3064,7 @@ class CloseOperationTests(CloseFixture):
         editing during a retry is enough to produce it, which is why all three shapes are pinned.
         """
         self.close()
+        writes = self.knowledge_writes()
         first_sentence = CLOSEOUT_BODY.split(".")[0] + "."
         self.assertIn(first_sentence, CLOSEOUT_BODY)
         for label, body in (
@@ -3072,7 +3079,7 @@ class CloseOperationTests(CloseFixture):
         # The body it was staged with still answers from the record and writes nothing new.
         self.assertTrue(self.close()["result"]["close"]["closeout"]["written"])
         self.assertEqual(len(self.knowledge()), 1)
-        self.assertEqual(len(self.knowledge_commits()), 1)
+        self.assertEqual(self.knowledge_writes(), writes)
 
     def audit_events(self) -> list[dict[str, Any]]:
 
@@ -3088,8 +3095,12 @@ class CloseoutTests(CloseFixture):
         written = answered["result"]["close"]["closeout"]
         self.assertEqual(self.knowledge(), (written["document"],))
         self.assertTrue(written["written"])
-        self.assertTrue(written["commit"])
+        # The knowledge writer's content revision of the document, where a Git commit id used to be.
         text = self.closeout_text(written["document"])
+        self.assertEqual(
+            written["commit"],
+            content_revision({written["document"]: hashlib.sha256(text.encode("utf-8")).hexdigest()}),
+        )
         self.assertIn(self.reference, text)
         # The outcome the caller stated, verbatim: the operation writes and links what it is given.
         self.assertIn(CLOSEOUT_BODY.strip(), text)
@@ -3115,10 +3126,12 @@ class CloseoutTests(CloseFixture):
         self.assertEqual(committed["payload"]["close_request_id"], "close-1")
 
     def test_a_closeout_this_installation_cannot_write_is_refused_before_anything_is(self) -> None:
-        """The preflight: an instance that is not a state repository refuses, and nothing is written."""
-        subprocess.run(
-            ["rm", "-rf", str(self.instance / ".git")], check=True, capture_output=True
-        )
+        """The preflight: a knowledge path the writer cannot write refuses, and nothing is written.
+
+        No Git is needed any more, so the unwritable case is `state/knowledge` being a file.
+        """
+        (self.instance / "state").mkdir(exist_ok=True)
+        (self.instance / "state" / "knowledge").write_text("not a directory\n", encoding="utf-8")
         before = self.board.card_count()
 
         with self.assertRaises(ValidationRefused) as refused:

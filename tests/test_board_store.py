@@ -17,7 +17,7 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 import ummanu.board
-from ummanu import state_repo, upgrade
+from ummanu import upgrade
 from ummanu.board import migrate, provision, schema, store
 from ummanu.board.store import (
     ROLES,
@@ -32,6 +32,8 @@ from ummanu.board.store import (
     resolve_with_lifecycle,
     store_path,
 )
+from ummanu.infra import export_allowlist
+from ummanu.infra.export_allowlist import SNAPSHOT_ALLOWLIST, is_exported
 from ummanu.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
 from tests import container_cleanup
 from tests import sql_backend_fixtures
@@ -194,15 +196,15 @@ class ConnectionFileTests(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(self.instance)), before)
 
     def test_fresh_materialization_is_complete_private_and_never_rotates(self) -> None:
-        subprocess.run(["git", "-C", str(self.instance), "init", "--quiet"], check=True)
-
         config = materialize_fresh(self.instance)
         path = store_path(self.instance)
 
         self.assertEqual(path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(set(config.as_environ()), set(STORE_ENV))
         self.assertEqual(len({config.owner_password, config.app_password, config.read_password}), 3)
-        self.assertTrue(state_repo.is_ignored(self.instance, f"/{STORE_FILE}"))
+        # Excluded because the export allowlist does not match it; nothing writes a `.gitignore`.
+        self.assertFalse(is_exported(STORE_FILE))
+        self.assertFalse((self.instance / ".gitignore").exists())
         before = path.read_bytes()
         with self.assertRaisesRegex(BoardStoreError, "rotation"):
             materialize_fresh(self.instance)
@@ -808,60 +810,41 @@ class MigrationScriptTests(unittest.TestCase):
         self.assertEqual(migrate.ADVISORY_LOCK_KEY, 0x2C5B1F4A6E9D0713)
 
 
-class InstanceRepository(unittest.TestCase):
-    """A throwaway instance repository, for the tests that need one."""
+class LiveRoot(unittest.TestCase):
+    """A throwaway live root, a plain directory, for the exclusion tests."""
 
     def setUp(self) -> None:
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.instance = Path(self.tmp.name)
-        self.git("init", "-b", "main")
-        self.git("config", "user.email", "test@example.invalid")
-        self.git("config", "user.name", "Test")
         (self.instance / "README.md").write_text("instance\n", encoding="utf-8")
-        self.git("add", "README.md")
-        self.git("commit", "-m", "Initial")
 
-    def git(self, *args: str) -> str:
-        return subprocess.run(
-            ["git", "-C", str(self.instance), *args],
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+    def exported(self):
+        """An export allowlist that would copy `board-store.env`, the one thing exclusion refuses."""
+        return mock.patch.object(export_allowlist, "SNAPSHOT_ALLOWLIST", (*SNAPSHOT_ALLOWLIST, STORE_FILE))
 
-    def ignored(self) -> bool:
-        return state_repo.is_ignored(self.instance, f"/{STORE_FILE}")
+    def listing(self) -> list[str]:
+        return sorted(os.listdir(self.instance))
 
 
-class IgnoreLifecycleTests(InstanceRepository):
-    """The durable exclusion of `board-store.env` (criterion 2, §5.4).
+class IgnoreLifecycleTests(LiveRoot):
+    """The exclusion of `board-store.env` (criterion 2, §5.4): the export allowlist never matches it.
 
-    A finding that the file is tracked is not a lifecycle; making `/board-store.env` excluded is.
-    This card ships the operation and calls it against no live installation: the bootstrap path
-    that generates the three passwords owns the call, and calls it before it writes the file.
+    Exclusion is no longer an entry this product writes; it is a property of the allowlist that
+    decides what leaves the host. So the lifecycle takes no action and refuses a file the export
+    would copy. The bootstrap path that generates the three passwords calls it before it writes.
     """
 
-    def test_it_adds_the_exclusion_and_says_so_once(self) -> None:
+    def test_the_exclusion_takes_no_action_and_writes_nothing(self) -> None:
+        before = self.listing()
+
         first = ensure_ignored(self.instance)
+        dry = ensure_ignored(self.instance, dry_run=True)
 
-        self.assertTrue(first.ignore_added)
-        self.assertTrue(first.changed)
-        self.assertEqual(first.render(), "added board store ignore")
-        self.assertTrue(self.ignored())
-
-        second = ensure_ignored(self.instance)
-
-        self.assertFalse(second.changed)
-        self.assertEqual(second.render(), "unchanged")
-
-    def test_a_dry_run_names_the_action_and_writes_nothing(self) -> None:
-        outcome = ensure_ignored(self.instance, dry_run=True)
-
-        self.assertTrue(outcome.ignore_added)
-        self.assertEqual(outcome.render(dry_run=True), "would add board store ignore")
-        self.assertFalse((self.instance / ".gitignore").exists())
-        self.assertFalse(self.ignored())
+        for outcome in (first, dry):
+            self.assertFalse(outcome.changed)
+            self.assertEqual(outcome.render(), "unchanged")
+        self.assertEqual(self.listing(), before)
 
     def test_it_refuses_a_configuration_anyone_could_read(self) -> None:
         write_store(self.instance, mode=0o644)
@@ -881,25 +864,18 @@ class IgnoreLifecycleTests(InstanceRepository):
 
     def test_an_already_private_configuration_needs_no_repair(self) -> None:
         write_store(self.instance)
-        ensure_ignored(self.instance)
 
         outcome = ensure_ignored(self.instance)
 
         self.assertFalse(outcome.changed)
 
-    def test_a_tracked_configuration_refuses_rather_than_pretending_to_hide_it(self) -> None:
+    def test_an_exported_configuration_refuses_rather_than_pretending_to_hide_it(self) -> None:
         write_store(self.instance)
-        self.git("add", "-f", STORE_FILE)
-        self.git("commit", "-m", "Track it by mistake")
 
-        with self.assertRaisesRegex(BoardStoreError, "tracked in the instance repository"):
-            ensure_ignored(self.instance)
-
-    def test_a_literal_ignore_overridden_by_a_negation_is_not_accepted(self) -> None:
-        (self.instance / ".gitignore").write_text(f"/{STORE_FILE}\n!/{STORE_FILE}\n", encoding="utf-8")
-
-        with self.assertRaisesRegex(BoardStoreError, "verify exclusion failed"):
-            ensure_ignored(self.instance)
+        with self.exported():
+            for dry_run in (False, True):
+                with self.subTest(dry_run=dry_run), self.assertRaisesRegex(BoardStoreError, "snapshot export copies"):
+                    ensure_ignored(self.instance, dry_run=dry_run)
 
     def test_a_symlink_refuses_for_the_reason_the_parse_refuses_one(self) -> None:
         store_path(self.instance).symlink_to(self.instance / "elsewhere.env")
@@ -912,94 +888,88 @@ class IgnoreLifecycleTests(InstanceRepository):
 
         self.assertFalse(store_path(self.instance).exists())
 
-    def test_a_directory_without_a_repository_is_left_alone(self) -> None:
-        with TemporaryDirectory() as plain:
-            outcome = ensure_ignored(Path(plain))
+    def test_a_git_work_tree_is_neither_asked_nor_written(self) -> None:
+        subprocess.run(["git", "-C", str(self.instance), "init", "--quiet"], check=True)
+        write_store(self.instance)
+
+        with mock.patch.object(subprocess, "Popen", side_effect=AssertionError("a child process was started")):
+            outcome = ensure_ignored(self.instance)
+            resolve(self.instance)
 
         self.assertFalse(outcome.changed)
+        self.assertFalse((self.instance / ".gitignore").exists())
 
 
-class ExclusionEnforcementTests(InstanceRepository):
-    """The lifecycle stands *in front of* every read of a configured store, not beside it.
+class ExclusionEnforcementTests(LiveRoot):
+    """The exclusion stands *in front of* every read of a configured store, not beside it.
 
-    Last round's gap was that a tracked `board-store.env` was only a passive finding: a store
-    could be read and migrated on top of database credentials the instance repository was
-    publishing. `resolve` is the one door — `resolve_role`, `migrate_instance` and `env.py` all
-    go through it — so the enforcement is there, and these tests are what says so.
+    `resolve` is the one door — `resolve_role`, `migrate_instance` and `env.py` all go through it —
+    so a `board-store.env` the snapshot export would copy is refused there, and these tests are what
+    says so.
     """
 
-    def test_resolving_a_tracked_configuration_refuses_with_its_reason(self) -> None:
+    def test_resolving_an_exported_configuration_refuses_with_its_reason(self) -> None:
         write_store(self.instance)
-        self.git("add", "-f", STORE_FILE)
-        self.git("commit", "-m", "credentials, by mistake")
 
-        with self.assertRaisesRegex(BoardStoreError, "tracked in the instance repository"):
-            resolve(self.instance)
-        with self.assertRaisesRegex(BoardStoreError, "tracked in the instance repository"):
-            resolve_role(self.instance, "owner")
+        with self.exported():
+            with self.assertRaisesRegex(BoardStoreError, "snapshot export copies"):
+                resolve(self.instance)
+            with self.assertRaisesRegex(BoardStoreError, "snapshot export copies"):
+                resolve_role(self.instance, "owner")
 
-    def test_a_configured_store_is_excluded_before_it_is_read(self) -> None:
+    def test_a_configured_store_is_read_without_writing_anything(self) -> None:
         write_store(self.instance)
-        self.assertFalse(self.ignored())
+        before = self.listing()
 
         config = resolve(self.instance)
 
-        self.assertTrue(self.ignored(), "resolve must make the exclusion durable, not report it")
         self.assertEqual(config.owner_user, "ummanu_owner")
+        self.assertEqual(self.listing(), before)
 
-    def test_an_absent_store_refuses_without_writing_the_repository(self) -> None:
+    def test_an_absent_store_refuses_without_writing_the_live_root(self) -> None:
         """A read of an installation that has no store -- `status`, `doctor` -- leaves it as it was."""
-        head = self.git("rev-parse", "HEAD")
+        before = self.listing()
 
         with self.assertRaisesRegex(BoardStoreError, "configuration is missing"):
             resolve_role(self.instance, "app")
 
-        self.assertFalse(self.ignored())
-        self.assertFalse((self.instance / ".gitignore").exists())
-        self.assertEqual(self.git("rev-parse", "HEAD"), head)
+        self.assertEqual(self.listing(), before)
 
     def test_the_lifecycle_outcome_is_visible_to_a_caller(self) -> None:
         write_store(self.instance)
 
         _, first = resolve_with_lifecycle(self.instance)
-        _, second = resolve_with_lifecycle(self.instance)
 
-        self.assertTrue(first.ignore_added)
-        self.assertEqual(first.render(), "added board store ignore")
-        self.assertFalse(second.changed)
+        self.assertFalse(first.changed)
+        self.assertEqual(first.render(), "unchanged")
 
     def test_the_read_path_refuses_a_broad_mode_rather_than_repairing_it(self) -> None:
-        """`enforce_exclusion` is the git half of `ensure_ignored` and deliberately not the mode
-        half: a credential file anyone could read has already been exposed, so `parse` refuses it
-        instead of quietly chmodding it in the middle of a read. `ensure_ignored`, which the
-        upgrade step calls, is what repairs it — visibly."""
+        """`enforce_exclusion` is deliberately not a mode repair: a credential file anyone could read
+        has already been exposed, so `parse` refuses it instead of quietly chmodding it in the
+        middle of a read."""
         path = write_store(self.instance, mode=0o644)
 
         with self.assertRaisesRegex(BoardStoreError, "permissions are too broad"):
             resolve(self.instance)
 
         self.assertEqual(path.stat().st_mode & 0o777, 0o644)
-        self.assertTrue(self.ignored())
 
-    def test_migrating_a_tracked_configuration_refuses_before_it_connects(self) -> None:
+    def test_migrating_an_exported_configuration_refuses_before_it_connects(self) -> None:
         from ummanu.board import migrate as board_migrate
 
         write_store(self.instance)
-        self.git("add", "-f", STORE_FILE)
-        self.git("commit", "-m", "credentials, by mistake")
 
         with (
+            self.exported(),
             mock.patch.object(board_migrate.board_store, "resolve", wraps=resolve) as door,
-            self.assertRaisesRegex(BoardStoreError, "tracked in the instance repository"),
+            self.assertRaisesRegex(BoardStoreError, "snapshot export copies"),
         ):
             board_migrate.migrate_instance(self.instance)
 
         door.assert_called_once_with(self.instance)
 
-    def test_the_upgrade_step_fails_rather_than_migrating_over_tracked_credentials(self) -> None:
+    def test_the_upgrade_step_fails_rather_than_migrating_over_exported_credentials(self) -> None:
         write_store(self.instance)
-        self.git("add", "-f", STORE_FILE)
-        self.git("commit", "-m", "credentials, by mistake")
         context = upgrade.UpgradeContext(
             instance_path=self.instance,
             product_root=self.instance,
@@ -1008,19 +978,29 @@ class ExclusionEnforcementTests(InstanceRepository):
             units=None,
         )
 
-        with mock.patch.object(upgrade, "migrate_instance") as migrated:
+        with self.exported(), mock.patch.object(upgrade, "migrate_instance") as migrated:
             result = upgrade.step_board_store(context)
 
         migrated.assert_not_called()
         self.assertTrue(result.failed)
-        self.assertIn("tracked in the instance repository", result.detail)
+        self.assertIn("snapshot export copies", result.detail)
+
+    def test_findings_name_an_exported_configuration(self) -> None:
+        write_store(self.instance)
+
+        self.assertEqual(findings(self.instance), [])
+        with self.exported():
+            reported = findings(self.instance)
+
+        self.assertEqual(len(reported), 1)
+        self.assertIn("snapshot export copies", reported[0])
 
     def test_enforcement_is_the_only_door_to_a_configured_store(self) -> None:
         """The claim `resolve` is a chokepoint, checked against the source rather than asserted.
 
         Everything that opens a configured store reads it through `board_store.resolve`; the only
         callers of the underlying `parse` are `resolve_with_lifecycle` itself and the read-only
-        `findings`, which does its own tracked check and never connects.
+        `findings`, which does its own export check and never connects.
         """
         source = (Path(store.__file__)).read_text(encoding="utf-8")
         callers = [line.strip() for line in source.splitlines() if "parse(" in line and "def " not in line]
@@ -1029,74 +1009,53 @@ class ExclusionEnforcementTests(InstanceRepository):
         self.assertIn("outcome = enforce_exclusion(instance_dir)", source)
 
 
-class HeldExclusionTests(InstanceRepository):
+class HeldExclusionTests(LiveRoot):
     """`hold_exclusion`: the same guard, run once per process instead of on every read.
 
-    A long-lived reader (`web-serve`) holds it at start-up. Its reads then cost no `git` call, and
-    none of them can write `.gitignore`; a refusal found at start-up keeps refusing.
+    A long-lived reader (`web-serve`) holds it at start-up. Its reads then skip the guard, and a
+    refusal found at start-up keeps refusing.
     """
 
     def setUp(self) -> None:
         super().setUp()
         self.enterContext(mock.patch.dict(store._HELD, clear=True))
 
-    def gitignore(self) -> str:
-        path = self.instance / ".gitignore"
-        return path.read_text(encoding="utf-8") if path.exists() else ""
-
-    def test_the_guard_runs_once_at_hold_and_adds_a_missing_exclusion_there(self) -> None:
+    def test_a_held_read_does_not_run_the_guard_again(self) -> None:
         write_store(self.instance)
-        self.assertFalse(self.ignored())
-
         outcome = store.hold_exclusion(self.instance)
+        self.assertFalse(outcome.changed)
 
-        self.assertTrue(outcome.ignore_added)
-        self.assertTrue(self.ignored())
-
-    def test_a_held_read_runs_no_git_and_cannot_write_the_ignore_file(self) -> None:
-        write_store(self.instance)
-        store.hold_exclusion(self.instance)
-        # The entry is removed after the hold: an unheld read would put it back, a held one must not.
-        (self.instance / ".gitignore").write_text("", encoding="utf-8")
-
-        with mock.patch.object(state_repo, "git", side_effect=AssertionError("a read ran git")):
-            config, outcome = resolve_with_lifecycle(self.instance)
+        with mock.patch.object(store, "enforce_exclusion", side_effect=AssertionError("a read ran the guard")):
+            config, held = resolve_with_lifecycle(self.instance)
             resolve_role(self.instance, "app")
 
         self.assertEqual(config.owner_user, "ummanu_owner")
-        self.assertFalse(outcome.changed)
-        self.assertEqual(self.gitignore(), "")
+        self.assertFalse(held.changed)
 
-    def test_a_tracked_file_found_at_hold_keeps_refusing_every_read(self) -> None:
+    def test_an_exported_file_found_at_hold_keeps_refusing_every_read(self) -> None:
         write_store(self.instance)
-        self.git("add", "-f", STORE_FILE)
-        self.git("commit", "-m", "credentials, by mistake")
 
-        with self.assertRaisesRegex(BoardStoreError, "tracked in the instance repository"):
+        with self.exported(), self.assertRaisesRegex(BoardStoreError, "snapshot export copies"):
             store.hold_exclusion(self.instance)
-        with (
-            mock.patch.object(state_repo, "git", side_effect=AssertionError("a read ran git")),
-            self.assertRaisesRegex(BoardStoreError, "tracked in the instance repository"),
-        ):
+        # The refusal is held: a read does not retry the guard, even once the allowlist changed.
+        with self.assertRaisesRegex(BoardStoreError, "snapshot export copies"):
             resolve(self.instance)
-        self.assertEqual(self.gitignore(), "")
 
-    def test_a_store_missing_at_hold_is_refused_without_touching_the_repository(self) -> None:
+    def test_a_store_missing_at_hold_is_refused_without_touching_the_live_root(self) -> None:
+        before = self.listing()
         with self.assertRaisesRegex(BoardStoreError, "missing"):
             store.hold_exclusion(self.instance)
+        self.assertEqual(self.listing(), before)
         write_store(self.instance)
 
         with self.assertRaisesRegex(BoardStoreError, "missing"):
             resolve(self.instance)
-        self.assertEqual(self.gitignore(), "")
-        self.assertFalse(self.ignored())
 
     def test_an_unheld_process_still_guards_every_read(self) -> None:
         write_store(self.instance)
 
-        resolve(self.instance)
-
-        self.assertTrue(self.ignored(), "without a hold, resolve still makes the exclusion durable")
+        with self.exported(), self.assertRaisesRegex(BoardStoreError, "snapshot export copies"):
+            resolve(self.instance)
 
 
 class UpgradeStepTests(unittest.TestCase):

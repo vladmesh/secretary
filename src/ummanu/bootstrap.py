@@ -144,8 +144,8 @@ def bootstrap(args: argparse.Namespace) -> int:
             migrate_instance(target)
             verify_board_store_roles(target)
             # Last, so the handoff covers what provisioning created as root under the instance:
-            # `board-store.env` (0600, read by every role and instance-bound CLI) and its
-            # `.gitignore` entry. The Compose definition stays root's in /opt/ummanu.
+            # `board-store.env` (0600, read by every role and instance-bound CLI). The Compose
+            # definition stays root's in /opt/ummanu.
             _set_installation_owner(target, args.installation_user)
         print("ummanu bootstrap\nstatus: " + ("preview" if args.dry_run else "ok"))
         return 0
