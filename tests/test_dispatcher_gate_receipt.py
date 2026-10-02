@@ -107,6 +107,9 @@ class AttestationEffectTests(unittest.TestCase):
     def test_actual_1883_legacy_bytes_and_audit_are_adopted_with_overwritten_timestamp(self):
         fixture = json.loads((Path(__file__).parent / "fixtures/gate_attestation_1883.json").read_text())
         event = fixture["event"]
+        # These bytes were committed by the dispatcher owner of their time, under the product's
+        # earlier name; the replay runs as that owner.
+        self.runtime.owner = event["actor"]["id"]
         self.events[event["request_id"]] = copy.deepcopy(event)
         self.comments.append({"marker": "dispatcher", "body": "[dispatcher]\n" + fixture["body"]})
         self.sha = fixture["receipt"]["validated_sha"]
