@@ -705,5 +705,379 @@ class SnapshotLegacyCompatibilityTests(SnapshotCase):
         self.assertEqual(git(self.repo, "remote").strip(), "")
 
 
+# -- publishing the snapshot: the pusher, the cutover seed, the takeover marker and doctor ----------
+
+NOW = 1_800_000_000.0
+
+
+def commit_on(repo: Path, tree: str, parent: str, message: str, *, name: str, email: str) -> str:
+    """A commit made with plumbing, the way a head with Git could add one to the bare repository."""
+    env = dict(
+        os.environ,
+        GIT_AUTHOR_NAME=name,
+        GIT_AUTHOR_EMAIL=email,
+        GIT_COMMITTER_NAME=name,
+        GIT_COMMITTER_EMAIL=email,
+    )
+    commit = subprocess.run(
+        ["git", "--git-dir", str(repo), "commit-tree", tree, "-p", parent, "-m", message],
+        text=True,
+        capture_output=True,
+        check=True,
+        env=env,
+    ).stdout.strip()
+    git(repo, "update-ref", SNAPSHOT_REF, commit)
+    return commit
+
+
+class SnapshotPublishCase(SnapshotCase):
+    """A live root without Git whose `instance.yaml` names the snapshot repository and a local remote."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.remote = self.root / "remote.git"
+        git(self.root, "init", "--quiet", "--bare", "--initial-branch", "main", str(self.remote))
+        self.configure(self.remote)
+
+    def configure(self, remote: Path | None) -> None:
+        offsite = f"  instance_remote: {remote}\n" if remote is not None else ""
+        (self.live / "instance.yaml").write_text(
+            "version: 1\n"
+            "name: test-home\n"
+            f"data_dir: {self.data_dir}\n"
+            "offsite:\n" + offsite + f"  snapshot_repo: {self.repo}\n",
+            encoding="utf-8",
+        )
+
+    def pusher(self, **options) -> checkpoint.CheckpointPusher:
+        options.setdefault("snapshot_repo", self.repo)
+        options.setdefault("clock", lambda: NOW)
+        return checkpoint.CheckpointPusher(self.live, **options)
+
+    def remote_tip(self, remote: Path | None = None) -> str:
+        return git(remote or self.remote, "rev-parse", "--verify", "--quiet", SNAPSHOT_REF, check=False).strip()
+
+    def marker(self) -> str:
+        return git(self.repo, "cat-file", "blob", checkpoint.SNAPSHOT_BASE_REF, check=False).strip()
+
+    def legacy_instance(self) -> tuple[Path, str]:
+        """A legacy work-tree checkpoint with two commits, pushed to the remote."""
+        legacy = self.root / "secretary-instance"
+        legacy.mkdir()
+        git(legacy, "init", "--quiet", "--initial-branch", "main")
+        git(legacy, "config", "user.name", "ummanu checkpoint")
+        git(legacy, "config", "user.email", "ummanu-checkpoint@localhost")
+        for version in ("1", "2"):
+            (legacy / "instance.yaml").write_text(f"version: {version}\n", encoding="utf-8")
+            git(legacy, "add", "instance.yaml")
+            git(legacy, "commit", "--quiet", "-m", f"checkpoint {version}")
+        git(legacy, "push", "--quiet", str(self.remote), "main")
+        return legacy, git(legacy, "rev-parse", "HEAD").strip()
+
+
+class SnapshotPushTests(SnapshotPublishCase):
+    def test_the_tick_gives_a_pusher_in_both_modes(self):
+        exporter = tick_checkpoint_writer(self.data_dir, self.live)
+        pusher = checkpoint.tick_checkpoint_pusher(exporter)
+        self.assertIsInstance(pusher, checkpoint.CheckpointPusher)
+        self.assertIsNotNone(pusher._snapshot_repo)
+
+        legacy = checkpoint.tick_checkpoint_pusher(CheckpointWriter(self.data_dir, self.live))
+        self.assertIsNone(legacy._snapshot_repo)
+        self.assertEqual(legacy.instance_dir, self.live.resolve())
+
+    def test_one_exporter_tick_commits_pushes_and_feeds_the_unchanged_rpo_rows(self):
+        from ummanu.dispatch.production import _coordinate_checkpoint
+
+        writer = tick_checkpoint_writer(self.data_dir, self.live)
+        runtime = mock.Mock(
+            checkpoint=writer,
+            checkpoint_push=checkpoint.tick_checkpoint_pusher(writer),
+        )
+        runtime.checkpoint_push._clock = lambda: NOW
+        payload: dict = {}
+
+        prepared, pushed = _coordinate_checkpoint(runtime, payload)
+
+        self.assertEqual(prepared["status"], "committed", prepared.get("reason"))
+        self.assertEqual(pushed["status"], "pushed", pushed.get("reason"))
+        tip = self.tip()
+        self.assertEqual(prepared["commit"], tip)
+        self.assertEqual(self.remote_tip(), tip)
+        self.assertEqual(git(self.repo, "config", "--get", "remote.origin.url").strip(), str(self.remote))
+        rows = checkpoint.checkpoint_snapshot(
+            self.live,
+            write_state=payload["checkpoint"],
+            push_state=payload["checkpoint_push"],
+            now=NOW + 60,
+            data_dir=self.data_dir,
+        )
+        self.assertEqual(rows["snapshot_repo"], str(self.repo.resolve()))
+        self.assertEqual(rows["last_commit"], tip)
+        self.assertEqual(rows["last_push_commit"], tip)
+        self.assertEqual(rows["push_status"], "pushed")
+        self.assertEqual((rows["lag_commits"], rows["push_failures"]), (0, 0))
+        self.assertFalse(rows["remote_diverged"])
+        self.assertFalse(rows["rpo_exceeded"])
+        self.assertEqual(rows["credential"]["state"], "ambient/manual-bypass")
+        lines = checkpoint.render_checkpoint_lines(rows)
+        self.assertEqual(lines[0], f"snapshot repository: {self.repo.resolve()}")
+        self.assertIn("push: pushed", lines)
+
+        # The next tick inside both windows prepares nothing and pushes nothing.
+        again, no_push = _coordinate_checkpoint(runtime, payload)
+        self.assertEqual(again["status"], "skipped")
+        self.assertIsNone(no_push)
+
+    def test_a_commit_the_remote_lacks_counts_as_lag_until_the_next_window(self):
+        self.assertEqual(self.exporter().write().status, "committed")
+        state = self.pusher().push()
+        self.seed_board([CARD, dict(CARD, id=2, reference="ummanu-638")])
+        self.assertEqual(self.exporter().write().status, "committed")
+
+        rows = checkpoint.checkpoint_snapshot(self.live, push_state=state, now=NOW, data_dir=self.data_dir)
+
+        self.assertEqual(rows["lag_commits"], 1)
+        self.assertEqual(self.pusher(clock=lambda: NOW + 10 * 60).push(state)["status"], "pushed")
+        self.assertNotEqual(self.remote_tip(), self.tip(), "the 30-minute window was not due")
+        later = self.pusher(clock=lambda: NOW + checkpoint.PUSH_INTERVAL_SECONDS).push(state)
+        self.assertEqual(later["status"], "pushed")
+        self.assertEqual(self.remote_tip(), self.tip())
+
+    def test_a_changed_instance_remote_repoints_the_snapshot_remote(self):
+        self.assertEqual(self.exporter().write().status, "committed")
+        self.assertEqual(self.pusher().push()["status"], "pushed")
+        moved = self.root / "renamed.git"
+        git(self.root, "init", "--quiet", "--bare", "--initial-branch", "main", str(moved))
+        self.configure(moved)
+
+        state = self.pusher().push()
+
+        self.assertEqual(state["status"], "pushed", state["reason"])
+        self.assertEqual(git(self.repo, "config", "--get-all", "remote.origin.url").strip(), str(moved))
+        self.assertEqual(self.remote_tip(moved), self.tip())
+
+    def test_an_absent_instance_remote_skips_with_a_reason(self):
+        self.assertEqual(self.exporter().write().status, "committed")
+        self.configure(None)
+
+        state = self.pusher().push()
+
+        self.assertEqual(state["status"], "skipped")
+        self.assertIn("offsite.instance_remote", state["reason"])
+        self.assertEqual(self.remote_tip(), "")
+
+    def test_no_snapshot_repository_yet_skips_with_a_reason(self):
+        state = self.pusher().push()
+
+        self.assertEqual(state["status"], "skipped")
+        self.assertIn("does not exist yet", state["reason"])
+
+    def test_a_remote_tip_the_snapshot_history_lacks_stops_the_push_as_diverged(self):
+        self.assertEqual(self.exporter().write().status, "committed")
+        foreign, _tip = self.legacy_instance()
+
+        state = self.pusher().push()
+
+        self.assertEqual(state["status"], "diverged")
+        self.assertTrue(state["remote_diverged"])
+        self.assertIn("snapshot history does not contain", state["reason"])
+        self.assertEqual(self.remote_tip(), git(foreign, "rev-parse", "HEAD").strip())
+
+
+class SnapshotSeedTests(SnapshotPublishCase):
+    def test_the_first_window_after_a_seed_fast_forwards_the_legacy_tip_and_pushes(self):
+        legacy, legacy_tip = self.legacy_instance()
+
+        seeded = self.exporter().seed(legacy)
+
+        self.assertEqual(seeded, {"status": "seeded", "commit": legacy_tip, "legacy_branch": "main"})
+        self.assertEqual(self.tip(), legacy_tip)
+        self.assertEqual(git(self.repo, "rev-parse", "--is-shallow-repository").strip(), "true")
+        self.assertEqual(git(self.repo, "rev-list", "--count", SNAPSHOT_REF).strip(), "1")
+        self.assertEqual(self.marker(), "", "seeding is not a takeover")
+
+        result = self.exporter().write()
+
+        self.assertEqual(result.status, "committed", result.reason)
+        self.assertEqual(git(self.repo, "rev-parse", f"{result.commit}^@").split(), [legacy_tip])
+        self.assertEqual(self.marker(), legacy_tip)
+        state = self.pusher().push()
+        self.assertEqual(state["status"], "pushed", state["reason"])
+        self.assertEqual(self.remote_tip(), result.commit)
+        git(self.remote, "merge-base", "--is-ancestor", legacy_tip, result.commit)
+        self.assertEqual(checkpoint.snapshot_foreign_commits(self.live, self.data_dir), "")
+
+    def test_reseeding_a_seeded_repository_is_a_no_op(self):
+        legacy, _tip = self.legacy_instance()
+        self.exporter().seed(legacy)
+        refs = git(self.repo, "for-each-ref")
+
+        again = self.exporter().seed(legacy)
+
+        self.assertEqual(again["status"], "unchanged")
+        self.assertEqual(git(self.repo, "for-each-ref"), refs)
+
+    def test_a_repository_with_exporter_commits_is_refused(self):
+        legacy, _tip = self.legacy_instance()
+        self.assertEqual(self.exporter().write().status, "committed")
+        tip = self.tip()
+
+        refused = self.exporter().seed(legacy)
+
+        self.assertEqual(refused["status"], "blocked")
+        self.assertIn("already has exporter commits", refused["reason"])
+        self.assertEqual(self.tip(), tip)
+
+    def test_a_seeded_repository_the_exporter_took_over_is_refused(self):
+        legacy, _tip = self.legacy_instance()
+        self.exporter().seed(legacy)
+        self.assertEqual(self.exporter().write().status, "committed")
+
+        self.assertEqual(self.exporter().seed(legacy)["status"], "blocked")
+
+    def test_the_verb_seeds_and_runs_no_window(self):
+        legacy, legacy_tip = self.legacy_instance()
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            code = cli_main(
+                [
+                    "data",
+                    "snapshot",
+                    "--instance",
+                    str(self.live),
+                    "--data-dir",
+                    str(self.data_dir),
+                    "--snapshot-repo",
+                    str(self.repo),
+                    "--seed-from",
+                    str(legacy),
+                ]
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(code, 0, payload)
+        self.assertEqual((payload["status"], payload["commit"]), ("seeded", legacy_tip))
+        self.assertEqual(self.tip(), legacy_tip)
+
+
+class SnapshotTakeoverMarkerTests(SnapshotPublishCase):
+    def test_the_first_commit_on_an_empty_branch_records_root_once(self):
+        self.assertEqual(self.exporter().write().status, "committed")
+        self.assertEqual(self.marker(), checkpoint.SNAPSHOT_BASE_ROOT)
+        marker = git(self.repo, "rev-parse", checkpoint.SNAPSHOT_BASE_REF).strip()
+
+        self.seed_board([CARD, dict(CARD, id=2, reference="ummanu-638")])
+        self.assertEqual(self.exporter().write().status, "committed")
+
+        self.assertEqual(git(self.repo, "rev-parse", checkpoint.SNAPSHOT_BASE_REF).strip(), marker)
+
+    def test_a_tip_the_exporter_made_without_a_marker_gets_none(self):
+        self.assertEqual(self.exporter().write().status, "committed")
+        git(self.repo, "update-ref", "-d", checkpoint.SNAPSHOT_BASE_REF)
+        self.seed_board([CARD, dict(CARD, id=2, reference="ummanu-638")])
+
+        self.assertEqual(self.exporter().write().status, "committed")
+
+        self.assertEqual(self.marker(), "")
+
+
+class SnapshotForeignCommitTests(SnapshotPublishCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.assertEqual(self.exporter().write().status, "committed")
+        self.seed_board([CARD, dict(CARD, id=2, reference="ummanu-638")])
+        self.assertEqual(self.exporter().write().status, "committed")
+
+    def finding(self) -> str:
+        return checkpoint.snapshot_foreign_commits(self.live, self.data_dir)
+
+    def test_an_exporter_only_history_has_no_finding(self):
+        self.assertEqual(self.finding(), "")
+
+    def test_a_foreign_commit_made_with_plumbing_is_named(self):
+        tip = self.tip()
+        foreign = commit_on(
+            self.repo, f"{tip}^{{tree}}", tip, "fix by hand", name="a head", email="head@example.invalid"
+        )
+
+        finding = self.finding()
+
+        self.assertIn(foreign[:12], finding)
+        self.assertIn("author a head <head@example.invalid>", finding)
+        self.assertIn("subject without the exporter prefix", finding)
+        self.assertNotIn(tip[:12], finding)
+
+    def test_the_exporter_identity_with_a_wrong_prefix_is_named(self):
+        tip = self.tip()
+        forged = commit_on(
+            self.repo,
+            f"{tip}^{{tree}}",
+            tip,
+            "snapshot: almost",
+            name=SNAPSHOT_AUTHOR_NAME,
+            email=SNAPSHOT_AUTHOR_EMAIL,
+        )
+
+        finding = self.finding()
+
+        self.assertIn(f"{forged[:12]} (subject without the exporter prefix)", finding)
+
+    def test_a_tip_whose_manifest_does_not_match_its_tree_is_named(self):
+        tip = self.tip()
+        blob = subprocess.run(
+            ["git", "--git-dir", str(self.repo), "hash-object", "-w", "--stdin"],
+            input="Be verbose.\n",
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        index = self.root / "forged.index"
+        env = dict(os.environ, GIT_INDEX_FILE=str(index))
+        for args in (["read-tree", tip], ["update-index", "--cacheinfo", f"100644,{blob},persona/rules.md"]):
+            subprocess.run(["git", "--git-dir", str(self.repo), *args], env=env, check=True, capture_output=True)
+        tree = subprocess.run(
+            ["git", "--git-dir", str(self.repo), "write-tree"], env=env, text=True, capture_output=True, check=True
+        ).stdout.strip()
+        forged = commit_on(
+            self.repo,
+            tree,
+            tip,
+            f"{SNAPSHOT_SUBJECT_PREFIX}1 card(s), 0 run record(s)",
+            name=SNAPSHOT_AUTHOR_NAME,
+            email=SNAPSHOT_AUTHOR_EMAIL,
+        )
+
+        finding = self.finding()
+
+        self.assertIn(f"{forged[:12]} (manifest digest does not match persona/rules.md)", finding)
+
+    def test_exporter_commits_without_a_marker_are_red(self):
+        git(self.repo, "update-ref", "-d", checkpoint.SNAPSHOT_BASE_REF)
+
+        self.assertIn("no takeover marker", self.finding())
+
+    def test_doctor_reports_it_red_under_its_own_code(self):
+        from ummanu.cli import snapshot_foreign_commit_findings
+
+        tip = self.tip()
+        commit_on(self.repo, f"{tip}^{{tree}}", tip, "by hand", name="a head", email="head@example.invalid")
+        report = mock.Mock(data_dir=self.data_dir, instance_path=self.live / "instance.yaml")
+
+        findings = snapshot_foreign_commit_findings(report)
+
+        self.assertEqual([(f["code"], f["severity"]) for f in findings], [("snapshot.foreign_commit", "red")])
+
+    def test_the_finding_is_absent_in_legacy_mode_and_without_a_repository(self):
+        commit_on(self.repo, f"{self.tip()}^{{tree}}", self.tip(), "x", name="a head", email="h@example.invalid")
+        git(self.live, "init", "--quiet", "--initial-branch", "main")
+        self.assertEqual(self.finding(), "")
+
+        shutil.rmtree(self.live / ".git")
+        shutil.rmtree(self.repo)
+        self.assertEqual(self.finding(), "")
+
+
 if __name__ == "__main__":
     unittest.main()

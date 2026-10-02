@@ -211,10 +211,54 @@ def run_git(
     crossing, hook suppression and noninteractive execution for all callers.
     """
     instance_dir = Path(instance_dir).expanduser().resolve()
-    command = git_command(instance_dir, args)
     env = git_env()
     if extra_env:
         env.update(extra_env)
+    command = _crossed_git_command(instance_dir, args, env, extra_env=extra_env, child=child, label=label)
+    try:
+        # Its own process group: a timeout must take Git's remote helper (`git-remote-https`) down
+        # with Git, since the production tick's unit no longer kills what it leaves behind.
+        return _proc.run_isolated(command, input=input, timeout=timeout, env=env)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise StateRepoError(f"{label} failed: {exc}") from None
+
+
+def run_git_bytes(
+    instance_dir: Path,
+    args: list[str],
+    *,
+    label: str,
+    timeout: float = 120,
+    input: bytes | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    """:func:`run_git` for a local read whose output is object bytes, not text.
+
+    The text runner decodes and normalises line ends, which would change the bytes a digest is
+    taken over. Same command shape, identity crossing and environment; meant for local plumbing
+    such as `cat-file --batch`, never for a remote operation.
+    """
+    instance_dir = Path(instance_dir).expanduser().resolve()
+    env = git_env()
+    command = _crossed_git_command(instance_dir, args, env, extra_env=None, child=None, label=label)
+    try:
+        return subprocess.run(
+            command, input=input, capture_output=True, timeout=timeout, env=env, start_new_session=True, check=False
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise StateRepoError(f"{label} failed: {exc}") from None
+
+
+def _crossed_git_command(
+    instance_dir: Path,
+    args: list[str],
+    env: dict[str, str],
+    *,
+    extra_env: dict[str, str] | None,
+    child: GitChildIdentity | None,
+    label: str,
+) -> list[str]:
+    """The Git command line for `instance_dir`, crossed to its owner when this process is root."""
+    command = git_command(instance_dir, args)
     # The instance checkout is runtime-user-owned.  Root install/upgrade may need to reconcile
     # it, but Git reads repository configuration before a command (including fsmonitor), so a
     # root Git process would execute runtime-user-controlled configuration.  Cross that boundary
@@ -250,12 +294,7 @@ def run_git(
                 ]
         except (KeyError, OSError) as exc:
             raise StateRepoError(f"{label} failed: could not select instance runtime user: {exc}") from None
-    try:
-        # Its own process group: a timeout must take Git's remote helper (`git-remote-https`) down
-        # with Git, since the production tick's unit no longer kills what it leaves behind.
-        return _proc.run_isolated(command, input=input, timeout=timeout, env=env)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise StateRepoError(f"{label} failed: {exc}") from None
+    return command
 
 
 def run_as_git_child(

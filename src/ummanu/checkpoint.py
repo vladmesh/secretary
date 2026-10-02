@@ -760,6 +760,12 @@ SNAPSHOT_SUBJECT_PREFIX = "snapshot(instance): "
 SNAPSHOT_MANIFEST = "snapshot-manifest.json"
 SNAPSHOT_MANIFEST_FORMAT = "ummanu.instance-snapshot"
 SNAPSHOT_MANIFEST_VERSION = 1
+# The takeover marker: where the exporter's own history on the snapshot branch begins. A ref to a
+# blob holding one line, the parent of the exporter's first commit (a seeded legacy tip) or
+# `SNAPSHOT_BASE_ROOT` when that commit was a root commit. Only the exporter creates it, once, in
+# the same ref transaction as that first commit; doctor checks every commit after it.
+SNAPSHOT_BASE_REF = "refs/ummanu/snapshot-base"
+SNAPSHOT_BASE_ROOT = "root"
 # The closed set of live-root paths a cut copies, byte for byte and at the same relative path. `*`
 # matches within one path segment, a trailing `**` everything below a directory. Everything else in
 # the live root stays out of the snapshot: generated heads files, onboarding and gate drafts, locks,
@@ -794,6 +800,34 @@ def tick_checkpoint_writer(data_dir: Path, instance_dir: Path) -> CheckpointWrit
     return SnapshotExporter(data_dir, instance_dir)
 
 
+def tick_checkpoint_pusher(writer: CheckpointWriter) -> CheckpointPusher:
+    """The tick's pusher for `writer`: the live root's branch, or the exporter's snapshot branch."""
+    if isinstance(writer, SnapshotExporter):
+        return CheckpointPusher(writer.instance_dir, snapshot_repo=lambda: writer.snapshot_repo)
+    return CheckpointPusher(writer.instance_dir)
+
+
+def _commit_fields(output: str) -> list[list[str]]:
+    """`_COMMIT_FORMAT` records out of `rev-list --format` output (its `commit` headers dropped)."""
+    return [line.split("\0") for line in output.splitlines() if "\0" in line]
+
+
+# sha, parents, author name/email, committer name/email, subject.
+_COMMIT_FORMAT = "%H%x00%P%x00%an%x00%ae%x00%cn%x00%ce%x00%s"
+
+
+def _exporter_made(fields: list[str]) -> bool:
+    """Whether a `_COMMIT_FORMAT` record carries the exporter's identity and subject prefix."""
+    if len(fields) != 7:
+        return False
+    _sha, _parents, author, author_email, committer, committer_email, subject = fields
+    return (
+        author == committer == SNAPSHOT_AUTHOR_NAME
+        and author_email == committer_email == SNAPSHOT_AUTHOR_EMAIL
+        and subject.startswith(SNAPSHOT_SUBJECT_PREFIX)
+    )
+
+
 class SnapshotExporter(CheckpointWriter):
     """Commit one cut of the installation per changed window into a bare snapshot repository.
 
@@ -802,7 +836,7 @@ class SnapshotExporter(CheckpointWriter):
     beside the snapshot repository, scanned for secrets file by file, and turned into a tree with Git
     plumbing through a temporary index, so the snapshot never has a work tree. The only Git calls go
     to the snapshot repository; the live root is read, never written, and its `.git` (if any) is not
-    used. Nothing is pushed.
+    used. The exporter does not push; `CheckpointPusher` publishes the snapshot branch.
     """
 
     def __init__(
@@ -928,12 +962,109 @@ class SnapshotExporter(CheckpointWriter):
         # Compare-and-swap against the tip this window started from; an all-zero old value means
         # "the branch must not exist yet".
         expected = tip or "0" * len(commit)
-        moved = self._repo_run(repo, ["update-ref", "-m", message, SNAPSHOT_REF, commit, expected], "snapshot ref")
+        updates = [f"update {SNAPSHOT_REF} {commit} {expected}\n"]
+        base = self._takeover_base(repo, tip)
+        if base:
+            marker = self._repo_git(repo, ["hash-object", "-w", "--stdin"], "snapshot base", input=f"{base}\n")
+            # `create` refuses an existing marker, so it is written once, with the commit it
+            # describes or not at all.
+            updates.append(f"create {SNAPSHOT_BASE_REF} {marker.strip()}\n")
+        moved = self._repo_run(
+            repo, ["update-ref", "-m", message, "--stdin"], "snapshot ref", input="".join(updates)
+        )
         if moved.returncode != 0:
             raise CheckpointBlocked(
                 f"snapshot branch moved during the window (expected {expected[:12]}): {_last_line(moved)}"
             )
         return commit
+
+    def _takeover_base(self, repo: Path, tip: str) -> str:
+        """What the takeover marker records for a commit on `tip`, or "" when it needs none.
+
+        The marker exists once the exporter has taken the branch over. Without it, the first commit
+        on an empty branch is a root commit and one on a tip the exporter did not make (a seeded
+        legacy tip) starts the exporter's history; a tip the exporter made itself without a marker
+        predates the marker, and its base is not the exporter's to guess (doctor says so).
+        """
+        known = self._repo_run(repo, ["rev-parse", "--verify", "--quiet", SNAPSHOT_BASE_REF], "snapshot base")
+        if known.returncode == 0:
+            return ""
+        if not tip:
+            return SNAPSHOT_BASE_ROOT
+        listing = self._repo_git(
+            repo, ["rev-list", "--no-walk", f"--format={_COMMIT_FORMAT}", tip], "snapshot tip identity"
+        )
+        records = _commit_fields(listing)
+        return "" if records and _exporter_made(records[0]) else tip
+
+    def seed(self, legacy_dir: Path) -> dict[str, Any]:
+        """Fetch the legacy checkpoint's branch tip into an empty snapshot repository (one-shot).
+
+        The cutover runs this once, after the final legacy checkpoint and push, so the exporter's
+        next window commits a fast-forward child of that tip. The fetch is shallow: the push needs
+        only the tip (the remote already holds its history), and the legacy history is large. A
+        repository already at that tip is left as it is; one with exporter commits, or at another
+        tip, is refused.
+        """
+        legacy = Path(legacy_dir).expanduser().resolve()
+        try:
+            with state_repo.state_repo_lock(self.instance_dir):
+                return self._seed(legacy)
+        except CheckpointBlocked as exc:
+            return {"status": "blocked", "reason": str(exc)}
+
+    def _seed(self, legacy: Path) -> dict[str, Any]:
+        if not (legacy / ".git").exists():
+            raise CheckpointBlocked(f"legacy instance {legacy} is not a Git work tree")
+        try:
+            branch = state_repo.git(
+                legacy, ["symbolic-ref", "--quiet", "--short", "HEAD"], label="legacy branch"
+            ).strip()
+            legacy_tip = state_repo.git(
+                legacy, ["rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}"], label="legacy tip"
+            ).strip()
+        except state_repo.StateRepoError as exc:
+            raise CheckpointBlocked(f"could not read the legacy branch tip: {exc}") from None
+        repo = self.snapshot_repo
+        self._ensure_repo(repo)
+        tip = self._tip(repo)
+        # A marker, or a tip the exporter made, means the exporter has committed here.
+        if self._takeover_base(repo, tip) != (tip or SNAPSHOT_BASE_ROOT):
+            raise CheckpointBlocked(f"snapshot repository {repo} already has exporter commits")
+        if tip:
+            if tip != legacy_tip:
+                raise CheckpointBlocked(
+                    f"snapshot repository {repo} is seeded at {tip[:12]}, but the legacy tip is "
+                    f"{legacy_tip[:12]}; seed into an empty repository"
+                )
+            return {"status": "unchanged", "commit": tip, "legacy_branch": branch}
+        # `-c safe.directory` reaches the upload-pack Git runs in the legacy repository too.
+        fetched = self._repo_run(
+            repo,
+            [
+                "-c",
+                f"safe.directory={legacy}",
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "--depth",
+                "1",
+                legacy.as_uri(),
+                legacy_tip,
+            ],
+            "snapshot seed fetch",
+        )
+        if fetched.returncode != 0:
+            raise CheckpointBlocked(f"snapshot seed fetch failed: {_last_line(fetched)}")
+        moved = self._repo_run(
+            repo,
+            ["update-ref", "-m", f"seed from {legacy}", SNAPSHOT_REF, legacy_tip, "0" * len(legacy_tip)],
+            "snapshot seed ref",
+        )
+        if moved.returncode != 0:
+            raise CheckpointBlocked(f"snapshot seed ref failed: {_last_line(moved)}")
+        return {"status": "seeded", "commit": legacy_tip, "legacy_branch": branch}
 
     def _build_tree(self, repo: Path, cut: Path, modes: dict[str, str], index: Path) -> str:
         """Write every cut file as a blob and the whole cut as one tree, through a temporary index."""
@@ -1323,6 +1454,25 @@ class _GitFailure(Exception):
 
 
 @dataclass(frozen=True)
+class _PublishedRepo:
+    """The repository whose branch the pusher publishes and doctor measures.
+
+    The live root while it is a work tree (`HEAD`), else the bare snapshot repository, which every
+    command names with `--git-dir` so Git never discovers another repository around it.
+    """
+
+    path: Path
+    bare: bool
+
+    @property
+    def ref(self) -> str:
+        return SNAPSHOT_REF if self.bare else "HEAD"
+
+    def args(self, args: list[str]) -> list[str]:
+        return ["--git-dir", str(self.path), *args] if self.bare else list(args)
+
+
+@dataclass(frozen=True)
 class PushOutcome:
     status: str
     reason: str = ""
@@ -1336,21 +1486,29 @@ class CheckpointPusher:
     Fail-closed on the checkpoint, not on the work: a failed push leaves its reason and a growing lag
     in state while the dispatcher keeps running. A remote holding commits the local repo does not
     have stops the push and raises `remote diverged`; there is no force-push path here.
+
+    The repository whose branch is pushed and the live root are the same `instance_dir` until the
+    live root stops being a work tree. With `snapshot_repo` the pusher publishes `SNAPSHOT_REF` of
+    that bare repository instead, to a remote it points at `offsite.instance_remote` itself; the
+    lock, the managed credential and the push state still belong to the live root.
     """
 
     def __init__(
         self,
         instance_dir: Path,
         *,
+        snapshot_repo: Path | Callable[[], Path] | None = None,
         remote: str = DEFAULT_REMOTE,
         interval_seconds: float = PUSH_INTERVAL_SECONDS,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self.instance_dir = Path(instance_dir).expanduser().resolve()
+        self._snapshot_repo = snapshot_repo
         self.remote = remote
         self.interval_seconds = float(interval_seconds)
         self._clock = clock
         self._credential: dict[str, Any] = {"state": "ambient/manual-bypass", "reason": "not verified"}
+        self._published = _PublishedRepo(self.instance_dir, bare=False)
 
     def due(self, state: dict[str, Any] | None = None, *, now: float | None = None) -> bool:
         """Whether the next remote publication window is due.
@@ -1377,26 +1535,33 @@ class CheckpointPusher:
     def _attempt(self) -> PushOutcome:
         try:
             with state_repo.state_repo_lock(self.instance_dir):
-                branch = self._branch()
-                if not branch:
-                    return PushOutcome("skipped", "instance repo has no checked-out branch")
-                if not self._has_remote():
-                    return PushOutcome("skipped", f"instance repo has no remote '{self.remote}'")
+                if self._snapshot_repo is not None:
+                    skipped = self._prepare_snapshot()
+                    if skipped:
+                        return PushOutcome("skipped", skipped)
+                    branch = SNAPSHOT_BRANCH
+                else:
+                    branch = self._branch()
+                    if not branch:
+                        return PushOutcome("skipped", "instance repo has no checked-out branch")
+                    if not self._has_remote():
+                        return PushOutcome("skipped", f"instance repo has no remote '{self.remote}'")
                 remote_url = self._git(["remote", "get-url", self.remote], "checkpoint remote URL").strip()
                 remote_git = self._remote_execution(remote_url)
-                head = self._git(["rev-parse", "HEAD"], "checkpoint head").strip()
+                head = self._git(["rev-parse", self._published.ref], "checkpoint head").strip()
                 remote_head = self._remote_head(branch, remote_git)
                 if remote_head and remote_head == head:
                     return PushOutcome("unchanged", commit=head)
                 if remote_head and not self._fast_forward(remote_head, head):
+                    history = "snapshot" if self._published.bare else "checkpoint"
                     return PushOutcome(
                         "diverged",
                         f"remote {self.remote}/{branch} is at {remote_head[:12]}, "
-                        "which the checkpoint history does not contain",
+                        f"which the {history} history does not contain",
                     )
                 self._remote_git(
                     remote_git,
-                    ["push", "--quiet", self.remote, f"HEAD:refs/heads/{branch}"],
+                    ["push", "--quiet", self.remote, f"{self._published.ref}:refs/heads/{branch}"],
                     "checkpoint push",
                     timeout=PUSH_TIMEOUT_SECONDS,
                 )
@@ -1452,6 +1617,40 @@ class CheckpointPusher:
             state["failures"] = int(_float_field(state, "failures")) + 1
             state["remote_diverged"] = outcome.status == "diverged"
         return state
+
+    def _prepare_snapshot(self) -> str:
+        """Select the snapshot repository and point its remote at `offsite.instance_remote`.
+
+        Returns why there is nothing to push yet, or "". The remote URL is rewritten whenever it
+        differs from the configured one, so a new `offsite.instance_remote` re-points the next push.
+        """
+        source = self._snapshot_repo
+        assert source is not None
+        try:
+            repo = Path(source() if callable(source) else source).expanduser().resolve()
+        except CheckpointBlocked as exc:
+            raise _GitFailure(str(exc)) from None
+        if not (repo / "HEAD").is_file():
+            return f"snapshot repository {repo} does not exist yet"
+        self._published = _PublishedRepo(repo, bare=True)
+        from ummanu.config import DataDirError, instance_offsite_remote
+
+        try:
+            remote_url = instance_offsite_remote(self.instance_dir)
+        except DataDirError as exc:
+            raise _GitFailure(f"could not read offsite.instance_remote: {exc}") from None
+        if not remote_url:
+            return "instance.yaml has no offsite.instance_remote"
+        key = f"remote.{self.remote}.url"
+        current = self._run(["config", "--get-all", key], timeout=120)
+        if current.returncode not in (0, 1):
+            self._raise_git_failure(current, "snapshot remote")
+        if current.stdout.strip() != remote_url:
+            self._git(["config", "--replace-all", key, remote_url], "snapshot remote")
+        tip = self._run(["rev-parse", "--verify", "--quiet", f"{SNAPSHOT_REF}^{{commit}}"], timeout=120)
+        if tip.returncode != 0 or not tip.stdout.strip():
+            return f"snapshot repository {repo} has no commit yet"
+        return ""
 
     def _branch(self) -> str:
         result = self._run(["symbolic-ref", "--quiet", "--short", "HEAD"], timeout=120)
@@ -1539,7 +1738,9 @@ class CheckpointPusher:
         self, remote_git: RemoteExecution, args: list[str], label: str, *, timeout: float = 120
     ) -> str:
         try:
-            result = remote_git.run_instance(self.instance_dir, args, label=label, timeout=timeout)
+            result = remote_git.run_instance(
+                self._published.path, self._published.args(args), label=label, timeout=timeout
+            )
         except CredentialError as exc:
             raise _GitFailure(str(exc)) from None
         if result.returncode != 0:
@@ -1551,8 +1752,8 @@ class CheckpointPusher:
     def _run(self, args: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
         try:
             return state_repo.run_git(
-                self.instance_dir,
-                args,
+                self._published.path,
+                self._published.args(args),
                 label=f"checkpoint {args[0]}",
                 timeout=timeout,
             )
@@ -1599,8 +1800,14 @@ def checkpoint_snapshot(
     write_state: dict[str, Any] | None = None,
     push_state: dict[str, Any] | None = None,
     now: float | None = None,
+    data_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Checkpoint freshness for `status` and `doctor`."""
+    """Checkpoint freshness for `status` and `doctor`.
+
+    The commit and lag rows read the repository the pusher publishes: the live root while it is a
+    work tree, else the snapshot repository (`data_dir` roots a relative or default location; it
+    is read from `instance.yaml` when omitted).
+    """
     write = dict(write_state or {})
     push = dict(push_state or {})
     stamp = time.time() if now is None else float(now)
@@ -1635,9 +1842,10 @@ def checkpoint_snapshot(
     skipped_epoch = _float_field(write, "skip_epoch")
     next_due_at = str(write.get("next_due_at") or "")
     next_due_epoch = _float_field(write, "next_due_epoch")
-    commit, commit_at = _last_commit(Path(instance_dir))
+    published = published_repository(Path(instance_dir), data_dir)
+    commit, commit_at = _last_commit(published)
     pushed = str(push.get("last_push_commit") or "")
-    lag_commits, oldest_at = _unpushed(Path(instance_dir), pushed)
+    lag_commits, oldest_at = _unpushed(published, pushed)
     attempted_at = str(push.get("attempted_at") or "")
     attempted_epoch = _float_field(push, "attempted_epoch")
     attempt_age = (
@@ -1709,7 +1917,11 @@ def checkpoint_snapshot(
         "push_failures": int(_float_field(push, "failures")),
         "remote_diverged": bool(push.get("remote_diverged")),
         "blocked_reason": failure_reason,
-        "credential": _credential_snapshot(Path(instance_dir), _object_field(push, "credential"), stamp),
+        "credential": _credential_snapshot(
+            Path(instance_dir), _object_field(push, "credential"), stamp, published=published
+        ),
+        # Empty while the live root is the published repository, so legacy rows read as before.
+        "snapshot_repo": str(published.path) if published is not None and published.bare else "",
     }
 
 
@@ -1763,8 +1975,20 @@ def _object_field(value: dict[str, Any], name: str) -> dict[str, Any]:
     return dict(field) if isinstance(field, dict) else {}
 
 
-def _credential_snapshot(instance_dir: Path, recorded: dict[str, Any], now: float) -> dict[str, Any]:
-    """Non-secret credential health. A locked store never implies equality."""
+def _credential_snapshot(
+    instance_dir: Path,
+    recorded: dict[str, Any],
+    now: float,
+    *,
+    published: _PublishedRepo | None | bool = True,
+) -> dict[str, Any]:
+    """Non-secret credential health. A locked store never implies equality.
+
+    The store is the live root's; the remote is the one of the published repository (`True`: the
+    live root itself, `None`: unknown).
+    """
+    if published is True:
+        published = _PublishedRepo(Path(instance_dir).expanduser().resolve(), bare=False)
     remote_git = RemoteExecution("", "checkpoint", instance_dir=instance_dir)
     current = remote_git.managed_credential_state
     state = current.state
@@ -1774,9 +1998,11 @@ def _credential_snapshot(instance_dir: Path, recorded: dict[str, Any], now: floa
         # Read the declared URL, not `git remote get-url`: the latter applies url.*.insteadOf
         # rewrites and would collapse a separately reported ambient bypass into current managed
         # credential readiness.
+        if not isinstance(published, _PublishedRepo):
+            raise state_repo.StateRepoError("the published repository is unknown")
         remote = state_repo.git(
-            instance_dir,
-            ["config", "--get", f"remote.{DEFAULT_REMOTE}.url"],
+            published.path,
+            published.args(["config", "--get", f"remote.{DEFAULT_REMOTE}.url"]),
             label="inspect checkpoint remote",
         ).strip()
         remote_git = RemoteExecution(remote, "checkpoint", instance_dir=instance_dir)
@@ -1817,7 +2043,8 @@ def render_checkpoint_lines(snapshot: dict[str, Any]) -> list[str]:
     lag = "unknown" if lag_commits is None else f"{lag_commits} commit(s)"
     if lag_minutes is not None:
         lag = f"{lag}, {lag_minutes} min"
-    lines = [
+    lines = [f"snapshot repository: {snapshot['snapshot_repo']}"] if snapshot.get("snapshot_repo") else []
+    lines += [
         f"last commit: {snapshot.get('last_commit') or '(none)'} "
         f"{snapshot.get('last_commit_at') or ''}".strip(),
         f"last preparation: {snapshot.get('last_checkpoint_prepared_at') or '(never)'}"
@@ -1857,24 +2084,232 @@ def render_checkpoint_lines(snapshot: dict[str, Any]) -> list[str]:
     return lines
 
 
-def _last_commit(instance_dir: Path) -> tuple[str, str]:
-    out = _read_git(instance_dir, ["log", "-1", "--format=%H %cI"])
+def published_repository(instance_dir: Path, data_dir: Path | None = None) -> _PublishedRepo | None:
+    """The repository whose branch is published, or None when the snapshot one cannot be named."""
+    if live_root_is_work_tree(instance_dir):
+        return _PublishedRepo(Path(instance_dir).expanduser().resolve(), bare=False)
+    from ummanu.config import DataDirError, instance_data_dir, instance_snapshot_repo
+
+    try:
+        root = Path(data_dir) if data_dir is not None else instance_data_dir(instance_dir)
+        return _PublishedRepo(instance_snapshot_repo(instance_dir, root), bare=True)
+    except DataDirError:
+        return None
+
+
+def snapshot_foreign_commits(instance_dir: Path, data_dir: Path | None = None) -> str:
+    """Why the snapshot branch holds history the exporter did not make, or "" when it holds none.
+
+    The finding behind doctor's red `snapshot.foreign_commit`. It is absent ("") in legacy mode and
+    while there is no snapshot repository. Otherwise every commit after the takeover marker must
+    carry the exporter's author and committer identity and subject prefix, exactly one parent (the
+    exporter's root commit none) and a `snapshot-manifest.json`; the tip's manifest must also
+    match its tree file by file. Exporter commits without a marker are a finding as well.
+    """
+    published = published_repository(Path(instance_dir), data_dir)
+    if published is None or not published.bare or not (published.path / "HEAD").is_file():
+        return ""
+    try:
+        return _SnapshotAudit(published).problem()
+    except state_repo.StateRepoError as exc:
+        return f"could not check the snapshot branch in {published.path}: {exc}"
+
+
+class _SnapshotAudit:
+    """Read-only checks of one snapshot repository for `snapshot_foreign_commits`."""
+
+    # How many offending commits a finding names before it counts the rest.
+    NAMED = 10
+
+    def __init__(self, published: _PublishedRepo) -> None:
+        self.published = published
+
+    def problem(self) -> str:
+        repo = self.published.path
+        tip = self._resolve(f"{SNAPSHOT_REF}^{{commit}}")
+        marker = self._resolve(SNAPSHOT_BASE_REF)
+        if not marker:
+            if tip and self._has_exporter_commit(tip):
+                return (
+                    f"snapshot branch in {repo} has exporter commits but no takeover marker "
+                    f"{SNAPSHOT_BASE_REF}, so its history cannot be checked"
+                )
+            return ""
+        if not tip:
+            return f"snapshot repository {repo} has a takeover marker but no {SNAPSHOT_REF}"
+        base = self._git(["cat-file", "blob", marker], "snapshot base").strip()
+        if base == SNAPSHOT_BASE_ROOT:
+            scope = [tip]
+        elif not re.fullmatch(r"[0-9a-f]{40}([0-9a-f]{24})?", base):
+            return f"takeover marker {SNAPSHOT_BASE_REF} in {repo} does not name a commit: {base[:80]!r}"
+        elif self._run(["merge-base", "--is-ancestor", base, tip]).returncode != 0:
+            return f"snapshot branch in {repo} no longer descends from its takeover base {base[:12]}"
+        else:
+            scope = [f"{base}..{tip}"]
+        records = _commit_fields(
+            self._git(["rev-list", "--topo-order", f"--format={_COMMIT_FORMAT}", *scope], "snapshot history")
+        )
+        manifests = self._manifests([fields[0] for fields in records])
+        offending: list[str] = []
+        for index, fields in enumerate(records):
+            # Only the oldest commit of a history the exporter began from nothing may be a root.
+            root_allowed = base == SNAPSHOT_BASE_ROOT and index == len(records) - 1
+            reasons = self._commit_reasons(fields, root_allowed=root_allowed, has_manifest=fields[0] in manifests)
+            if fields[0] == tip:
+                reasons += self._tip_reasons(tip, manifests.get(tip, ""))
+            if reasons:
+                offending.append(f"{fields[0][:12]} ({', '.join(reasons)})")
+        if not offending:
+            return ""
+        named = "; ".join(offending[: self.NAMED])
+        more = f"; and {len(offending) - self.NAMED} more" if len(offending) > self.NAMED else ""
+        return f"snapshot branch in {repo} holds {len(offending)} commit(s) the exporter did not make: {named}{more}"
+
+    @staticmethod
+    def _commit_reasons(fields: list[str], *, root_allowed: bool, has_manifest: bool) -> list[str]:
+        if len(fields) != 7:
+            return ["unreadable commit"]
+        _sha, parents, author, author_email, committer, committer_email, subject = fields
+        reasons: list[str] = []
+        if (author, author_email) != (SNAPSHOT_AUTHOR_NAME, SNAPSHOT_AUTHOR_EMAIL):
+            reasons.append(f"author {author} <{author_email}>")
+        if (committer, committer_email) != (SNAPSHOT_AUTHOR_NAME, SNAPSHOT_AUTHOR_EMAIL):
+            reasons.append(f"committer {committer} <{committer_email}>")
+        if not subject.startswith(SNAPSHOT_SUBJECT_PREFIX):
+            reasons.append("subject without the exporter prefix")
+        count = len(parents.split())
+        if count != 1 and not (count == 0 and root_allowed):
+            reasons.append(f"{count} parents")
+        if not has_manifest:
+            reasons.append(f"no {SNAPSHOT_MANIFEST}")
+        return reasons
+
+    def _tip_reasons(self, tip: str, manifest_oid: str) -> list[str]:
+        """The tip's manifest against its tree: the same paths, and each file's digest."""
+        if not manifest_oid:
+            return []
+        listing = self._git(["ls-tree", "-r", "-z", "--full-tree", tip], "snapshot tip tree")
+        tree: dict[str, str] = {}
+        irregular: list[str] = []
+        for entry in filter(None, listing.split("\0")):
+            meta, _, path = entry.partition("\t")
+            mode, kind, oid = (meta.split() + ["", "", ""])[:3]
+            if path == SNAPSHOT_MANIFEST:
+                continue
+            if kind != "blob" or mode not in (_REGULAR_MODE, _EXECUTABLE_MODE):
+                irregular.append(path)
+            tree[path] = oid
+        if irregular:
+            return [f"non-file tree entries {', '.join(sorted(irregular)[:3])}"]
+        try:
+            manifest = json.loads(self._blobs([manifest_oid])[manifest_oid])
+            files = manifest["files"]
+            if not isinstance(files, dict):
+                raise TypeError("files is not an object")
+        except (KeyError, TypeError, ValueError) as exc:
+            return [f"unreadable manifest ({type(exc).__name__})"]
+        if set(files) != set(tree):
+            changed = sorted(set(files) ^ set(tree))
+            return [f"manifest and tree list different files: {', '.join(changed[:3])}"]
+        blobs = self._blobs(sorted(set(tree.values())))
+        changed = sorted(path for path, oid in tree.items() if hashlib.sha256(blobs[oid]).hexdigest() != files[path])
+        if changed:
+            return [f"manifest digest does not match {', '.join(changed[:3])}"]
+        return []
+
+    def _has_exporter_commit(self, tip: str) -> bool:
+        for field in ("--author", "--committer"):
+            found = self._git(
+                ["rev-list", "--max-count=1", "--fixed-strings", f"{field}=<{SNAPSHOT_AUTHOR_EMAIL}>", tip],
+                "snapshot exporter commits",
+            )
+            if found.strip():
+                return True
+        return False
+
+    def _manifests(self, commits: list[str]) -> dict[str, str]:
+        """commit -> blob id of its manifest, for the commits whose tree holds one as a file."""
+        if not commits:
+            return {}
+        output = self._git(
+            ["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+            "snapshot manifests",
+            input="".join(f"{commit}:{SNAPSHOT_MANIFEST}\n" for commit in commits),
+        )
+        found: dict[str, str] = {}
+        for commit, line in zip(commits, output.splitlines(), strict=False):
+            oid, _, kind = line.partition(" ")
+            if kind == "blob":
+                found[commit] = oid
+        return found
+
+    def _blobs(self, oids: list[str]) -> dict[str, bytes]:
+        """The bytes of each blob, read in one `cat-file --batch` (the text runner would alter them)."""
+        result = state_repo.run_git_bytes(
+            self.published.path,
+            self.published.args(["cat-file", "--batch"]),
+            label="snapshot blobs",
+            input="".join(f"{oid}\n" for oid in oids).encode(),
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+            raise state_repo.StateRepoError(f"snapshot blobs failed: {detail[-1] if detail else 'git error'}")
+        payload, offset = result.stdout, 0
+        blobs: dict[str, bytes] = {}
+        for oid in oids:
+            end = payload.index(b"\n", offset)
+            header = payload[offset:end].decode("ascii", "replace").split()
+            if len(header) != 3 or header[1] != "blob" or not header[2].isdigit():
+                raise state_repo.StateRepoError(f"snapshot blobs failed: {oid} is not a blob")
+            size = int(header[2])
+            blobs[oid] = payload[end + 1 : end + 1 + size]
+            offset = end + 1 + size + 1
+        return blobs
+
+    def _resolve(self, name: str) -> str:
+        result = self._run(["rev-parse", "--verify", "--quiet", name])
+        if result.returncode == 1 and not result.stdout.strip():
+            return ""
+        if result.returncode != 0:
+            raise state_repo.StateRepoError(f"could not resolve {name}: {_last_line(result)}")
+        return result.stdout.strip()
+
+    def _run(self, args: list[str], *, input: str | None = None) -> subprocess.CompletedProcess[str]:
+        return state_repo.run_git(
+            self.published.path, self.published.args(args), label=f"snapshot doctor {args[0]}", input=input
+        )
+
+    def _git(self, args: list[str], label: str, *, input: str | None = None) -> str:
+        result = self._run(args, input=input)
+        if result.returncode != 0:
+            raise state_repo.StateRepoError(f"{label} failed: {_last_line(result)}")
+        return result.stdout
+
+
+def _last_commit(published: _PublishedRepo | None) -> tuple[str, str]:
+    if published is None:
+        return "", ""
+    out = _read_git(published.path, published.args(["log", "-1", "--format=%H %cI", published.ref]))
     parts = out.strip().split(" ", 1)
     if not parts or not parts[0]:
         return "", ""
     return parts[0], parts[1].strip() if len(parts) > 1 else ""
 
 
-def _unpushed(instance_dir: Path, pushed: str) -> tuple[int | None, str]:
+def _unpushed(published: _PublishedRepo | None, pushed: str) -> tuple[int | None, str]:
     """Count the commits the remote lacks and stamp the oldest of them."""
+    if published is None:
+        return None, ""
+    path, head = published.path, published.ref
     # A recorded tip this history no longer holds leaves every commit unpushed,
     # which is the honest reading: nothing local is known to be on the remote.
     known = (
         pushed
-        and _read_git(instance_dir, ["cat-file", "-e", f"{pushed}^{{commit}}"], ok_only=True) is not None
+        and _read_git(path, published.args(["cat-file", "-e", f"{pushed}^{{commit}}"]), ok_only=True)
+        is not None
     )
-    scope = [f"{pushed}..HEAD"] if known else ["HEAD"]
-    out = _read_git(instance_dir, ["log", "--format=%cI", *scope], ok_only=True)
+    scope = [f"{pushed}..{head}"] if known else [head]
+    out = _read_git(path, published.args(["log", "--format=%cI", *scope]), ok_only=True)
     if out is None:
         return None, ""
     stamps = [line.strip() for line in out.splitlines() if line.strip()]
