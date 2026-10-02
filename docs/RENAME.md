@@ -360,6 +360,8 @@ running tick. Then:
    activate in the window either. The `upgrade` pull refuses the same way, so an accidental
    `secretary upgrade` cannot ff into the rename.
 
+   Landed in secretary-1929: `dispatch/entrypoint_guard.py`, called by both movers.
+
 **How the dispatcher is kept from executing deleted code mid-release:** the checkout it executes never
 moves to the renamed tree while it runs. Only the transition unit moves it, after the dispatcher is frozen
 and its timer stopped (§T3, steps 1–2), and it moves it as `/home/dev/ummanu`, a path the old units never

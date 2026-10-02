@@ -10,12 +10,15 @@ both paths reach :func:`advance`, which keeps one order:
    names that id, never the ref (which another merge may move);
 2. refuse a checkout that cannot fast-forward to it before touching the board, as the plain
    ``merge --ff-only`` it replaces would have;
-3. bring the board store to the target's schema (`board.release_migrations.prepare`: the target's
+3. refuse a target that does not keep the entrypoint the live units execute
+   (`dispatch.entrypoint_guard`, reason ``entrypoint_moved``): it lands on the remote, and only the
+   transition runbook (`docs/RENAME.md` §T3) activates it;
+4. bring the board store to the target's schema (`board.release_migrations.prepare`: the target's
    own migration bundle, additive revisions only, under the migration advisory lock, verified at
    the target's head);
-4. only then ``merge --ff-only <target>``, and read ``HEAD`` back to confirm it is the target.
+5. only then ``merge --ff-only <target>``, and read ``HEAD`` back to confirm it is the target.
 
-A refused schema raises `ProductionActivationRefused` and the checkout stays where it was; the
+A refused entrypoint or schema raises `ProductionActivationRefused` and the checkout stays where it was; the
 release turns it into a Blocked card, a typed reason and one operation card for the sprint's PO
 (`dispatch.release_lifecycle`). Every other failure is the `HostError` the plain fast-forward
 raised before, so each path keeps its own handling of it. A replay is safe at every step: the
@@ -34,18 +37,20 @@ from typing import Any
 
 from secretary.board import release_migrations
 from secretary.board.release_migrations import ReleaseSchemaRefused
+from secretary.dispatch.entrypoint_guard import EntrypointMoved, require_entrypoint
 from secretary.dispatch.types import HostError, MergeLanding
 
 
 class ProductionActivationRefused(HostError):
-    """The production checkout was not advanced, because the target's board schema was refused.
+    """The production checkout was not advanced: the target's entrypoint or board schema was refused.
 
-    `landing` is what the release had already delivered to the remote before this (the pushed or
+    `refusal` is the `EntrypointMoved` or `ReleaseSchemaRefused` behind it; its `facts()` carry the
+    `code`, `reason`, `target`, `revision` and `message` every consumer reads. `landing` is what the release had already delivered to the remote before this (the pushed or
     merged commit), set by `complete_green`: the remote merge happened, the production activation
     did not, and the two are reported apart.
     """
 
-    def __init__(self, refusal: ReleaseSchemaRefused, *, checkout: Path | str, old: str) -> None:
+    def __init__(self, refusal: ReleaseSchemaRefused | EntrypointMoved, *, checkout: Path | str, old: str) -> None:
         self.refusal = refusal
         self.checkout = str(checkout)
         self.old = old
@@ -93,6 +98,17 @@ def advance(
                 f"post-merge fast-forward failed: the checkout at {old[:12]} is not an ancestor of "
                 f"{ref} at {target[:12]}"
             ) from None
+
+        def probe(args: list[str]) -> str | None:
+            try:
+                return str(run(["git", "-C", str(repo), *args], "post-merge entrypoint guard").stdout)
+            except HostError:
+                return None
+
+        try:
+            require_entrypoint(probe, target)
+        except EntrypointMoved as exc:
+            raise ProductionActivationRefused(exc, checkout=repo, old=old) from exc
     try:
         release_migrations.prepare(repo, target, instance_dir)
     except ReleaseSchemaRefused as exc:

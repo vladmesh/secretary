@@ -35,6 +35,8 @@ from secretary.board.provision import verify_roles as verify_board_store_roles
 from secretary.board.store import BoardStoreError, ensure_ignored, store_path
 from secretary.checkpoint import CheckpointPusher
 from secretary.config import DataDirError, validate_instance
+from secretary.dispatch import entrypoint_guard
+from secretary.dispatch.entrypoint_guard import EntrypointMoved
 from secretary.head_registry import (
     HeadRegistryConfigError,
     assert_snapshot_current,
@@ -192,6 +194,17 @@ class GitError(RuntimeError):
     """A git command failed. The message carries git's reason, not a traceback."""
 
 
+class EntrypointRefused(GitError):
+    """The upstream target does not keep the running entrypoint; the checkout was left as found.
+
+    `refusal` is the `entrypoint_guard.EntrypointMoved` the release path raises for the same target.
+    """
+
+    def __init__(self, root: Path, refusal: EntrypointMoved) -> None:
+        self.refusal = refusal
+        super().__init__(f"{refusal.reason}: {root} stays at its commit: {refusal}")
+
+
 def _git(root: Path, args: list[str], timeout: int = 120) -> str:
     try:
         # Scrub inherited Git state so `-C root` selects this checkout.
@@ -212,15 +225,44 @@ def _git(root: Path, args: list[str], timeout: int = 120) -> str:
     return (result.stdout or "").strip()
 
 
+def require_entrypoint(root: Path, target: str) -> None:
+    """Raise `EntrypointRefused` when moving `root` to `target` would remove the running entrypoint.
+
+    The same check the release path runs (`dispatch.entrypoint_guard`), through this module's Git.
+    """
+
+    def probe(args: list[str]) -> str | None:
+        try:
+            return _git(root, args)
+        except GitError:
+            return None
+
+    try:
+        entrypoint_guard.require_entrypoint(probe, target)
+    except EntrypointMoved as exc:
+        raise EntrypointRefused(root, exc) from exc
+
+
+def upstream_target(root: Path, base_branch: str) -> tuple[str, str]:
+    """Fetch `base_branch` and pin it. Returns ``(head, target)``; refuses a target that moved the entrypoint."""
+    head = _git(root, ["rev-parse", "HEAD"])
+    _git(root, ["fetch", "--quiet", "origin", base_branch])
+    target = _git(root, ["rev-parse", "--verify", f"origin/{base_branch}^{{commit}}"])
+    if target != head:
+        require_entrypoint(root, target)
+    return head, target
+
+
 def fast_forward(root: Path, base_branch: str) -> tuple[str, str]:
     """Fetch and fast-forward one checkout. Returns ``(before, after)``.
 
     Strictly ``--ff-only``: a checkout with local commits or a diverged history is left exactly as
     found and the caller hears why. Nothing in an upgrade may discard work that is only on this host.
+    The upstream commit is pinned and checked first: a target without the entrypoint the live units
+    execute raises `EntrypointRefused` before anything moves (`docs/RENAME.md` §T1).
     """
-    before = _git(root, ["rev-parse", "HEAD"])
-    _git(root, ["fetch", "--quiet", "origin", base_branch])
-    _git(root, ["merge", "--ff-only", f"origin/{base_branch}"])
+    before, target = upstream_target(root, base_branch)
+    _git(root, ["merge", "--ff-only", target])
     return before, _git(root, ["rev-parse", "HEAD"])
 
 
@@ -286,9 +328,7 @@ def step_pull(context: UpgradeContext) -> StepResult:
             # checkout is left exactly where it was. This is what makes every later step's
             # `would-change` line about the revision an operator is about to apply rather than
             # about the one already installed.
-            _git(context.product_root, ["fetch", "--quiet", "origin", context.base_branch])
-            head = _git(context.product_root, ["rev-parse", "HEAD"])
-            target = _git(context.product_root, ["rev-parse", f"origin/{context.base_branch}"])
+            head, target = upstream_target(context.product_root, context.base_branch)
             record_change_plan(context, _changed_paths(context.product_root, head, target))
             if head == target:
                 return StepResult("pull", "unchanged", head[:12])
@@ -1166,9 +1206,8 @@ def step_worktrees(context: UpgradeContext) -> StepResult:
             continue
         try:
             if context.dry_run:
-                head = _git(worktree, ["rev-parse", "HEAD"])
-                _git(worktree, ["fetch", "--quiet", "origin", context.base_branch])
-                if head != _git(worktree, ["rev-parse", f"origin/{context.base_branch}"]):
+                head, target = upstream_target(worktree, context.base_branch)
+                if head != target:
                     moved.append(worktree.name)
                 continue
             before, after = fast_forward(worktree, context.base_branch)

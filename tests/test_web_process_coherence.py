@@ -641,7 +641,9 @@ BASELINE = {
     "src/secretary/automations/__main__.py": "ROOT = None\n",
     "packaging/systemd/secretary-web.service": "[Service]\nExecStart=/x --host 127.0.0.1 --port 8787\n",
     "packaging/systemd/README.md": "not a unit\n",
-    "pyproject.toml": '[project]\nname = "secretary"\n',
+    # The entrypoint the live units execute: `step_pull` refuses a target without it (secretary-1929).
+    "src/secretary/dispatch/runtime_preflight.py": "PACKAGE = 'secretary'\n",
+    "pyproject.toml": '[project]\nname = "secretary"\n\n[project.scripts]\nsecretary = "secretary.cli:main"\n',
     "docs/OPERATIONS.md": "how to run it\n",
     # The product checkout carries its own virtualenv, and `step_pull` refuses a dirty checkout.
     ".gitignore": ".venv/\n",
@@ -864,7 +866,9 @@ class PulledRevisionTests(unittest.TestCase):
             {
                 "src/secretary/config.py": "SCHEMAS = {'adapter': 1}\n",
                 "src/secretary/schemas/onboarding-contract.schema.json": '{"x": 1}\n',
-                "pyproject.toml": '[project]\nname = "secretary"\nversion = "2"\n',
+                "pyproject.toml": (
+                    '[project]\nname = "secretary"\nversion = "2"\n\n[project.scripts]\nsecretary = "secretary.cli:main"\n'
+                ),
                 "packaging/systemd/secretary-web.service": "[Service]\nExecStart=/y --port 8787\n",
             }
         )
