@@ -335,6 +335,7 @@ def production_observe(runtime: Any) -> dict[str, Any]:
             runtime.catalog.instance_dir,
             write_state=payload.get("checkpoint"),
             push_state=payload.get("checkpoint_push"),
+            data_dir=runtime.data_dir,
         ),
     }
 

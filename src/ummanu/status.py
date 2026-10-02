@@ -82,6 +82,7 @@ def collect_status(
         report.instance_path.parent,
         write_state=_object(production.get("checkpoint")),
         push_state=_object(production.get("checkpoint_push")),
+        data_dir=report.data_dir,
     )
     # Status is a pollable metadata snapshot. Provider-backed readiness is therefore cache-only;
     # doctor supplies an explicitly live inventory when its caller permits live inspection.

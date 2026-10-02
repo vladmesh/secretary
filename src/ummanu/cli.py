@@ -19,6 +19,7 @@ from ummanu.checkpoint import (
     checkpoint_snapshot,
     render_checkpoint_lines,
     rpo_problem,
+    snapshot_foreign_commits,
 )
 from ummanu.config import DataDirError, instance_data_dir, load_config, validate, validate_instance
 from ummanu.data import (
@@ -315,6 +316,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--snapshot-repo",
         required=True,
         help="the bare snapshot repository to commit into; created when absent",
+    )
+    snapshot_command.add_argument(
+        "--seed-from",
+        metavar="LEGACY_INSTANCE_DIR",
+        help=(
+            "cutover only: instead of a window, fetch the legacy checkpoint's branch tip (depth 1) "
+            "into the empty snapshot repository, so the next window commits on top of it"
+        ),
     )
     snapshot_command.add_argument("--state-dir", default=str(PIPELINE_STATE_DIR))
     snapshot_command.set_defaults(handler=run_data_snapshot)
@@ -832,7 +841,7 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     dispatcher = dispatcher_findings(
         report, collected, inspect_live=not args.offline, provenance=provenance
     )
-    checkpoint_rpo = checkpoint_rpo_findings(report)
+    checkpoint_rpo = checkpoint_rpo_findings(report) + snapshot_foreign_commit_findings(report)
     checkpoint_plain = checkpoint_findings(report)
     checkpoint = [f"{finding['severity']}: {finding['message']}" for finding in checkpoint_rpo] + checkpoint_plain
     secret_store = secret_store_findings(report)
@@ -841,6 +850,7 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         report.instance_path.parent,
         write_state=production.get("checkpoint"),
         push_state=production.get("checkpoint_push"),
+        data_dir=report.data_dir,
     )
     recovery = collect_recovery_inventory(
         report,
@@ -1444,6 +1454,7 @@ def print_checkpoint_status(report, *, findings: list[str] | None = None) -> lis
         report.instance_path.parent,
         write_state=production.get("checkpoint"),
         push_state=production.get("checkpoint_push"),
+        data_dir=report.data_dir,
     )
     print()
     print("checkpoint freshness: read-only")
@@ -1473,6 +1484,7 @@ def checkpoint_rpo_findings(report) -> list[dict[str, object]]:
         report.instance_path.parent,
         write_state=production.get("checkpoint"),
         push_state=production.get("checkpoint_push"),
+        data_dir=report.data_dir,
     )
     message = rpo_problem(snapshot)
     if not message:
@@ -1488,6 +1500,28 @@ def checkpoint_rpo_findings(report) -> list[dict[str, object]]:
     ]
 
 
+def snapshot_foreign_commit_findings(report) -> list[dict[str, object]]:
+    """Red `snapshot.foreign_commit` when the snapshot branch holds history the exporter did not make.
+
+    Absent in legacy mode and while there is no snapshot repository (docs/RECOVERY.md, "Snapshot
+    repository").
+    """
+    if report.data_dir is None:
+        return []
+    message = snapshot_foreign_commits(report.instance_path.parent, report.data_dir)
+    if not message:
+        return []
+    from ummanu.webproto.reads import SNAPSHOT_FOREIGN_COMMIT, problem_severity
+
+    return [
+        {
+            "code": SNAPSHOT_FOREIGN_COMMIT,
+            "severity": problem_severity(SNAPSHOT_FOREIGN_COMMIT),
+            "message": message,
+        }
+    ]
+
+
 def checkpoint_findings(report) -> list[str]:
     if report.data_dir is None:
         return []
@@ -1498,6 +1532,7 @@ def checkpoint_findings(report) -> list[str]:
             report.instance_path.parent,
             write_state=production.get("checkpoint"),
             push_state=production.get("checkpoint_push"),
+            data_dir=report.data_dir,
         )
         if snapshot["remote_diverged"]:
             findings.append(f"remote diverged: {snapshot['push_reason'] or 'push stopped, resolve by hand'}")
@@ -1884,7 +1919,8 @@ def run_data_snapshot(args: argparse.Namespace) -> int:
     """One exporter window against `--snapshot-repo`, whatever the live root is.
 
     The live root is only read (and its writer lock taken), so this works on a live root that is
-    still a Git work tree without touching its repository. Nothing is pushed.
+    still a Git work tree without touching its repository. Nothing is pushed. With `--seed-from`
+    it runs no window and seeds the empty repository from the legacy branch tip instead.
     """
     data_dir = _data_dir_from_args(args, validate_tree=False)
     if data_dir is None:
@@ -1895,6 +1931,10 @@ def run_data_snapshot(args: argparse.Namespace) -> int:
         snapshot_repo=Path(args.snapshot_repo),
         state_dir=Path(args.state_dir),
     )
+    if args.seed_from:
+        seeded = exporter.seed(Path(args.seed_from))
+        print(json.dumps({**seeded, "snapshot_repo": str(exporter.snapshot_repo)}, sort_keys=True))
+        return 0 if seeded["status"] in {"seeded", "unchanged"} else 1
     result = exporter.write()
     print(json.dumps({**result.to_json(), "snapshot_repo": str(exporter.snapshot_repo)}, sort_keys=True))
     return 0 if result.status in {"committed", "unchanged"} else 1

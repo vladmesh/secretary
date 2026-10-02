@@ -134,6 +134,21 @@ For the same live state the exporter's tree equals the tracked tree of a legacy 
 paths (same paths, same blob ids, the board's segments included); the manifest is the only extra
 file.
 
+**Takeover marker.** `refs/ummanu/snapshot-base` (`checkpoint.SNAPSHOT_BASE_REF`) names a blob of
+one line: the parent of the exporter's first commit on this branch (a seeded legacy tip), or `root`
+when that commit was a root commit. The exporter creates it once, in the same `update-ref --stdin`
+transaction as that first commit, and only when the tip it builds on is not its own (empty, or
+seeded). Nothing else writes it. It is a local ref and is not pushed.
+
+**Doctor `snapshot.foreign_commit` (red).** For every commit in `<base>..<tip>` of the snapshot
+branch (the whole branch when the base is `root`), doctor checks the exporter's author and committer
+identity, the subject prefix, exactly one parent (the exporter's root commit: none) and a
+`snapshot-manifest.json` in its tree. For the tip it also checks that the manifest lists exactly the
+tree's other files and that every per-file digest matches the blob. Any failure is one red finding
+naming the commits and why. So is a marker that no longer names an ancestor of the tip, and exporter
+commits without any marker (a repository the exporter wrote before the marker existed: recreate it
+or reseed it). In legacy mode, and while there is no snapshot repository, the finding is absent.
+
 ### Board checkpoint layout
 
 The local export in the data directory stays flat. Only the copy committed into `state/board` is
@@ -191,9 +206,9 @@ Six writers touch the instance repository, each with its own pathspec:
 
 Which periodic writer runs is decided by the live root. While it is a Git work tree (it has a
 `.git`), the tick keeps the commit and push above unchanged. When it is not, the tick runs the
-**snapshot exporter** instead and pushes nothing (the snapshot pusher is a later step). Per window,
-under the same shared repository lock (which sits beside the tree as `.ummanu-state-writer.lock`
-when there is no `.git`), the exporter:
+**snapshot exporter** instead, and the same pusher publishes the snapshot repository (below). Per
+window, under the same shared repository lock (which sits beside the tree as
+`.ummanu-state-writer.lock` when there is no `.git`), the exporter:
 
 1. reads the tip of the snapshot branch, the base of the compare-and-swap below;
 2. passes the [validation gate](#validation-gate) and stages `state/board` and `state/runs` from the
@@ -210,7 +225,8 @@ when there is no `.git`), the exporter:
    otherwise a child of the tip only, with the fixed identity `ummanu snapshot exporter
    <snapshot-exporter@ummanu.invalid>` and the subject prefix `snapshot(instance): `
    (`checkpoint.SNAPSHOT_AUTHOR_*`, `SNAPSHOT_SUBJECT_PREFIX`), and `update-ref` moves the branch
-   only if it still points at the tip from step 1.
+   only if it still points at the tip from step 1. The first commit on a tip the exporter did not
+   make also creates the [takeover marker](#snapshot-repository) in the same ref transaction.
 
 The cut is rebuilt from scratch every window, so a file deleted from the live root leaves the next
 snapshot. The repository is created and initialised bare when absent; a non-empty directory there
@@ -221,6 +237,27 @@ runs one exporter window into an explicit repository whatever the live root is, 
 root that is still a work tree, whose repository it never uses (it takes only the writer lock). It
 prints the result as JSON, exits 0 on `committed` or `unchanged`, and never pushes. It is what the
 stand comparison and the cutover use.
+
+**Push.** In exporter mode the tick's `CheckpointPusher` publishes `refs/heads/main` of the snapshot
+repository instead of the live root's `HEAD`, with everything else unchanged: the 30-minute window,
+the fresh preparation a due window forces, fast-forward only, the `diverged` stop on a remote tip
+the snapshot history does not contain, the managed GitHub credential from the live root's secret
+store, the shared lock, and the push state and doctor rows (which then read the snapshot repository
+and name it as `snapshot repository:`). Before each attempt the pusher sets the snapshot
+repository's `origin` URL from `offsite.instance_remote` when it differs, so a changed value
+re-points the next push. No `offsite.instance_remote`, no snapshot repository, or no commit yet is a
+`skipped` push with that reason.
+
+**Cutover seed.** `ummanu data snapshot --instance LIVE_ROOT --snapshot-repo PATH --seed-from
+LEGACY_INSTANCE_DIR` runs no window. It fetches the legacy work tree's checked-out branch tip at
+depth 1 into an empty snapshot repository and points `main` at it. Depth 1 is enough because the
+remote already holds the legacy history, so a push of the exporter's child needs only the tip. The
+legacy history (4.3 GiB) is never copied. An empty remote would refuse a push from this shallow
+repository, so a fresh remote is not seeded this way. Rerunning it on a repository already at that
+tip is a no-op (`unchanged`). A repository with exporter commits, or one seeded at another tip, is
+refused (`blocked`, exit 1). The next window commits with the legacy tip as its parent and writes
+the marker. The runbook order is: final legacy checkpoint and push, seed, switch the live root. The
+first exporter push is then a fast-forward of the remote branch.
 
 Pathspecs do not overlap, and nobody uses `git add -A`, so uncommitted manual config edits are left
 alone. Every writer holds the shared repository lock while staging and committing. All writers except
@@ -385,7 +422,8 @@ about current credential health.
 
 ## Observability
 
-`status` and `doctor` show checkpoint freshness: time and hash of the last commit, last successful
+`status` and `doctor` show checkpoint freshness (of the snapshot repository in exporter mode, named on
+its own row): time and hash of the last commit, last successful
 preparation, a not-yet-due skip, retry state, last failed preparation and reason, last successful
 push, last operation attempt and its age, lag in minutes and commits, and `remote diverged`. A skip is
 never reported as a fresh preparation. The attempt timestamp does not replace the last successful

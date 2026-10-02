@@ -816,6 +816,8 @@ PROBLEM_SEVERITY: dict[str, str] = {
     "checkpoint.last_failed": "red",
     # No checkpoint has reached the remote for longer than the 30-minute RPO (`rpo_problem`).
     "checkpoint.rpo_exceeded": "red",
+    # The snapshot branch holds a commit the exporter did not make (`snapshot_foreign_commits`).
+    "snapshot.foreign_commit": "red",
     "secret_store.key_unusable": "red",
     # Minted by the reader of this summary rather than here: health that could not be read at all
     # is not an absence of problems, so it carries a code of its own and the gravest severity.
@@ -830,6 +832,9 @@ PROBLEM_SEVERITY: dict[str, str] = {
 
 #: The code `ummanu doctor` reports a checkpoint past its RPO under, classified above.
 CHECKPOINT_RPO_EXCEEDED = "checkpoint.rpo_exceeded"
+
+#: The code `ummanu doctor` reports foreign history on the snapshot branch under, classified above.
+SNAPSHOT_FOREIGN_COMMIT = "snapshot.foreign_commit"
 
 #: What an unclassified code is worth. Deliberately not green: a problem somebody adds tomorrow and
 #: forgets to classify must show as something to look at, never as a clean installation.

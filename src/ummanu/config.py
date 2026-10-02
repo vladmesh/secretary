@@ -291,6 +291,23 @@ def instance_snapshot_repo(path: Path, data_dir: Path) -> Path:
     return candidate.resolve(strict=False)
 
 
+def instance_offsite_remote(path: Path) -> str:
+    """``offsite.instance_remote`` of ``instance.yaml``, or "" when the file does not set one.
+
+    Read without the schema, whose ``required`` would turn an absent remote into an invalid file:
+    the snapshot pusher reports an absent remote as a skipped push, as the legacy pusher does a
+    repository with no remote.
+    """
+    instance_file = _resolve_instance(path)
+    try:
+        instance = load_config(instance_file)
+    except ConfigError as exc:
+        raise DataDirError(str(exc)) from None
+    offsite = instance.get("offsite") if isinstance(instance, dict) else None
+    remote = offsite.get("instance_remote") if isinstance(offsite, dict) else None
+    return remote.strip() if isinstance(remote, str) else ""
+
+
 def validate_instance(path: Path) -> InstanceReport:
     """Validate instance.yaml plus its bindings, adapters and data manifest.
 

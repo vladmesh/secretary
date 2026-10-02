@@ -135,6 +135,9 @@ class TheColourRuleTests(unittest.TestCase):
             "checkpoint.blocked",
             "checkpoint.last_failed",
             "checkpoint.rpo_exceeded",
+            # Reported by doctor only (ummanu-21): history on the snapshot branch nobody but the
+            # exporter should have made.
+            "snapshot.foreign_commit",
             "secret_store.key_unusable",
             "health.unreadable",
             "doctor.collection_stuck",
