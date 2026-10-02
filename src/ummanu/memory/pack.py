@@ -14,19 +14,17 @@ import stat
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, NoReturn
 
 import yaml
 
 from ummanu import state_repo
-from ummanu._fsutil import remove_path, write_json, write_text_atomic
+from ummanu.memory.canon import canon_revision, canon_transaction, recover_canon_undo
 from ummanu.memory_errors import MemoryValidationError
 from ummanu.memory_journal import (
-    _git_status,
     _memory_journal_lock,
     _publish_memory_export,
     _read_memory_facts,
-    _recover_journal_worktree,
     init_memory_journal,
     reject_legacy_memory_journal,
 )
@@ -43,7 +41,10 @@ class MemoryPackError(MemoryValidationError):
 
 
 class MemoryPackDegradedError(MemoryPackError):
-    """The canon committed but its derived export could not be published."""
+    """The canon was written but its derived export could not be published.
+
+    `commit` holds the content revision of the written canon (`memory.canon`), not a Git commit.
+    """
 
     def __init__(self, message: str, *, commit: str) -> None:
         super().__init__(message)
@@ -71,6 +72,8 @@ class MemoryPack:
 
 @dataclass(frozen=True)
 class MaterializedPack:
+    """One reconciliation; `commit` is the canon's content revision after it, None when unchanged."""
+
     changed: bool
     commit: str | None
     added: int
@@ -157,13 +160,17 @@ def materialize_product_pack(
     Validation is deliberately separate from this function.  Callers can parse
     the product input before an upgrade performs any instance mutation.
     """
-    instance_dir = state_repo.require_repo(instance_dir)
+    instance_dir = Path(instance_dir).expanduser().resolve()
     data_dir = Path(data_dir).expanduser().resolve()
     memory_dir = data_dir / "memory"
     reject_legacy_memory_journal(memory_dir)
     facts_dir, _created = init_memory_journal(instance_dir)
+    memory_root = facts_dir.parent
     with _memory_journal_lock(memory_dir), state_repo.state_repo_lock(instance_dir):
-        _recover_journal_worktree(instance_dir)
+        try:
+            recover_canon_undo(memory_dir)
+        except (OSError, RuntimeError) as exc:
+            raise MemoryPackError(f"memory pack could not restore an unfinished canon write: {exc}") from None
         ledger_path = instance_dir / LEDGER_RELATIVE
         prior = _read_ledger(ledger_path)
         desired = {fact.canon_id: fact for fact in pack.facts}
@@ -181,35 +188,22 @@ def materialize_product_pack(
             added = sum(not _fact_path(facts_dir, fact_id).exists() for fact_id in write_ids)
             return MaterializedPack(True, None, added, len(write_ids) - added, len(delete_ids), len(desired) - len(write_ids))
         try:
-            for fact_id in write_ids:
-                write_text_atomic(_fact_path(facts_dir, fact_id), desired[fact_id].text)
-            for fact_id in delete_ids:
-                target = _fact_path(facts_dir, fact_id)
-                if target.exists() or target.is_symlink():
-                    remove_path(target)
-            # A pending ledger is durable recovery state, not an installed-digest
-            # claim.  It lets the next --no-pull run recognise the facts as ours
-            # and retry publication if the handoff below fails.
-            pending_changed = ledger_on_disk != pending_ledger
-            if pending_changed:
-                write_json(ledger_path, pending_ledger)
-            _handoff_runtime_path(instance_dir / "state" / "memory", runtime_handoff)
-            if write_ids or delete_ids or pending_changed:
-                pending_commit = state_repo.commit(
-                    instance_dir,
-                    state_repo.MEMORY_PATHSPEC,
-                    f"memory pack: reconcile {PACK_NAMESPACE}",
-                )
-                if pending_commit is None:
-                    raise MemoryPackError("memory pack reconciliation produced no journal changes")
-                if _git_status(instance_dir):
-                    raise MemoryPackError("state/memory dirty after pack reconciliation")
-            else:
-                pending_commit = state_repo.head(instance_dir)
-                if pending_commit is None:
-                    raise MemoryPackError("memory pack pending reconciliation has no journal commit")
+            with canon_transaction(memory_dir, memory_root) as transaction:
+                for fact_id in write_ids:
+                    transaction.write(_fact_path(facts_dir, fact_id), desired[fact_id].text)
+                for fact_id in delete_ids:
+                    target = _fact_path(facts_dir, fact_id)
+                    if target.exists() or target.is_symlink():
+                        transaction.remove(target)
+                # A pending ledger is durable recovery state, not an installed-digest
+                # claim.  It lets the next --no-pull run recognise the facts as ours
+                # and retry publication if the handoff below fails.
+                if ledger_on_disk != pending_ledger:
+                    transaction.write(ledger_path, _ledger_text(pending_ledger))
+                _handoff_runtime_path(memory_root, runtime_handoff)
+                pending_revision = canon_revision(facts_dir)
         except Exception as exc:
-            _raise_reconciled_failure(instance_dir, exc)
+            _raise_reconciled_failure(exc)
         try:
             facts = _read_memory_facts(facts_dir)
             _publish_memory_export(
@@ -217,8 +211,6 @@ def materialize_product_pack(
                 facts=facts,
                 source_memory=facts_dir,
                 source_root=facts_dir,
-                source_head=pending_commit,
-                commit=pending_commit,
                 changed=True,
                 record_import=False,
             )
@@ -226,27 +218,20 @@ def materialize_product_pack(
             _check_runtime_export(memory_dir, runtime_export_check)
         except Exception as exc:
             raise MemoryPackDegradedError(
-                f"memory pack export publish failed after pending journal commit {pending_commit}: {exc}",
-                commit=pending_commit,
+                f"memory pack export publish failed after pending canon write {pending_revision}: {exc}",
+                commit=pending_revision,
             ) from None
         try:
-            write_json(ledger_path, ready_ledger)
-            _handoff_runtime_path(instance_dir / "state" / "memory", runtime_handoff)
-            commit = state_repo.commit(
-                instance_dir,
-                state_repo.MEMORY_PATHSPEC,
-                f"memory pack: activate {PACK_NAMESPACE}",
-            )
-            if commit is None:
-                raise MemoryPackError("memory pack activation produced no journal changes")
-            if _git_status(instance_dir):
-                raise MemoryPackError("state/memory dirty after pack activation")
+            with canon_transaction(memory_dir, memory_root) as transaction:
+                transaction.write(ledger_path, _ledger_text(ready_ledger))
+                _handoff_runtime_path(memory_root, runtime_handoff)
+            revision = canon_revision(facts_dir)
         except Exception as exc:
-            _raise_reconciled_failure(instance_dir, exc)
+            _raise_reconciled_failure(exc)
         # Targets now exist, so derive this from the old ownership rather than the filesystem.
         added = sum(fact_id not in prior["facts"] for fact_id in write_ids)
         updated = len(write_ids) - added
-        return MaterializedPack(True, commit, added, updated, len(delete_ids), len(desired) - len(write_ids))
+        return MaterializedPack(True, revision, added, updated, len(delete_ids), len(desired) - len(write_ids))
 
 
 def _validate_manifest_header(manifest: dict[str, Any]) -> None:
@@ -342,16 +327,10 @@ def _check_runtime_export(memory_dir: Path, runtime_export_check: Callable[[Path
         raise MemoryPackError(f"memory pack export is not usable by the runtime user: {exc}") from None
 
 
-def _raise_reconciled_failure(instance_dir: Path, exc: Exception) -> None:
-    """Make state-writer failures visible while leaving its owner able to retry."""
-    try:
-        _recover_journal_worktree(instance_dir)
-    except Exception as recovery:
-        raise MemoryPackError(f"memory pack state reconciliation failed: {exc}; recovery failed: {recovery}") from None
+def _raise_reconciled_failure(exc: Exception) -> NoReturn:
+    """Make canon-write failures visible; the transaction already restored the canon for a retry."""
     if isinstance(exc, MemoryPackError):
         raise exc
-    if isinstance(exc, state_repo.StateRepoError):
-        raise MemoryPackError(f"memory pack state reconciliation failed: {exc}") from None
     raise MemoryPackError(f"memory pack reconciliation failed: {exc}") from None
 
 
@@ -403,6 +382,11 @@ def _ledger_payload(pack: MemoryPack, *, state: str) -> dict[str, Any]:
         "digest": pack.digest,
         "facts": {fact.canon_id: fact.digest for fact in pack.facts},
     }
+
+
+def _ledger_text(payload: dict[str, Any]) -> str:
+    """The ledger exactly as `_fsutil.write_json` lays it out."""
+    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
 
 
 def _fact_path(facts_dir: Path, fact_id: str) -> Path:

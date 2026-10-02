@@ -35,6 +35,7 @@ from ummanu.checkpoint import (
 )
 from ummanu.cli import main as cli_main
 from ummanu.data import DataExport
+from ummanu.memory_write import commit_memory_proposal, propose_memory_fact
 from ummanu.secret_store import initialize_store, set_secret
 from ummanu.secret_words import RECOVERY_WORDS
 
@@ -43,6 +44,7 @@ REVISION = "0123456789abcdef0123456789abcdef01234567"
 SCHEMA_HEAD = "0026_test_head"
 # A token the redaction patterns recognise by shape, so a cut holding it must be refused.
 TOKEN = "sk-ant-api03-" + "A" * 40
+MEMORY_ACTOR = "curator:claude/session"
 
 
 def git(repo: Path, *args: str, check: bool = True) -> str:
@@ -728,6 +730,87 @@ def commit_on(repo: Path, tree: str, parent: str, message: str, *, name: str, em
     ).stdout.strip()
     git(repo, "update-ref", SNAPSHOT_REF, commit)
     return commit
+
+
+class MemoryWriterTickTests(SnapshotCase):
+    """The Git-free memory writer and both tick modes (docs/RECOVERY.md, "Writers")."""
+
+    def write_fact(self, slug: str, text: str) -> Path:
+        fact = self.root / f"{slug}.md"
+        fact.write_text(text, encoding="utf-8")
+        proposal = propose_memory_fact(
+            self.data_dir, actor=MEMORY_ACTOR, scope="global", slug=slug, fact_file=fact, source=MEMORY_ACTOR
+        )
+        commit_memory_proposal(self.data_dir, self.live, actor=MEMORY_ACTOR, propose_id=proposal.propose_id)
+        return self.live / "state" / "memory" / "facts" / "global" / f"{slug}.md"
+
+    def make_work_tree(self) -> None:
+        git(self.live, "init", "--quiet", "--initial-branch", "main")
+        git(self.live, "config", "user.name", "operator")
+        git(self.live, "config", "user.email", "operator@example.invalid")
+        (self.live / ".gitignore").write_text("state/checks/\nadapter-drafts/\ngate-runs/\n", "utf-8")
+        shutil.rmtree(self.live / "state" / "board")
+        git(self.live, "add", "-A")
+        git(self.live, "commit", "--quiet", "-m", "config")
+
+    def test_a_legacy_tick_commits_the_writers_fact_with_board_and_runs_and_nothing_else(self):
+        self.make_work_tree()
+        head = git(self.live, "rev-parse", "HEAD").strip()
+        fact = self.write_fact("written", "a fact the writer leaves uncommitted\n")
+        self.assertEqual(git(self.live, "rev-parse", "HEAD").strip(), head)
+        self.assertIn("?? state/memory/facts/global/", git(self.live, "status", "--porcelain"))
+        # An operator's uncommitted config edit stays out of the tick's commit.
+        (self.live / "persona" / "rules.md").write_text("Be briefer.\n", encoding="utf-8")
+
+        result = tick_checkpoint_writer(self.data_dir, self.live).write()
+
+        self.assertEqual(result.status, "committed", result.reason)
+        touched = git(self.live, "show", "--name-only", "--format=", "HEAD").split()
+        self.assertIn("state/memory/facts/global/written.md", touched)
+        self.assertIn("state/runs/runs.ndjson", touched)
+        self.assertIn("state/board/cards/0000/00000000.json", touched)
+        self.assertEqual(
+            [path for path in touched if not path.startswith(("state/board/", "state/runs/", "state/memory/"))], []
+        )
+        self.assertEqual(git(self.live, "show", "HEAD:state/memory/facts/global/written.md"), fact.read_text("utf-8"))
+        self.assertEqual(git(self.live, "status", "--porcelain"), " M persona/rules.md\n")
+
+    def test_a_legacy_tick_with_no_memory_commits_as_before(self):
+        shutil.rmtree(self.live / "state" / "memory")
+        self.make_work_tree()
+
+        result = tick_checkpoint_writer(self.data_dir, self.live).write()
+
+        self.assertEqual(result.status, "committed", result.reason)
+        self.assertEqual(git(self.live, "ls-files", "--", "state/memory"), "")
+
+    def test_a_secret_pasted_into_a_fact_file_blocks_the_legacy_tick_by_path(self):
+        self.make_work_tree()
+        head = git(self.live, "rev-parse", "HEAD").strip()
+        self.write_fact("written", "a clean fact\n")
+        pasted = self.live / "state" / "memory" / "facts" / "global" / "pasted.md"
+        pasted.write_text(f"token {TOKEN}\n", encoding="utf-8")
+
+        result = tick_checkpoint_writer(self.data_dir, self.live).write()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("secret detected in state/memory/facts/global/pasted.md", result.reason)
+        self.assertNotIn("written.md", result.reason)
+        self.assertEqual(git(self.live, "rev-parse", "HEAD").strip(), head)
+
+    def test_an_exporter_cut_carries_the_writers_fact_with_a_matching_digest(self):
+        self.assertFalse(live_root_is_work_tree(self.live))
+        fact = self.write_fact("written", "a fact in a live root without Git\n")
+        self.assertFalse((self.live / ".git").exists())
+
+        result = self.exporter().write()
+
+        self.assertEqual(result.status, "committed", result.reason)
+        relative = "state/memory/facts/global/written.md"
+        self.assertEqual(self.committed(relative), fact.read_bytes())
+        manifest = json.loads(self.committed(SNAPSHOT_MANIFEST))
+        self.assertEqual(manifest["files"][relative], hashlib.sha256(fact.read_bytes()).hexdigest())
+        self.assertFalse([path for path in self.tree() if ".undo" in path or path.startswith("state/memory/.")])
 
 
 class SnapshotPublishCase(SnapshotCase):

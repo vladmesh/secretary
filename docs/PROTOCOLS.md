@@ -3399,7 +3399,8 @@ python3 -P -m ummanu memory reindex --instance INSTANCE
 
 Write authority is split. `propose` stages a fact in the curator inbox
 (`<data_dir>/memory/.staging/<propose-id>`) and touches no canon; `commit` and `supersede` write
-`state/memory` in the instance repository. **Proposer** roles: `curator`, `ummanu`, `operator`,
+`state/memory` of the live root as files, without Git, all or nothing
+([Recovery](RECOVERY.md#writers)); their `commit` field is the canon's content revision. **Proposer** roles: `curator`, `ummanu`, `operator`,
 `butler`. **Canonical writer** roles: `curator`, `ummanu`, `operator`. A butler's `commit` or
 `supersede` is refused with a permission error saying butler proposals await curator review. Every actor
 may use only a `source` of its own role, so a butler proposal stays butler-sourced through commit. An

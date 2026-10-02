@@ -25,6 +25,7 @@ from ummanu.data import (
     manifest_for,
     normalize_board_card,
 )
+from ummanu.memory.canon import canon_revision, fact_content_hash, parse_fact_text
 from ummanu.memory_journal import verify_memory_journal
 from ummanu.memory_write import (
     MEMORY_PROPOSAL_ACTIVE_MARKER,
@@ -354,14 +355,16 @@ class ExportTests(unittest.TestCase):
             second = export_memory(data_dir, instance_dir)
             facts_dir_exists = (data_dir / "memory" / "facts").exists()
             manifest = json.loads((data_dir / "memory" / "manifest.json").read_text(encoding="utf-8"))
-            source_head = git(instance_dir, "rev-parse", "HEAD")
+            revision = canon_revision(source)
 
         self.assertEqual(first.count, 2)
         self.assertEqual(second.count, 2)
         self.assertIn("ummanu/one.md", first_payload)
         self.assertIn('"metadata": {"created": "2026-07-11"', first_payload)
         self.assertFalse(facts_dir_exists)
-        self.assertEqual(manifest["source"]["head"], source_head)
+        # The manifest names the content revision of the exported facts, not a Git commit.
+        self.assertEqual(manifest["source"]["head"], revision)
+        self.assertEqual(manifest["journal"]["commit"], revision)
         self.assertTrue(manifest["source"]["readonly_fallback"])
 
     def test_export_memory_ndjson_comes_from_readonly_snapshot(self):
@@ -437,7 +440,7 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(current_export, old_export)
         self.assertFalse(facts_dir_exists)
 
-    def test_memory_protocol_commit_writes_one_journal_commit(self):
+    def test_memory_protocol_commit_writes_the_fact_without_a_git_commit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             data_dir = root / "ummanu-data"
@@ -461,17 +464,18 @@ class ExportTests(unittest.TestCase):
                 propose_id=proposal.propose_id,
             )
             log_count = memory_commit_count(instance_dir)
-            message = memory_message(instance_dir)
             status = memory_status(instance_dir)
+            fact_text = (memory_facts_dir(instance_dir) / "ummanu" / "new-fact.md").read_text(encoding="utf-8")
+            revision = canon_revision(memory_facts_dir(instance_dir))
             exported = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
 
         self.assertEqual(result.fact, "ummanu/new-fact")
-        self.assertEqual(log_count, "1")
-        self.assertIn("Op: commit", message)
-        self.assertIn("Principal: curator:claude/session", message)
-        self.assertIn("Source: curator:claude/session", message)
-        self.assertIn("Changed-Facts: ummanu/new-fact", message)
-        self.assertEqual(status, "")
+        # The writer is Git-free: the fact is a file in the canon, committed later by the tick.
+        self.assertEqual(log_count, "0")
+        self.assertTrue(status.startswith("?? state/"), status)
+        self.assertIn("source: curator:claude/session", fact_text)
+        self.assertIn("new durable fact", fact_text)
+        self.assertEqual(result.commit, revision)
         self.assertIn("new durable fact", exported)
 
     def test_memory_verify_checks_export_and_index_parity(self):
@@ -495,11 +499,7 @@ class ExportTests(unittest.TestCase):
                 actor="curator:claude/session",
                 propose_id=proposal.propose_id,
             )
-            index = data_dir / "memory" / "index.sqlite"
-            with sqlite3.connect(index) as conn:
-                conn.execute("create table memories(id integer primary key)")
-                conn.execute("insert into memories default values")
-                conn.commit()
+            write_index_from_canon(data_dir / "memory" / "index.sqlite", memory_facts_dir(instance_dir))
 
             result = verify_memory_journal(data_dir, instance_dir)
 
@@ -539,7 +539,7 @@ class ExportTests(unittest.TestCase):
                 )
 
             failed_result = raised.exception.result
-            after_failure_head = memory_head(instance_dir)
+            after_failure_revision = canon_revision(memory_facts_dir(instance_dir))
             log_count_after_failure = memory_commit_count(instance_dir)
             completed_marker = data_dir / "memory" / ".staging" / proposal.propose_id / "committed.json"
             completed_exists_after_failure = completed_marker.is_file()
@@ -551,19 +551,19 @@ class ExportTests(unittest.TestCase):
                 actor="curator:claude/session",
                 propose_id=proposal.propose_id,
             )
-            retry_head = memory_head(instance_dir)
+            retry_revision = canon_revision(memory_facts_dir(instance_dir))
             retry_log_count = memory_commit_count(instance_dir)
             exported = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
             staging_exists_after_retry = completed_marker.parent.exists()
 
-        self.assertEqual(failed_result.commit, after_failure_head)
+        self.assertEqual(failed_result.commit, after_failure_revision)
         self.assertEqual(failed_result.fact, "ummanu/retryable")
-        self.assertEqual(log_count_after_failure, "1")
+        self.assertEqual(log_count_after_failure, "0")
         self.assertTrue(completed_exists_after_failure)
         self.assertFalse(export_exists_after_failure)
-        self.assertEqual(retry_result.commit, after_failure_head)
-        self.assertEqual(retry_head, after_failure_head)
-        self.assertEqual(retry_log_count, "1")
+        self.assertEqual(retry_result.commit, after_failure_revision)
+        self.assertEqual(retry_revision, after_failure_revision)
+        self.assertEqual(retry_log_count, "0")
         self.assertIn("retryable fact", exported)
         self.assertFalse(staging_exists_after_retry)
 
@@ -713,11 +713,11 @@ class ExportTests(unittest.TestCase):
                 actor="curator:claude/session",
                 propose_id=proposal.propose_id,
             )
-            tracked = tracked_facts(instance_dir)
+            facts = canon_facts(instance_dir)
 
         self.assertEqual(proposal.scope_dir, "po-review")
         self.assertEqual(result.fact, "po-review/ambiguous-conclusion")
-        self.assertEqual(tracked, ["po-review/ambiguous-conclusion.md"])
+        self.assertEqual(facts, ["po-review/ambiguous-conclusion.md"])
 
     def test_memory_protocol_supersede_unknown_fact_fails_cleanly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -742,7 +742,7 @@ class ExportTests(unittest.TestCase):
 
         self.assertEqual(status, "")
 
-    def test_memory_protocol_supersede_removes_old_fact_in_one_commit(self):
+    def test_memory_protocol_supersede_removes_old_fact_in_one_write(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             data_dir = root / "ummanu-data"
@@ -776,15 +776,14 @@ class ExportTests(unittest.TestCase):
                 supersedes=["old"],
                 source="curator:claude/session",
             )
-            tracked = tracked_facts(instance_dir)
+            facts = canon_facts(instance_dir)
             log_count = memory_commit_count(instance_dir)
-            message = memory_message(instance_dir)
+            revision = canon_revision(memory_facts_dir(instance_dir))
 
         self.assertEqual(result.changed_facts, ("ummanu/new", "ummanu/old"))
-        self.assertEqual(tracked, ["ummanu/new.md"])
-        self.assertEqual(log_count, "2")
-        self.assertIn("Op: supersede", message)
-        self.assertIn("Supersedes: ummanu/old", message)
+        self.assertEqual(facts, ["ummanu/new.md"])
+        self.assertEqual(log_count, "0")
+        self.assertEqual(result.commit, revision)
 
     def test_memory_protocol_live_lock_rejects_concurrent_write(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -815,7 +814,12 @@ class ExportTests(unittest.TestCase):
                     source="curator:claude/session",
                 )
 
-    def test_memory_protocol_recovers_dirty_worktree_before_commit(self):
+    def test_memory_protocol_never_touches_files_it_did_not_write(self):
+        """The canon is the files: an edit made outside the writer is the canon, not residue.
+
+        Rollback restores only the set a write recorded in its undo area, so the next write leaves
+        a hand edit and a new file where they are.
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             data_dir = root / "ummanu-data"
@@ -857,12 +861,10 @@ class ExportTests(unittest.TestCase):
                 propose_id=second.propose_id,
             )
             first_text = (facts_dir / "ummanu" / "first.md").read_text(encoding="utf-8")
-            tracked = tracked_facts(instance_dir)
-            status = memory_status(instance_dir)
+            facts = canon_facts(instance_dir)
 
-        self.assertIn("first fact", first_text)
-        self.assertEqual(tracked, ["ummanu/first.md", "ummanu/second.md"])
-        self.assertEqual(status, "")
+        self.assertEqual(first_text, "dirty edit\n")
+        self.assertEqual(facts, ["ummanu/first.md", "ummanu/residue.md", "ummanu/second.md"])
 
     def test_export_memory_after_protocol_commit_is_readonly(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -887,18 +889,27 @@ class ExportTests(unittest.TestCase):
             )
             before_head = memory_head(instance_dir)
             before_count = memory_commit_count(instance_dir)
+            before_status = memory_status(instance_dir)
+            before_canon = {
+                path: path.read_bytes() for path in memory_facts_dir(instance_dir).rglob("*") if path.is_file()
+            }
 
             result = export_memory(data_dir, instance_dir)
             after_head = memory_head(instance_dir)
             after_count = memory_commit_count(instance_dir)
             exported = (data_dir / "memory" / "export.ndjson").read_text(encoding="utf-8")
             status = memory_status(instance_dir)
+            after_canon = {
+                path: path.read_bytes() for path in memory_facts_dir(instance_dir).rglob("*") if path.is_file()
+            }
 
         self.assertEqual(result.count, 1)
         self.assertEqual(after_head, before_head)
         self.assertEqual(after_count, before_count)
         self.assertIn("protocol fact", exported)
-        self.assertEqual(status, "")
+        # The Git-free writer leaves its fact for the tick to commit; the export changes nothing.
+        self.assertEqual(status, before_status)
+        self.assertEqual(after_canon, before_canon)
 
     def test_export_memory_respects_live_journal_lock(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1199,11 +1210,31 @@ def memory_facts_dir(instance_dir: Path) -> Path:
     return instance_dir / "state" / "memory" / "facts"
 
 
-def tracked_facts(instance_dir: Path) -> list[str]:
-    prefix = "state/memory/facts/"
-    return [
-        line.removeprefix(prefix) for line in git(instance_dir, "ls-files", "--", "state/memory").splitlines()
-    ]
+def canon_facts(instance_dir: Path) -> list[str]:
+    facts = memory_facts_dir(instance_dir)
+    return sorted(path.relative_to(facts).as_posix() for path in facts.rglob("*.md"))
+
+
+def write_index_from_canon(index: Path, facts_dir: Path) -> None:
+    """An index in the memory service's schema, built from the canon the way the service builds one."""
+    with sqlite3.connect(index) as conn:
+        conn.execute(
+            "create table memories(id integer primary key, fact_id text unique, content_hash text, "
+            "text text, scope text, tags text, source text, created_at text)"
+        )
+        for path in sorted(facts_dir.rglob("*.md")):
+            fact_id = path.relative_to(facts_dir).as_posix().removesuffix(".md")
+            fact = parse_fact_text(path.read_text(encoding="utf-8"), f"{fact_id}.md", fact_id=fact_id)
+            conn.execute(
+                "insert into memories(fact_id, content_hash, text, scope, tags, source, created_at) "
+                "values (?,?,?,?,?,?,?)",
+                (
+                    fact_id,
+                    fact_content_hash(fact),
+                    *(fact[key] for key in ("text", "scope", "tags", "source", "created_at")),
+                ),
+            )
+        conn.commit()
 
 
 def memory_commit_count(instance_dir: Path) -> str:
@@ -1212,10 +1243,6 @@ def memory_commit_count(instance_dir: Path) -> str:
 
 def memory_head(instance_dir: Path) -> str:
     return git(instance_dir, "log", "-1", "--format=%H", "--", "state/memory")
-
-
-def memory_message(instance_dir: Path) -> str:
-    return git(instance_dir, "log", "-1", "--format=%B", "--", "state/memory")
 
 
 def memory_status(instance_dir: Path) -> str:

@@ -205,7 +205,7 @@ class MemorySecretGateTests(unittest.TestCase):
 
 
 class TwoWriterTests(unittest.TestCase):
-    """Tick writer and memory writer share the repo but never the pathspec."""
+    """Tick writer and memory writer share the live root; in legacy mode the tick commits memory."""
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -263,28 +263,28 @@ class TwoWriterTests(unittest.TestCase):
             propose_id=proposal.propose_id,
         )
 
-    def test_tick_checkpoint_leaves_memory_facts_alone(self):
+    def test_the_memory_writer_makes_no_commit_and_the_tick_commits_its_fact(self):
+        """The writer writes files only; the legacy tick carries them in its own commit."""
+        head = git(self.instance_dir, "rev-parse", "HEAD").strip()
+
         self.write_fact("one")
-        memory_head = git(self.instance_dir, "log", "-1", "--format=%H", "--", "state/memory").strip()
+
+        self.assertEqual(git(self.instance_dir, "rev-parse", "HEAD").strip(), head)
+        self.assertIn("state/memory/", git(self.instance_dir, "status", "--porcelain", "--", "state/memory"))
 
         result = self.writer().write()
 
-        self.assertEqual(result.status, "committed")
-        # The tick commit touched board and runs only; memory's tip did not move.
+        self.assertEqual(result.status, "committed", result.reason)
         touched = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
-        self.assertTrue(touched)
-        self.assertFalse([path for path in touched if path.startswith("state/memory")], touched)
-        self.assertEqual(
-            git(self.instance_dir, "log", "-1", "--format=%H", "--", "state/memory").strip(),
-            memory_head,
-        )
-        facts = state_repo.memory_facts_dir(self.instance_dir)
-        self.assertEqual((facts / "global" / "one.md").read_text(encoding="utf-8").count("fact"), 1)
+        self.assertIn("state/memory/facts/global/one.md", touched)
+        self.assertTrue([path for path in touched if path.startswith("state/board/")], touched)
+        self.assertEqual(git(self.instance_dir, "status", "--porcelain", "--", "state"), "")
 
-    def test_a_memory_write_lands_in_the_checkpoint_history(self):
+    def test_a_memory_write_lands_in_the_next_checkpoint(self):
         self.writer().write()
 
         self.write_fact("one")
+        self.writer().write()
 
         # HEAD carries the fact, so the 30-minute push ships it with everything else.
         listed = git(self.instance_dir, "ls-tree", "-r", "--name-only", "HEAD").split()
@@ -317,6 +317,8 @@ class TwoWriterTests(unittest.TestCase):
             thread.join(timeout=60)
 
         self.assertEqual(errors, [])
+        # Whichever ran first, the next tick finds the fact whole and commits it.
+        self.writer().write()
         listed = git(self.instance_dir, "ls-tree", "-r", "--name-only", "HEAD").split()
         self.assertIn("state/memory/facts/global/one.md", listed)
         self.assertIn("state/board/cards/0000/00000000.json", listed)

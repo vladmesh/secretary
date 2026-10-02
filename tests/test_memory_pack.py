@@ -14,6 +14,7 @@ import yaml
 
 from tests.fakes.upgrade import FakeUnitInstaller
 from ummanu import upgrade
+from ummanu.memory import pack as memory_pack
 from ummanu.memory.pack import (
     MemoryPackDegradedError,
     MemoryPackError,
@@ -169,14 +170,16 @@ class ProductMemoryPackTests(unittest.TestCase):
         self.product = write_pack(self.root / "product", {"one": "one", "two": "two"})
         self.instance = instance_repo(self.root / "instance-replacement")
 
-    def test_state_repo_failure_is_a_typed_pack_error_and_recovers_the_worktree(self):
+    def test_canon_write_failure_is_a_typed_pack_error_and_restores_the_canon(self):
         with mock.patch(
-            "ummanu.memory.pack.state_repo.commit",
-            side_effect=upgrade.state_repo.StateRepoError("state lock unavailable"),
+            "ummanu.memory.pack.canon_revision",
+            side_effect=RuntimeError("canon disk unavailable"),
         ):
-            with self.assertRaisesRegex(MemoryPackError, "state lock unavailable"):
+            with self.assertRaisesRegex(MemoryPackError, "canon disk unavailable"):
                 self.materialize()
         self.assertFalse(git(self.instance, "status", "--porcelain", "--", "state/memory"))
+        self.assertEqual([path for path in (self.instance / "state/memory").rglob("*") if path.is_file()], [])
+        self.assertFalse((self.data / "memory" / ".undo").exists())
 
     def test_failed_export_leaves_pending_ledger_and_no_pull_retry_converges(self):
         with mock.patch(
@@ -192,7 +195,7 @@ class ProductMemoryPackTests(unittest.TestCase):
         self.assertEqual(json.loads(ledger_path.read_text(encoding="utf-8"))["state"], "ready")
         self.assertTrue((self.data / "memory/export.ndjson").is_file())
 
-    def test_root_handoff_precedes_state_commit_and_makes_export_runtime_owned(self):
+    def test_root_handoff_precedes_export_and_makes_export_runtime_owned(self):
         report = SimpleNamespace(data_dir=self.data, host={"unit_prefix": "ummanu-"})
         context = upgrade.UpgradeContext(
             instance_path=self.instance,
@@ -205,21 +208,22 @@ class ProductMemoryPackTests(unittest.TestCase):
         )
         account = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
         owned: set[Path] = set()
-        actual_commit = upgrade.state_repo.commit
+        actual_publish = memory_pack._publish_memory_export
 
         def chown(path, *_args, **_kwargs):
             owned.add(Path(path))
 
-        def commit(*args, **kwargs):
+        def publish(*args, **kwargs):
+            # The canon write is finished and handed to the runtime user before its export.
             self.assertIn(self.instance / "state/memory/facts/product-ummanu/one.md", owned)
             self.assertIn(self.instance / "state/memory/packs/product-ummanu.json", owned)
-            return actual_commit(*args, **kwargs)
+            return actual_publish(*args, **kwargs)
 
         with (
             mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
             mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=account),
             mock.patch("ummanu.upgrade.os.chown", side_effect=chown),
-            mock.patch("ummanu.memory.pack.state_repo.commit", side_effect=commit),
+            mock.patch("ummanu.memory.pack._publish_memory_export", side_effect=publish),
         ):
             result = upgrade.step_memory_pack(context)
 

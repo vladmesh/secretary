@@ -36,8 +36,16 @@ from ummanu._fsutil import (
 from ummanu._fsutil import (
     write_ndjson as _write_ndjson,
 )
+from ummanu.memory.canon import (
+    content_revision,
+    fact_content_hash,
+    fact_files,
+    parse_fact_text,
+    pending_undo,
+    recover_canon_undo,
+    text_digest,
+)
 from ummanu.memory_errors import MemoryLockError, MemoryProtocolError
-from ummanu.state_repo import MEMORY_PATHSPEC, StateRepoError
 
 MEMORY_LOCK_NAME = ".write.lock"
 
@@ -51,6 +59,12 @@ class MemoryExportSnapshot:
 
 @dataclass(frozen=True)
 class MemoryVerify:
+    """What `memory verify` found.
+
+    `journal_commit` holds the content revision of the canon fact set (`memory.canon`), not a Git
+    commit; `dirty` says an unfinished write left its undo area behind.
+    """
+
     facts_dir: Path
     ok: bool
     findings: tuple[str, ...]
@@ -62,12 +76,15 @@ class MemoryVerify:
 
 
 def init_memory_journal(instance_dir: Path) -> tuple[Path, bool]:
-    """Resolve `state/memory/facts` in the private repo.
+    """Resolve `state/memory/facts` in the live root.
 
-    Contract: docs/RECOVERY.md, "Layout". Facts live flat in the single instance
-    repository; there is no nested journal to initialize.
+    Contract: docs/RECOVERY.md, "Layout" and "Writers". Facts live flat in the live root, which may
+    or may not be a Git work tree; there is no nested journal to initialize and no repository to
+    require.
     """
-    instance_dir = state_repo.require_repo(instance_dir)
+    instance_dir = Path(instance_dir).expanduser().resolve()
+    if not instance_dir.is_dir():
+        raise RuntimeError(f"instance directory not found: {instance_dir}")
     facts_dir = state_repo.memory_facts_dir(instance_dir)
     created = not facts_dir.is_dir()
     try:
@@ -107,17 +124,22 @@ def _legacy_journal_facts(legacy: Path) -> bool:
 
 
 def export_memory_snapshot(data_dir: Path, instance_dir: Path) -> MemoryExportSnapshot:
-    """Refresh the derived export from the live facts in the private repo.
+    """Refresh the derived export from the live facts of the live root.
 
-    The instance repo is the only source, so an export cannot carry facts that
-    are not this installation's canon.
+    The live root is the only source, so an export cannot carry facts that are not this
+    installation's canon. An unfinished write is restored first, under the same locks a writer
+    holds, so an export never publishes half of one.
     """
     data_dir = data_dir.expanduser().resolve()
+    instance_dir = Path(instance_dir).expanduser().resolve()
     memory_dir = data_dir / "memory"
     _ensure_dir(memory_dir, "memory data dir")
     facts_dir = state_repo.memory_facts_dir(instance_dir)
     with _memory_journal_lock(memory_dir):
-        source_head = _journal_head(instance_dir) or "unknown"
+        reject_legacy_memory_journal(memory_dir)
+        if pending_undo(memory_dir) is not None:
+            with state_repo.state_repo_lock(instance_dir):
+                recover_canon_undo(memory_dir)
         try:
             staging = Path(tempfile.mkdtemp(prefix=".memory-export-", suffix=".tmp", dir=memory_dir))
         except OSError as exc:
@@ -130,8 +152,6 @@ def export_memory_snapshot(data_dir: Path, instance_dir: Path) -> MemoryExportSn
                 facts=facts,
                 source_memory=facts_dir,
                 source_root=facts_dir,
-                source_head=source_head,
-                commit=source_head,
                 changed=False,
                 record_import=False,
             )
@@ -146,64 +166,152 @@ def export_memory_snapshot(data_dir: Path, instance_dir: Path) -> MemoryExportSn
 
 
 def verify_memory_journal(data_dir: Path, instance_dir: Path) -> MemoryVerify:
+    """Compare the canon, `export.ndjson` and `index.sqlite` by fact id and content, not by count.
+
+    Every divergence is a named finding: ids missing from or extra in the export or the index, a
+    fact whose export text or index row differs from the canon, an index that cannot be checked by
+    id, and an undo area an unfinished write left behind.
+    """
     data_dir = data_dir.expanduser().resolve()
+    instance_dir = Path(instance_dir).expanduser().resolve()
     memory_dir = data_dir / "memory"
     findings: list[str] = []
-    journal_commit: str | None = None
+    revision: str | None = None
     fact_count = 0
     export_count: int | None = None
     index_count: int | None = None
     dirty = False
-
-    try:
-        instance_dir = state_repo.require_repo(instance_dir)
-    except StateRepoError as exc:
-        instance_dir = Path(instance_dir).expanduser().resolve()
-        findings.append(str(exc))
     facts_dir = state_repo.memory_facts_dir(instance_dir)
+    canon_texts: dict[str, str] | None = None
 
     with _memory_journal_lock(memory_dir):
-        if not findings:
-            legacy = memory_dir / "facts"
-            if (legacy / ".git").is_dir():
-                findings.append(f"nested memory journal is still present: {legacy}")
-            journal_commit = _journal_head(instance_dir)
-            if journal_commit is None:
-                findings.append("no memory commit in the instance repo")
-            status = _git_status(instance_dir)
-            dirty = bool(status)
-            if status:
-                findings.append("state/memory has uncommitted changes")
-            if journal_commit is not None:
-                fact_count = len(_tracked_fact_ids(instance_dir))
+        legacy = memory_dir / "facts"
+        if (legacy / ".git").is_dir():
+            findings.append(f"nested memory journal is still present: {legacy}")
+        try:
+            pending = pending_undo(memory_dir)
+        except RuntimeError as exc:
+            pending = ()
+            findings.append(str(exc))
+        if pending is not None:
+            dirty = True
+            named = ", ".join(pending) if pending else "no path recorded"
+            findings.append(
+                f"memory undo state is left behind: {memory_dir / '.undo'} ({named}); "
+                "the next memory write restores it"
+            )
+
+        if not instance_dir.is_dir():
+            findings.append(f"instance directory not found: {instance_dir}")
+        elif not facts_dir.is_dir():
+            findings.append(f"memory canon missing: {facts_dir}")
+        else:
+            canon_texts = _read_canon_texts(facts_dir)
+            digests = {fact_id: text_digest(text) for fact_id, text in canon_texts.items()}
+            revision = content_revision(digests)
+            fact_count = len(canon_texts)
 
         export_path = memory_dir / "export.ndjson"
         if not export_path.is_file():
             findings.append(f"memory export missing: {export_path}")
         else:
-            export_ids = _read_export_fact_ids(export_path)
-            export_count = len(export_ids)
-            if fact_count and export_count != fact_count:
-                findings.append(f"memory export count mismatch: export={export_count} journal={fact_count}")
+            export_rows = _read_export_fact_texts(export_path)
+            export_count = len(export_rows)
+            findings.extend(_duplicate_findings("export", [fact_id for fact_id, _text in export_rows]))
+            if canon_texts is not None:
+                findings.extend(_set_findings("export", canon_texts, {fact_id for fact_id, _text in export_rows}))
+                # Every row is compared, so a stale duplicate beside a current row stays red.
+                changed = sorted(
+                    {
+                        fact_id
+                        for fact_id, text in export_rows
+                        if fact_id in canon_texts and text_digest(text) != text_digest(canon_texts[fact_id])
+                    }
+                )
+                if changed:
+                    findings.append(f"memory export content differs from the canon: {', '.join(changed)}")
 
         index_path = memory_dir / "index.sqlite"
         if not index_path.is_file():
             findings.append(f"memory index missing: {index_path}")
         else:
-            index_count = _read_index_fact_count(index_path)
-            if fact_count and index_count != fact_count:
-                findings.append(f"memory index count mismatch: index={index_count} journal={fact_count}")
+            index_rows, index_count, index_finding = _read_index_rows(index_path)
+            if index_finding:
+                findings.append(index_finding)
+            if index_rows is not None:
+                findings.extend(_duplicate_findings("index", [fact_id for fact_id, _row in index_rows]))
+            if index_rows is not None and canon_texts is not None:
+                findings.extend(_set_findings("index", canon_texts, {fact_id for fact_id, _row in index_rows}))
+                findings.extend(_index_content_findings(canon_texts, index_rows))
 
     return MemoryVerify(
         facts_dir=facts_dir,
         ok=not findings,
         findings=tuple(findings),
-        journal_commit=journal_commit,
+        journal_commit=revision,
         fact_count=fact_count,
         export_count=export_count,
         index_count=index_count,
         dirty=dirty,
     )
+
+
+def _read_canon_texts(facts_dir: Path) -> dict[str, str]:
+    texts = {}
+    for fact_id, path in fact_files(facts_dir):
+        try:
+            texts[fact_id] = path.read_bytes().decode("utf-8")
+        except OSError as exc:
+            raise RuntimeError(f"could not read memory fact {fact_id}: {exc}") from None
+        except UnicodeError as exc:
+            raise RuntimeError(f"could not decode memory fact {fact_id}: {exc}") from None
+    return texts
+
+
+def _duplicate_findings(label: str, fact_ids: list[str]) -> list[str]:
+    """One finding per fact id that appears in more than one derived row."""
+    counts: dict[str, int] = {}
+    for fact_id in fact_ids:
+        counts[fact_id] = counts.get(fact_id, 0) + 1
+    return [
+        f"memory {label} has {count} rows for one fact: {fact_id}"
+        for fact_id, count in sorted(counts.items())
+        if count > 1
+    ]
+
+
+def _set_findings(label: str, canon: dict[str, Any], other: set[str]) -> list[str]:
+    findings = []
+    missing = sorted(set(canon) - set(other))
+    extra = sorted(set(other) - set(canon))
+    if missing:
+        findings.append(f"memory {label} is missing canon facts: {', '.join(missing)}")
+    if extra:
+        findings.append(f"memory {label} has facts the canon does not: {', '.join(extra)}")
+    return findings
+
+
+def _index_content_findings(canon_texts: dict[str, str], index_rows: list[tuple[str, dict[str, Any]]]) -> list[str]:
+    """An index row matches its fact when both its stored hash and its stored fields hash to the canon."""
+    changed: set[str] = set()
+    unparsed: set[str] = set()
+    for fact_id, row in index_rows:
+        text = canon_texts.get(fact_id)
+        if text is None:
+            continue
+        try:
+            expected = fact_content_hash(parse_fact_text(text, f"{fact_id}.md", fact_id=fact_id))
+        except (ValueError, yaml.YAMLError):
+            unparsed.add(fact_id)
+            continue
+        if row["content_hash"] != expected or fact_content_hash(row) != expected:
+            changed.add(fact_id)
+    findings = []
+    if changed:
+        findings.append(f"memory index content differs from the canon: {', '.join(sorted(changed))}")
+    if unparsed:
+        findings.append(f"memory canon facts the index cannot parse: {', '.join(sorted(unparsed))}")
+    return findings
 
 
 def _read_memory_facts(facts_dir: Path) -> list[dict[str, Any]]:
@@ -213,7 +321,8 @@ def _read_memory_facts(facts_dir: Path) -> list[dict[str, Any]]:
             continue
         relative = path.relative_to(facts_dir).as_posix()
         try:
-            text = path.read_text(encoding="utf-8")
+            # Bytes decoded as they are, so a fact's export text hashes to its file's bytes.
+            text = path.read_bytes().decode("utf-8")
         except OSError as exc:
             raise RuntimeError(f"could not read memory fact {relative}: {exc}") from None
         except UnicodeError as exc:
@@ -231,22 +340,9 @@ def _read_memory_facts(facts_dir: Path) -> list[dict[str, Any]]:
     return facts
 
 
-def _tracked_fact_ids(instance_dir: Path) -> list[str]:
-    prefix = f"{state_repo.MEMORY_FACTS_RELATIVE.as_posix()}/"
-    raw = state_repo.git(
-        instance_dir,
-        ["ls-files", "-z", "--", *MEMORY_PATHSPEC],
-        label="inspect memory files",
-    )
-    fact_ids = []
-    for item in raw.split("\0"):
-        if item.startswith(prefix) and item.endswith(".md"):
-            fact_ids.append(item.removeprefix(prefix).removesuffix(".md"))
-    return fact_ids
-
-
-def _read_export_fact_ids(path: Path) -> list[str]:
-    ids: list[str] = []
+def _read_export_fact_texts(path: Path) -> list[tuple[str, str]]:
+    """Every export row as `(id, text)`, in file order and with its multiplicity."""
+    rows: list[tuple[str, str]] = []
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError as exc:
@@ -265,16 +361,27 @@ def _read_export_fact_ids(path: Path) -> list[str]:
         fact_id = payload.get("id")
         if not isinstance(fact_id, str) or not fact_id:
             raise RuntimeError(f"invalid memory export row at line {number}: missing id")
-        ids.append(fact_id)
-    return ids
+        text = payload.get("text")
+        rows.append((fact_id, text if isinstance(text, str) else ""))
+    return rows
 
 
-def _read_index_fact_count(path: Path) -> int:
+_INDEX_FIELDS = ("fact_id", "content_hash", "text", "scope", "tags", "source", "created_at")
+
+
+def _read_index_rows(path: Path) -> tuple[list[tuple[str, dict[str, Any]]] | None, int | None, str | None]:
+    """`([(fact_id, row)], raw row count, finding)`; rows keep their multiplicity and are None when the
+    index cannot be checked by id."""
     try:
         with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as conn:
-            return int(conn.execute("select count(*) from memories").fetchone()[0])
+            count = int(conn.execute("select count(*) from memories").fetchone()[0])
+            columns = {row[1] for row in conn.execute("pragma table_info(memories)")}
+            if not set(_INDEX_FIELDS) <= columns:
+                return None, count, f"memory index has no fact ids or content hashes to check: {path}"
+            rows = conn.execute(f"select {', '.join(_INDEX_FIELDS)} from memories").fetchall()
     except sqlite3.Error as exc:
         raise RuntimeError(f"could not read memory index {path}: {exc}") from None
+    return [(row[0], dict(zip(_INDEX_FIELDS, row))) for row in rows], count, None
 
 
 def _memory_fact_metadata(text: str) -> dict[str, Any]:
@@ -380,12 +487,16 @@ def _publish_memory_export(
     facts: list[dict[str, Any]],
     source_memory: Path,
     source_root: Path,
-    source_head: str,
-    commit: str | None,
     changed: bool,
     record_import: bool,
 ) -> None:
+    """Publish `export.ndjson`, `export.json` and `manifest.json` for one read of the canon.
+
+    The manifest's `source.head` and `journal.commit` hold the content revision of exactly the
+    exported facts, computed here so the two can never disagree.
+    """
     reject_legacy_memory_journal(memory_dir)
+    revision = content_revision({str(fact["id"]): text_digest(str(fact["text"])) for fact in facts})
     try:
         staging = Path(tempfile.mkdtemp(prefix=".memory-export-", suffix=".tmp", dir=memory_dir))
     except OSError as exc:
@@ -407,8 +518,8 @@ def _publish_memory_export(
                 facts=facts,
                 source_memory=source_memory,
                 source_root=source_root,
-                source_head=source_head,
-                commit=commit,
+                source_head=revision,
+                commit=revision,
                 changed=changed,
                 record_import=record_import,
             ),
@@ -474,41 +585,3 @@ def _read_json_file_if_valid(path: Path) -> dict[str, Any]:
     except (OSError, UnicodeError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
-
-
-def _recover_journal_worktree(instance_dir: Path) -> None:
-    """Roll back a half-applied write, touching `state/memory` and nothing else.
-
-    The repo also carries board, runs and the operator's uncommitted config, so
-    a repo-wide `reset --hard` is not available here: recovery is scoped to the
-    memory pathspec by construction.
-    """
-    if not state_repo.status(instance_dir, MEMORY_PATHSPEC):
-        return
-    if _journal_head(instance_dir) is not None:
-        state_repo.git(
-            instance_dir,
-            ["checkout", "--", *MEMORY_PATHSPEC],
-            label="recover memory worktree",
-        )
-    state_repo.git(
-        instance_dir,
-        ["clean", "-fdq", "--", *MEMORY_PATHSPEC],
-        label="recover memory worktree",
-    )
-
-
-def _journal_head(instance_dir: Path) -> str | None:
-    """The last commit that touched `state/memory`, not the repo tip."""
-    if state_repo.head(instance_dir) is None:
-        return None
-    raw = state_repo.git(
-        instance_dir,
-        ["log", "-1", "--format=%H", "--", *MEMORY_PATHSPEC],
-        label="inspect memory head",
-    ).strip()
-    return raw or None
-
-
-def _git_status(instance_dir: Path) -> str:
-    return state_repo.status(instance_dir, MEMORY_PATHSPEC)

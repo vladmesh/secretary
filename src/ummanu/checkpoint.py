@@ -9,9 +9,10 @@ changed. The dispatcher invokes it at most once in a five-minute cadence window,
 remote recovery window, under `tick_lock`; it also takes the instance repo writer lock so
 checkpoint writes cannot overlap a green-card publish against the same checkout.
 
-Memory (`state/memory`) and knowledge (`state/knowledge`) are written by their own writers
-directly into the same repo, so both are deliberately outside this pathspec; `state_repo_lock`
-keeps their index operations from overlapping.
+Knowledge (`state/knowledge`) is written and committed by its own writer directly into the same
+repo, so it is deliberately outside this pathspec; `state_repo_lock` keeps the index operations
+from overlapping. Memory (`state/memory`) is written by its writer without Git, so in this legacy
+mode the tick stages and commits it with board and runs, after the same secret scan.
 
 `SnapshotExporter` grows the same staging and validation into the writer for a live root that is
 not a Git work tree: one cut per changed window (the export, `SNAPSHOT_ALLOWLIST` copied from the
@@ -81,7 +82,7 @@ from ummanu.product_issues import (
     registered_projects,
 )
 from ummanu.runtime.redact import redact
-from ummanu.state_repo import BOARD_RUNS_PATHSPEC
+from ummanu.state_repo import BOARD_RUNS_PATHSPEC, MEMORY_PATHSPEC
 from ummanu.tasks import TaskError, task_audit_for
 
 # Canonical checkpoint entries per component. `events.ndjson` is stored history: the
@@ -473,6 +474,7 @@ class CheckpointWriter:
     def _write(self) -> CheckpointResult:
         self._collect_abandoned_staging()
         board, runs, secret_values = self._open_window(self.instance_dir / "state" / "runs" / "runs.ndjson")
+        self._scan_memory(secret_values)
         self._publish(
             "board",
             BOARD_ENTRIES,
@@ -692,15 +694,44 @@ class CheckpointWriter:
     def _commit(self, *, board_cards: int, run_records: int) -> CheckpointResult:
         return self._commit_locked(board_cards=board_cards, run_records=run_records)
 
+    def _scan_memory(self, secret_values: tuple[str, ...]) -> None:
+        """`state/memory` leaves the host with this commit, so every file in it passes the scan.
+
+        The memory writer scans what it writes; this catches anything else left there, such as a
+        secret pasted into a fact file by hand. A hit blocks the tick by path before anything is
+        published or staged.
+        """
+        root = self.instance_dir.joinpath(*MEMORY_PATHSPEC[0].split("/"))
+        runtime_env = self.instance_dir / "runtime.env"
+        hits: list[str] = []
+        for directory, dirnames, filenames in os.walk(root):
+            dirnames.sort()
+            for name in sorted(filenames):
+                path = Path(directory) / name
+                try:
+                    info = path.lstat()
+                    if stat.S_ISLNK(info.st_mode):
+                        text = os.readlink(path)
+                    elif stat.S_ISREG(info.st_mode):
+                        text = path.read_bytes().decode("utf-8", errors="replace")
+                    else:
+                        continue
+                except OSError as exc:
+                    raise CheckpointBlocked(f"could not read {path.relative_to(self.instance_dir)}: {exc}") from None
+                if redact(text, env_files=[runtime_env], secret_values=secret_values) != text:
+                    hits.append(path.relative_to(self.instance_dir).as_posix())
+        if hits:
+            raise CheckpointBlocked(f"secret detected in {', '.join(hits)}")
+
     def _commit_locked(self, *, board_cards: int, run_records: int) -> CheckpointResult:
-        pathspec = ["--", *STAGED_PATHSPEC]
         try:
-            self._git(["add", *pathspec], "checkpoint stage")
+            self._git(["add", "--", *STAGED_PATHSPEC], "checkpoint stage")
         except CheckpointBlocked:
             # A repo that ignores `state/` fails the add with a git hint; say why.
             self._require_tracked()
             raise
         self._require_tracked()
+        pathspec = ["--", *STAGED_PATHSPEC, *self._stage_memory()]
         status = self._git(["status", "--porcelain", *pathspec], "checkpoint status")
         if not status.stdout.strip():
             return CheckpointResult(
@@ -721,6 +752,19 @@ class CheckpointWriter:
             board_cards=board_cards,
             run_records=run_records,
         )
+
+    def _stage_memory(self) -> tuple[str, ...]:
+        """Stage `state/memory`; returns its pathspec when Git knows a file there, else nothing.
+
+        Only `state/memory` joins board and runs: config and every other path stay out of the
+        tick's commit. A pathspec Git knows no file under would fail the commit, so a live root
+        without memory commits as before.
+        """
+        memory = self.instance_dir.joinpath(*MEMORY_PATHSPEC[0].split("/"))
+        if memory.is_dir():
+            self._git(["add", "--", *MEMORY_PATHSPEC], "checkpoint stage memory")
+        known = self._git(["ls-files", "--", *MEMORY_PATHSPEC], "checkpoint memory tracked").stdout
+        return MEMORY_PATHSPEC if known.strip() else ()
 
     def _require_tracked(self) -> None:
         """An ignored `state/` stages nothing, which otherwise reads as unchanged."""

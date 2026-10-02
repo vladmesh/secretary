@@ -16,6 +16,7 @@ from unittest import mock
 from tests.head_registry import write_installed_pair
 from ummanu import state_repo
 from ummanu.cli import MEMORY_EXIT_PERMISSION, build_parser, main
+from ummanu.memory.canon import canon_revision, fact_content_hash, parse_fact_text
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"
@@ -1042,10 +1043,25 @@ class CliTests(unittest.TestCase):
                 ]
             )
             index = data_dir / "memory" / "index.sqlite"
+            fact_id = "ummanu/verified-cli"
+            raw = (state_repo.memory_facts_dir(instance_dir) / f"{fact_id}.md").read_text(encoding="utf-8")
+            indexed = parse_fact_text(raw, f"{fact_id}.md", fact_id=fact_id)
 
+            # The index the service writes: verify compares it by fact id and content hash.
             with sqlite3.connect(index) as conn:
-                conn.execute("create table memories(id integer primary key)")
-                conn.execute("insert into memories default values")
+                conn.execute(
+                    "create table memories(id integer primary key, fact_id text unique, content_hash text, "
+                    "text text, scope text, tags text, source text, created_at text)"
+                )
+                conn.execute(
+                    "insert into memories(fact_id, content_hash, text, scope, tags, source, created_at) "
+                    "values (?,?,?,?,?,?,?)",
+                    (
+                        fact_id,
+                        fact_content_hash(indexed),
+                        *(indexed[key] for key in ("text", "scope", "tags", "source", "created_at")),
+                    ),
+                )
                 conn.commit()
 
             code, output = self.run_cli(["memory", "verify", "--instance", str(instance_dir)])
@@ -1125,6 +1141,11 @@ class CliTests(unittest.TestCase):
             )
             retried = json.loads(retry_output)
             log_count = git(instance_dir, "rev-list", "--count", "HEAD", "--", "state/memory")
+            facts = sorted(
+                path.relative_to(state_repo.memory_facts_dir(instance_dir)).as_posix()
+                for path in state_repo.memory_facts_dir(instance_dir).rglob("*.md")
+            )
+            revision = canon_revision(state_repo.memory_facts_dir(instance_dir))
 
         self.assertEqual(propose_code, 0, propose_output)
         self.assertEqual(failed_code, 1, failed_output)
@@ -1133,7 +1154,10 @@ class CliTests(unittest.TestCase):
         self.assertTrue(failed["commit"])
         self.assertEqual(retry_code, 0, retry_output)
         self.assertEqual(retried["commit"], failed["commit"])
-        self.assertEqual(log_count, "1")
+        # The writer makes no Git commit; the canon holds the fact once, at the reported revision.
+        self.assertEqual(log_count, "0")
+        self.assertEqual(facts, ["ummanu/cli-retryable.md"])
+        self.assertEqual(retried["commit"], revision)
 
     def test_memory_protocol_commands_use_stable_error_codes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
