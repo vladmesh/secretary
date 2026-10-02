@@ -102,6 +102,38 @@ Outside the canon, rebuilt or kept in an optional cold archive:
 
 `secrets/installation.key` is the raw installation key, mode `0600`, outside Git and the checkpoint.
 
+### Snapshot repository
+
+A live root that is not a Git work tree is backed up by the snapshot exporter instead of the tick
+writer (see [Writers](#writers)). Its target is a **bare** repository, `offsite.snapshot_repo` in
+`instance.yaml` (a relative value is rooted at the data directory), by default
+`<data_dir>/backup/instance.git`, branch `main`. The exporter is the only code that builds a commit
+there. The snapshot tree keeps the live root's relative paths, so it is the layout above plus one
+file:
+
+```text
+<snapshot repository>/
+  snapshot-manifest.json   format "ummanu.instance-snapshot", version 1, product_revision,
+                           board_schema_head, files: {path: sha256} of every other file
+  instance.yaml, projects/*.yaml, adapters/*.yaml, heads/heads.toml, persona/**,
+  skills/manifest.toml, secrets/catalog.yaml, secrets/installation-key.json,
+  secrets/values/*.enc.json, state/knowledge/**, state/memory/**     the export allowlist
+  state/board/, state/runs/                                           from the export, as above
+```
+
+The export allowlist is `checkpoint.SNAPSHOT_ALLOWLIST`, a closed set: `*` matches inside one path
+segment and a trailing `**` everything below a directory. Nothing else in the live root is
+exported: not `heads/heads.yaml` or `heads/source.yaml`, `policies/`, `tests/`, `README.md`,
+`CONTEXT.md`, `.gitignore`, onboarding, gate, provision and compatibility directories, `.locks/`,
+`state/checks/`, the live root's own `state/board` and `state/runs`, and never
+`secrets/installation.key`, `runtime.env` or `board-store.env`. The manifest holds no clock value,
+so an unchanged state yields an unchanged manifest; a new product revision or board schema head is a
+change.
+
+For the same live state the exporter's tree equals the tracked tree of a legacy checkpoint on these
+paths (same paths, same blob ids, the board's segments included); the manifest is the only extra
+file.
+
 ### Board checkpoint layout
 
 The local export in the data directory stays flat. Only the copy committed into `state/board` is
@@ -145,7 +177,7 @@ failure or divergence for the next window or operator action.
 
 ## Writers
 
-Six writers touch the repository, each with its own pathspec:
+Six writers touch the instance repository, each with its own pathspec:
 
 - tick writer: `state/board`, `state/runs`, at the cadence above, under the tick lock;
 - memory writer: `state/memory`, on `propose`/`commit`/`supersede`;
@@ -156,6 +188,39 @@ Six writers touch the repository, each with its own pathspec:
   immediately pushes the pair;
 - local-configuration writer: `.gitignore`, when local configuration such as `board-store.env`
   needs a durable exclusion.
+
+Which periodic writer runs is decided by the live root. While it is a Git work tree (it has a
+`.git`), the tick keeps the commit and push above unchanged. When it is not, the tick runs the
+**snapshot exporter** instead and pushes nothing (the snapshot pusher is a later step). Per window,
+under the same shared repository lock (which sits beside the tree as `.ummanu-state-writer.lock`
+when there is no `.git`), the exporter:
+
+1. reads the tip of the snapshot branch, the base of the compare-and-swap below;
+2. passes the [validation gate](#validation-gate) and stages `state/board` and `state/runs` from the
+   export exactly as the tick writer does, the run-history check against the tip's `runs.ndjson`;
+   the board's log segments continue the tip's;
+3. copies the export allowlist byte for byte from the live root. A symlink or any non-regular file
+   at an allowlisted path, or on the way to one, blocks the window by its path; nothing is followed;
+4. writes `snapshot-manifest.json`;
+5. runs the secret scan over every file of the cut, the manifest included; any hit blocks the window
+   by path;
+6. builds the tree with Git plumbing through a temporary index (`hash-object`, `update-index`,
+   `write-tree`), so the snapshot never has a work tree. A tree equal to the tip's makes no commit
+   (`unchanged`). Otherwise `commit-tree` makes one commit, a root commit on an empty repository and
+   otherwise a child of the tip only, with the fixed identity `ummanu snapshot exporter
+   <snapshot-exporter@ummanu.invalid>` and the subject prefix `snapshot(instance): `
+   (`checkpoint.SNAPSHOT_AUTHOR_*`, `SNAPSHOT_SUBJECT_PREFIX`), and `update-ref` moves the branch
+   only if it still points at the tip from step 1.
+
+The cut is rebuilt from scratch every window, so a file deleted from the live root leaves the next
+snapshot. The repository is created and initialised bare when absent; a non-empty directory there
+that is not a bare repository blocks the window.
+
+`ummanu data snapshot --instance INSTANCE --snapshot-repo PATH [--data-dir DIR] [--state-dir DIR]`
+runs one exporter window into an explicit repository whatever the live root is, including a live
+root that is still a work tree, whose repository it never uses (it takes only the writer lock). It
+prints the result as JSON, exits 0 on `committed` or `unchanged`, and never pushes. It is what the
+stand comparison and the cutover use.
 
 Pathspecs do not overlap, and nobody uses `git add -A`, so uncommitted manual config edits are left
 alone. Every writer holds the shared repository lock while staging and committing. All writers except
@@ -227,8 +292,8 @@ checkpoint, records the reason in status and retries next tick:
   `export.json` match the line counts, the generated `cards.json`/`cards.ndjson` pair is identical and
   card references are unique, all before local export or canonical files are replaced;
 - memory staging is empty;
-- the secret scan of `state/` is clean. The memory and knowledge writers run the same scan over their
-  own text before committing.
+- the secret scan of `state/` is clean (for the snapshot exporter: of every file of the cut). The
+  memory and knowledge writers run the same scan over their own text before committing.
 
 ### Analytics checkpoint seal v2
 

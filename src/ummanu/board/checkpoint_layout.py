@@ -54,11 +54,11 @@ class CheckpointLayoutError(ValueError):
     """A committed board checkpoint whose layout cannot be read."""
 
 
-def _part_name(index: int, suffix: str) -> Path:
+def part_name(index: int, suffix: str) -> Path:
     return Path(f"{index // _PER_DIRECTORY:04d}") / f"{index:08d}{suffix}"
 
 
-def _layout_marker_text() -> str:
+def layout_marker_text() -> str:
     return json.dumps({"schema": LAYOUT_SCHEMA, "version": LAYOUT_VERSION}, sort_keys=True) + "\n"
 
 
@@ -78,7 +78,7 @@ def _parts(root: Path, suffix: str) -> list[Path]:
                 index = _part_index(part, suffix)
                 if index is None or not part.is_file() or part.is_symlink():
                     raise CheckpointLayoutError(f"{part}: unexpected entry in split checkpoint directory")
-                if part.relative_to(root) != _part_name(len(parts), suffix):
+                if part.relative_to(root) != part_name(len(parts), suffix):
                     raise CheckpointLayoutError(f"{part}: split checkpoint part is out of sequence")
                 parts.append(part)
     except OSError as exc:
@@ -192,7 +192,7 @@ def publish_split_board(staging: Path, destination: Path) -> None:
     the directory. The analytics seal is the caller's to remove first and publish last.
     """
     previous = _previous_logs(destination)
-    _write_bytes_if_changed(destination / LAYOUT_MARKER, _layout_marker_text().encode("utf-8"))
+    _write_bytes_if_changed(destination / LAYOUT_MARKER, layout_marker_text().encode("utf-8"))
     for name, (directory, suffix) in RECORD_FILES.items():
         _sync_records(_read_staged(staging, name), destination / directory, suffix)
     for name, (directory, suffix) in SEGMENT_FILES.items():
@@ -248,7 +248,7 @@ def split_records(payload: bytes) -> list[bytes]:
 def _sync_records(payload: bytes, root: Path, suffix: str) -> None:
     records = split_records(payload)
     for index, record in enumerate(records):
-        _write_bytes_if_changed(root / _part_name(index, suffix), record)
+        _write_bytes_if_changed(root / part_name(index, suffix), record)
     _prune(root, suffix, keep=len(records))
 
 
@@ -257,14 +257,14 @@ def _sync_segments(payload: bytes, committed: bytes | None, root: Path, suffix: 
         count = len(_parts(root, suffix))
         appended = payload[len(committed) :]
         if appended:
-            _write_bytes_if_changed(root / _part_name(count, suffix), appended)
+            _write_bytes_if_changed(root / part_name(count, suffix), appended)
         return
     # History that does not extend the committed log is not appended to: the log is rewritten as
     # one segment, which costs one full blob and is expected only on the first split checkpoint.
     if root.exists():
         _remove(root)
     if payload:
-        _write_bytes_if_changed(root / _part_name(0, suffix), payload)
+        _write_bytes_if_changed(root / part_name(0, suffix), payload)
 
 
 def _prune(root: Path, suffix: str, *, keep: int) -> None:
@@ -274,7 +274,7 @@ def _prune(root: Path, suffix: str, *, keep: int) -> None:
     if not root.is_dir() or root.is_symlink():
         _remove(root)
         return
-    wanted = {_part_name(index, suffix) for index in range(keep)}
+    wanted = {part_name(index, suffix) for index in range(keep)}
     wanted_chunks = {name.parent for name in wanted}
     try:
         for chunk in list(root.iterdir()):

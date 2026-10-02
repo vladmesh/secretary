@@ -263,6 +263,34 @@ def instance_data_dir(path: Path) -> Path:
     return _configured_data_dir(instance_file, instance)
 
 
+#: Where the snapshot exporter keeps its bare repository when `offsite.snapshot_repo` names none,
+#: relative to the data directory (docs/RECOVERY.md, "Writers").
+DEFAULT_SNAPSHOT_REPO = Path("backup") / "instance.git"
+
+
+def instance_snapshot_repo(path: Path, data_dir: Path) -> Path:
+    """Return the bare snapshot repository the exporter commits into.
+
+    ``offsite.snapshot_repo`` from the schema-validated ``instance.yaml``, ``~`` expanded, a relative
+    value rooted at ``data_dir``; without it, ``<data_dir>/backup/instance.git``. Only the exporter,
+    recovery and doctor read this setting.
+    """
+    instance_file = _resolve_instance(path)
+    try:
+        instance = load_config(instance_file)
+    except ConfigError as exc:
+        raise DataDirError(str(exc)) from None
+    errors = validate(instance, "instance", instance_file.name)
+    if errors:
+        raise DataDirError(f"invalid instance {instance_file}: " + "; ".join(map(str, errors)))
+    assert isinstance(instance, dict)
+    configured = instance["offsite"].get("snapshot_repo")
+    candidate = Path(configured).expanduser() if configured else DEFAULT_SNAPSHOT_REPO
+    if not candidate.is_absolute():
+        candidate = Path(data_dir).expanduser() / candidate
+    return candidate.resolve(strict=False)
+
+
 def validate_instance(path: Path) -> InstanceReport:
     """Validate instance.yaml plus its bindings, adapters and data manifest.
 

@@ -712,9 +712,13 @@ def set_secret(
 
 
 def read_secret(instance_dir: Path, secret_id: str) -> bytes:
-    """Internal API. No command in this card puts the result on stdout."""
+    """Internal API. No command in this card puts the result on stdout.
+
+    A read needs no repository: the snapshot exporter reads redaction values from a live root that
+    is a plain directory.
+    """
     secret_id = _clean_secret_id(secret_id)
-    instance_dir = state_repo.require_repo(instance_dir)
+    instance_dir = Path(instance_dir).expanduser().resolve()
     if not any(entry["id"] == secret_id for entry in list_secrets(instance_dir)):
         raise SecretStoreStateError(f"no secret named {secret_id!r} in the catalog")
     return _read_value(instance_dir, secret_id, load_installation_key(instance_dir))
