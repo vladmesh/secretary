@@ -89,7 +89,7 @@ tables exist (§3.13). `board/schema.py` is authoritative; the DDL below mirrors
 
 ```sql
 CREATE TABLE products (
-    product_id   text PRIMARY KEY,                    -- "secretary"; matches ^[a-z0-9][a-z0-9-]{0,62}$
+    product_id   text PRIMARY KEY,                    -- "ummanu"; matches ^[a-z0-9][a-z0-9-]{0,62}$
     board_key    bigint NOT NULL UNIQUE,              -- §2.2
     ref          text GENERATED ALWAYS AS ('product:' || product_id) STORED UNIQUE,
     title        text NOT NULL CHECK (title <> ''),
@@ -101,7 +101,7 @@ CREATE TABLE products (
 );
 
 CREATE TABLE projects (
-    project_id       text PRIMARY KEY,                -- registry id, e.g. "secretary"
+    project_id       text PRIMARY KEY,                -- registry id, e.g. "ummanu"
     enabled          boolean NOT NULL DEFAULT true,
     plane            text NOT NULL DEFAULT 'project',
     adapter          text,
@@ -639,8 +639,8 @@ The `UNIQUE (request_id)` on comment tables means at most one comment per claime
   written. The refusal is found by the row's own id and status (`refusal`, `refusals`). A
   `discarded` request id is terminal: `stage`, `claim` and `append` refuse it. Settlement never applies an effect.
 - A pending-request count is `SELECT count(*) FROM requests WHERE status = 'staged'`; it is the
-  export gate (§6.3) and `secretary task verify-audit`'s answer.
-- One advisory lock (`secretary.board.requests`) serializes separate claims outside a transaction;
+  export gate (§6.3) and `ummanu task verify-audit`'s answer.
+- One advisory lock (`ummanu.board.requests`) serializes separate claims outside a transaction;
   the per-card marker lock is also an advisory lock.
 
 ### 3.10 The eight `jsonb` columns
@@ -712,7 +712,7 @@ Alembic builds the schema in two steps:
 
 In `board/schema.py` every step-2 constraint carries `use_alter=True`.
 
-Revisions (`src/secretary/board/migrations/versions/`):
+Revisions (`src/ummanu/board/migrations/versions/`):
 
 | Revision | Change |
 |---|---|
@@ -792,7 +792,7 @@ Operator steps are in [OPERATIONS.md](OPERATIONS.md#postgresql-board-store).
 
 ### 5.1 Container
 
-`postgres:16` in its own Docker container, defined by `/opt/secretary/postgres-compose.yml`, which
+`postgres:16` in its own Docker container, defined by `/opt/ummanu/postgres-compose.yml`, which
 `board/provision.py` writes and verifies (mode 0600 or narrower). Bootstrap creates it; upgrade
 reconciles it (`step_board_store_provision`) before migrations. Only the database is containerized;
 CLI, dispatcher, web and heads run on the host. Client tools (`psql`, `pg_dump`, `pg_restore`) are
@@ -806,18 +806,18 @@ services:
     image: postgres:16
     restart: unless-stopped
     ports:
-      - 127.0.0.1:${SECRETARY_DB_PORT}:5432
+      - 127.0.0.1:${UMMANU_DB_PORT}:5432
     environment:
-      POSTGRES_DB: ${SECRETARY_DB_NAME}
-      POSTGRES_USER: ${SECRETARY_DB_OWNER_USER}
-      POSTGRES_PASSWORD: ${SECRETARY_DB_OWNER_PASSWORD}
+      POSTGRES_DB: ${UMMANU_DB_NAME}
+      POSTGRES_USER: ${UMMANU_DB_OWNER_USER}
+      POSTGRES_PASSWORD: ${UMMANU_DB_OWNER_PASSWORD}
     volumes:
       - board-db:/var/lib/postgresql/data
 volumes:
   board-db:
 ```
 
-- Compose project `secretary-board-store`; volume `secretary-board-store_board-db`, outside
+- Compose project `ummanu-board-store`; volume `ummanu-board-store_board-db`, outside
   `<data>`, so file-level backups never copy live database files.
 - Reconciliation verifies image, restart policy, loopback publication and mount before
   `compose up`; drift is refused, not repaired by recreating the container.
@@ -826,7 +826,7 @@ volumes:
 
 ### 5.3 Port publication
 
-Loopback only: `127.0.0.1:<SECRETARY_DB_PORT>` (fresh default 5432) → container 5432. Clients run
+Loopback only: `127.0.0.1:<UMMANU_DB_PORT>` (fresh default 5432) → container 5432. Clients run
 on the host, so the port must be published.
 
 ### 5.4 `board-store.env`
@@ -835,15 +835,15 @@ on the host, so the port must be published.
 never in archives.
 
 ```
-SECRETARY_DB_HOST=127.0.0.1
-SECRETARY_DB_PORT=5432
-SECRETARY_DB_NAME=secretary
-SECRETARY_DB_OWNER_USER=secretary_owner
-SECRETARY_DB_OWNER_PASSWORD=<generated>
-SECRETARY_DB_APP_USER=secretary_app
-SECRETARY_DB_APP_PASSWORD=<generated>
-SECRETARY_DB_READ_USER=secretary_read
-SECRETARY_DB_READ_PASSWORD=<generated>
+UMMANU_DB_HOST=127.0.0.1
+UMMANU_DB_PORT=5432
+UMMANU_DB_NAME=ummanu
+UMMANU_DB_OWNER_USER=ummanu_owner
+UMMANU_DB_OWNER_PASSWORD=<generated>
+UMMANU_DB_APP_USER=ummanu_app
+UMMANU_DB_APP_PASSWORD=<generated>
+UMMANU_DB_READ_USER=ummanu_read
+UMMANU_DB_READ_PASSWORD=<generated>
 ```
 
 - All nine keys are required. An unknown, missing or empty key, a symlink, or `mode & 0o077`
@@ -863,27 +863,27 @@ SECRETARY_DB_READ_PASSWORD=<generated>
 
 | Role | Privileges |
 |---|---|
-| `secretary_owner` | initialization superuser from `POSTGRES_USER`; owns the schema; runs migrations |
-| `secretary_app` | `SELECT, INSERT, UPDATE, DELETE` on all tables, `USAGE` on sequences; no DDL |
-| `secretary_read` | `USAGE` on the schema, `SELECT` only |
+| `ummanu_owner` | initialization superuser from `POSTGRES_USER`; owns the schema; runs migrations |
+| `ummanu_app` | `SELECT, INSERT, UPDATE, DELETE` on all tables, `USAGE` on sequences; no DDL |
+| `ummanu_read` | `USAGE` on the schema, `SELECT` only |
 
 `0001_initial`, run as owner, creates the two login roles with passwords passed as run parameters
 (`config.attributes`, rendered as literals because `CREATE ROLE` takes no bound parameter) and
 grants:
 
 ```sql
-CREATE ROLE secretary_app  LOGIN PASSWORD :'app_password';
-CREATE ROLE secretary_read LOGIN PASSWORD :'read_password';
-GRANT USAGE ON SCHEMA public TO secretary_app, secretary_read;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO secretary_app;
-GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO secretary_app;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO secretary_read;
-ALTER DEFAULT PRIVILEGES FOR ROLE secretary_owner IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO secretary_app;
-ALTER DEFAULT PRIVILEGES FOR ROLE secretary_owner IN SCHEMA public
-  GRANT USAGE ON SEQUENCES TO secretary_app;
-ALTER DEFAULT PRIVILEGES FOR ROLE secretary_owner IN SCHEMA public
-  GRANT SELECT ON TABLES TO secretary_read;
+CREATE ROLE ummanu_app  LOGIN PASSWORD :'app_password';
+CREATE ROLE ummanu_read LOGIN PASSWORD :'read_password';
+GRANT USAGE ON SCHEMA public TO ummanu_app, ummanu_read;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ummanu_app;
+GRANT USAGE ON ALL SEQUENCES IN SCHEMA public TO ummanu_app;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO ummanu_read;
+ALTER DEFAULT PRIVILEGES FOR ROLE ummanu_owner IN SCHEMA public
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ummanu_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE ummanu_owner IN SCHEMA public
+  GRANT USAGE ON SEQUENCES TO ummanu_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE ummanu_owner IN SCHEMA public
+  GRANT SELECT ON TABLES TO ummanu_read;
 ```
 
 Default privileges make tables added by later revisions visible to `app` and `read`.
@@ -963,7 +963,7 @@ functions that need them, so an upgrade can start on a venv that lacks them. Upg
 
 | Data | Writer |
 |---|---|
-| products, issues, sprints, tasks and their link tables | `secretary_app` through the board protocol: dispatcher tick, CLI commands, `webproto/ops.py`, `webproto/sprint_ops.py` |
+| products, issues, sprints, tasks and their link tables | `ummanu_app` through the board protocol: dispatcher tick, CLI commands, `webproto/ops.py`, `webproto/sprint_ops.py` |
 | `projects`, `repositories` (derived, not canonical) | Product project-set and Sprint repository-list writes (§3.1) |
 | comment tables | the same writers |
 | `sprint_decisions`, close reason, closeout document path | `SprintWriter.close` |
@@ -1075,7 +1075,7 @@ readers:
 | Reader | Reads |
 |---|---|
 | `CheckpointWriter` publication gate | staged `requests`; an unavailable card client blocks the checkpoint by name |
-| `secretary task verify-audit` | staged count, backend named; exit 0 clean, 1 pending |
+| `ummanu task verify-audit` | staged count, backend named; exit 0 clean, 1 pending |
 | `CommandReadLayer.command_history` / `command_request` | committed and staged `requests`; unreadable audit is `unavailable`/`unknown`, never empty or `not_found` |
 | `webproto.ops` product-run publication | the `requests` row of the generic `product_run.*` record |
 | `BoardEventCanon` | the audit its caller's client named; with neither audit nor data directory it refuses |
@@ -1091,15 +1091,15 @@ kind is refused.
 
 ### 7.4 Schema versioning and migrations
 
-- **Schema:** `src/secretary/board/schema.py` declarative models. CHECKs are `CheckConstraint`,
+- **Schema:** `src/ummanu/board/schema.py` declarative models. CHECKs are `CheckConstraint`,
   partial unique indexes are `Index(..., postgresql_where=...)`, generated refs are
   `Computed(..., persisted=True)`, deferred keys carry `use_alter=True`.
-- **Revisions:** `src/secretary/board/migrations/versions/`, shipped in the package (§3.13). Each
+- **Revisions:** `src/ummanu/board/migrations/versions/`, shipped in the package (§3.13). Each
   runs in its own transaction (`transaction_per_migration`); `0001` has no downgrade.
 - **Version table:** Alembic's `alembic_version`; no other bookkeeping.
   `migrate.EXPECTED_SCHEMA_REVISION` and `migrate.head_revision()` name the head
   (`0026_sprint_local_runs`); a test holds them equal. PostgreSQL restore compares against `head_revision()`.
-- **Connection:** no `alembic.ini`. `secretary.board.migrate` builds the Alembic `Config` in code
+- **Connection:** no `alembic.ini`. `ummanu.board.migrate` builds the Alembic `Config` in code
   and passes `env.py` an owner connection from `board-store.env`; `env.py` refuses to open its own.
 - **Role passwords:** read from `board-store.env`, passed in `config.attributes`, never stored in a
   revision file.
@@ -1108,7 +1108,7 @@ kind is refused.
   before the next; a failure is `MigrationFailed` naming the revision, what was committed before it
   and the server's cause. A failed run is rolled back *before* the unlock, and a cleanup that cannot
   run invalidates the session (the lock ends with it) instead of replacing the original failure.
-- **Where it runs:** bootstrap, and `step_board_store` in `secretary upgrade` (§5.8 order).
+- **Where it runs:** bootstrap, and `step_board_store` in `ummanu upgrade` (§5.8 order).
   No file → skipped; current → unchanged; broken or tracked file, unreachable server or failed
   revision → failed, before service restart. These apply every owed revision, whatever it declares.
 - **At release (`board/release_migrations.py`, `dispatch/production_checkout.py`):** when the
@@ -1117,10 +1117,10 @@ kind is refused.
   pin the fetched target to its full commit id, refuse a checkout that cannot fast-forward to it,
   then apply the target's owed revisions and only then `merge --ff-only <commit>`. The running
   build is the old one, so the revisions come from the target: `git archive <commit>
-  src/secretary/board/migrations` out of the checkout's own objects, extracted into a temporary
+  src/ummanu/board/migrations` out of the checkout's own objects, extracted into a temporary
   directory and run as the script location of the same `migrate.apply`, owner connection and lock.
   The version table must then hold the target's head. The connection has a connect timeout and a
-  session `lock_timeout` (`SECRETARY_RELEASE_MIGRATION_LOCK_TIMEOUT_SECONDS`, default 30) bounding
+  session `lock_timeout` (`UMMANU_RELEASE_MIGRATION_LOCK_TIMEOUT_SECONDS`, default 30) bounding
   the advisory-lock wait and every DDL lock wait. Nothing owed: one lock, one read, unchanged. Any
   refusal (`release_schema_refused`: `bundle_unreadable`, `store_unavailable`, `lock_timeout`,
   `destructive`, `unclassified`, `migration_failed`, `unknown_revision`, `not_verified`) leaves the
@@ -1138,7 +1138,7 @@ kind is refused.
   columns, indexes, grants or widened CHECK vocabularies, and drops, renames or narrows nothing the
   previous release reads or writes. Declare `release_safety = "destructive"` otherwise. A
   destructive or undeclared revision (`0001`–`0024` declare nothing) is refused before any owed
-  revision runs, and that release is a person's `secretary upgrade`. A revision is loaded by the
+  revision runs, and that release is a person's `ummanu upgrade`. A revision is loaded by the
   *previous* build at release, so it imports from the product only what that build already ships.
 - **Schema gate (`board/schema_gate.py`):** every operational connection reads `alembic_version`
   once when it opens, before any schema-dependent statement: each new connection of
@@ -1153,7 +1153,7 @@ kind is refused.
   pooled, so the next read checks again and succeeds once the upgrade applied the migrations. A
   revision the lineage does not contain is a later build's schema and is read as additive, not
   refused: the previous build's dispatcher finishes its release against it. Destructive migrations
-  are not supported by this. `secretary doctor` reports the same assessment
+  are not supported by this. `ummanu doctor` reports the same assessment
   ([Protocols](PROTOCOLS.md#board-schema-gate)). Exempt, because they exist to inspect or apply an
   owed schema: `migrate` (bootstrap and `step_board_store`), `provision` (container and role
   probes), `postgres_recovery` (dump preflight and restore target, which migrate first).

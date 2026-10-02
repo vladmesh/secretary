@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.role_skills import (
+from ummanu.role_skills import (
     BIN_DIR_ENV,
     INSTANCE_ORIGIN,
     MANIFEST,
@@ -140,26 +140,26 @@ class CanonicalRegistryTests(unittest.TestCase):
 
     def test_the_document_sprint_loop_is_gone(self) -> None:
         """A sprint is an entity with an observer; the document loop is not shipped."""
-        skills = self.manifest["roles"]["secretary"]["skills"]
+        skills = self.manifest["roles"]["ummanu"]["skills"]
 
         for skill in ("start-sprint", "run-sprint"):
             self.assertNotIn(skill, skills)
-            self.assertFalse((ROLES_ROOT / "secretary" / skill).exists())
+            self.assertFalse((ROLES_ROOT / "ummanu" / skill).exists())
 
-    def test_the_secretary_role_owns_the_sprint_entity_skill(self) -> None:
-        self.assertIn(OPEN_SPRINT_SKILL, self.manifest["roles"]["secretary"]["skills"])
+    def test_the_ummanu_role_owns_the_sprint_entity_skill(self) -> None:
+        self.assertIn(OPEN_SPRINT_SKILL, self.manifest["roles"]["ummanu"]["skills"])
 
     def test_the_canonical_open_sprint_skill_is_in_this_repository(self) -> None:
-        source = ROLES_ROOT / "secretary" / OPEN_SPRINT_SKILL / "SKILL.md"
+        source = ROLES_ROOT / "ummanu" / OPEN_SPRINT_SKILL / "SKILL.md"
 
         self.assertTrue(source.is_file(), f"{source} is missing")
 
-    def test_open_sprint_reaches_both_secretary_shells(self) -> None:
-        """Sprint birth must not depend on which secretary the human opened."""
+    def test_open_sprint_reaches_both_ummanu_shells(self) -> None:
+        """Sprint birth must not depend on which ummanu the human opened."""
         shells = {
             item.shell
             for item in iter_expected(self.registry)
-            if item.role == "secretary" and item.skill == OPEN_SPRINT_SKILL
+            if item.role == "ummanu" and item.skill == OPEN_SPRINT_SKILL
         }
 
         self.assertLessEqual({"claude", "codex"}, shells)
@@ -237,13 +237,13 @@ class OverlayFixture(unittest.TestCase):
             body
             if body is not None
             else (
-                '[roles.secretary]\nskills = ["shipped"]\n\n'
+                '[roles.ummanu]\nskills = ["shipped"]\n\n'
                 f'[targets.t]\nshell = "codex"\nroot = "{self.shell_root}"\n'
-                'roles = ["secretary"]\n'
+                'roles = ["ummanu"]\n'
             ),
             encoding="utf-8",
         )
-        self.write_skill(self.product.parent / "roles" / "secretary" / "shipped", "# shipped\n")
+        self.write_skill(self.product.parent / "roles" / "ummanu" / "shipped", "# shipped\n")
 
     def write_overlay(self, body: str) -> Path:
         manifest = self.instance / "skills" / "manifest.toml"
@@ -258,7 +258,7 @@ class OverlayFixture(unittest.TestCase):
         return skill
 
     def personal_skill_dir(self) -> Path:
-        return self.instance / "skills" / "roles" / "secretary" / "personal"
+        return self.instance / "skills" / "roles" / "ummanu" / "personal"
 
 
 class LayeredRegistryTests(OverlayFixture):
@@ -273,26 +273,26 @@ class LayeredRegistryTests(OverlayFixture):
         self.assertTrue((self.shell_root / "shipped" / "SKILL.md").is_file())
 
     def test_the_overlay_adds_to_a_product_role_instead_of_replacing_it(self) -> None:
-        self.write_overlay('[roles.secretary]\nskills = ["personal"]\n')
+        self.write_overlay('[roles.ummanu]\nskills = ["personal"]\n')
         self.write_skill(self.personal_skill_dir(), "# personal\n")
 
         registry = load_registry(self.instance)
 
-        self.assertEqual([skill for skill, _ in registry.roles["secretary"]], ["shipped", "personal"])
+        self.assertEqual([skill for skill, _ in registry.roles["ummanu"]], ["shipped", "personal"])
 
     def test_each_skill_resolves_beside_the_manifest_that_declared_it(self) -> None:
-        self.write_overlay('[roles.secretary]\nskills = ["personal"]\n')
+        self.write_overlay('[roles.ummanu]\nskills = ["personal"]\n')
         self.write_skill(self.personal_skill_dir(), "# personal\n")
 
         by_skill = {item.skill: item for item in iter_expected(load_registry(self.instance))}
 
-        self.assertEqual(by_skill["shipped"].source, self.product.parent / "roles" / "secretary" / "shipped")
+        self.assertEqual(by_skill["shipped"].source, self.product.parent / "roles" / "ummanu" / "shipped")
         self.assertEqual(by_skill["shipped"].origin, PRODUCT_ORIGIN)
         self.assertEqual(by_skill["personal"].source, self.personal_skill_dir())
         self.assertEqual(by_skill["personal"].origin, INSTANCE_ORIGIN)
 
     def test_sync_delivers_both_layers_into_one_shell_root(self) -> None:
-        self.write_overlay('[roles.secretary]\nskills = ["personal"]\n')
+        self.write_overlay('[roles.ummanu]\nskills = ["personal"]\n')
         self.write_skill(self.personal_skill_dir(), "# personal\n")
 
         result = sync(instance_path=self.instance)
@@ -306,7 +306,7 @@ class LayeredRegistryTests(OverlayFixture):
         )
 
     def test_an_overlay_skill_with_no_source_is_reported_against_its_own_manifest(self) -> None:
-        overlay = self.write_overlay('[roles.secretary]\nskills = ["personal"]\n')
+        overlay = self.write_overlay('[roles.ummanu]\nskills = ["personal"]\n')
 
         result = audit(instance_path=self.instance)
 
@@ -317,7 +317,7 @@ class LayeredRegistryTests(OverlayFixture):
         )
 
     def test_the_audit_names_every_manifest_it_read(self) -> None:
-        overlay = self.write_overlay('[roles.secretary]\nskills = ["personal"]\n')
+        overlay = self.write_overlay('[roles.ummanu]\nskills = ["personal"]\n')
         self.write_skill(self.personal_skill_dir(), "# personal\n")
         sync(instance_path=self.instance)
 
@@ -334,22 +334,22 @@ class LayeredRegistryTests(OverlayFixture):
 
     def test_the_text_audit_attributes_every_finding_to_the_manifest_that_owns_it(self) -> None:
         """`audit` without `--json` is the operator path, and it has to say which file to edit."""
-        overlay = self.write_overlay('[roles.secretary]\nskills = ["personal"]\n')
+        overlay = self.write_overlay('[roles.ummanu]\nskills = ["personal"]\n')
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             main(["audit", "--instance", str(self.instance)])
         lines = out.getvalue().splitlines()
 
-        shipped = next(line for line in lines if "secretary/shipped" in line)
-        personal = next(line for line in lines if "secretary/personal" in line)
+        shipped = next(line for line in lines if "ummanu/shipped" in line)
+        personal = next(line for line in lines if "ummanu/personal" in line)
         self.assertIn(str(self.product), shipped)
         self.assertIn(str(overlay), personal)
 
     def test_an_overlay_target_replaces_the_product_target_of_the_same_name(self) -> None:
         """A target is one shell root: merging two of them means nothing, so the last one wins."""
         other = self.root / "other-shell"
-        self.write_overlay(f'[targets.t]\nshell = "codex"\nroot = "{other}"\nroles = ["secretary"]\n')
+        self.write_overlay(f'[targets.t]\nshell = "codex"\nroot = "{other}"\nroles = ["ummanu"]\n')
 
         registry = load_registry(self.instance)
 
@@ -361,7 +361,7 @@ class LayeredRegistryTests(OverlayFixture):
         overlay = self.write_overlay(
             '[roles.observer]\nskills = ["shipped"]\n\n'
             f'[targets.t]\nshell = "codex"\nroot = "{self.shell_root}"\n'
-            'roles = ["secretary", "observer"]\n'
+            'roles = ["ummanu", "observer"]\n'
         )
         self.write_skill(
             self.instance / "skills" / "roles" / "observer" / "shipped", "# not the product one\n"
@@ -403,18 +403,18 @@ class LayeredRegistryTests(OverlayFixture):
         )
 
     def test_the_configured_instance_is_used_when_no_path_is_passed(self) -> None:
-        overlay = self.write_overlay('[roles.secretary]\nskills = ["personal"]\n')
+        overlay = self.write_overlay('[roles.ummanu]\nskills = ["personal"]\n')
 
-        with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(self.instance)}):
+        with mock.patch.dict(os.environ, {"UMMANU_INSTANCE": str(self.instance)}):
             sources = manifest_sources()
 
         self.assertEqual([str(source.path) for source in sources], [str(self.product), str(overlay)])
 
     def test_the_command_default_instance_comes_from_the_environment(self) -> None:
-        self.write_overlay('[roles.secretary]\nskills = ["personal"]\n')
+        self.write_overlay('[roles.ummanu]\nskills = ["personal"]\n')
         self.write_skill(self.personal_skill_dir(), "# personal\n")
 
-        with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(self.instance)}):
+        with mock.patch.dict(os.environ, {"UMMANU_INSTANCE": str(self.instance)}):
             code = main(["sync"])
 
         self.assertEqual(code, 0)
@@ -424,7 +424,7 @@ class LayeredRegistryTests(OverlayFixture):
 class AlternateProductManifestTests(OverlayFixture):
     """A caller installing one checkout while running from another.
 
-    `SECRETARY_ROLE_SKILLS_MANIFEST` still points at the fixture the base class wrote, which stands
+    `UMMANU_ROLE_SKILLS_MANIFEST` still points at the fixture the base class wrote, which stands
     in for the checkout that runs the process. Everything below names a second one instead.
     """
 
@@ -434,11 +434,11 @@ class AlternateProductManifestTests(OverlayFixture):
         self.other = product_manifest_path(self.other_root)
         self.other.parent.mkdir(parents=True)
         self.other.write_text(
-            '[roles.secretary]\nskills = ["newer"]\n\n'
-            f'[targets.t]\nshell = "codex"\nroot = "{self.shell_root}"\nroles = ["secretary"]\n',
+            '[roles.ummanu]\nskills = ["newer"]\n\n'
+            f'[targets.t]\nshell = "codex"\nroot = "{self.shell_root}"\nroles = ["ummanu"]\n',
             encoding="utf-8",
         )
-        self.write_skill(self.other.parent / "roles" / "secretary" / "newer", "# newer\n")
+        self.write_skill(self.other.parent / "roles" / "ummanu" / "newer", "# newer\n")
 
     def test_the_named_checkouts_manifest_replaces_the_running_ones(self) -> None:
         result = audit(instance_path=self.instance, product_manifest=self.other)
@@ -457,7 +457,7 @@ class AlternateProductManifestTests(OverlayFixture):
         self.assertEqual(product_manifest_path(self.other_root), self.other)
 
     def test_an_overlay_still_layers_over_the_named_checkout(self) -> None:
-        self.write_overlay('[roles.secretary]\nskills = ["personal"]\n')
+        self.write_overlay('[roles.ummanu]\nskills = ["personal"]\n')
         self.write_skill(self.personal_skill_dir(), "# personal\n")
 
         result = sync(instance_path=self.instance, product_manifest=self.other)
@@ -468,7 +468,7 @@ class AlternateProductManifestTests(OverlayFixture):
         )
 
     def test_a_malformed_manifest_in_the_named_checkout_names_that_file(self) -> None:
-        self.other.write_text("[roles.secretary\n", encoding="utf-8")
+        self.other.write_text("[roles.ummanu\n", encoding="utf-8")
 
         with self.assertRaises(RegistryError) as caught:
             audit(instance_path=self.instance, product_manifest=self.other)
@@ -499,12 +499,12 @@ class MalformedManifestTests(OverlayFixture):
         self.assert_bounded(code, output, overlay)
 
     def test_an_overlay_with_the_wrong_shape_names_itself_and_the_key(self) -> None:
-        overlay = self.write_overlay('[roles.secretary]\nskills = "personal"\n')
+        overlay = self.write_overlay('[roles.ummanu]\nskills = "personal"\n')
 
         code, output = self.run_command("audit")
 
         self.assert_bounded(code, output, overlay)
-        self.assertIn("roles.secretary.skills", output)
+        self.assertIn("roles.ummanu.skills", output)
 
     def test_a_target_naming_an_unknown_role_is_rejected(self) -> None:
         overlay = self.write_overlay(
@@ -517,7 +517,7 @@ class MalformedManifestTests(OverlayFixture):
         self.assertIn("ghost", output)
 
     def test_a_malformed_overlay_makes_sync_write_nothing(self) -> None:
-        overlay = self.write_overlay("[roles.secretary]\nskills = [1]\n")
+        overlay = self.write_overlay("[roles.ummanu]\nskills = [1]\n")
 
         code, output = self.run_command("sync")
 
@@ -544,8 +544,8 @@ class MalformedManifestTests(OverlayFixture):
 
     def test_a_skill_name_that_is_a_path_cannot_leave_the_shell_root(self) -> None:
         """A name is joined onto a shell root, so a name with a separator moves the write."""
-        overlay = self.write_overlay('[roles.secretary]\nskills = ["../escaped"]\n')
-        self.write_skill(self.instance / "skills" / "roles" / "secretary" / "escaped", "# escaped\n")
+        overlay = self.write_overlay('[roles.ummanu]\nskills = ["../escaped"]\n')
+        self.write_skill(self.instance / "skills" / "roles" / "ummanu" / "escaped", "# escaped\n")
         self.shell_root.mkdir(parents=True)
 
         code, output = self.run_command("sync")
@@ -565,7 +565,7 @@ class MalformedManifestTests(OverlayFixture):
         self.assertIn("../outside", output)
 
     def test_a_malformed_product_manifest_names_the_product_manifest(self) -> None:
-        self.write_product("[roles.secretary\n")
+        self.write_product("[roles.ummanu\n")
 
         code, output = self.run_command("audit")
 
@@ -584,13 +584,13 @@ class RetiredSkillTests(OverlayFixture):
         self.home = self.root / "home"
         self.shell = self.home / ".claude" / "skills"
         for skill in ("kept", "dropped"):
-            self.write_skill(self.product.parent / "roles" / "secretary" / skill, f"# {skill}\n")
+            self.write_skill(self.product.parent / "roles" / "ummanu" / skill, f"# {skill}\n")
 
     def declare(self, *skills: str) -> None:
         listed = ", ".join(f'"{skill}"' for skill in skills)
         self.product.write_text(
-            f"[roles.secretary]\nskills = [{listed}]\n\n"
-            '[targets.t]\nshell = "claude"\nroot = "~/.claude/skills"\nroles = ["secretary"]\n',
+            f"[roles.ummanu]\nskills = [{listed}]\n\n"
+            '[targets.t]\nshell = "claude"\nroot = "~/.claude/skills"\nroles = ["ummanu"]\n',
             encoding="utf-8",
         )
 
@@ -632,7 +632,7 @@ class CommandEntryPointTests(OverlayFixture):
         self.write_skill(self.personal_skill_dir(), "# personal\n")
         if with_command:
             self.helper.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
-        return self.write_overlay('[roles.secretary]\nskills = ["personal"]\n')
+        return self.write_overlay('[roles.ummanu]\nskills = ["personal"]\n')
 
     def test_sync_materializes_an_executable_entry_point(self) -> None:
         overlay = self.install_personal_skill()
@@ -655,7 +655,7 @@ class CommandEntryPointTests(OverlayFixture):
         """
         self.install_personal_skill()
         self.bin_dir.mkdir(parents=True, exist_ok=True)
-        moved_from = self.product.parent / "roles" / "secretary" / "personal"
+        moved_from = self.product.parent / "roles" / "ummanu" / "personal"
         self.link.symlink_to(moved_from / "personal.sh")
         self.assertFalse(self.link.exists(), "the fixture link is supposed to dangle")
 
@@ -722,7 +722,7 @@ class CommandEntryPointTests(OverlayFixture):
     def test_sync_refuses_a_foreign_link_that_merely_looks_like_ours(self) -> None:
         """Somebody else's file under a path with the shape of a skill source is still theirs."""
         self.install_personal_skill()
-        theirs = self.root / "elsewhere" / "roles" / "secretary" / "personal"
+        theirs = self.root / "elsewhere" / "roles" / "ummanu" / "personal"
         theirs.mkdir(parents=True)
         script = theirs / "personal.sh"
         script.write_text("#!/bin/sh\necho theirs\n", encoding="utf-8")
@@ -744,7 +744,7 @@ class CommandEntryPointTests(OverlayFixture):
         and the command being claimed can be the one that opens the operator's browser session.
         """
         self.install_personal_skill()
-        theirs = self.root / "elsewhere" / "roles" / "secretary" / "personal" / "personal.sh"
+        theirs = self.root / "elsewhere" / "roles" / "ummanu" / "personal" / "personal.sh"
         self.bin_dir.mkdir(parents=True, exist_ok=True)
         self.link.symlink_to(theirs)
         self.assertFalse(self.link.exists(), "the fixture link is supposed to dangle")
@@ -773,10 +773,10 @@ class CommandEntryPointTests(OverlayFixture):
         # Separate shell roots: the two skills fit side by side on disk, and the one thing they
         # cannot both have is the single link named after them.
         self.write_product(
-            '[roles.secretary]\nskills = ["shipped"]\n\n'
+            '[roles.ummanu]\nskills = ["shipped"]\n\n'
             '[roles.helper]\nskills = ["personal"]\n\n'
             f'[targets.t]\nshell = "codex"\nroot = "{self.shell_root}"\n'
-            'roles = ["secretary"]\n\n'
+            'roles = ["ummanu"]\n\n'
             f'[targets.u]\nshell = "codex"\nroot = "{self.root / "helper-shell"}"\n'
             'roles = ["helper"]\n'
         )
@@ -840,7 +840,7 @@ class SkillDeliveryTests(unittest.TestCase):
         self.write_manifest(shell="codex")
         env = mock.patch.dict(
             os.environ,
-            {MANIFEST_ENV: str(self.manifest), "SECRETARY_INSTANCE": str(self.instance)},
+            {MANIFEST_ENV: str(self.manifest), "UMMANU_INSTANCE": str(self.instance)},
         )
         env.start()
         self.addCleanup(env.stop)

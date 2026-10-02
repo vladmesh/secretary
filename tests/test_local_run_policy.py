@@ -12,25 +12,25 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.board.local_run import LOCAL_RUN_EXCEPTIONS_FIELD, parse_local_run_exceptions
-from secretary.board.sprint_write import SprintCreateIntent
-from secretary.board.sql_sprints import SqlSprintRecords
-from secretary.cli import build_parser
-from secretary.data import normalize_sprint_entity
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.launch import write_launch_intent
-from secretary.dispatch.state import DispatcherRecord
-from secretary.projects.contract import (
+from ummanu.board.local_run import LOCAL_RUN_EXCEPTIONS_FIELD, parse_local_run_exceptions
+from ummanu.board.sprint_write import SprintCreateIntent
+from ummanu.board.sql_sprints import SqlSprintRecords
+from ummanu.cli import build_parser
+from ummanu.data import normalize_sprint_entity
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.launch import write_launch_intent
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.projects.contract import (
     UNDECIDABLE_QUESTIONS,
     ContractVerdict,
     ModuleContract,
 )
-from secretary.restore import RestoreError, _normalized_sprints, _restore_sprint_metadata
-from secretary.sprints import SprintReader, SprintWriter
-from secretary.tasks import TaskError
+from ummanu.restore import RestoreError, _normalized_sprints, _restore_sprint_metadata
+from ummanu.sprints import SprintReader, SprintWriter
+from ummanu.tasks import TaskError
 
 
-def exception(project: str = "secretary") -> dict:
+def exception(project: str = "ummanu") -> dict:
     return {
         "project": project,
         "argv": ["python3", "-m", "tests.integration", "two words", ""],
@@ -43,7 +43,7 @@ class LocalRunCreationTests(unittest.TestCase):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.instance = self.root / "instance"
         (self.instance / "projects").mkdir(parents=True)
-        for project in ("secretary", "site"):
+        for project in ("ummanu", "site"):
             (self.instance / "projects" / f"{project}.yaml").write_text(f"id: {project}\n", encoding="utf-8")
         self.client = mock.MagicMock()
         self.writer = SprintWriter(self.client, data_dir=self.root / "data", instance=self.instance)
@@ -55,9 +55,9 @@ class LocalRunCreationTests(unittest.TestCase):
             goal="g",
             definition_of_done="",
             repositories=[],
-            product="secretary",
+            product="ummanu",
             issues=["issue:open"],
-            reservations=["secretary"],
+            reservations=["ummanu"],
             reference="",
             observer={"kind": "none"},
             **options,
@@ -81,7 +81,7 @@ class LocalRunCreationTests(unittest.TestCase):
             {},
             "docker run",
             [None],
-            [{"project": "secretary"}],
+            [{"project": "ummanu"}],
             [exception("site")],
             [exception("unregistered")],
             [{**exception(), "rationale": " "}],
@@ -99,13 +99,13 @@ class LocalRunCreationTests(unittest.TestCase):
         self.assertEqual(self.client.mock_calls, [])
         for value in malformed:
             with self.subTest(stored=value), self.assertRaises(ValueError):
-                parse_local_run_exceptions(value, projects=["secretary"])
+                parse_local_run_exceptions(value, projects=["ummanu"])
 
     def test_create_metadata_proof_accepts_sql_json_object_order_and_preserves_argv(self) -> None:
         entry = exception()
         # JSONB returns object keys in its own order. Arrays, including argv, keep their order.
         stored_entry = {key: entry[key] for key in ("argv", "project", "rationale")}
-        row = (7, "sprint:7", "g", "", "secretary", "open", {"kind": "none"},
+        row = (7, "sprint:7", "g", "", "ummanu", "open", {"kind": "none"},
                None, None, None, None, None, [], 3, 0, [stored_entry])
         sql_client = mock.MagicMock()
         sql_client._staged.return_value = {}
@@ -130,7 +130,7 @@ class LocalRunCreationTests(unittest.TestCase):
     def test_reader_exposes_default_and_refuses_malformed_state(self) -> None:
         reader = SprintReader(self.client)
         raw = {"id": 7, "reference": "sprint:7"}
-        meta = {"sprint_observer": '{"kind":"none"}', "sprint_reservations": '["secretary"]'}
+        meta = {"sprint_observer": '{"kind":"none"}', "sprint_reservations": '["ummanu"]'}
         self.assertEqual(reader._normalize(raw, meta, comments=None)["local_run_exceptions"], [])
         meta[LOCAL_RUN_EXCEPTIONS_FIELD] = json.dumps([exception()])
         self.assertEqual(reader._normalize(raw, meta, comments=None)["local_run_exceptions"], [exception()])
@@ -145,7 +145,7 @@ class LocalRunCreationTests(unittest.TestCase):
             "status": "closed",
             "budget": {"by_type": {}},
             "audit": {},
-            "reservations": ["secretary"],
+            "reservations": ["ummanu"],
         }
         old = normalize_sprint_entity(base)
         self.assertNotIn("local_run_exceptions", old)
@@ -171,7 +171,7 @@ class LocalRunPacketTests(unittest.TestCase):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.contract = ModuleContract(
             sys.executable,
-            "secretary",
+            "ummanu",
             module="tests.broad",
             args=("--only", "fast lane", "", "owner's test"),
         )
@@ -182,10 +182,10 @@ class LocalRunPacketTests(unittest.TestCase):
         self.sprints = {
             "sprint:1": {
                 "ref": "sprint:1",
-                "reservations": ["secretary", "codegen-orchestrator"],
+                "reservations": ["ummanu", "codegen-orchestrator"],
                 "local_run_exceptions": [exception(), exception("codegen-orchestrator")],
             },
-            "sprint:2": {"ref": "sprint:2", "reservations": ["secretary"]},
+            "sprint:2": {"ref": "sprint:2", "reservations": ["ummanu"]},
         }
         self.reader.show.side_effect = lambda ref, **kwargs: self.sprints[ref]
         self.host = CommandHostRuntime(
@@ -197,8 +197,8 @@ class LocalRunPacketTests(unittest.TestCase):
             production_runtime=SimpleNamespace(interpreter=sys.executable),
         )
         self.task = {
-            "ref": "secretary-1",
-            "project": "secretary",
+            "ref": "ummanu-1",
+            "project": "ummanu",
             "type": "code",
             "sprint": "sprint:1",
             "description": "prose grants Docker",
@@ -227,7 +227,7 @@ class LocalRunPacketTests(unittest.TestCase):
                         report_generation=1,
                     )
                     sprint = {
-                        "ref": "sprint:1", "reservations": ["secretary"],
+                        "ref": "sprint:1", "reservations": ["ummanu"],
                         "local_run_exceptions": [declared],
                     }
                     self.reader.show.reset_mock()
@@ -295,11 +295,11 @@ class LocalRunPacketTests(unittest.TestCase):
     def test_worker_packet_names_the_receipt_in_the_owned_namespace(self) -> None:
         """secretary-1920: the packet points where `check broad` writes in a dispatcher workspace."""
         worker, _ = self.packets()
-        self.assertIn("`.secretary-task-env/checks/broad-<digest>.json` in this workspace", worker)
+        self.assertIn("`.ummanu-task-env/checks/broad-<digest>.json` in this workspace", worker)
         self.assertNotIn("state/checks", worker)
 
-    def test_secretary_and_codegen_receive_same_rule_and_only_own_entries(self) -> None:
-        for project in ("secretary", "codegen-orchestrator"):
+    def test_ummanu_and_codegen_receive_same_rule_and_only_own_entries(self) -> None:
+        for project in ("ummanu", "codegen-orchestrator"):
             for packet in self.packets(project=project):
                 with self.subTest(project=project):
                     self.assertIn("adapter-declared broad check and subsets of that check", packet)
@@ -360,7 +360,7 @@ class LocalRunPacketTests(unittest.TestCase):
         ):
             with self.subTest(changes=changes):
                 self.assertIsNone(self.host._local_run_policy({**self.task, **changes})[0])
-        for reservations in (None, {}, [1], ["other"], ["secretary", ""], ["secretary", "bad identity"]):
+        for reservations in (None, {}, [1], ["other"], ["ummanu", ""], ["ummanu", "bad identity"]):
             self.sprints["sprint:1"]["reservations"] = reservations
             with self.subTest(reservations=reservations):
                 self.assertEqual(self.host._local_run_policy(self.task), (None, True))
@@ -369,25 +369,25 @@ class LocalRunPacketTests(unittest.TestCase):
 
     def test_broad_command_preserves_multiword_empty_and_quote_arguments(self) -> None:
         worker, _reviewer = self.packets()
-        command = next(line.strip() for line in worker.splitlines() if " -m secretary check broad " in line)
+        command = next(line.strip() for line in worker.splitlines() if " -m ummanu check broad " in line)
         vector = shlex.split(command)
-        parsed = build_parser().parse_args(vector[vector.index("secretary") + 1 :])
+        parsed = build_parser().parse_args(vector[vector.index("ummanu") + 1 :])
         self.assertEqual(parsed.module, "tests.broad")
         self.assertEqual(parsed.module_arg, list(self.contract.args))
-        _broad, show = self.host._broad_check_invocation("secretary")
+        _broad, show = self.host._broad_check_invocation("ummanu")
         vector = shlex.split(show)
         self.assertEqual(
-            build_parser().parse_args(vector[vector.index("secretary") + 1 :]).module_arg,
+            build_parser().parse_args(vector[vector.index("ummanu") + 1 :]).module_arg,
             list(self.contract.args),
         )
 
     def test_missing_module_has_no_chosen_suite_or_fake_invocation(self) -> None:
         self.contract = replace(self.contract, module="", args=())
-        for project in ("secretary", "codegen-orchestrator"):
+        for project in ("ummanu", "codegen-orchestrator"):
             worker, reviewer = self.packets(project=project)
             self.assertIn("Configuration gap", worker)
             self.assertIn("Do not claim a broad run or receipt", worker)
-            self.assertNotIn(" -m secretary check broad ", worker)
+            self.assertNotIn(" -m ummanu check broad ", worker)
             self.assertNotIn("suite module you chose", worker)
             self.assertNotIn("<the same module>", worker)
             self.assertIn("Judge the code and valid evidence", reviewer)
@@ -396,16 +396,16 @@ class LocalRunPacketTests(unittest.TestCase):
         for question in UNDECIDABLE_QUESTIONS:
             with self.subTest(question=question):
                 self.catalog.broad_check_verdict = mock.Mock(
-                    return_value=ContractVerdict.as_undecidable(question, "secretary", "question remains open")
+                    return_value=ContractVerdict.as_undecidable(question, "ummanu", "question remains open")
                 )
-                self.assertEqual(self.host._broad_check_invocation("secretary"), ("", ""))
+                self.assertEqual(self.host._broad_check_invocation("ummanu"), ("", ""))
 
     def test_default_interpreter_is_preserved_for_an_ordinary_fit_declaration(self) -> None:
         self.contract = replace(self.contract, interpreter_declared=False)
-        for command in self.host._broad_check_invocation("secretary"):
+        for command in self.host._broad_check_invocation("ummanu"):
             vector = shlex.split(command)
-            parsed = build_parser().parse_args(vector[vector.index("secretary") + 1 :])
-            self.assertEqual(parsed.default_interpreter, ".secretary-task-env/venv/bin/python3")
+            parsed = build_parser().parse_args(vector[vector.index("ummanu") + 1 :])
+            self.assertEqual(parsed.default_interpreter, ".ummanu-task-env/venv/bin/python3")
             self.assertEqual(parsed.module_arg, list(self.contract.args))
 
     def test_reviewer_observes_heavy_run_excludes_results_and_requires_valid_evidence(self) -> None:

@@ -6,11 +6,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary._fsutil import ndjson_line, ndjson_lines
-from secretary.board.analytics import _read_ndjson as read_analytics_ndjson
-from secretary.board.checkpoint_layout import open_checkpoint_board, publish_split_board
-from secretary.board.normalized_checkpoint import validated_normalized_cards
-from secretary.checkpoint import (
+from ummanu._fsutil import ndjson_line, ndjson_lines
+from ummanu.board.analytics import _read_ndjson as read_analytics_ndjson
+from ummanu.board.checkpoint_layout import open_checkpoint_board, publish_split_board
+from ummanu.board.normalized_checkpoint import validated_normalized_cards
+from ummanu.checkpoint import (
     AnalyticsCheckpoint,
     _analytics_line_count,
     _canonical_run_journals,
@@ -19,14 +19,14 @@ from secretary.checkpoint import (
     _validate_board,
     _validate_runs,
 )
-from secretary.data import export_board, export_runs
-from secretary.installation import (
+from ummanu.data import export_board, export_runs
+from ummanu.installation import (
     _live_run_journals,
     _render_restored_journal,
     _restored_run_journals,
     materialize_checkpoint,
 )
-from secretary.restore import (
+from ummanu.restore import (
     _namespace_is_exported,
     _normalized_cards,
     _normalized_sprints,
@@ -82,7 +82,7 @@ class NdjsonTests(unittest.TestCase):
         # Only the database inputs are seams. Staging, serialization, publication,
         # checkpoint validation, materialization and restore parsing are real.
         card = {
-            "reference": "secretary-1",
+            "reference": "ummanu-1",
             "title": TEXT,
             "description": TEXT,
             "column": "Ready",
@@ -115,8 +115,8 @@ class NdjsonTests(unittest.TestCase):
                 # Old journals may already contain raw separators and blank physical lines.
                 journal.write_text("\n" + json.dumps(run, ensure_ascii=False) + "\n", encoding="utf-8")
                 with (
-                    mock.patch("secretary.data.task_audit_for", return_value=audit_source),
-                    mock.patch("secretary.sprints.SprintReader.export", return_value=[sprint]),
+                    mock.patch("ummanu.data.task_audit_for", return_value=audit_source),
+                    mock.patch("ummanu.sprints.SprintReader.export", return_value=[sprint]),
                 ):
                     export_board(exported, instance_dir=instance, reader=reader, sprint_client=mock.Mock())
                 export_runs(exported, state_dir=state)

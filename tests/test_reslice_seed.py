@@ -22,23 +22,23 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from secretary.dispatch.gate import GateResult, _impossible_trigger_reason, gate_check
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.launch import BRING_UP_CAUSE_CLASSES, CAUSE_BASE_BRANCH_CONTRACT
-from secretary.dispatch.types import HostError
-from secretary.infra.github_credential import PROJECT_GIT_PHASE, RemoteExecution
-from secretary.projects.integration_base import (
-    IntegrationBaseError,
-    integration_base_refusal,
-    resolve_integration_base,
-    seed_ref_refusal,
-)
-from secretary.tasks import TaskError, TaskReader, TaskWriter
 from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
 from tests.fakes.dispatcher import FakeCatalog
 from tests.fakes.tasks import writer_seed
 from tests.production_runtime_fixtures import registered_production_runtime
 from tests.sql_backend_fixtures import card_store
+from ummanu.dispatch.gate import GateResult, _impossible_trigger_reason, gate_check
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.launch import BRING_UP_CAUSE_CLASSES, CAUSE_BASE_BRANCH_CONTRACT
+from ummanu.dispatch.types import HostError
+from ummanu.infra.github_credential import PROJECT_GIT_PHASE, RemoteExecution
+from ummanu.projects.integration_base import (
+    IntegrationBaseError,
+    integration_base_refusal,
+    resolve_integration_base,
+    seed_ref_refusal,
+)
+from ummanu.tasks import TaskError, TaskReader, TaskWriter
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -196,7 +196,7 @@ class CardAdmissionTests(unittest.TestCase):
         arguments: dict[str, object] = {
             "role": "worker",
             "actor": "operator",
-            "project": "secretary",
+            "project": "ummanu",
             "task_type": "code",
             "title": "successor of codegen-orchestrator-1235",
             "target": "issues",
@@ -250,36 +250,36 @@ class CatalogSeedTests(unittest.TestCase):
         self.catalog = FakeCatalog()
 
     def test_an_ordinary_card_seeds_from_its_integration_base(self) -> None:
-        task = {"ref": "secretary-1", "project": "secretary", "workspace": {}}
+        task = {"ref": "ummanu-1", "project": "ummanu", "workspace": {}}
 
-        self.assertEqual(self.catalog.workspace_seed("secretary", task), "main")
-        self.assertEqual(self.catalog.integration_base("secretary", None), "main")
+        self.assertEqual(self.catalog.workspace_seed("ummanu", task), "main")
+        self.assertEqual(self.catalog.integration_base("ummanu", None), "main")
 
     def test_a_card_naming_the_default_branch_behaves_identically(self) -> None:
-        task = {"ref": "secretary-1", "project": "secretary", "workspace": {"base_branch": "main"}}
+        task = {"ref": "ummanu-1", "project": "ummanu", "workspace": {"base_branch": "main"}}
 
-        self.assertEqual(self.catalog.workspace_seed("secretary", task), "main")
-        self.assertEqual(self.catalog.integration_base("secretary", "main"), "main")
+        self.assertEqual(self.catalog.workspace_seed("ummanu", task), "main")
+        self.assertEqual(self.catalog.integration_base("ummanu", "main"), "main")
 
     def test_a_successor_seeds_from_the_predecessor_and_still_integrates_into_main(self) -> None:
         task = {
             "ref": "codegen-orchestrator-1236",
-            "project": "secretary",
+            "project": "ummanu",
             "workspace": {
                 "seed_ref": "pipeline/codegen-orchestrator-1235",
                 "supersedes": "codegen-orchestrator-1235",
             },
         }
 
-        self.assertEqual(self.catalog.workspace_seed("secretary", task), "pipeline/codegen-orchestrator-1235")
+        self.assertEqual(self.catalog.workspace_seed("ummanu", task), "pipeline/codegen-orchestrator-1235")
         self.assertEqual(
-            self.catalog.integration_base("secretary", task["workspace"].get("base_branch")), "main"
+            self.catalog.integration_base("ummanu", task["workspace"].get("base_branch")), "main"
         )
 
     def test_a_legacy_card_branch_base_is_refused_as_this_cards_own_contract(self) -> None:
         """Nothing repairs a card admitted before the split; it fails fast, typed, and once."""
         with self.assertRaises(HostError) as refused:
-            self.catalog.integration_base("secretary", "pipeline/codegen-orchestrator-1235")
+            self.catalog.integration_base("ummanu", "pipeline/codegen-orchestrator-1235")
 
         self.assertEqual(getattr(refused.exception, "bring_up_cause", ""), CAUSE_BASE_BRANCH_CONTRACT)
         self.assertIn("card branch", str(refused.exception))
@@ -509,7 +509,7 @@ class MergeBaseTests(unittest.TestCase):
         self.root = Path(self.tmpdir.name)
         self.task = {
             "ref": "codegen-orchestrator-1236",
-            "project": "secretary",
+            "project": "ummanu",
             "workspace": {
                 "seed_ref": "pipeline/codegen-orchestrator-1235",
                 "supersedes": "codegen-orchestrator-1235",
@@ -655,13 +655,13 @@ class SeededWorkspaceTests(unittest.TestCase):
 
     def _cut(self, task: dict, worker_id: str) -> Path:
         """Exactly what `prepare_worker` does: seed for the checkout, base for everything else."""
-        seed = self.catalog.workspace_seed("secretary", task)
+        seed = self.catalog.workspace_seed("ummanu", task)
         return Path(self.host._git_workspaces.create(task, worker_id, seed))
 
     def test_a_successor_is_cut_from_the_predecessor_candidate_and_still_integrates_into_main(self) -> None:
         task = {
             "ref": "codegen-orchestrator-1236",
-            "project": "secretary",
+            "project": "ummanu",
             "workspace": {
                 "seed_ref": self.fixture.candidate_sha,
                 "supersedes": "codegen-orchestrator-1235",
@@ -681,13 +681,13 @@ class SeededWorkspaceTests(unittest.TestCase):
         )
         # And nothing about the seed moved where the increment lands.
         self.assertEqual(
-            self.catalog.integration_base("secretary", task["workspace"].get("base_branch")), "main"
+            self.catalog.integration_base("ummanu", task["workspace"].get("base_branch")), "main"
         )
 
     def test_a_branch_seed_cuts_the_same_content_through_its_tracking_ref(self) -> None:
         task = {
             "ref": "codegen-orchestrator-1236",
-            "project": "secretary",
+            "project": "ummanu",
             "workspace": {
                 "seed_ref": "pipeline/codegen-orchestrator-1235",
                 "supersedes": "codegen-orchestrator-1235",
@@ -701,9 +701,9 @@ class SeededWorkspaceTests(unittest.TestCase):
 
     def test_an_ordinary_card_is_still_cut_from_its_integration_base(self) -> None:
         """No seed, no change: the checkout starts where every card's checkout always started."""
-        task = {"ref": "secretary-1", "project": "secretary", "workspace": {}}
+        task = {"ref": "ummanu-1", "project": "ummanu", "workspace": {}}
 
-        workspace = self._cut(task, "secretary-1-ordinary")
+        workspace = self._cut(task, "ummanu-1-ordinary")
 
         self.assertEqual(git(workspace, "rev-parse", "HEAD"), self.fixture.main_sha)
         self.assertEqual(self.host.start_points, ["origin/main"])
@@ -775,7 +775,7 @@ class NonGithubPublishTests(unittest.TestCase):
     def _publish(self, catalog, workspace: dict) -> list[str]:
         host = _PushHost(catalog, self.root)
         host.complete_green(
-            {"ref": "secretary-770", "project": "secretary", "workspace": workspace}, self.record
+            {"ref": "ummanu-770", "project": "ummanu", "workspace": workspace}, self.record
         )
         return [" ".join(run) for run in host.runs]
 
@@ -783,7 +783,7 @@ class NonGithubPublishTests(unittest.TestCase):
         commands = self._publish(_PushCatalog(), {})
 
         self.assertTrue(
-            any(command.endswith("push origin pipeline/secretary-770:main") for command in commands), commands
+            any(command.endswith("push origin pipeline/ummanu-770:main") for command in commands), commands
         )
         self.assertTrue(
             any(command.endswith("merge --ff-only origin/main") for command in commands), commands
@@ -793,7 +793,7 @@ class NonGithubPublishTests(unittest.TestCase):
         commands = self._publish(_PushCatalog(integration_bases=["develop"]), {"base_branch": "develop"})
 
         self.assertTrue(
-            any(command.endswith("push origin pipeline/secretary-770:develop") for command in commands),
+            any(command.endswith("push origin pipeline/ummanu-770:develop") for command in commands),
             commands,
         )
         self.assertTrue(
@@ -812,7 +812,7 @@ class TopologyRedRoutingTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.host.gate_results = [
             GateResult(
                 "red",
-                "CI cannot run for `pipeline/secretary-510`",
+                "CI cannot run for `pipeline/ummanu-510`",
                 failure_class="topology",
                 failure_reason="ci-trigger-impossible",
             )

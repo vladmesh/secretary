@@ -15,10 +15,10 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
+os.environ.setdefault("UMMANU_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
-from secretary.runtime.head.children import read_head_children
 from tests.dispatcher_fixtures import DispatcherRuntimeFixture
+from ummanu.runtime.head.children import read_head_children
 
 
 def _stop_group(head: subprocess.Popen) -> None:
@@ -42,7 +42,7 @@ class RespawnNamesTheInterruptedCommandTests(DispatcherRuntimeFixture, unittest.
         self._rewind_idle()
         if command:
             payload = self.runtime.production_state.load()
-            episode = payload["records"]["secretary-510"]["worker_vitality_episode"]
+            episode = payload["records"]["ummanu-510"]["worker_vitality_episode"]
             episode["last_child_key"] = "4321.99"
             episode["last_child_command"] = command
             episode["last_child_output"] = "/tmp/shards.log"
@@ -53,7 +53,7 @@ class RespawnNamesTheInterruptedCommandTests(DispatcherRuntimeFixture, unittest.
 
     def _task_doc(self) -> str:
         payload = self.runtime.production_state.load()
-        workspace = payload["records"]["secretary-510"]["workspace"]
+        workspace = payload["records"]["ummanu-510"]["workspace"]
         return (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
 
     def test_the_successor_is_told_which_command_was_interrupted(self) -> None:
@@ -67,7 +67,7 @@ class RespawnNamesTheInterruptedCommandTests(DispatcherRuntimeFixture, unittest.
         )
         # Transient: nothing about it lands on the durable record.
         payload = self.runtime.production_state.load()
-        self.assertNotIn("respawn_interrupted_command", payload["records"]["secretary-510"])
+        self.assertNotIn("respawn_interrupted_command", payload["records"]["ummanu-510"])
 
     def _respawn_over_a_real_sleep_child(self, stdout: Any) -> str:
         """The wait tick's own child readings of a live ``sleep 3600`` (never above the noise

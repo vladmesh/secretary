@@ -12,16 +12,20 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import secret_store
-from secretary._fsutil import publish_component_entries
-from secretary.board import (
+from tests.fakes.installation import split_board
+from tests.fakes.tasks import writer_seed
+from tests.retired_board import LEGACY_VALUES, legacy_runtime_lines, write_stale_leftovers
+from tests.sql_backend_fixtures import card_store
+from ummanu import secret_store
+from ummanu._fsutil import publish_component_entries
+from ummanu.board import (
     Actor,
     EntityKind,
     Event,
     EventKind,
 )
-from secretary.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
-from secretary.checkpoint import (
+from ummanu.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
+from ummanu.checkpoint import (
     ANALYTICS_MANIFEST,
     PUSH_INTERVAL_SECONDS,
     AnalyticsManifestError,
@@ -37,16 +41,12 @@ from secretary.checkpoint import (
     render_checkpoint_lines,
     verify_analytics_checkpoint,
 )
-from secretary.data import DataExport, export_board
-from secretary.dispatch.production import _coordinate_checkpoint
-from secretary.routing_journal import attempts
-from secretary.secret_store import import_env_file, initialize_store, set_secret
-from secretary.secret_words import RECOVERY_WORDS
-from secretary.tasks import TaskReader, task_audit_for
-from tests.fakes.installation import split_board
-from tests.fakes.tasks import writer_seed
-from tests.retired_board import LEGACY_VALUES, legacy_runtime_lines, write_stale_leftovers
-from tests.sql_backend_fixtures import card_store
+from ummanu.data import DataExport, export_board
+from ummanu.dispatch.production import _coordinate_checkpoint
+from ummanu.routing_journal import attempts
+from ummanu.secret_store import import_env_file, initialize_store, set_secret
+from ummanu.secret_words import RECOVERY_WORDS
+from ummanu.tasks import TaskReader, task_audit_for
 
 
 def git(repo: Path, *args: str) -> str:
@@ -66,7 +66,7 @@ def is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
 
 CARD = {
     "id": 1,
-    "reference": "secretary-637",
+    "reference": "ummanu-637",
     "title": "Checkpoint writer",
     "column": "Ready",
     "comments": [],
@@ -77,15 +77,15 @@ SPRINT = {
     "reference": "sprint:41",
     "goal": "Ship sprint entities into the checkpoint",
     "definition_of_done": "restore rebuilds the entity",
-    "repositories": ["secretary"],
+    "repositories": ["ummanu"],
     "status": "closed",
     "budget": {"by_type": {"red_ci": 1}},
-    "current_task": "secretary-637",
+    "current_task": "ummanu-637",
     "resume": None,
     "audit": {
         "created_at": "2026-07-01T00:00:00Z",
         "updated_at": "2026-07-02T00:00:00Z",
-        "board": "Secretary sprints",
+        "board": "Ummanu sprints",
     },
     "comments": [],
 }
@@ -104,7 +104,7 @@ class CheckpointWriterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
         root = Path(self.tmpdir.name)
-        self.data_dir = root / "secretary-data"
+        self.data_dir = root / "ummanu-data"
         self.instance_dir = root / "secretary-instance"
         (self.data_dir / "board").mkdir(parents=True)
         (self.data_dir / "runs").mkdir(parents=True)
@@ -201,8 +201,8 @@ class CheckpointWriterTests(unittest.TestCase):
             return DataExport(path=Path(data_dir), count=len(lines.splitlines()), source="test")
 
         with (
-            mock.patch("secretary.checkpoint.export_board", side_effect=board_export),
-            mock.patch("secretary.checkpoint.export_runs", side_effect=runs_export),
+            mock.patch("ummanu.checkpoint.export_board", side_effect=board_export),
+            mock.patch("ummanu.checkpoint.export_runs", side_effect=runs_export),
         ):
             return self.writer(client).write()
 
@@ -289,7 +289,7 @@ class CheckpointWriterTests(unittest.TestCase):
                 created.append(Path(path))
             return path
 
-        return created, mock.patch("secretary.checkpoint.tempfile.mkdtemp", side_effect=mkdtemp)
+        return created, mock.patch("ummanu.checkpoint.tempfile.mkdtemp", side_effect=mkdtemp)
 
     def test_every_outcome_of_a_run_removes_its_staging(self):
         """Staging never outlives its run: committed, unchanged and blocked (secretary-1663)."""
@@ -325,7 +325,7 @@ class CheckpointWriterTests(unittest.TestCase):
 
         with (
             watching,
-            mock.patch("secretary.checkpoint.publish_split_board", side_effect=OSError("disk went away")),
+            mock.patch("ummanu.checkpoint.publish_split_board", side_effect=OSError("disk went away")),
             self.assertRaisesRegex(OSError, "disk went away"),
         ):
             self.write()
@@ -355,7 +355,7 @@ class CheckpointWriterTests(unittest.TestCase):
         elsewhere = self.instance_dir / ".board-checkpoint-elsewhere.tmp"
         elsewhere.mkdir()
 
-        from secretary import checkpoint as checkpoint_module
+        from ummanu import checkpoint as checkpoint_module
 
         held = {"lock": False}
         real_lock = checkpoint_module.state_repo.state_repo_lock
@@ -380,8 +380,8 @@ class CheckpointWriterTests(unittest.TestCase):
         # A run the audit gate blocks before staging anything still collects.
         task_audit_for(self.client).stage("request-1", {"event_id": "e1", "request_id": "request-1"})
         with (
-            mock.patch("secretary.checkpoint.state_repo.state_repo_lock", side_effect=lock),
-            mock.patch("secretary.checkpoint._cleanup_staging_dir", side_effect=cleanup),
+            mock.patch("ummanu.checkpoint.state_repo.state_repo_lock", side_effect=lock),
+            mock.patch("ummanu.checkpoint._cleanup_staging_dir", side_effect=cleanup),
         ):
             result = self.write()
 
@@ -401,7 +401,7 @@ class CheckpointWriterTests(unittest.TestCase):
         result = self.write()
 
         self.assertEqual(result.status, "blocked")
-        self.assertIn("duplicate references secretary-637", result.reason)
+        self.assertIn("duplicate references ummanu-637", result.reason)
         self.assertEqual(git(self.instance_dir, "rev-parse", "HEAD").strip(), head)
         self.assertEqual(git(self.instance_dir, "diff", "--cached", "--name-only"), "")
         self.assertEqual(self.published_text("cards.ndjson"), canon)
@@ -432,7 +432,7 @@ class CheckpointWriterTests(unittest.TestCase):
         changed = dict(CARD, title="new cut")
         self.seed_board([changed])
 
-        from secretary import checkpoint as checkpoint_module
+        from ummanu import checkpoint as checkpoint_module
 
         publish = checkpoint_module.publish_split_board
         observed: list[str] = []
@@ -445,7 +445,7 @@ class CheckpointWriterTests(unittest.TestCase):
             observed.append("no manifest")
             return publish(staging, destination)
 
-        with mock.patch("secretary.checkpoint.publish_split_board", side_effect=copy_with_window):
+        with mock.patch("ummanu.checkpoint.publish_split_board", side_effect=copy_with_window):
             self.assertEqual(self.write().status, "committed")
 
         self.assertEqual(observed, ["no manifest"])
@@ -457,7 +457,7 @@ class CheckpointWriterTests(unittest.TestCase):
             "evt-stored",
             EventKind.ENTITY_CREATED,
             EntityKind.CARD,
-            "secretary-1419",
+            "ummanu-1419",
             Actor("po", "operator"),
             "accepted into the sprint",
             datetime(2026, 9, 1, 12, 0, tzinfo=UTC),
@@ -472,7 +472,7 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertEqual(result.status, "committed")
         committed = self.committed_text("events.ndjson")
         self.assertEqual(json.loads(committed)["event_id"], event.event_id)
-        self.assertEqual(json.loads(committed)["subject"], {"kind": "card", "ref": "secretary-1419"})
+        self.assertEqual(json.loads(committed)["subject"], {"kind": "card", "ref": "ummanu-1419"})
 
     def test_invalid_typed_event_blocks_checkpoint_but_generic_history_stays_allowed(self):
         (self.data_dir / "board" / "events.ndjson").write_text(
@@ -572,13 +572,13 @@ class CheckpointWriterTests(unittest.TestCase):
 
     def test_typed_records_with_invalid_product_projects_block_checkpoint(self):
         (self.instance_dir / "projects").mkdir()
-        (self.instance_dir / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
+        (self.instance_dir / "projects" / "ummanu.yaml").write_text("id: ummanu\n", encoding="utf-8")
         product = {
-            "reference": "product:secretary",
-            "title": "Secretary",
+            "reference": "product:ummanu",
+            "title": "Ummanu",
             "column": "Issues",
             "closed": False,
-            "metadata": {"record_type": "product", "product_id": "secretary", "product_projects": "[]"},
+            "metadata": {"record_type": "product", "product_id": "ummanu", "product_projects": "[]"},
         }
         self.seed_board([product])
 
@@ -647,9 +647,9 @@ class CheckpointWriterTests(unittest.TestCase):
                     "kind": "routing",
                     "occurred_at": "2026-07-24T00:00:00Z",
                     "outcome": "success",
-                    "actor": {"role": "dispatcher", "id": "secretary-dispatcher"},
+                    "actor": {"role": "dispatcher", "id": "ummanu-dispatcher"},
                     "task_id": "task_postgres_1",
-                    "ref": "secretary-637",
+                    "ref": "ummanu-637",
                     "backend": {"kind": "postgres", "task_id": 1, "revision": "updated_at:x"},
                     "request_id": f"routing-{phase}",
                     "payload": {
@@ -684,7 +684,7 @@ class CheckpointWriterTests(unittest.TestCase):
 
     def test_changed_board_commits_again(self):
         first = self.write()
-        self.seed_board([CARD, {**CARD, "id": 2, "reference": "secretary-638"}])
+        self.seed_board([CARD, {**CARD, "id": 2, "reference": "ummanu-638"}])
         second = self.write()
 
         self.assertEqual(second.status, "committed")
@@ -833,13 +833,13 @@ class CheckpointWriterTests(unittest.TestCase):
     def test_imported_runtime_config_paths_do_not_block_checkpoint(self):
         runtime = self.instance_dir / "runtime.env"
         url = "https://board.example.invalid/rpc"
-        data_dir = "/srv/secretary-data"
-        product_root = "/srv/secretary"
+        data_dir = "/srv/ummanu-data"
+        product_root = "/srv/ummanu"
         runtime.write_text(
             "\n".join(
                 [
-                    f"SECRETARY_DATA_DIR={data_dir}",
-                    f"TA_SECRETARY_REPO={product_root}",
+                    f"UMMANU_DATA_DIR={data_dir}",
+                    f"UMMANU_REPO={product_root}",
                     f"EXAMPLE_URL={url}",
                     "EXAMPLE_API_TOKEN=opaque-token-value",
                     "",
@@ -889,7 +889,7 @@ class CheckpointWriterTests(unittest.TestCase):
 
     def test_export_failure_blocks_without_touching_state(self):
         with mock.patch(
-            "secretary.checkpoint.export_board", side_effect=RuntimeError("pipeline list failed")
+            "ummanu.checkpoint.export_board", side_effect=RuntimeError("pipeline list failed")
         ):
             result = self.writer().write()
 
@@ -963,7 +963,7 @@ class CheckpointGitCostTests(unittest.TestCase):
     def seed_large_board(self, *, audit_lines: int) -> list[dict]:
         rng = random.Random(1656)
         cards = [
-            dict(CARD, id=number, reference=f"secretary-{number}", description=self._prose(rng, 1500))
+            dict(CARD, id=number, reference=f"ummanu-{number}", description=self._prose(rng, 1500))
             for number in range(1, self.CARDS + 1)
         ]
         self.seed_board(cards, sprints=[SPRINT])
@@ -1070,7 +1070,7 @@ class AnalyticsManifestTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.board = Path(self.tmpdir.name) / "board"
         self.board.mkdir()
-        (self.board / "cards.ndjson").write_text('{"reference":"secretary-1"}\n', encoding="utf-8")
+        (self.board / "cards.ndjson").write_text('{"reference":"ummanu-1"}\n', encoding="utf-8")
         (self.board / "sprints.ndjson").write_text('{"reference":"sprint:1"}\n', encoding="utf-8")
         (self.board / "events.ndjson").write_text('{"event_id":"event-1"}\n', encoding="utf-8")
         (self.board / "audit.ndjson").write_text('{"request_id":"request-1"}\n', encoding="utf-8")
@@ -1136,7 +1136,7 @@ class AnalyticsManifestTests(unittest.TestCase):
         self.assertEqual(verified.directory, self.board.resolve())
         self.assertRegex(verified.checkpoint_id, r"^[0-9a-f]{64}$")
         manifest = self.manifest(self.board)
-        self.assertEqual(manifest["schema"], "secretary.board.analytics-checkpoint")
+        self.assertEqual(manifest["schema"], "ummanu.board.analytics-checkpoint")
         self.assertEqual(manifest["version"], 2)
         self.assertEqual(
             [entry["path"] for entry in manifest["files"]],
@@ -1161,10 +1161,10 @@ class AnalyticsManifestTests(unittest.TestCase):
         destination = self.copy_board()
         staging = self.board.parent / "staging"
         shutil.copytree(self.board, staging)
-        (staging / "cards.ndjson").write_text('{"reference":"secretary-2"}\n', encoding="utf-8")
+        (staging / "cards.ndjson").write_text('{"reference":"ummanu-2"}\n', encoding="utf-8")
         _write_analytics_manifest(staging)
 
-        from secretary import _fsutil
+        from ummanu import _fsutil
 
         replace = _fsutil.os.replace
         observations: list[str] = []
@@ -1179,7 +1179,7 @@ class AnalyticsManifestTests(unittest.TestCase):
                 verify_analytics_checkpoint(destination)
                 observations.append("sealed")
 
-        with mock.patch("secretary._fsutil.os.replace", side_effect=observe_replace):
+        with mock.patch("ummanu._fsutil.os.replace", side_effect=observe_replace):
             publish_component_entries(
                 staging,
                 destination,
@@ -1227,7 +1227,7 @@ class AnalyticsManifestTests(unittest.TestCase):
 
         board = self.copy_board()
         manifest = self.manifest(board)
-        manifest["schema"] = "secretary.board.unknown"
+        manifest["schema"] = "ummanu.board.unknown"
         self.write_manifest(board, manifest)
         with self.assertRaisesRegex(AnalyticsManifestError, "unknown manifest schema"):
             verify_analytics_checkpoint(board)
@@ -1365,11 +1365,11 @@ class CheckpointPusherPrivilegeTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "secretary.checkpoint.state_repo.state_repo_lock", return_value=contextlib.nullcontext()
+                "ummanu.checkpoint.state_repo.state_repo_lock", return_value=contextlib.nullcontext()
             ),
-            mock.patch("secretary.state_repo.os.getuid", return_value=0),
-            mock.patch("secretary.state_repo.pwd.getpwuid", return_value=SimpleNamespace(pw_name="runtime")),
-            mock.patch("secretary.state_repo._proc.run_isolated", side_effect=run_git),
+            mock.patch("ummanu.state_repo.os.getuid", return_value=0),
+            mock.patch("ummanu.state_repo.pwd.getpwuid", return_value=SimpleNamespace(pw_name="runtime")),
+            mock.patch("ummanu.state_repo._proc.run_isolated", side_effect=run_git),
         ):
             state = CheckpointPusher(self.instance).push()
 
@@ -1408,7 +1408,7 @@ class CheckpointPusherPrivilegeTests(unittest.TestCase):
             returncode=128,
             stderr="fatal: detected dubious ownership\n",
         )
-        with mock.patch("secretary.checkpoint.state_repo.run_git", return_value=failure):
+        with mock.patch("ummanu.checkpoint.state_repo.run_git", return_value=failure):
             state = CheckpointPusher(self.instance).push()
 
         self.assertEqual(state["status"], "failed")
@@ -1674,22 +1674,22 @@ class CheckpointPusherTests(unittest.TestCase):
     def test_a_secret_store_commit_rides_the_same_push_as_the_rest_of_the_canon(self):
         """secretary-777: the store's own writer commits separately, but there is
         only one HEAD and one push; nothing routes a secret commit around it."""
-        from secretary.secret_store import initialize_store, set_secret
+        from ummanu.secret_store import initialize_store, set_secret
 
         fast_params = {
-            "format": "secretary.installation-key",
+            "format": "ummanu.installation-key",
             "version": 1,
             "kdf": {"id": "scrypt", "salt": "", "length": 32, "n": 2**8, "r": 8, "p": 1},
         }
 
         def fast_key_params():
-            from secretary import secret_store
+            from ummanu import secret_store
 
             params = json.loads(json.dumps(fast_params))
             params["kdf"]["salt"] = secret_store._b64(b"0123456789abcdef")
             return params
 
-        with mock.patch("secretary.secret_store._new_key_params", side_effect=fast_key_params):
+        with mock.patch("ummanu.secret_store._new_key_params", side_effect=fast_key_params):
             initialize_store(self.instance_dir, phrase="one two three four", actor="tester")
             before_secret = git(self.instance_dir, "rev-parse", "HEAD").strip()
             set_secret(
@@ -1733,7 +1733,7 @@ class CheckpointSnapshotTests(unittest.TestCase):
         self.tmpdir.cleanup()
 
     def test_the_duration_of_the_run_the_status_describes_is_exposed(self):
-        """`secretary status` is where an operator reads what the last checkpoint run cost."""
+        """`ummanu status` is where an operator reads what the last checkpoint run cost."""
         snapshot = checkpoint_snapshot(
             self.instance_dir,
             write_state={"status": "committed", "at": "2026-07-20T10:00:00Z", "duration_ms": 1234.5},
@@ -1861,7 +1861,7 @@ class CheckpointSnapshotTests(unittest.TestCase):
 
     def test_non_https_remote_is_reported_as_bypass_before_the_first_push(self):
         with mock.patch(
-            "secretary.checkpoint.state_repo.git", return_value="ssh://example.invalid/private.git\n"
+            "ummanu.checkpoint.state_repo.git", return_value="ssh://example.invalid/private.git\n"
         ):
             snapshot = checkpoint_snapshot(self.instance_dir)
         self.assertEqual(snapshot["credential"]["state"], "ambient/manual-bypass")
@@ -1874,7 +1874,7 @@ class BoardEventCheckpointCompatibilityTests(unittest.TestCase):
             "legacy-decision",
             EventKind.CARD_DECIDED,
             EntityKind.CARD,
-            "secretary-1546",
+            "ummanu-1546",
             Actor("observer", "observer"),
             "rework it",
             datetime(2026, 9, 3, 22, 0, tzinfo=UTC),

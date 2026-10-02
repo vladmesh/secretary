@@ -21,15 +21,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatch import wait_vitality as secretary_wait_vitality
-from secretary.dispatch.heartbeat import heartbeat_identity
-from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatch.watchdog import (
+from tests.dispatcher_fixtures import CARD_REF, RUNNING_STATUS, STOPPED_STATUS, DispatcherRuntimeFixture
+from ummanu.dispatch import wait_vitality as ummanu_wait_vitality
+from ummanu.dispatch.heartbeat import heartbeat_identity
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.watchdog import (
     head_process_status,
     suspension_response_window_seconds,
 )
-from secretary.runtime.head import with_pid_heartbeat
-from tests.dispatcher_fixtures import CARD_REF, RUNNING_STATUS, STOPPED_STATUS, DispatcherRuntimeFixture
+from ummanu.runtime.head import with_pid_heartbeat
 
 
 class WindowExpiryTests(DispatcherRuntimeFixture, unittest.TestCase):
@@ -205,7 +205,7 @@ class RealStoppedChildTests(DispatcherRuntimeFixture, unittest.TestCase):
         proc.send_signal(signal.SIGSTOP)
         self._wait_parked(proc.pid)
 
-        sent = secretary_wait_vitality._sigcont_head(self.runtime, {"ref": "s1-5-real"}, record, kind="worker")
+        sent = ummanu_wait_vitality._sigcont_head(self.runtime, {"ref": "s1-5-real"}, record, kind="worker")
 
         self.assertTrue(sent)
         self.assertTrue(
@@ -243,11 +243,11 @@ class RealStoppedChildTests(DispatcherRuntimeFixture, unittest.TestCase):
             return real_killpg(group, number)
 
         with (
-            mock.patch.object(secretary_wait_vitality.os, "kill", side_effect=audit_kill),
-            mock.patch.object(secretary_wait_vitality.os, "killpg", side_effect=audit_killpg),
+            mock.patch.object(ummanu_wait_vitality.os, "kill", side_effect=audit_kill),
+            mock.patch.object(ummanu_wait_vitality.os, "killpg", side_effect=audit_killpg),
         ):
             self.assertTrue(
-                secretary_wait_vitality._sigcont_head(self.runtime, {"ref": "s1-5-real"}, record, kind="worker"),
+                ummanu_wait_vitality._sigcont_head(self.runtime, {"ref": "s1-5-real"}, record, kind="worker"),
             )
         self.assertEqual(
             signalled,
@@ -262,7 +262,7 @@ class RealStoppedChildTests(DispatcherRuntimeFixture, unittest.TestCase):
         proc.send_signal(signal.SIGSTOP)
         self._wait_parked(proc.pid)
 
-        sent = secretary_wait_vitality._sigcont_head(self.runtime, {"ref": "s1-5-real"}, foreign_record, kind="worker")
+        sent = ummanu_wait_vitality._sigcont_head(self.runtime, {"ref": "s1-5-real"}, foreign_record, kind="worker")
 
         self.assertFalse(sent, "a mismatched identity must never be resumed")
         self.assertTrue(

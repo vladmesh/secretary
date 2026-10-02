@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Required in-repository gate for secretary's memory restore handoff.
+"""Required in-repository gate for ummanu's memory restore handoff.
 
-Run with ``SECRETARY_MEMORY_TEST_PYTHON=/path/to/python``. The selected Python
-must provide the ``secretary[memory]`` dependencies. A missing environment is a
+Run with ``UMMANU_MEMORY_TEST_PYTHON=/path/to/python``. The selected Python
+must provide the ``ummanu[memory]`` dependencies. A missing environment is a
 failure; no external memory-mcp checkout is used.
 """
 
@@ -27,7 +27,7 @@ def _fact(tags: str, text: str) -> str:
     return (
         "---\n"
         f"tags: [{tags}]\n"
-        "source: secretary-restore-e2e\n"
+        "source: ummanu-restore-e2e\n"
         "created: 2026-07-16\n"
         "pinned: false\n"
         "---\n"
@@ -55,7 +55,7 @@ class _BoardFixture:
                 {"id": 6, "title": "Done"},
             ]
         if method == "getActiveSwimlanes":
-            return [{"id": 4, "name": "Secretary"}]
+            return [{"id": 4, "name": "Ummanu"}]
         if method == "getAllTasks":
             return self.tasks
         if method == "getTaskByReference":
@@ -96,9 +96,9 @@ class _BoardFixture:
 
 
 def main() -> int:
-    python = Path(os.environ.get("SECRETARY_MEMORY_TEST_PYTHON", "")).expanduser()
+    python = Path(os.environ.get("UMMANU_MEMORY_TEST_PYTHON", "")).expanduser()
     if not python.is_file():
-        print("secretary memory restore e2e: test Python is unavailable", file=sys.stderr)
+        print("ummanu memory restore e2e: test Python is unavailable", file=sys.stderr)
         return 2
     if Path(sys.executable).absolute() != python.absolute():
         os.execv(str(python), [str(python), str(Path(__file__).resolve())])
@@ -107,13 +107,13 @@ def main() -> int:
     try:
         import numpy as np
 
-        from secretary import memory_service as server
-        from secretary import restore_commands, state_repo
-        from secretary.cli import main as secretary_main
-        from secretary.config import validate_instance
-        from secretary.data import export_memory, normalize_board_card
-        from secretary.host import CollectResult, HostInventory, build_plan
-        from secretary.restore import (
+        from ummanu import memory_service as server
+        from ummanu import restore_commands, state_repo
+        from ummanu.cli import main as ummanu_main
+        from ummanu.config import validate_instance
+        from ummanu.data import export_memory, normalize_board_card
+        from ummanu.host import CollectResult, HostInventory, build_plan
+        from ummanu.restore import (
             bootstrap_empty,
             import_normalized_board,
             rebuild_memory_index,
@@ -121,7 +121,7 @@ def main() -> int:
             restore_state,
         )
     except ImportError as error:
-        print(f"secretary memory restore e2e: dependency unavailable: {error}", file=sys.stderr)
+        print(f"ummanu memory restore e2e: dependency unavailable: {error}", file=sys.stderr)
         return 2
 
     def fake_embed(text: str) -> np.ndarray:
@@ -129,8 +129,8 @@ def main() -> int:
         vector[0 if "alpha" in text.lower() else 1] = 1.0
         return vector
 
-    with tempfile.TemporaryDirectory(prefix="secretary-memory-restore-") as temporary:
-        data_dir = Path(temporary) / "secretary-data"
+    with tempfile.TemporaryDirectory(prefix="ummanu-memory-restore-") as temporary:
+        data_dir = Path(temporary) / "ummanu-data"
         instance = Path(temporary) / "instance"
         instance.mkdir()
         (instance / "instance.yaml").write_text(
@@ -138,7 +138,7 @@ def main() -> int:
             "name: restore-e2e\n"
             f"data_dir: {data_dir}\n"
             "offsite:\n  instance_remote: git@example.invalid:restore/e2e.git\n"
-            "host:\n  unit_prefix: secretary-\n",
+            "host:\n  unit_prefix: ummanu-\n",
             encoding="utf-8",
         )
         # Bootstrap creates the target. The normalized board and facts below model
@@ -147,22 +147,22 @@ def main() -> int:
         card = normalize_board_card(
             {
                 "id": 1,
-                "reference": "secretary-restore-e2e",
+                "reference": "ummanu-restore-e2e",
                 "title": "Restore e2e",
                 "column": "Ready",
-                "swimlane": "Secretary",
+                "swimlane": "Ummanu",
                 "position": 1,
                 "task_type": "code",
-                "project": "secretary",
+                "project": "ummanu",
             },
             {
                 "id": 1,
-                "reference": "secretary-restore-e2e",
+                "reference": "ummanu-restore-e2e",
                 "title": "Restore e2e",
                 "description": "cross-repository restore fixture",
                 "column": "Ready",
                 "task_type": "code",
-                "project": "secretary",
+                "project": "ummanu",
                 "comments": [],
                 "metadata": {"resolved_head": "", "resolved_review_head": ""},
             },
@@ -190,12 +190,12 @@ def main() -> int:
 
         def rebuild(canon: Path, export: Path, target: Path) -> dict:
             return server.offline_rebuild(
-                canon, export, target, "secretary-restore-e2e", 4, document_embed=fake_embed
+                canon, export, target, "ummanu-restore-e2e", 4, document_embed=fake_embed
             )
 
         indexed = rebuild_memory_index(data_dir, instance, runner=rebuild)
         if indexed != 2 or restore_state(data_dir).get("memory_index") != "complete":
-            raise AssertionError("secretary did not record a complete memory rebuild")
+            raise AssertionError("ummanu did not record a complete memory rebuild")
 
         database = data_dir / "memory" / "index.sqlite"
         server.DB_PATH = str(database)
@@ -230,7 +230,7 @@ def main() -> int:
             "\n".join(resource.name for resource in desired if resource.kind == "unit"), encoding="utf-8"
         )
         if (
-            secretary_main(
+            ummanu_main(
                 [
                     "reconcile",
                     "plan",
@@ -247,14 +247,14 @@ def main() -> int:
         source = mock.Mock()
         source.collect.return_value = CollectResult(inventory=inventory)
         with mock.patch.object(restore_commands, "LiveHostSource", return_value=source):
-            if secretary_main(["restore-reconcile", "--instance", str(instance)]) != 0:
+            if ummanu_main(["restore-reconcile", "--instance", str(instance)]) != 0:
                 raise AssertionError("restore reconcile did not confirm live managed state")
         if restore_findings(data_dir):
             raise AssertionError(f"restore state is not clean: {restore_findings(data_dir)}")
-        if secretary_main(["doctor", "--offline", "--instance", str(instance)]) != 0:
+        if ummanu_main(["doctor", "--offline", "--instance", str(instance)]) != 0:
             raise AssertionError("doctor did not report the completed restore as healthy")
 
-    print("secretary memory restore e2e: ok")
+    print("ummanu memory restore e2e: ok")
     return 0
 
 

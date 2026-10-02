@@ -16,11 +16,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
-from secretary.board import backend
-from secretary.board.sql_cards import _COLUMN_ID_BY_STATE
-from secretary.tasks import TaskError, TaskReader, TaskWriter
 from tests.fakes.tasks import open_sprint, reader_seed, writer_seed
 from tests.sql_backend_fixtures import CardStoreCase
+from ummanu.board import backend
+from ummanu.board.sql_cards import _COLUMN_ID_BY_STATE
+from ummanu.tasks import TaskError, TaskReader, TaskWriter
 
 
 class SqlBoardCase(CardStoreCase):
@@ -42,15 +42,15 @@ class SqlTaskReaderTests(SqlBoardCase):
     def test_export_carries_the_same_projection(self) -> None:
         rows = {row["reference"]: row for row in self.reader.export()}
 
-        self.assertEqual(set(rows), {"secretary-468", "old-1"})
-        self.assertEqual(rows["secretary-468"]["column"], "Ready")
-        self.assertEqual(rows["secretary-468"]["swimlane"], "Secretary")
-        self.assertEqual(rows["secretary-468"]["project"], "secretary")
-        self.assertEqual(rows["secretary-468"]["task_type"], "code")
+        self.assertEqual(set(rows), {"ummanu-468", "old-1"})
+        self.assertEqual(rows["ummanu-468"]["column"], "Ready")
+        self.assertEqual(rows["ummanu-468"]["swimlane"], "Ummanu")
+        self.assertEqual(rows["ummanu-468"]["project"], "ummanu")
+        self.assertEqual(rows["ummanu-468"]["task_type"], "code")
 
     def test_a_tasks_row_states_task_whatever_its_bag_says(self) -> None:
         """secretary-1678: the table is the record type; a stale bag value does not rename the row."""
-        key = self.client.key_of("secretary-468")
+        key = self.client.key_of("ummanu-468")
         for stale in ("product", "issue", "epic"):
             with self.subTest(stale=stale), self.client.transaction():
                 self.client._execute(
@@ -60,11 +60,11 @@ class SqlTaskReaderTests(SqlBoardCase):
                 )
             self.assertEqual(self.client.metadata(key)["record_type"], "task")
             rows = {row["reference"]: row for row in self.reader.export()}
-            self.assertEqual(rows["secretary-468"]["metadata"]["record_type"], "task")
+            self.assertEqual(rows["ummanu-468"]["metadata"]["record_type"], "task")
 
     def test_a_tasks_row_refuses_another_record_type_on_write(self) -> None:
         """secretary-1678: a write cannot store a Product's or Issue's kind in a `tasks` row's bag."""
-        key = self.client.key_of("secretary-468")
+        key = self.client.key_of("ummanu-468")
         for declared in ("product", "issue", "epic"):
             with self.subTest(declared=declared), self.assertRaisesRegex(TaskError, "is a task"):
                 self.client.save_metadata(key, record_type=declared)
@@ -76,20 +76,20 @@ class SqlTaskReaderTests(SqlBoardCase):
     def test_restore_snapshot_returns_every_card_by_reference(self) -> None:
         snapshot = self.reader.restore_snapshot()
 
-        self.assertEqual(set(snapshot), {"secretary-468", "old-1"})
-        self.assertIn("comments", snapshot["secretary-468"])
+        self.assertEqual(set(snapshot), {"ummanu-468", "old-1"})
+        self.assertIn("comments", snapshot["ummanu-468"])
 
     def test_steward_signal_cards_report_the_bounded_view(self) -> None:
-        cards = self.reader.steward_signal_cards(project="secretary")
+        cards = self.reader.steward_signal_cards(project="ummanu")
 
         self.assertEqual(
             cards,
             [
                 {
-                    "reference": "secretary-468",
+                    "reference": "ummanu-468",
                     "state": "ready",
                     "column": "Ready",
-                    "project": "secretary",
+                    "project": "ummanu",
                     "date_moved": None,
                     "steward_report": "1",
                 }
@@ -201,20 +201,20 @@ class SqlTaskWriterTests(SqlBoardCase):
         same transaction as the claim, so the rollback takes both and there is nothing to
         recover.
         """
-        self._place("secretary-468", "in_progress")
+        self._place("ummanu-468", "in_progress")
 
         with self._drops_the_call_after("moveTaskPosition"), self.assertRaises(TaskError) as raised:
             self.writer.move(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="validate",
                 reason="submit",
                 request_id="rq-move-lost-read-back",
             )
 
         self.assertNoRepairIsOwed(raised.exception)
-        self.assertEqual(self.reader.show("secretary-468")["state"], "in_progress")
+        self.assertEqual(self.reader.show("ummanu-468")["state"], "in_progress")
         self.assertNothingSurvived("rq-move-lost-read-back")
 
     def test_a_failure_after_the_claim_metadata_write_leaves_neither_the_claim_nor_a_staged_request(
@@ -226,7 +226,7 @@ class SqlTaskWriterTests(SqlBoardCase):
         event held open.  The metadata write here is issued inside the transition's transaction, so it rolls back with
         the column effect: the card is still Ready and still unclaimed.
         """
-        self._set_metadata("secretary-468", claim="")
+        self._set_metadata("ummanu-468", claim="")
 
         with (
             self._loses_the_reply_to("saveTaskMetadata"),
@@ -235,13 +235,13 @@ class SqlTaskWriterTests(SqlBoardCase):
             self.writer.claim(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
+                reference="ummanu-468",
                 worker="codex-terra",
                 request_id="rq-claim-lost-metadata-reply",
             )
 
         self.assertNoRepairIsOwed(raised.exception)
-        card = self.reader.show("secretary-468")
+        card = self.reader.show("ummanu-468")
         self.assertEqual(card["state"], "ready")
         self.assertIsNone(card["claim"]["worker"])
         self.assertNothingSurvived("rq-claim-lost-metadata-reply")
@@ -255,9 +255,9 @@ class SqlTaskWriterTests(SqlBoardCase):
         column effect and the claim are undone together, so the card keeps the routing the reset
         would have cleared.
         """
-        self._place("secretary-468", "in_progress")
+        self._place("ummanu-468", "in_progress")
         self._set_metadata(
-            "secretary-468", resolved_head="codex-terra", resolved_review_head="codex-reviewer"
+            "ummanu-468", resolved_head="codex-terra", resolved_review_head="codex-reviewer"
         )
 
         with (
@@ -267,14 +267,14 @@ class SqlTaskWriterTests(SqlBoardCase):
             self.writer.move(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="ready",
                 reason="",
                 request_id="rq-ready-lost-reset-reply",
             )
 
         self.assertNoRepairIsOwed(raised.exception)
-        card = self.reader.show("secretary-468")
+        card = self.reader.show("ummanu-468")
         self.assertEqual(card["state"], "in_progress")
         self.assertEqual(card["routing"]["resolved_worker_head"], "codex-terra")
         self.assertEqual(card["routing"]["resolved_review_head"], "codex-reviewer")
@@ -293,15 +293,15 @@ class SqlTaskWriterTests(SqlBoardCase):
         """Migration does not invent a timestamp for an episode the SQL store never observed."""
         self.client._execute(
             "UPDATE tasks SET state = 'done', date_moved = NULL WHERE task_ref = %s",
-            ("secretary-468",),
+            ("ummanu-468",),
         )
         self.client._commit_unless_nested()
         self.assertEqual(
             self.reader.done_retention_candidates(),
-            [{"reference": "secretary-468", "date_moved": None}],
+            [{"reference": "ummanu-468", "date_moved": None}],
         )
         result = self.writer.retire_done(
-            reference="secretary-468", expected_date_moved=100, cutoff=101,
+            reference="ummanu-468", expected_date_moved=100, cutoff=101,
             retention_days=14, request_id="rq-retire-unknown",
         )
         self.assertTrue(result["skipped"])
@@ -320,15 +320,15 @@ class SqlTaskWriterTests(SqlBoardCase):
         whole of it — the freshness guard, the close, its proof and the record — is now one
         transaction, so the lost reply takes the close with it.
         """
-        self._place("secretary-468", "done")
-        moved_at = self._move_time("secretary-468")
+        self._place("ummanu-468", "done")
+        moved_at = self._move_time("ummanu-468")
 
         with (
             self._loses_the_reply_to("closeTask"),
             self.assertRaises(TaskError) as raised,
         ):
             self.writer.retire_done(
-                reference="secretary-468",
+                reference="ummanu-468",
                 expected_date_moved=moved_at,
                 cutoff=moved_at + 1,
                 retention_days=14,
@@ -336,11 +336,11 @@ class SqlTaskWriterTests(SqlBoardCase):
             )
 
         self.assertNoRepairIsOwed(raised.exception)
-        card = self.reader.show("secretary-468")
+        card = self.reader.show("ummanu-468")
         self.assertEqual(card["state"], "done")
         self.assertEqual(
             self.client._query(
-                "SELECT count(*) FROM tasks WHERE task_ref = %s AND archived", ("secretary-468",)
+                "SELECT count(*) FROM tasks WHERE task_ref = %s AND archived", ("ummanu-468",)
             ),
             [(0,)],
         )
@@ -352,11 +352,11 @@ class SqlTaskWriterTests(SqlBoardCase):
         Without it the rollback proof would be satisfied by a fixture that never reached the
         close at all, which is exactly the vacuity the parked-case block is about.
         """
-        self._place("secretary-468", "done")
-        moved_at = self._move_time("secretary-468")
+        self._place("ummanu-468", "done")
+        moved_at = self._move_time("ummanu-468")
 
         result = self.writer.retire_done(
-            reference="secretary-468",
+            reference="ummanu-468",
             expected_date_moved=moved_at,
             cutoff=moved_at + 1,
             retention_days=14,
@@ -366,7 +366,7 @@ class SqlTaskWriterTests(SqlBoardCase):
         self.assertTrue(result["retired"])
         self.assertEqual(
             self.client._query(
-                "SELECT count(*) FROM tasks WHERE task_ref = %s AND archived", ("secretary-468",)
+                "SELECT count(*) FROM tasks WHERE task_ref = %s AND archived", ("ummanu-468",)
             ),
             [(1,)],
         )
@@ -377,7 +377,7 @@ class SqlTaskWriterTests(SqlBoardCase):
             [("committed",)],
         )
         replay = self.writer.retire_done(
-            reference="secretary-468",
+            reference="ummanu-468",
             expected_date_moved=moved_at,
             cutoff=moved_at + 1,
             retention_days=14,
@@ -394,11 +394,11 @@ class SqlTaskWriterTests(SqlBoardCase):
         )
 
     def test_done_retention_fresh_guard_uses_the_real_move_episode(self) -> None:
-        self._place("secretary-468", "done")
-        moved_at = self._move_time("secretary-468")
+        self._place("ummanu-468", "done")
+        moved_at = self._move_time("ummanu-468")
 
         result = self.writer.retire_done(
-            reference="secretary-468", expected_date_moved=moved_at, cutoff=moved_at,
+            reference="ummanu-468", expected_date_moved=moved_at, cutoff=moved_at,
             retention_days=14, request_id="rq-retire-fresh",
         )
 
@@ -406,7 +406,7 @@ class SqlTaskWriterTests(SqlBoardCase):
         self.assertFalse(result["retired"])
         self.assertEqual(
             self.client._query(
-                "SELECT archived FROM tasks WHERE task_ref = %s", ("secretary-468",)
+                "SELECT archived FROM tasks WHERE task_ref = %s", ("ummanu-468",)
             ),
             [(False,)],
         )
@@ -414,7 +414,7 @@ class SqlTaskWriterTests(SqlBoardCase):
 
     def test_a_comment_lands_with_its_request_row_committed(self) -> None:
         result = self.writer.comment(
-            role="po", actor="operator", reference="secretary-468", body="hello", request_id="rq-1"
+            role="po", actor="operator", reference="ummanu-468", body="hello", request_id="rq-1"
         )
 
         self.assertEqual(result["action"], "commented")
@@ -422,24 +422,24 @@ class SqlTaskWriterTests(SqlBoardCase):
         rows = self.client._query(
             "SELECT status, operation, ref FROM requests WHERE request_id = %s", ("rq-1",)
         )
-        self.assertEqual(rows, [("committed", "commented", "secretary-468")])
+        self.assertEqual(rows, [("committed", "commented", "ummanu-468")])
         task_id = self.client.call(
-            "getTaskByReference", project_id=1, reference="secretary-468"
+            "getTaskByReference", project_id=1, reference="ummanu-468"
         )["id"]
         bodies = [row["comment"] for row in self.client.call("getAllComments", task_id=task_id)]
         self.assertIn("hello", "\n".join(bodies))
 
     def test_the_same_request_id_replays_instead_of_writing_twice(self) -> None:
         self.writer.comment(
-            role="po", actor="operator", reference="secretary-468", body="once", request_id="rq-2"
+            role="po", actor="operator", reference="ummanu-468", body="once", request_id="rq-2"
         )
         again = self.writer.comment(
-            role="po", actor="operator", reference="secretary-468", body="once", request_id="rq-2"
+            role="po", actor="operator", reference="ummanu-468", body="once", request_id="rq-2"
         )
 
         self.assertTrue(again["replayed"])
         task_id = self.client.call(
-            "getTaskByReference", project_id=1, reference="secretary-468"
+            "getTaskByReference", project_id=1, reference="ummanu-468"
         )["id"]
         bodies = [row["comment"] for row in self.client.call("getAllComments", task_id=task_id)]
         self.assertEqual(sum("once" in body for body in bodies), 1)
@@ -529,7 +529,7 @@ class SqlTaskWriterTests(SqlBoardCase):
         )
         self.assertEqual(audit_refs, [("butler-1", 2), ("codegen-product-kit-1", 1)])
 
-        from secretary.data import export_board
+        from ummanu.data import export_board
 
         artifact = export_board(
             Path(self.tmpdir.name) / "export-data",
@@ -553,16 +553,16 @@ class SqlTaskWriterTests(SqlBoardCase):
         )
 
     def test_a_request_id_reused_for_another_operation_is_refused(self) -> None:
-        from secretary.tasks import TaskError
+        from ummanu.tasks import TaskError
 
         self.writer.comment(
-            role="po", actor="operator", reference="secretary-468", body="first", request_id="rq-3"
+            role="po", actor="operator", reference="ummanu-468", body="first", request_id="rq-3"
         )
         with self.assertRaises(TaskError) as raised:
             self.writer.comment(
                 role="po",
                 actor="operator",
-                reference="secretary-468",
+                reference="ummanu-468",
                 body="second",
                 request_id="rq-3",
             )
@@ -584,13 +584,13 @@ class SqlTaskWriterTests(SqlBoardCase):
                 ("sprint:test", backend.record_key("sprint", "sprint:test"), "a goal", "a definition", now, now),
             )
         with (
-            mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),
+            mock.patch("ummanu.sprints.sprint_guard_index_initialized", return_value=True),
             open_sprint() as sprint,
         ):
             return self.writer.create(
                 role="observer",
                 actor="observer",
-                project="secretary",
+                project="ummanu",
                 task_type="code",
                 title=title,
                 request_id=request_id,
@@ -657,11 +657,11 @@ class SqlTaskWriterTests(SqlBoardCase):
         )
 
     def test_a_failed_mutation_leaves_neither_effect_nor_claim(self) -> None:
-        from secretary.tasks import TaskError
+        from ummanu.tasks import TaskError
 
         with self.assertRaises(TaskError):
             self.writer.comment(
-                role="nobody", actor="x", reference="secretary-468", body="no", request_id="rq-4"
+                role="nobody", actor="x", reference="ummanu-468", body="no", request_id="rq-4"
             )
         self.assertEqual(
             self.client._query("SELECT count(*) FROM requests WHERE request_id = %s", ("rq-4",)),

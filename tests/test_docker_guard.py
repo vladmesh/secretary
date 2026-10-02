@@ -16,13 +16,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.dispatch.host import CommandHostRuntime, InstanceCatalog
-from secretary.runtime import docker_guard, role_env
-from secretary.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
-from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
-from secretary.runtime.head import command as head_command
-from secretary.runtime.head.command import wrap_role_command
 from tests.support.managed_venv import guarded_product_env
+from ummanu.dispatch.host import CommandHostRuntime, InstanceCatalog
+from ummanu.runtime import docker_guard, role_env
+from ummanu.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
+from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef
+from ummanu.runtime.head import command as head_command
+from ummanu.runtime.head.command import wrap_role_command
 
 SAFE_ID = "a" * 64
 OTHER_ID = "b" * 64
@@ -111,7 +111,7 @@ class DockerGuardTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
         product_env = guarded_product_env(self.root)
-        self.product = Path(product_env["TA_SECRETARY_REPO"])
+        self.product = Path(product_env["UMMANU_REPO"])
         self.workspace = self.root / "candidate"
         self.workspace.mkdir()
         venv_bin = self.workspace / role_env.WORKSPACE_ENV_DIR / "bin"
@@ -136,7 +136,7 @@ class DockerGuardTests(unittest.TestCase):
         }
         self.base = {
             **product_env,
-            "SECRETARY_RUNTIME_ENV_FILE": str(self.root / "absent.env"),
+            "UMMANU_RUNTIME_ENV_FILE": str(self.root / "absent.env"),
             "GUARD_CASE": str(self.case_file),
             "GUARD_TRANSCRIPT": str(self.transcript),
         }
@@ -150,10 +150,10 @@ class DockerGuardTests(unittest.TestCase):
                 role, base_env=self.base, workspace=self.workspace, local_run_policy=policy
             )
 
-    def policy(self, *vectors: list[str], project: str = "secretary") -> str:
+    def policy(self, *vectors: list[str], project: str = "ummanu") -> str:
         return json.dumps(
             {
-                "card": "secretary-1",
+                "card": "ummanu-1",
                 "sprint": "sprint:1",
                 "project": project,
                 "exceptions": [
@@ -358,7 +358,7 @@ class DockerGuardTests(unittest.TestCase):
         self.base[docker_guard.POLICY_ENV] = policy
         runtime = self.root / "runtime.env"
         runtime.write_text(f"{docker_guard.POLICY_ENV}={shlex.quote(policy)}\n")
-        self.base["SECRETARY_RUNTIME_ENV_FILE"] = str(runtime)
+        self.base["UMMANU_RUNTIME_ENV_FILE"] = str(runtime)
         (self.workspace / "local_run_exceptions.json").write_text(policy)
         (self.workspace / "TASK.md").write_text("Docker is permitted\n" + policy)
         for role in ("worker", "reviewer"):
@@ -425,11 +425,11 @@ class DockerGuardTests(unittest.TestCase):
         catalog._head_profile = mock.Mock(return_value={"adapter": "hermes"})
         catalog.prepare_head_workspace = mock.Mock()
         reader = mock.Mock()
-        declared = {"project": "secretary", "argv": ["docker", "run", "image"], "rationale": "fake probe"}
+        declared = {"project": "ummanu", "argv": ["docker", "run", "image"], "rationale": "fake probe"}
         other = {**declared, "project": "other", "argv": ["docker", "create", "image"]}
         sprint = {
             "ref": "sprint:1",
-            "reservations": ["secretary", "other"],
+            "reservations": ["ummanu", "other"],
             "local_run_exceptions": [declared, other],
         }
         reader.show.return_value = sprint
@@ -437,14 +437,14 @@ class DockerGuardTests(unittest.TestCase):
         host._workspace_environment_owner(self.workspace).write_text(
             json.dumps(
                 {
-                    "owner": "secretary-dispatcher",
+                    "owner": "ummanu-dispatcher",
                     "schema_version": 1,
                     "workspace": str(self.workspace.resolve()),
                 }
             )
         )
         host._workspace_environment_ready_file(self.workspace).write_text("ready\n")
-        task = {"ref": "secretary-1", "project": "secretary", "sprint": "sprint:1"}
+        task = {"ref": "ummanu-1", "project": "ummanu", "sprint": "sprint:1"}
         runtime = mock.Mock(writes_launch_identity=True)
         results = []
         commands = []
@@ -487,7 +487,7 @@ class DockerGuardTests(unittest.TestCase):
             mock.patch.object(host, "_codex_provider_ingress", return_value=None),
             mock.patch.object(host, "_head_transport"),
             mock.patch(
-                "secretary.dispatch.host.memory_access.issue_grant",
+                "ummanu.dispatch.host.memory_access.issue_grant",
                 return_value=SimpleNamespace(launch_identity={}),
             ),
         ):
@@ -514,7 +514,7 @@ class DockerGuardTests(unittest.TestCase):
                         snapshot,
                         {
                             "card": task["ref"],
-                            "project": "secretary",
+                            "project": "ummanu",
                             "sprint": "sprint:1",
                             "exceptions": [declared],
                         },
@@ -617,7 +617,7 @@ class DockerGuardTests(unittest.TestCase):
         )
         self.base["HOME"] = str(home)
         # Candidate policy/module files do not choose the guard or its snapshot.
-        shadow = self.workspace / "secretary" / "runtime"
+        shadow = self.workspace / "ummanu" / "runtime"
         shadow.mkdir(parents=True)
         (shadow.parent / "__init__.py").write_text("")
         (shadow / "__init__.py").write_text("")
@@ -994,7 +994,7 @@ class DockerGuardTests(unittest.TestCase):
         parent.mkdir()
         product_env = guarded_product_env(parent)
         runtime = parent / "runtime.env"
-        runtime.write_text("ANTHROPIC_MODEL=opus\nSECRETARY_INSTANCE=/decoy\n")
+        runtime.write_text("ANTHROPIC_MODEL=opus\nUMMANU_INSTANCE=/decoy\n")
         home = parent / "home"
         (home / ".claude").mkdir(parents=True)
         (home / ".claude/settings.json").write_text(json.dumps({"model": "sonnet"}))
@@ -1003,21 +1003,21 @@ class DockerGuardTests(unittest.TestCase):
                 **product_env,
                 "HOME": str(home),
                 "CLAUDE_MANAGED_SETTINGS": str(parent / "no-managed.json"),
-                "SECRETARY_RUNTIME_ENV_FILE": str(runtime),
-                "SECRETARY_INSTANCE": str(parent / "selected-instance"),
+                "UMMANU_RUNTIME_ENV_FILE": str(runtime),
+                "UMMANU_INSTANCE": str(parent / "selected-instance"),
                 "ANTHROPIC_MODEL": "opus",
             }
         )
         probe = (
-            "id -u >/dev/null && printenv TA_SECRETARY_REPO SECRETARY_INSTANCE BOARD_ROLE"
+            "id -u >/dev/null && printenv UMMANU_REPO UMMANU_INSTANCE BOARD_ROLE"
             ' && command -v python3 && test -z "${ANTHROPIC_MODEL:-}"'
         )
         snapshot = (
-            "import json; from secretary.dispatch.launcher import claude_launch_model; "
+            "import json; from ummanu.dispatch.launcher import claude_launch_model; "
             "print(json.dumps(claude_launch_model({'adapter': 'claude'})))"
         )
         probe += (
-            f" && PYTHONPATH={shlex.quote(str(Path(product_env['TA_SECRETARY_REPO']) / 'src'))} "
+            f" && PYTHONPATH={shlex.quote(str(Path(product_env['UMMANU_REPO']) / 'src'))} "
             f"python3 -P -c {shlex.quote(snapshot)}"
         )
         for role in ("worker", "reviewer"):
@@ -1027,7 +1027,7 @@ class DockerGuardTests(unittest.TestCase):
                 self.assertEqual(
                     result.stdout.splitlines(),
                     [
-                        product_env["TA_SECRETARY_REPO"],
+                        product_env["UMMANU_REPO"],
                         str(parent / "selected-instance"),
                         role,
                         str(self.workspace / role_env.WORKSPACE_ENV_DIR / "bin/python3"),
@@ -1056,7 +1056,7 @@ class DockerGuardTests(unittest.TestCase):
             f"PATH=/usr/bin:/bin\nexport PATH\n: > {shlex.quote(str(marker))}\n"
         )
         self.base["HOME"] = str(home)
-        shadow = self.workspace / "secretary" / "runtime"
+        shadow = self.workspace / "ummanu" / "runtime"
         shadow.mkdir(parents=True)
         (shadow.parent / "__init__.py").write_text("")
         (shadow / "__init__.py").write_text("")
@@ -1142,7 +1142,7 @@ class DockerGuardTests(unittest.TestCase):
         guard = role_env_path(broken) / "docker"
         guard.parent.mkdir(parents=True)
         (broken / ".venv").symlink_to(Path(sys.prefix), target_is_directory=True)
-        self.base["TA_SECRETARY_REPO"] = str(broken)
+        self.base["UMMANU_REPO"] = str(broken)
         for state in ("missing", "unexecutable"):
             if state == "unexecutable":
                 guard.write_text("#!/bin/sh\nexit 0\n")
@@ -1208,7 +1208,7 @@ class DockerGuardTests(unittest.TestCase):
 
 
 def role_env_path(product: Path) -> Path:
-    return product / "src/secretary/runtime/docker-bin"
+    return product / "src/ummanu/runtime/docker-bin"
 
 
 if __name__ == "__main__":

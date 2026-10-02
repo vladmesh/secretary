@@ -8,7 +8,7 @@ another purely from what that host happens to have (secretary-705, secretary-738
 secretary-748).
 
 Board reads need no patch here. A client is built only by
-``secretary.board.backend.board_client(<instance dir>)``, from that
+``ummanu.board.backend.board_client(<instance dir>)``, from that
 instance's own ``board-store.env``, and nothing in the environment selects
 or reaches a board, so a worker/reviewer/operator shell that inherits a live
 installation's environment cannot turn the unit suite into a client of that
@@ -23,7 +23,7 @@ every Codex bring-up answers the directory-trust dialog *before* the pane
 exists, by appending a ``[projects."<workspace>"]`` table to ``config.toml``
 inside the ``CODEX_HOME`` that head will run with. On a developer box that
 home is the installation's ``<data_dir>/codex-home`` wherever
-``SECRETARY_DATA_DIR`` names one (the legacy ``~/.config/orca/...`` home before
+``UMMANU_DATA_DIR`` names one (the legacy ``~/.config/orca/...`` home before
 secretary-1723) -- installation state shared by every Codex head on the
 host -- so any test that reaches a
 worker/reviewer/service bring-up without saying otherwise would record a
@@ -35,11 +35,11 @@ its own for the whole run, before any test module is imported.
 ``tests/test_hermetic_codex.py`` proves it.
 
 The live pipeline's state dir needs the same treatment, and needs it early.
-``secretary.automations.agents.pipeline.state`` resolves ``STATE`` at import time,
+``ummanu.automations.agents.pipeline.state`` resolves ``STATE`` at import time,
 and ``agents.pipeline.pause`` binds ``PAUSE_FILE`` off it, so by the time any
 test body runs the pause path is already fixed. Left at its default that path
-is the live ``<workspaces>/secretary/pipeline/state/pipeline`` of the machine
-running the suite: a ``secretary pause --mode freeze`` held there while the
+is the live ``<workspaces>/ummanu/pipeline/state/pipeline`` of the machine
+running the suite: a ``ummanu pause --mode freeze`` held there while the
 suite runs makes ``runtime/dispatch._pipeline_paused()`` true, and every
 triggered-dispatch test silently takes the "pipeline paused -- no dispatch"
 branch instead of the lifecycle branch it was written for. The same binding
@@ -68,27 +68,27 @@ from pathlib import Path
 # Every `tempfile` call in this process and every child that inherits TMPDIR lands under one root
 # the run claims here, before any other default below and before any test module is imported, so
 # the run leaves the host's temporary directory as it found it: the root is removed at exit. The
-# host's `/tmp` is shared with the live pipeline, which writes its own `secretary-*` and `orca-*`
+# host's `/tmp` is shared with the live pipeline, which writes its own `ummanu-*` and `orca-*`
 # files there concurrently, so a before/after count of `/tmp` cannot tell a test's leak from the
-# pipeline's work; a root only this run writes to can. Whatever `secretary-*` or `orca-*` entry is
+# pipeline's work; a root only this run writes to can. Whatever `ummanu-*` or `orca-*` entry is
 # still in it once every other exit handler has run is a test that did not clean up after itself,
 # and the run fails naming it. A test that writes to `/tmp` by absolute path bypasses TMPDIR and
 # this guard alike, so such a test owns its own cleanup. `tests/test_suite_tmp_guard.py` proves the rest.
-_LEAK_PREFIXES = ("secretary-", "orca-")
+_LEAK_PREFIXES = ("ummanu-", "orca-")
 # Production state that is persistent by design: the per-terminal prompt lock directory the Orca
 # prompt send kept. Nothing creates it since that send went (secretary-1725); the exemption is
 # pinned by `test_suite_tmp_guard` and goes with it.
-_PERSISTENT_BY_DESIGN = frozenset({"secretary-agent-prompt-locks"})
+_PERSISTENT_BY_DESIGN = frozenset({"ummanu-agent-prompt-locks"})
 # Short on purpose: it lengthens every temporary path in the run, and real-head tests put a Unix
 # socket (100-byte address limit) about 70 bytes deep under the temporary directory.
-_SUITE_TMP = Path(tempfile.mkdtemp(prefix="secretary-t"))
+_SUITE_TMP = Path(tempfile.mkdtemp(prefix="ummanu-t"))
 _SUITE_PID = os.getpid()
 os.environ["TMPDIR"] = str(_SUITE_TMP)
 tempfile.tempdir = str(_SUITE_TMP)
 
 
 def suite_tmp_leaks(root: Path) -> list[str]:
-    """The `secretary-*` and `orca-*` entries a run left in its temporary root."""
+    """The `ummanu-*` and `orca-*` entries a run left in its temporary root."""
     try:
         names = sorted(entry.name for entry in root.iterdir())
     except FileNotFoundError:
@@ -106,7 +106,7 @@ def _guard_suite_tmp() -> None:
         return
     sys.stdout.flush()
     sys.stderr.write(
-        "\nFAILED: the test run left temporary entries behind (secretary-1663); each is a test "
+        "\nFAILED: the test run left temporary entries behind (ummanu-1663); each is a test "
         "that created it and did not remove it:\n" + "".join(f"  {name}\n" for name in leaks)
     )
     sys.stderr.flush()
@@ -121,19 +121,19 @@ atexit.register(_guard_suite_tmp)
 # all -- writes into a directory this run owns and removes. Set unconditionally:
 # an ambient TA_CODEX_HOME inherited from a worker/reviewer/operator shell names that
 # installation's real home, which is exactly what must not be written.
-_SUITE_CODEX_HOME = Path(tempfile.mkdtemp(prefix="secretary-tests-codex-home."))
+_SUITE_CODEX_HOME = Path(tempfile.mkdtemp(prefix="ummanu-tests-codex-home."))
 os.environ["TA_CODEX_HOME"] = str(_SUITE_CODEX_HOME)
 atexit.register(shutil.rmtree, _SUITE_CODEX_HOME, ignore_errors=True)
 
 # The throwaway pipeline state dir described above, claimed before any test module
-# -- and therefore before `secretary.automations.agents.pipeline.state` -- is imported,
+# -- and therefore before `ummanu.automations.agents.pipeline.state` -- is imported,
 # because that module binds `STATE` (and through it `pause.PAUSE_FILE`) to whatever
 # `resolve_pipeline_state_dir()` answers at import time. Set unconditionally, for
 # the same reason as TA_CODEX_HOME above: an ambient TA_PIPELINE_STATE_DIR
 # inherited from a worker/reviewer/operator shell names the live installation's
 # state dir, which is exactly what the suite must neither read nor write.
 # `tests/test_hermetic_pipeline_state.py` proves both halves.
-_SUITE_PIPELINE_STATE_DIR = Path(tempfile.mkdtemp(prefix="secretary-tests-pipeline-state."))
+_SUITE_PIPELINE_STATE_DIR = Path(tempfile.mkdtemp(prefix="ummanu-tests-pipeline-state."))
 os.environ["TA_PIPELINE_STATE_DIR"] = str(_SUITE_PIPELINE_STATE_DIR)
 atexit.register(shutil.rmtree, _SUITE_PIPELINE_STATE_DIR, ignore_errors=True)
 

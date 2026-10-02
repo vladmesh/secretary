@@ -32,27 +32,27 @@ from unittest import mock
 
 import yaml
 
-from secretary.board.events import BoardEventCanon, BoardEventCanonUnowned, MutationEventTransaction
-from secretary.board.sql_host import SqlBoardHost
-from secretary.board.models import Actor, EntityKind, Event, EventKind
-from secretary.board.sql_audit import SqlTaskAudit
-from secretary.checkpoint import CheckpointWriter
-from secretary.sprints import SprintReader
-from secretary.task_commands import run_task_verify_audit
-from secretary.tasks import TaskError, task_audit_for
-from secretary.webproto.command_reads import (
+from ummanu.board.events import BoardEventCanon, BoardEventCanonUnowned, MutationEventTransaction
+from ummanu.board.sql_host import SqlBoardHost
+from ummanu.board.models import Actor, EntityKind, Event, EventKind
+from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.checkpoint import CheckpointWriter
+from ummanu.sprints import SprintReader
+from ummanu.task_commands import run_task_verify_audit
+from ummanu.tasks import TaskError, task_audit_for
+from ummanu.webproto.command_reads import (
     STATE_COMMITTED,
     STATE_NOT_FOUND,
     STATE_PENDING,
     CommandReadLayer,
 )
-from secretary.webproto.cursor import Cursor
-from secretary.webproto.errors import InvalidCursor
-from secretary.webproto.journal import CommittedAudit
-from secretary.webproto.ops import OperationLayer
-from secretary.webproto.reads import ReadLayer
-from secretary.webproto.run_events import STARTED, publish_started, request_id_for
-from secretary.webproto.runs import ProductRun
+from ummanu.webproto.cursor import Cursor
+from ummanu.webproto.errors import InvalidCursor
+from ummanu.webproto.journal import CommittedAudit
+from ummanu.webproto.ops import OperationLayer
+from ummanu.webproto.reads import ReadLayer
+from ummanu.webproto.run_events import STARTED, publish_started, request_id_for
+from ummanu.webproto.runs import ProductRun
 from tests.fakes.tasks import reader_seed
 from tests.sql_backend_fixtures import CardStoreCase
 
@@ -85,15 +85,15 @@ class SqlAuditCase(CardStoreCase):
             "offsite:\n  instance_remote: https://example.invalid/instance.git\n",
             encoding="utf-8",
         )
-        repo = self.tmp / "repos" / "secretary"
+        repo = self.tmp / "repos" / "ummanu"
         repo.mkdir(parents=True)
-        (instance_dir / "projects" / "secretary.yaml").write_text(
+        (instance_dir / "projects" / "ummanu.yaml").write_text(
             yaml.safe_dump(
                 {
-                    "id": "secretary",
+                    "id": "ummanu",
                     "repo": str(repo),
                     "enabled": True,
-                    "adapter": "secretary",
+                    "adapter": "ummanu",
                     "default_branch": "main",
                 }
             ),
@@ -129,7 +129,7 @@ class SqlAuditCase(CardStoreCase):
         self,
         *,
         event_id: str,
-        ref: str = "secretary-468",
+        ref: str = "ummanu-468",
         kind: EventKind = EventKind.CARD_STARTED,
         minute: int = 0,
     ) -> Event:
@@ -138,7 +138,7 @@ class SqlAuditCase(CardStoreCase):
             kind=kind,
             entity_kind=EntityKind.CARD,
             ref=ref,
-            actor=Actor("dispatcher", "secretary-production"),
+            actor=Actor("dispatcher", "ummanu-production"),
             reason="claimed for the worker",
             occurred_at=datetime(2026, 9, 7, 12, minute, tzinfo=UTC),
             source_state="ready",
@@ -172,7 +172,7 @@ class CommandReadTests(SqlAuditCase):
 
     def test_a_committed_history_comes_from_sql_while_the_projection_is_stale(self) -> None:
         self.commit("req-1", event_id="evt_1", minute=1)
-        self.commit("req-2", event_id="evt_2", minute=2, ref="secretary-12")
+        self.commit("req-2", event_id="evt_2", minute=2, ref="ummanu-12")
         self.stale_projection()
 
         document = self.layer().command_history()
@@ -252,7 +252,7 @@ class _RefusingClient:
     _depth = 0
 
     def _refuse(self) -> Any:
-        from secretary.tasks import TaskError
+        from ummanu.tasks import TaskError
 
         raise TaskError("backend_unavailable", STORE_REFUSAL, 1)
 
@@ -314,15 +314,15 @@ class CheckpointGateTests(SqlAuditCase):
 
 
 class VerifyAuditCommandTests(SqlAuditCase):
-    """AC2: `secretary task verify-audit` verifies the configured backend's audit."""
+    """AC2: `ummanu task verify-audit` verifies the configured backend's audit."""
 
     def _run(self) -> tuple[int, dict[str, Any]]:
         printed: list[Any] = []
         arguments = Namespace(instance=str(self.instance_dir), data_dir=str(self.data_dir))
         with (
-            mock.patch("secretary.task_commands.card_client", return_value=self.client),
+            mock.patch("ummanu.task_commands.card_client", return_value=self.client),
             mock.patch(
-                "secretary.task_commands.print_json",
+                "ummanu.task_commands.print_json",
                 side_effect=lambda document, **_options: printed.append(document),
             ),
         ):
@@ -361,8 +361,8 @@ class ProductRunPublicationTests(SqlAuditCase):
         return ProductRun(
             run_id="run_1",
             request_id="req-run-1",
-            ref="secretary-468",
-            project="secretary",
+            ref="ummanu-468",
+            project="ummanu",
             role="worker",
             profile="claude-worker",
             adapter="claude",
@@ -405,7 +405,7 @@ class ProductRunPublicationTests(SqlAuditCase):
         publish_started(audit, run)
 
         self.assertEqual(
-            [record["kind"] for record in self.audit.events("secretary-468", kind=STARTED)],
+            [record["kind"] for record in self.audit.events("ummanu-468", kind=STARTED)],
             [STARTED],
         )
 
@@ -420,7 +420,7 @@ class CardHistoryReadTests(SqlAuditCase):
     what the file holds while SQL answers: absent, empty, or holding a board that is not this one.
     """
 
-    REF = "secretary-468"
+    REF = "ummanu-468"
 
     def layer(self, **kwargs: Any) -> ReadLayer:
         options: dict[str, Any] = {
@@ -441,7 +441,7 @@ class CardHistoryReadTests(SqlAuditCase):
             run_id="run_1",
             request_id="req-run-1",
             ref=self.REF,
-            project="secretary",
+            project="ummanu",
             role="worker",
             profile="claude-worker",
             adapter="claude",
@@ -545,7 +545,7 @@ class CardHistoryReadTests(SqlAuditCase):
         mine = self.layer().task_events(self.REF, None, limit=1)["next_cursor"]
 
         with self.assertRaises(InvalidCursor):
-            self.layer().task_events("secretary-12", mine, limit=1)
+            self.layer().task_events("ummanu-12", mine, limit=1)
         beyond = Cursor(ref=self.REF, offset=99).encode()
         with self.assertRaises(InvalidCursor):
             self.layer().task_events(self.REF, beyond, limit=1)
@@ -569,7 +569,7 @@ class CardHistoryReadTests(SqlAuditCase):
         layer = ReadLayer(self.instance_dir, data_dir=self.data_dir, clock=lambda: 1788652800.0)
 
         with mock.patch(
-            "secretary.webproto.reads.board_client",
+            "ummanu.webproto.reads.board_client",
             side_effect=TaskError("backend_unavailable", STORE_REFUSAL, 1),
         ):
             page = layer.task_events(self.REF, None, limit=10)
@@ -596,7 +596,7 @@ class TypedCanonAndSprintReadTests(SqlAuditCase):
 
         canon = BoardEventCanon(self.audit)
 
-        self.assertEqual([held.event_id for held in canon.events(ref="secretary-468")], [event.event_id])
+        self.assertEqual([held.event_id for held in canon.events(ref="ummanu-468")], [event.event_id])
 
     def test_the_sprint_reader_traverses_the_sql_audit_and_never_the_file(self) -> None:
         self.commit("req-1", event_id="evt_1")
@@ -632,7 +632,7 @@ class ClaimOwnershipTests(SqlAuditCase):
             "actor": {"role": "worker", "id": "worker-468"},
             "kind": "moved",
             "outcome": "success",
-            "ref": "secretary-468",
+            "ref": "ummanu-468",
             "request_id": self.REQUEST,
             "payload": payload or {"to": "in_progress"},
         }
@@ -691,7 +691,7 @@ class ClaimOwnershipTests(SqlAuditCase):
 
         self.assertEqual(canon.event(self.REQUEST), event)
         self.assertEqual(canon.committed(self.REQUEST), event)
-        self.assertEqual([held.event_id for held in canon.events(ref="secretary-468")], ["evt_typed"])
+        self.assertEqual([held.event_id for held in canon.events(ref="ummanu-468")], ["evt_typed"])
         self.assertIsNone(self.audit.pending_event(self.REQUEST))
         with self.assertRaisesRegex(ValueError, "another operation or payload"):
             canon.stage(self.REQUEST, self.event(event_id="evt_other", kind=EventKind.CARD_BLOCKED))
@@ -712,10 +712,10 @@ class ClaimOwnershipTests(SqlAuditCase):
         self.canon().commit(self.REQUEST, event)
 
         self.assertEqual(
-            [record["request_id"] for record in self.audit.events("secretary-468")],
+            [record["request_id"] for record in self.audit.events("ummanu-468")],
             ["req-released", self.REQUEST],
         )
-        self.assertEqual(self.canon().events(ref="secretary-468"), (event,))
+        self.assertEqual(self.canon().events(ref="ummanu-468"), (event,))
         with self.assertRaisesRegex(ValueError, "generic audit record"):
             self.canon().event("req-released")
 

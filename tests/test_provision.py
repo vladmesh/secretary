@@ -12,12 +12,12 @@ from unittest import mock
 
 import yaml
 
-from secretary._fsutil import publish_pair_atomic
-from secretary.cli import main
-from secretary.config import load_config, validate
-from secretary.onboarding import project_add
-from secretary.provision import apply_provision_result, start_provision
 from tests.support.git import git, make_repo
+from ummanu._fsutil import publish_pair_atomic
+from ummanu.cli import main
+from ummanu.config import load_config, validate
+from ummanu.onboarding import project_add
+from ummanu.provision import apply_provision_result, start_provision
 
 
 class ProvisionTests(unittest.TestCase):
@@ -309,7 +309,7 @@ class ProvisionTests(unittest.TestCase):
                 raise KeyboardInterrupt("host crash")
             return outcome
 
-        with mock.patch("secretary._fsutil.os.replace", side_effect=crash_after_first):
+        with mock.patch("ummanu._fsutil.os.replace", side_effect=crash_after_first):
             with self.assertRaises(KeyboardInterrupt):
                 project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
@@ -425,7 +425,7 @@ class ProvisionTests(unittest.TestCase):
             worker.start()
             publish_pair_atomic(first, first_text, second, second_text)
 
-        with mock.patch("secretary.provision.publish_pair_atomic", side_effect=publish_then_race):
+        with mock.patch("ummanu.provision.publish_pair_atomic", side_effect=publish_then_race):
             code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
 
         self.assertEqual(code, 0, result)
@@ -507,7 +507,7 @@ class ProvisionTests(unittest.TestCase):
         proposal = self.drafted_result(task)
         proposal["project_local_adapter"] = {
             "proposed": True,
-            "path": ".secretary/adapter.yaml",
+            "path": ".ummanu/adapter.yaml",
             "requires_opt_in": True,
         }
         code, result = apply_provision_result(
@@ -571,7 +571,7 @@ class ProvisionTests(unittest.TestCase):
             },
         }
 
-        with mock.patch("secretary._fsutil.os.replace", side_effect=OSError(5, "injected")):
+        with mock.patch("ummanu._fsutil.os.replace", side_effect=OSError(5, "injected")):
             code, result = apply_provision_result(
                 str(self.instance), "sample-project", str(self.write_result(env))
             )
@@ -652,7 +652,7 @@ class ProvisionTests(unittest.TestCase):
                 raise OSError(5, "injected")
             return real_replace(source, target)
 
-        with mock.patch("secretary._fsutil.os.replace", side_effect=fail_second):
+        with mock.patch("ummanu._fsutil.os.replace", side_effect=fail_second):
             code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
 
         self.assertEqual(code, 1)

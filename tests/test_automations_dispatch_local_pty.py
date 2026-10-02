@@ -33,16 +33,16 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.automations.runtime import dispatch
-from secretary.dispatch.watchdog import head_process_status
-from secretary.head_health import HeadChoice, HeadReadiness
-from secretary.runtime import heads as pipeline_heads
-from secretary.runtime import local_pty_head, role_env
-from secretary.runtime import state as runtime_state
-from secretary.runtime.head import HeadCommand, render_head_command
-from secretary.runtime.head.local_pty import protocol
-from secretary.runtime.head.local_pty.client import SupervisorClient
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
+from ummanu.automations.runtime import dispatch
+from ummanu.dispatch.watchdog import head_process_status
+from ummanu.head_health import HeadChoice, HeadReadiness
+from ummanu.runtime import heads as pipeline_heads
+from ummanu.runtime import local_pty_head, role_env
+from ummanu.runtime import state as runtime_state
+from ummanu.runtime.head import HeadCommand, render_head_command
+from ummanu.runtime.head.local_pty import protocol
+from ummanu.runtime.head.local_pty.client import SupervisorClient
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
 
 REPO = Path(__file__).resolve().parents[1]
 #: A head that never exits and says what its own terminal handed it. Both properties are the point:
@@ -167,11 +167,11 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
                 mock.patch.dict(
                     os.environ,
                     {
-                        "SECRETARY_DATA_DIR": str(self.data_dir),
-                        # The grant helper is a Secretary-owned launch boundary.  Keep this
+                        "UMMANU_DATA_DIR": str(self.data_dir),
+                        # The grant helper is a Ummanu-owned launch boundary.  Keep this
                         # subprocess on the product tree this fixture is testing instead of an
                         # ambient installation's selected checkout.
-                        "TA_SECRETARY_REPO": str(Path(__file__).resolve().parents[1]),
+                        "UMMANU_REPO": str(Path(__file__).resolve().parents[1]),
                     },
                 )
             )
@@ -820,7 +820,7 @@ class StewardBoard:
 
     def create_report(self, *, project: str, title: str, slug: str) -> str:
         card = {
-            "reference": f"secretary-report-{len(self.cards) + 1}",
+            "reference": f"ummanu-report-{len(self.cards) + 1}",
             "column": "In progress",
             "steward_report": "1",
             "date_moved": time.time(),
@@ -942,11 +942,11 @@ class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
     def test_a_failed_closed_tick_leaves_even_an_ownerless_report_alone(self) -> None:
         """A refused tick holds still: a report whose writer is not recorded anywhere is the next
         ordinary tick's to close, not this one's."""
-        self.state.save_active_report("secretary-report-9", "run-9")
+        self.state.save_active_report("ummanu-report-9", "run-9")
 
         self.assertEqual(self.refused_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME)), dispatch.REFUSED_EXIT)
 
-        self.assertEqual(self.state.load_active_report()["reference"], "secretary-report-9")
+        self.assertEqual(self.state.load_active_report()["reference"], "ummanu-report-9")
         self.assertEqual(self.actions(), [dispatch.NO_SUPERVISED_HEAD])
 
     def test_a_working_supervised_head_keeps_the_report_it_is_writing(self) -> None:

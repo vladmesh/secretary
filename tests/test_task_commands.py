@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.task_commands import resolve_data_dir
-from secretary.tasks import TaskError
+from ummanu.task_commands import resolve_data_dir
+from ummanu.tasks import TaskError
 
 
 def _args(**overrides) -> argparse.Namespace:
@@ -37,35 +37,35 @@ class ResolveDataDirTest(unittest.TestCase):
         return path
 
     def test_explicit_data_dir_wins(self) -> None:
-        self.write_instance("/var/lib/secretary-data")
+        self.write_instance("/var/lib/ummanu-data")
         args = _args(data_dir="/elsewhere/data", instance=str(self.instance_dir))
         self.assertEqual(resolve_data_dir(args), "/elsewhere/data")
 
     def test_absolute_data_dir_from_instance(self) -> None:
-        self.write_instance("/var/lib/secretary-data")
+        self.write_instance("/var/lib/ummanu-data")
         args = _args(instance=str(self.instance_dir))
-        self.assertEqual(resolve_data_dir(args), "/var/lib/secretary-data")
+        self.assertEqual(resolve_data_dir(args), "/var/lib/ummanu-data")
 
     def test_relative_instance_data_dir_pins_to_instance_not_cwd(self) -> None:
-        self.write_instance("secretary-data")
+        self.write_instance("ummanu-data")
         args = _args(instance=str(self.instance_dir))
-        self.assertEqual(resolve_data_dir(args), str(self.instance_dir / "secretary-data"))
+        self.assertEqual(resolve_data_dir(args), str(self.instance_dir / "ummanu-data"))
 
     def test_workspace_cwd_never_becomes_the_data_dir(self) -> None:
-        self.write_instance("/var/lib/secretary-data")
+        self.write_instance("/var/lib/ummanu-data")
         workspace = Path(self.tmp.name) / "workspace"
         workspace.mkdir()
         cwd = os.getcwd()
         os.chdir(workspace)
         self.addCleanup(os.chdir, cwd)
         args = _args(instance=str(self.instance_dir))
-        self.assertEqual(resolve_data_dir(args), "/var/lib/secretary-data")
-        self.assertFalse((workspace / "secretary-data").exists())
+        self.assertEqual(resolve_data_dir(args), "/var/lib/ummanu-data")
+        self.assertFalse((workspace / "ummanu-data").exists())
 
     def test_instance_file_path_is_accepted(self) -> None:
-        instance_file = self.write_instance("/var/lib/secretary-data")
+        instance_file = self.write_instance("/var/lib/ummanu-data")
         args = _args(instance=str(instance_file))
-        self.assertEqual(resolve_data_dir(args), "/var/lib/secretary-data")
+        self.assertEqual(resolve_data_dir(args), "/var/lib/ummanu-data")
 
     def test_missing_instance_is_a_usage_error(self) -> None:
         args = _args(instance=str(self.instance_dir / "absent"))
@@ -82,9 +82,9 @@ class ResolveDataDirTest(unittest.TestCase):
         self.assertIn("data_dir", caught.exception.message)
 
     def test_env_data_dir_is_read_at_parse_time(self) -> None:
-        from secretary.cli import build_parser
+        from ummanu.cli import build_parser
 
-        with mock.patch.dict(os.environ, {"SECRETARY_DATA_DIR": "/env/data"}):
+        with mock.patch.dict(os.environ, {"UMMANU_DATA_DIR": "/env/data"}):
             parser = build_parser()
             args = parser.parse_args(["task", "report", "--ref", "x-1", "--role", "worker", "--kind", "done"])
         self.assertEqual(resolve_data_dir(args), "/env/data")

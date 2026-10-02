@@ -1,6 +1,6 @@
 # Architecture
 
-`secretary` is a substrate for several interchangeable agent heads. It owns the task and memory
+`ummanu` is a substrate for several interchangeable agent heads. It owns the task and memory
 protocols, the dispatcher lifecycle, installation contracts and recovery. The actual work is done by
 the providers' native CLIs.
 
@@ -13,39 +13,39 @@ the PostgreSQL schema in [Board store](BOARD_STORE.md), checkpoint and restore i
 Product source uses a `src/` layout, so a test or command run from the repository root cannot import
 an uninstalled checkout by accident. Packaging, scripts, docs, examples and tests stay at the root.
 
-- `src/secretary` is the product package. Its flat root is closed: `tests/test_architecture.py`
+- `src/ummanu` is the product package. Its flat root is closed: `tests/test_architecture.py`
   holds the list of existing flat modules, and a new module must go into a feature package. Current
   packages: `automations`, `board`, `dispatch`, `infra`, `memory`, `po`, `projects`, `runtime`,
   `schemas`, `web`, `webfront`, `webproto`.
-- `src/secretary/automations` is the three background agents (curator, steward, retro), built on top
-  of the rest of `secretary`. `python3 -P -m secretary automations <agent> <cmd>` is their one entry:
-  `secretary.cli` hands the argv untouched to the composition root
-  (`secretary.automations.composition`), which injects Secretary's board ports and hands the rest to
+- `src/ummanu/automations` is the three background agents (curator, steward, retro), built on top
+  of the rest of `ummanu`. `python3 -P -m ummanu automations <agent> <cmd>` is their one entry:
+  `ummanu.cli` hands the argv untouched to the composition root
+  (`ummanu.automations.composition`), which injects Ummanu's board ports and hands the rest to
   the mechanical-role driver and the agents' deterministic helpers. The package may import any
-  `secretary` module; no other `secretary` module imports it, except the on-demand import behind the
-  `automations` subcommand in `secretary.cli`. `secretary` finds the agents' shipped `automation.toml`
-  specs through the product manifest (`[tool.secretary] agent-specs` in `pyproject.toml`), not by the
+  `ummanu` module; no other `ummanu` module imports it, except the on-demand import behind the
+  `automations` subcommand in `ummanu.cli`. `ummanu` finds the agents' shipped `automation.toml`
+  specs through the product manifest (`[tool.ummanu] agent-specs` in `pyproject.toml`), not by the
   package name. `tests/test_architecture.py` holds the one direction and keeps the retired top-level
   `triggered_agents` package (historical name, removed in sprint:1459) from coming back.
 - The packaged systemd timers are the only schedule owner of the background agents. Before
   sprint:1459 they ran as Orca automations; `upgrade` no longer creates, repoints or deletes any.
-- Resource health has one writer and one vocabulary: `secretary.head_health` runs each registry
+- Resource health has one writer and one vocabulary: `ummanu.head_health` runs each registry
   resource's `probe` command, classifies it (`ready`, `unknown`, `probe_broken`, `unauthenticated`,
   `exhausted`, `unavailable`) and caches it in `<data_dir>/dispatcher/resource_health.json` for
   300 s. The card dispatcher and the background agents' head resolution read that one cache; a
-  head is launchable when its status is `ready` or `unknown`. The shipped registry's probes are `python3 -P -m secretary.runtime.resource_probe --resource <id>` (`claude-sub`,
+  head is launchable when its status is `ready` or `unknown`. The shipped registry's probes are `python3 -P -m ummanu.runtime.resource_probe --resource <id>` (`claude-sub`,
   `openai-sub`, `openrouter`): one cheap provider call, exit 0 healthy, 1 failed with one scrubbed
   reason line on stderr, 2 for an id it has no probe for. It writes nothing.
-- `src/secretary/runtime` holds the head-runtime utilities both the pipeline and the background
+- `src/ummanu/runtime` holds the head-runtime utilities both the pipeline and the background
   agents use (`paths`, `references`, `prompt_document`, `launch_prefix`, `shared_state`,
   `claude_sessions`, `claude_env`, `state`, ...). New shared runtime code goes here, not into
-  `secretary.automations`.
+  `ummanu.automations`.
 
 The target package layout is feature-first. Modules move there one feature at a time, keeping
 compatibility imports where an installed command depends on an old path:
 
 ```text
-src/secretary/
+src/ummanu/
   cli/                 command parsing and rendering
   board/               board protocol, models and adapters
   tasks/               task lifecycle
@@ -73,12 +73,12 @@ dispatcher for the extracted continuation methods.
 
 `dispatch.wait_vitality` owns the shared worker/reviewer wait state machine: vitality reduction,
 recovery-policy rungs, suspension SIGCONT/operator escalation, guarded one-shot respawn, second-stall
-blocking and the bounded unobservable-head escalation. `DispatcherRuntime` (`secretary.dispatch.runtime`) calls its four package
+blocking and the bounded unobservable-head escalation. `DispatcherRuntime` (`ummanu.dispatch.runtime`) calls its four package
 entry points from worker/review/gate orchestration; the module calls back only for the existing
 worker/reviewer confirmed-stop lifecycle boundaries and routing; terminal effects go directly through
 `dispatch.attempt_accounting`. Mechanical gate
 verdict, transport retry, bounded infrastructure rerun and pending-CI policy are package-owned by
-`secretary.dispatch.gate_lifecycle`. `dispatch.review_verdict` owns durable review-verdict
+`ummanu.dispatch.gate_lifecycle`. `dispatch.review_verdict` owns durable review-verdict
 acceptance and Assessment parking: marker consumption, reviewer-stop handoff, green/red bookkeeping,
 the no-observer red ceiling, pre-park gate handoff, and park intent/replay. `dispatch.assessment_decision`
 owns Assessment decision intake/replay plus rework/reslice execution. `dispatch.release_lifecycle`
@@ -96,8 +96,8 @@ Dependency rules:
   protocol owned by the feature that consumes it.
 - Feature code does not import CLI modules. Shared runtime does not import an application module to
   find configuration; configuration and paths are passed in.
-- A board client is built only through `secretary.board.backend.board_client`, and a card audit only
-  through `secretary.tasks.task_audit_for`. `tests/test_architecture.py` holds both rules.
+- A board client is built only through `ummanu.board.backend.board_client`, and a card audit only
+  through `ummanu.tasks.task_audit_for`. `tests/test_architecture.py` holds both rules.
 
 ## Storage boundary
 
@@ -128,14 +128,14 @@ normalised board and process state plus the `postgres_dump` of the store. Backup
 does not read ORM rows. It asks the board client for normalised state and the `board-store.env`
 resolver for the owner connection; dump/restore runs in `board/postgres_recovery.py`.
 
-Product configuration reaches an installation one way. `secretary upgrade` generates
+Product configuration reaches an installation one way. `ummanu upgrade` generates
 `heads/heads.yaml` from the installation's head canon (its own `heads/heads.toml`, else the product
 default), writes `heads/source.yaml` recording the canon, its owner, checkout, revision and snapshot
 digest, and commits and pushes both. A live tick reads only that installed pair, so editing a product
-working tree changes nothing until the next `upgrade`. The gap shows in `secretary status` under
+working tree changes nothing until the next `upgrade`. The gap shows in `ummanu status` under
 `installation.head_registry`.
 
-An installation is named by `--instance` or `SECRETARY_INSTANCE`, the checkout by `--product-root`.
+An installation is named by `--instance` or `UMMANU_INSTANCE`, the checkout by `--product-root`.
 Every other path (skill targets, shell entry points, role worktrees, runtime env file) hangs off the
 home of the account that owns the installation: the owner of the instance directory, or
 `--runtime-user`. A run as root therefore writes the paths the units name, not `/root`. Full order:
@@ -154,7 +154,7 @@ cold archive is optional and plays no part in recovery readiness.
 operator / automation
           │
           ▼
-  secretary task and sprint protocol ────────> board backend
+  ummanu task and sprint protocol ────────> board backend
           │                            ▲
           ▼                            │
  production dispatcher ──> HeadRuntime ──> runtime backend ──> native agent CLI
@@ -164,7 +164,7 @@ operator / automation
 agent heads ── Bearer grant + HeadRun heartbeat ──> memory MCP/index <── facts journal <── curator
 ```
 
-Every supported board write goes through `secretary task` or `secretary sprint`, which apply role
+Every supported board write goes through `ummanu task` or `ummanu sprint`, which apply role
 guards, transitions and append-only audit ([Protocols](PROTOCOLS.md#tasks)). Cards and sprints are
 exported to the checkpoint and restored from it as separate sets
 ([Recovery](RECOVERY.md#what-the-checkpoint-contains)). Card references are recovery identities, not
@@ -182,7 +182,7 @@ writes one budget event per source event. At the hard limit the sprint becomes `
 removes the live head without touching claimed cards. The sprint's resume entry is structured
 metadata; its freshness is computed against card audit.
 
-Standing agents: curator, steward and retro all enter `python3 -P -m secretary automations`. Its
+Standing agents: curator, steward and retro all enter `python3 -P -m ummanu automations`. Its
 composition root supplies task-backed ports for steward signals and reports and for retro Done
 retention; curator needs none. The generic triggered-agent runtime owns only the port interfaces.
 Each tick raises the role's head on `local-pty` or fails closed with a recorded reason and exit 1
@@ -193,7 +193,7 @@ Each tick raises the role's head on `local-pty` or fails closed with a recorded 
 `HeadRuntime` is the lifecycle boundary for the dispatcher and the mechanical-role driver. Its verbs
 (start, deliver, observe, request drain, stop, conditional stop) return typed receipts; callers do not
 infer success from a socket write or process existence. There is one head runtime,
-`local-pty`, and `secretary.runtime.head_runtime_backends` is the only place a name becomes a
+`local-pty`, and `ummanu.runtime.head_runtime_backends` is the only place a name becomes a
 backend. A durable record written while heads were Orca panes (`orca-legacy`, or no runtime) still
 loads and is shown as a legacy record, but no backend is built for it, so it is never launched or
 delivered to. A dispatcher record from that time, one whose workspace is an Orca worktree or whose
@@ -233,7 +233,7 @@ gate refuses a green verdict if the checkout has moved since. Teardown removes t
 `git worktree remove --force` and `prune`, only after the heads were confirmed stopped. Head
 rendering and delivery are adapter-specific, but not a stable plugin API.
 
-A record whose workspace is under the Orca workspaces root (`SECRETARY_DISPATCHER_WORKSPACES_ROOT`,
+A record whose workspace is under the Orca workspaces root (`UMMANU_DISPATCHER_WORKSPACES_ROOT`,
 else `~/orca/workspaces`) and not a git worktree the host owns was placed by Orca before A20. It is a
 legacy record: the host never resumes, re-places or tears it down (see
 [Head runtime ownership](#head-runtime-ownership)).
@@ -243,27 +243,27 @@ A sprint observer's workspace is a detached `git worktree` of the observer repo 
 respawn and removal read it from the recorded path; a recorded path anywhere else is a legacy
 record.
 
-The dispatcher owns only `.secretary-task-env/venv` in a card worktree; `.venv` belongs to the
+The dispatcher owns only `.ummanu-task-env/venv` in a card worktree; `.venv` belongs to the
 project adapter. It claims the environment with an owner record, adds its workspace paths to Git's
 `info/exclude`, and never writes production package paths into either environment. One immutable
-`ProductionRuntime` value binds the production interpreter, product root and `secretary` import at
+`ProductionRuntime` value binds the production interpreter, product root and `ummanu` import at
 workspace creation, launch, gate, release and teardown; a mismatch keeps the worktree and blocks the
-card. Head-visible Secretary commands name the absolute production interpreter with `-P`. Details:
+card. Head-visible Ummanu commands name the absolute production interpreter with `-P`. Details:
 [Operations](OPERATIONS.md#dispatcher-task-python-isolation).
 
 Before any interactive Codex head launches (worker, reviewer, observer or service agent), one
 preflight answers the CLI's first-run questions: it marks the workspace trusted, appends only missing
 entries, and stops bring-up with a reason if a path is held at a different trust level. Then the head
 is started, readiness awaited, the prompt delivered and the turn confirmed. A workspace that cannot be
-prepared fails before anything starts. Operator `secretary shell` sessions skip the preflight.
+prepared fails before anything starts. Operator `ummanu shell` sessions skip the preflight.
 
 ## The read layer
 
-`secretary.webproto` answers the operator's questions (what the system is doing, what a card is
+`ummanu.webproto` answers the operator's questions (what the system is doing, what a card is
 doing, what happened to it) for every transport: the `web-read` CLI and the web dashboard. A
 transport only maps typed errors to its own codes and renders snapshots.
 
-The layer collects no facts of its own. Health is `collect_status` (what `secretary status --json`
+The layer collects no facts of its own. Health is `collect_status` (what `ummanu status --json`
 prints); projects are the validated bindings; cards come from `TaskReader`; history is the board's
 append-only audit, so a cursor is a position in that audit; agents are dispatcher production state
 plus launch heartbeats.
@@ -278,7 +278,7 @@ Protocol, schema, states and cursors: [Protocols](PROTOCOLS.md#reading-the-pipel
 
 ## The product runtime
 
-The other half of `secretary.webproto` raises a real worker head for a card and a reviewer head from
+The other half of `ummanu.webproto` raises a real worker head for a card and a reviewer head from
 its result, and owns their workspace, process, pid, logs and outcome.
 
 It reuses existing parts: `LocalPtyHeadRuntime` through
@@ -306,15 +306,15 @@ Operations, idempotency, ownership and outcomes: [Protocols](PROTOCOLS.md#runnin
 
 ## The web transport
 
-`secretary.web` serves the dashboard, card, sprint, project and history pages and a JSON API over
+`ummanu.web` serves the dashboard, card, sprint, project and history pages and a JSON API over
 HTTP, using the standard-library `http.server`. It is a transport like `web-read`/`web-run`: each
-entry of `secretary.web.app.ROUTES` is one `secretary.webproto` operation, and one table
-(`secretary.web.statuses`) maps protocol codes to HTTP status. It holds no snapshot, state derivation,
+entry of `ummanu.web.app.ROUTES` is one `ummanu.webproto` operation, and one table
+(`ummanu.web.statuses`) maps protocol codes to HTTP status. It holds no snapshot, state derivation,
 liveness rule or mutation of its own. A missing fact is added to the layer, not to a page.
 
 Constraints:
 
-- `secretary.web` imports nothing from the product except `secretary.webproto`.
+- `ummanu.web` imports nothing from the product except `ummanu.webproto`.
 - No session state. Cursors belong to the client, and repeated POSTs carry the client's request id,
   so a retry never raises a second head.
 - Every public `webproto` operation is wrapped by `webproto.boundary.ProtocolBoundary`, which turns an
@@ -326,7 +326,7 @@ Constraints:
 - A run is shown as two facts: what its process did (outcome and whether it is over) and what it
   produced (result document, verdict, exit status).
 
-`secretary-web.service` runs it on `127.0.0.1:8787`. A product run started through it must name a
+`ummanu-web.service` runs it on `127.0.0.1:8787`. A product run started through it must name a
 head-registry profile that declares `local-pty`.
 
 Routes, status table, cursors: [Protocols](PROTOCOLS.md#serving-the-pipeline-locally). Running it:
@@ -335,13 +335,13 @@ Routes, status table, cursors: [Protocols](PROTOCOLS.md#serving-the-pipeline-loc
 ## The guarded front
 
 External access is TLS plus one password, and the product contains no authentication code.
-`secretary.webfront` renders a Caddy configuration (Caddy from the Ubuntu archive) that terminates
+`ummanu.webfront` renders a Caddy configuration (Caddy from the Ubuntu archive) that terminates
 TLS, checks the owner's password with `basicauth *` against a bcrypt hash, and proxies to loopback.
 
 - The front is the only public listener; the application cannot bind anywhere else, and pages call
   the read layer in-process, so there is no internal HTTP surface.
-- `secretary.webfront.guard` parses the rendered file and reports every entry of
-  `secretary.web.app.ROUTES` that would be answered before the password check.
+- `ummanu.webfront.guard` parses the rendered file and reports every entry of
+  `ummanu.web.app.ROUTES` that would be answered before the password check.
 - The password and its hash live in the installation secret store. The rendered file is `0600` state
   under the data directory; rotation is `set-password`, `render`, restart, with no commit.
 
@@ -381,7 +381,7 @@ the confirmed head first, then removes the git worktree.
 
 The launch prompt is rendered from the live sprint entity and points to the `observe-sprint` role
 skill by path without repeating it. The skill lives in `skills/` of this repository, is registered as
-the `observer` role in `skills/manifest.toml` and is delivered by `secretary role-skills sync` to the
+the `observer` role in `skills/manifest.toml` and is delivered by `ummanu role-skills sync` to the
 shell of every profile a sprint may declare. If the skill is missing from the target shell, launch is
 deferred with a reason naming the file.
 
@@ -422,7 +422,7 @@ All interactive heads share one delivery path, whichever provider or role:
 Lifecycle events go to the durable audit keyed by sprint reference and are deduplicated by request id,
 which includes the record generation. As with card writes, the event is staged, the host is called,
 then the event is committed. A staging failure cancels the action. A commit failure keeps the effect,
-leaves the event pending for `secretary task reconcile-audit`, and reports a pending audit.
+leaves the event pending for `ummanu task reconcile-audit`, and reports a pending audit.
 
 The launch intent (sprint, generation, profile, attempt, workspace, pid file) is flushed to production
 state before the host call; unwritable state means no launch. A tick that dies after the host call
@@ -436,9 +436,9 @@ deferred record.
 ## Memory plane
 
 Facts are markdown records under `state/memory/facts` in the instance repository. The curator writes
-through `secretary memory propose/commit/supersede`, which commits only `state/memory` under the
+through `ummanu memory propose/commit/supersede`, which commits only `state/memory` under the
 shared instance-repository writer lock. The butler may only `propose`; `commit` and `supersede` belong
-to the curator, secretary and operator roles ([Protocols](PROTOCOLS.md#memory)). Other heads read
+to the curator, ummanu and operator roles ([Protocols](PROTOCOLS.md#memory)). Other heads read
 through MCP. The NDJSON export and the SQLite/vector index in the data directory are rebuilt from the
 canon, and one index writer publishes at a time.
 
@@ -446,9 +446,9 @@ Unresolved cross-project conclusions sit under `state/memory/facts/po-review` as
 The interactive PO, curator and retro see them; worker, reviewer, observer and steward grants do not.
 A reviewed item is superseded into its final scope.
 
-The shipped `packaging/memory/product-secretary` pack feeds the same canon at
-`state/memory/facts/product-secretary` (scope `product:secretary`). Its manifest, paths and SHA-256
-digests are verified before it is materialised. `state/memory/packs/product-secretary.json` records
+The shipped `packaging/memory/product-ummanu` pack feeds the same canon at
+`state/memory/facts/product-ummanu` (scope `product:ummanu`). Its manifest, paths and SHA-256
+digests are verified before it is materialised. `state/memory/packs/product-ummanu.json` records
 the installed digest and owned fact ids; a local fact with a shipped id is refused. Incremental index
 reconciliation reuses embeddings with unchanged id and digest. The ledger is `pending` until the
 export is handed to the memory daemon's runtime user, then `ready`, so a failed handoff is retried by
@@ -472,7 +472,7 @@ live under `state/knowledge/projects/<project id>/<section>/`, with the id from 
 repository carries contracts and code; the reasoning behind its development is installation state.
 
 Knowledge is not indexed, not returned by `memory_search` and never loaded wholesale into a head's
-context. Format is free markdown. Writes go through `secretary knowledge write`, which owns only
+context. Format is free markdown. Writes go through `ummanu knowledge write`, which owns only
 `state/knowledge`, takes the shared instance-repository writer lock and refuses documents containing
 secrets ([Protocols](PROTOCOLS.md#knowledge)).
 

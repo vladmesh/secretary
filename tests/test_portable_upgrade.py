@@ -22,22 +22,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import cli as cli_module
-from secretary import installation, role_skills, upgrade
-from secretary.cli import main as cli_main
-from secretary.config import validate_instance
-from secretary.head_registry import (
-    INSTANCE_ORIGIN,
-    PRODUCT_ORIGIN,
-    canonical_heads,
-    canonical_path,
-    read_source,
-    snapshot_path,
-)
-from secretary.host import SHIPPED_PACKAGING_ROOT, LiveHostSource
-from secretary.host_apply import HostCommandError, SystemdUnitInstaller, resolve_packaged, strict_manifest
-from secretary.projects.availability import ProjectAvailability
-from secretary.runtime import heads as shipped_heads
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.retired_board import (
     LEGACY_ENV,
@@ -47,8 +31,24 @@ from tests.retired_board import (
     legacy_runtime_lines,
     write_stale_leftovers,
 )
+from ummanu import cli as cli_module
+from ummanu import installation, role_skills, upgrade
+from ummanu.cli import main as cli_main
+from ummanu.config import validate_instance
+from ummanu.head_registry import (
+    INSTANCE_ORIGIN,
+    PRODUCT_ORIGIN,
+    canonical_heads,
+    canonical_path,
+    read_source,
+    snapshot_path,
+)
+from ummanu.host import SHIPPED_PACKAGING_ROOT, LiveHostSource
+from ummanu.host_apply import HostCommandError, SystemdUnitInstaller, resolve_packaged, strict_manifest
+from ummanu.projects.availability import ProjectAvailability
+from ummanu.runtime import heads as shipped_heads
 
-UNIT_PREFIX = "secretary-"
+UNIT_PREFIX = "ummanu-"
 # Read at import, before any fixture patches the home or the account database: these are the two
 # places a portable run is not allowed to reach.
 LIVE_HOME = str(Path.home())
@@ -87,11 +87,11 @@ Description=Portable {component}
 
 [Service]
 Type=simple
-User={{{{SECRETARY_RUNTIME_USER}}}}
-WorkingDirectory={{{{SECRETARY_PRODUCT_ROOT}}}}
-Environment=SECRETARY_INSTANCE={{{{SECRETARY_INSTANCE_PATH}}}}
-Environment=SECRETARY_DATA_DIR={{{{SECRETARY_DATA_DIR}}}}
-ExecStart={{{{SECRETARY_RUNTIME_HOME}}}}/.local/bin/secretary-{component}
+User={{{{UMMANU_RUNTIME_USER}}}}
+WorkingDirectory={{{{UMMANU_PRODUCT_ROOT}}}}
+Environment=UMMANU_INSTANCE={{{{UMMANU_INSTANCE_PATH}}}}
+Environment=UMMANU_DATA_DIR={{{{UMMANU_DATA_DIR}}}}
+ExecStart={{{{UMMANU_RUNTIME_HOME}}}}/.local/bin/ummanu-{component}
 
 [Install]
 WantedBy=default.target
@@ -102,29 +102,29 @@ Description=Portable {component} timer
 
 [Timer]
 OnCalendar=hourly
-Unit=secretary-{component}.service
+Unit=ummanu-{component}.service
 
 [Install]
 WantedBy=timers.target
 """
 
 MANIFEST = """
-[roles.secretary]
+[roles.ummanu]
 skills = ["portable-skill"]
 
 [targets.codex-portable]
 shell = "codex"
 root = "~/shells/codex/skills"
-roles = ["secretary"]
+roles = ["ummanu"]
 
 [targets.claude-portable]
 shell = "claude"
 root = "~/shells/claude/skills"
-roles = ["secretary"]
+roles = ["ummanu"]
 """
 
 OVERLAY = """
-[roles.secretary]
+[roles.ummanu]
 skills = ["owned-skill"]
 """
 
@@ -204,7 +204,7 @@ class PortableFixture(unittest.TestCase):
         self.write_product()
         self.write_instance()
         self._initialize_instance_repo()
-        # A fully replaced environment: an inherited SECRETARY_INSTANCE, TA_* or runtime variable would
+        # A fully replaced environment: an inherited UMMANU_INSTANCE, TA_* or runtime variable would
         # point some part of the run back at the live installation, which is exactly the failure
         # this fixture exists to rule out.
         env = mock.patch.dict(
@@ -216,8 +216,8 @@ class PortableFixture(unittest.TestCase):
         self.addCleanup(env.stop)
         account = SimpleNamespace(pw_dir=str(self.home), pw_name="operator")
         for target, kwargs in (
-            ("secretary.host_apply.pwd.getpwnam", {"return_value": account}),
-            ("secretary.host_apply.pwd.getpwuid", {"return_value": account}),
+            ("ummanu.host_apply.pwd.getpwnam", {"return_value": account}),
+            ("ummanu.host_apply.pwd.getpwuid", {"return_value": account}),
         ):
             patch = mock.patch(target, **kwargs)
             patch.start()
@@ -229,35 +229,35 @@ class PortableFixture(unittest.TestCase):
         manifest = self.product / "skills" / "manifest.toml"
         manifest.parent.mkdir(parents=True)
         manifest.write_text(MANIFEST, encoding="utf-8")
-        skill = manifest.parent / "roles" / "secretary" / "portable-skill"
+        skill = manifest.parent / "roles" / "ummanu" / "portable-skill"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text("# portable-skill\n", encoding="utf-8")
         (skill / "portable-skill.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        canon = self.product / "src" / "secretary" / "runtime" / "heads.toml"
+        canon = self.product / "src" / "ummanu" / "runtime" / "heads.toml"
         canon.parent.mkdir(parents=True)
         canon.write_text(PRODUCT_CANON, encoding="utf-8")
         packaging = self.product / "packaging" / "systemd"
         packaging.mkdir(parents=True)
         for component in ("memory", "dispatcher-production"):
-            (packaging / f"secretary-{component}.service").write_text(
+            (packaging / f"ummanu-{component}.service").write_text(
                 SERVICE.format(component=component), encoding="utf-8"
             )
-        (packaging / "secretary-dispatcher-production.timer").write_text(
+        (packaging / "ummanu-dispatcher-production.timer").write_text(
             TIMER.format(component="dispatcher-production"), encoding="utf-8"
         )
         # A portable product checkout is now also the strict source of the
         # active product memory pack. Keep this fixture self-contained rather
         # than letting an upgrade read the checkout running the test.
-        memory_pack = self.product / "packaging" / "memory" / "product-secretary"
+        memory_pack = self.product / "packaging" / "memory" / "product-ummanu"
         memory_pack.mkdir(parents=True)
-        pack_fact = b"---\nsource: product:secretary\n---\nportable product fact\n"
+        pack_fact = b"---\nsource: product:ummanu\n---\nportable product fact\n"
         (memory_pack / "portable.md").write_bytes(pack_fact)
         (memory_pack / "manifest.yaml").write_text(
             "\n".join(
                 (
                     "schema: 1",
-                    "product: secretary",
-                    "namespace: product:secretary",
+                    "product: ummanu",
+                    "namespace: product:ummanu",
                     "status: active",
                     "ownership: shipped",
                     "fact_format: markdown-frontmatter-v1",
@@ -340,7 +340,7 @@ class PortableFixture(unittest.TestCase):
         overlay = self.instance / "skills" / "manifest.toml"
         overlay.parent.mkdir(parents=True, exist_ok=True)
         overlay.write_text(OVERLAY, encoding="utf-8")
-        skill = overlay.parent / "roles" / "secretary" / "owned-skill"
+        skill = overlay.parent / "roles" / "ummanu" / "owned-skill"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text("# owned-skill\n", encoding="utf-8")
         return overlay
@@ -471,34 +471,34 @@ class PackagedRuntimeParityTests(PortableFixture):
             runtime_user="operator",
         )
         self.assertEqual(len(packaged), 18)
-        from secretary.infra.doctor_record import TIMEOUT_SECONDS
+        from ummanu.infra.doctor_record import TIMEOUT_SECONDS
 
-        service = self.units.files["secretary-doctor.service"].decode()
-        timer = self.units.files["secretary-doctor.timer"].decode()
-        self.assertIn(f"ExecStart={self.product}/.venv/bin/secretary doctor-record --instance {self.instance} --data-dir {self.data}", service)
+        service = self.units.files["ummanu-doctor.service"].decode()
+        timer = self.units.files["ummanu-doctor.timer"].decode()
+        self.assertIn(f"ExecStart={self.product}/.venv/bin/ummanu doctor-record --instance {self.instance} --data-dir {self.data}", service)
         self.assertIn(f"EnvironmentFile=-{self.instance}/runtime.env", service)
         self.assertIn("User=operator", service)
         outer = int(next(line.split("=", 1)[1] for line in service.splitlines() if line.startswith("TimeoutStartSec=")))
         self.assertGreater(outer, TIMEOUT_SECONDS)
         self.assertIn("KillMode=control-group", service)
         self.assertIn("OnUnitInactiveSec=60s", timer)
-        self.assertIn("Unit=secretary-doctor.service", timer)
+        self.assertIn("Unit=ummanu-doctor.service", timer)
         self.assertEqual(self.units.files, {unit.name: unit.content for unit in packaged})
         managed, error = strict_manifest(self.data / "host-managed.json")
         self.assertEqual(error, "")
         self.assertEqual({resource.name for resource in managed}, set(self.units.files))
         self.assertEqual(self.units.enabled, {unit.name for unit in packaged if unit.installable})
         for unit in packaged:
-            self.assertNotIn(b"{{SECRETARY_", unit.content)
+            self.assertNotIn(b"{{UMMANU_", unit.content)
             if unit.name.endswith(".service"):
                 self.assertIn(b"User=operator", unit.content)
             if unit.oneshot and not unit.installable:
                 self.assertNotIn(unit.name, self.units.active)
         for component in ("steward", "retro", "steward-deep-sweep", "doctor"):
-            self.assertIn(f"secretary-{component}.timer", self.units.enabled)
+            self.assertIn(f"ummanu-{component}.timer", self.units.enabled)
             self.assertIn(
-                f"Unit=secretary-{component}.service".encode(),
-                self.units.files[f"secretary-{component}.timer"],
+                f"Unit=ummanu-{component}.service".encode(),
+                self.units.files[f"ummanu-{component}.timer"],
             )
         self.assertFalse(self.verify().failed)
         expected, collected, diffs = self.doctor_inventory()
@@ -512,7 +512,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         before = dict(self.units.files)
         for component in ("steward", "retro", "steward-deep-sweep", "doctor"):
             for enabled, action in ((True, "start"), (False, "enable")):
-                name = f"secretary-{component}.timer"
+                name = f"ummanu-{component}.timer"
                 with self.subTest(name=name, enabled=enabled):
                     self.units.active.discard(name)
                     if not enabled:
@@ -559,7 +559,7 @@ class PackagedRuntimeParityTests(PortableFixture):
 
     def test_existing_materializer_updates_steward_and_retro_templates_and_layout(self):
         for component in ("steward", "retro", "doctor"):
-            name = f"secretary-{component}.service"
+            name = f"ummanu-{component}.service"
             template = self.product / "packaging" / "systemd" / name
             template.write_bytes(template.read_bytes() + b"\n# changed catalogue input\n")
             result = upgrade.step_host(self.context())
@@ -570,12 +570,12 @@ class PackagedRuntimeParityTests(PortableFixture):
             self.units.calls.clear()
         other_home = self.root / "other-owner-home"
         with mock.patch(
-            "secretary.host_apply.pwd.getpwnam", return_value=SimpleNamespace(pw_dir=str(other_home))
+            "ummanu.host_apply.pwd.getpwnam", return_value=SimpleNamespace(pw_dir=str(other_home))
         ):
             result = upgrade.step_host(self.context())
         self.assertEqual(result.status, "changed", result.detail)
         for component in ("steward", "retro", "doctor"):
-            self.assertIn(str(other_home).encode(), self.units.files[f"secretary-{component}.service"])
+            self.assertIn(str(other_home).encode(), self.units.files[f"ummanu-{component}.service"])
         managed, error = strict_manifest(self.data / "host-managed.json")
         self.assertEqual(error, "")
         self.assertEqual({resource.name for resource in managed}, set(self.units.files))
@@ -586,10 +586,10 @@ class PackagedRuntimeParityTests(PortableFixture):
         config.write_text(
             config.read_text()
             + "  components:\n    retro: {enabled: false}\n"
-            + "  foreign_units: [secretary-steward.service, secretary-steward.timer]\n"
+            + "  foreign_units: [ummanu-steward.service, ummanu-steward.timer]\n"
         )
-        self.units.active.discard("secretary-steward.timer")
-        self.units.enabled.discard("secretary-steward.timer")
+        self.units.active.discard("ummanu-steward.timer")
+        self.units.enabled.discard("ummanu-steward.timer")
         self.units._publish()
         foreign_before = {name: content for name, content in self.units.files.items() if "steward." in name}
         result = upgrade.step_host(self.context())
@@ -598,14 +598,14 @@ class PackagedRuntimeParityTests(PortableFixture):
         self.assertFalse(any("retro." in name for name in self.units.files))
         self.assertEqual({name: self.units.files[name] for name in foreign_before}, foreign_before)
         expected, collected, diffs = self.doctor_inventory()
-        self.assertNotIn("secretary-steward.timer", expected.unit_runtime)
-        self.assertNotIn("secretary-retro.timer", expected.unit_runtime)
+        self.assertNotIn("ummanu-steward.timer", expected.unit_runtime)
+        self.assertNotIn("ummanu-retro.timer", expected.unit_runtime)
         self.assertEqual(cli_module._unit_runtime_findings(expected, collected), [])
         self.assertEqual(diffs["units"].unmanaged_on_host, [])
         self.assertFalse(self.verify().failed)
 
     def test_failed_runtime_repair_is_failed_and_verify_still_reads_inactive(self):
-        name = "secretary-steward.timer"
+        name = "ummanu-steward.timer"
         self.units.active.discard(name)
         self.units.fail_on.add(name)
         self.units._publish()
@@ -617,17 +617,17 @@ class PackagedRuntimeParityTests(PortableFixture):
     def test_doctor_component_opt_out_and_foreign_pair_use_existing_ownership_rules(self):
         config = self.instance / "instance.yaml"
         original = config.read_text()
-        pair = {"secretary-doctor.service", "secretary-doctor.timer"}
+        pair = {"ummanu-doctor.service", "ummanu-doctor.timer"}
         before = {name: self.units.files[name] for name in pair}
-        config.write_text(original + "  foreign_units: [secretary-doctor.service, secretary-doctor.timer]\n")
-        self.units.active.discard("secretary-doctor.timer")
+        config.write_text(original + "  foreign_units: [ummanu-doctor.service, ummanu-doctor.timer]\n")
+        self.units.active.discard("ummanu-doctor.timer")
         self.units._publish()
         result = upgrade.step_host(self.context())
         self.assertFalse(result.failed, result.detail)
         self.assertFalse(any(name in pair for _, name in self.units.calls))
         self.assertEqual({name: self.units.files[name] for name in pair}, before)
         expected, collected, diffs = self.doctor_inventory()
-        self.assertNotIn("secretary-doctor.timer", expected.unit_runtime)
+        self.assertNotIn("ummanu-doctor.timer", expected.unit_runtime)
         self.assertEqual(cli_module._unit_runtime_findings(expected, collected), [])
         self.assertEqual(diffs["units"].unmanaged_on_host, [])
         self.assertFalse(self.verify().failed)
@@ -639,7 +639,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         self.assertFalse(self.verify().failed)
 
     def test_required_long_running_service_is_repaired_and_verified(self):
-        name = "secretary-memory.service"
+        name = "ummanu-memory.service"
         self.units.active.discard(name)
         self.units._publish()
         result = self.verify()
@@ -659,7 +659,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         config.write_text(
             config.read_text()
             + "  components:\n    memory: {enabled: false}\n"
-            + "  foreign_units: [secretary-web.service, secretary-po.service]\n"
+            + "  foreign_units: [ummanu-web.service, ummanu-po.service]\n"
         )
         context = self.context()
         host = upgrade.step_host(context)
@@ -681,7 +681,7 @@ class PackagedRuntimeParityTests(PortableFixture):
 
     def test_runtime_state_absent_is_unavailable_without_live_fixture_probes(self):
         (self.host_fixture / "unit-states.txt").unlink()
-        with mock.patch("secretary.infra.systemd._proc.run", side_effect=AssertionError("live probe")):
+        with mock.patch("ummanu.infra.systemd._proc.run", side_effect=AssertionError("live probe")):
             result = self.verify()
             expected, collected, _ = self.doctor_inventory()
             findings = cli_module._unit_runtime_findings(expected, collected)
@@ -718,13 +718,13 @@ class PackagedRuntimeParityTests(PortableFixture):
         return subprocess.CompletedProcess(argv, code, stdout=state + "\n", stderr="")
 
     def native_boundary(self, error="", probe="list-unit-files"):
-        from secretary import _proc
+        from ummanu import _proc
 
         self.real_run = _proc.run
         self.systemctl_calls = []
         self.bus_error = error
         self.error_probe = probe
-        return mock.patch("secretary.infra.systemd._proc.run", side_effect=self.systemctl_reply)
+        return mock.patch("ummanu.infra.systemd._proc.run", side_effect=self.systemctl_reply)
 
     def test_successful_native_enumeration_with_bus_and_connect_foreign_names(self):
         args = [
@@ -741,7 +741,7 @@ class PackagedRuntimeParityTests(PortableFixture):
             {finding["code"] for finding in baseline["findings"]},
             {"production_runtime_provenance", "dispatcher"},
         )
-        foreign = {"secretary-bus-forwarder.service", "secretary-connect-forwarder.service"}
+        foreign = {"ummanu-bus-forwarder.service", "ummanu-connect-forwarder.service"}
         config = self.instance / "instance.yaml"
         config.write_text(config.read_text() + f"  foreign_units: {sorted(foreign)}\n")
         manifest = (self.data / "host-managed.json").read_bytes()
@@ -761,7 +761,7 @@ class PackagedRuntimeParityTests(PortableFixture):
                 f"--root={self.root / 'systemd-root'}",
                 "list-unit-files",
                 "--no-legend",
-                "secretary-*",
+                "ummanu-*",
             ],
             capture_output=True,
             text=True,
@@ -778,7 +778,7 @@ class PackagedRuntimeParityTests(PortableFixture):
 
         with (
             self.native_boundary(),
-            mock.patch("secretary.infra.systemd._proc.run", side_effect=reply),
+            mock.patch("ummanu.infra.systemd._proc.run", side_effect=reply),
             mock.patch.object(cli_module, "FixtureHostSource", return_value=LiveHostSource("operator")),
         ):
             result = self.verify(host_fixture=None)
@@ -795,7 +795,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         self.assertEqual(self.units.calls, [])
 
     def test_previously_owned_foreign_dispatcher_is_unchanged_in_all_consumers(self):
-        pair = {"secretary-dispatcher-production.service", "secretary-dispatcher-production.timer"}
+        pair = {"ummanu-dispatcher-production.service", "ummanu-dispatcher-production.timer"}
         managed, error = strict_manifest(self.data / "host-managed.json")
         self.assertEqual(error, "")
         self.assertTrue(pair <= {resource.name for resource in managed})
@@ -845,7 +845,7 @@ class PackagedRuntimeParityTests(PortableFixture):
 
         with (
             self.native_boundary(),
-            mock.patch("secretary.infra.systemd._proc.run", side_effect=reply),
+            mock.patch("ummanu.infra.systemd._proc.run", side_effect=reply),
             mock.patch.object(cli_module, "FixtureHostSource", return_value=LiveHostSource("operator")),
         ):
             result = self.verify(host_fixture=None)
@@ -903,11 +903,11 @@ class PackagedRuntimeParityTests(PortableFixture):
         self.assertEqual((self.data / "host-managed.json").read_bytes(), manifest)
         self.assertEqual(self.units.calls, [])
         # Unit assessment is still required when the unavailable checkout is excluded.
-        self.units.active.discard("secretary-steward.timer")
+        self.units.active.discard("ummanu-steward.timer")
         with self.native_boundary():
             result = self.verify(host_fixture=None, project_availability=availability)
         self.assertTrue(result.failed, result.detail)
-        self.assertIn("secretary-steward.timer: expected active, got inactive", result.detail)
+        self.assertIn("ummanu-steward.timer: expected active, got inactive", result.detail)
         self.assertEqual(self.units.calls, [])
 
     def test_included_project_symlink_loop_remains_unavailable_in_upgrade(self):
@@ -938,7 +938,7 @@ class PackagedRuntimeParityTests(PortableFixture):
             with (
                 self.subTest(shell_user=shell_user),
                 mock.patch.dict(os.environ, {"USER": shell_user}),
-                mock.patch("secretary.host_apply.os.geteuid", return_value=effective_uid),
+                mock.patch("ummanu.host_apply.os.geteuid", return_value=effective_uid),
                 self.native_boundary(),
             ):
                 context = self.context(host_fixture=None)
@@ -963,13 +963,13 @@ class PackagedRuntimeParityTests(PortableFixture):
                 self.assertEqual(diffs["units"].missing_on_host, [])
                 self.assertEqual(cli_module._unit_runtime_findings(expected, collected), [])
                 installer = SystemdUnitInstaller(sudo=False, runtime_user="operator")
-                self.assertTrue(installer.is_active("secretary-steward.timer"))
+                self.assertTrue(installer.is_active("ummanu-steward.timer"))
                 self.assertEqual(installer.observation.runtime_user, "operator")
                 self.assertTrue(self.systemctl_calls)
                 self.assertTrue(all("--user" not in argv for argv in self.systemctl_calls))
 
     def test_native_inactive_exit_is_a_finding_in_verify_and_text_json_doctor(self):
-        name = "secretary-steward.timer"
+        name = "ummanu-steward.timer"
         self.units.active.discard(name)
         self.units._publish()
         with self.native_boundary():
@@ -1026,7 +1026,7 @@ class PackagedRuntimeParityTests(PortableFixture):
                     self.assertNotIn("expected active", result.detail)
                     installer = SystemdUnitInstaller(sudo=False, runtime_user="operator")
                     with self.assertRaisesRegex(HostCommandError, "manager/bus connection failed"):
-                        installer.is_active("secretary-steward.timer")
+                        installer.is_active("ummanu-steward.timer")
                     with mock.patch.object(
                         cli_module, "FixtureHostSource", return_value=LiveHostSource("operator")
                     ):
@@ -1133,7 +1133,7 @@ class PortableInstallationTests(PortableFixture):
         self.assertTrue(self.shell_skill("claude", "portable-skill").is_file())
         self.assertEqual(
             (self.home / "bin" / "portable-skill").resolve(),
-            self.product / "skills" / "roles" / "secretary" / "portable-skill" / "portable-skill.sh",
+            self.product / "skills" / "roles" / "ummanu" / "portable-skill" / "portable-skill.sh",
         )
         # The running checkout's own manifest targets `~/.claude/skills` and `~/.hermes/...`. It
         # was never named here, so a step that read it would leave those directories behind in
@@ -1149,7 +1149,7 @@ class PortableInstallationTests(PortableFixture):
         pin = read_source(self.instance)
         self.assertEqual(
             canonical,
-            self.product / "src" / "secretary" / "runtime" / "heads.toml",
+            self.product / "src" / "ummanu" / "runtime" / "heads.toml",
         )
         self.assertEqual(origin, PRODUCT_ORIGIN)
         self.assertTrue(result.ok, result.render())
@@ -1177,7 +1177,7 @@ class PortableInstallationTests(PortableFixture):
 
         self.assertTrue(result.ok, result.render())
         self.assertIn(f"WorkingDirectory={self.product}".encode(), rendered)
-        self.assertIn(f"SECRETARY_INSTANCE={self.instance}".encode(), rendered)
+        self.assertIn(f"UMMANU_INSTANCE={self.instance}".encode(), rendered)
         self.assertIn(f"ExecStart={self.home}/.local/bin".encode(), rendered)
         self.assertIn("User=operator", rendered.decode())
         self.assert_hermetic(rendered.decode())
@@ -1188,11 +1188,11 @@ class PortableInstallationTests(PortableFixture):
         The product ships a background agent's spec, which is exactly what the retired automations
         step turned into `orca automations` calls; the upgrade must now issue none of them.
         """
-        agent = self.product / "src" / "secretary" / "automations" / "agents" / "curator"
+        agent = self.product / "src" / "ummanu" / "automations" / "agents" / "curator"
         agent.mkdir(parents=True, exist_ok=True)
         (agent / "automation.toml").write_text('name = "curator"\nskill = "/curate"\n', encoding="utf-8")
         (self.product / "pyproject.toml").write_text(
-            '[tool.secretary]\nagent-specs = "src/secretary/automations/agents"\n', encoding="utf-8"
+            '[tool.ummanu]\nagent-specs = "src/ummanu/automations/agents"\n', encoding="utf-8"
         )
         argvs: list[list[str]] = []
         real_popen_init = subprocess.Popen.__init__
@@ -1264,7 +1264,7 @@ class PortableInstallationTests(PortableFixture):
         decoy = self.root / "decoy"
         (decoy / "packaging" / "systemd").mkdir(parents=True)
 
-        with mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(decoy)}):
+        with mock.patch.dict(os.environ, {"UMMANU_REPO": str(decoy)}):
             code, report = self.run_json_cli(
                 ["doctor", "--instance", str(self.instance), "--offline", "--json"]
             )
@@ -1345,7 +1345,7 @@ class CodexHomeMigrationTests(PortableFixture):
 
     def test_doctor_reports_a_missing_login_red_with_the_fix_and_then_the_active_home(self) -> None:
         """A20 step 7 (secretary-1723): no legacy fallback, so no login is a red finding naming the fix."""
-        canon = self.product / "src" / "secretary" / "runtime" / "heads.toml"
+        canon = self.product / "src" / "ummanu" / "runtime" / "heads.toml"
         canon.write_text(
             PRODUCT_CANON
             + '\n[profiles.portable-codex]\nresource = "portable-sub"\nadapter = "codex"\nfallback = []\n',
@@ -1400,7 +1400,7 @@ class CodexHomeMigrationTests(PortableFixture):
 class InstallationOwnerTests(PortableFixture):
     """Whose home an upgrade materializes into, when that is not the caller's.
 
-    The reproduction is a repair: root, or an operator on the same box, runs `secretary upgrade`
+    The reproduction is a repair: root, or an operator on the same box, runs `ummanu upgrade`
     against an installation owned by somebody else. Every home-relative path the run writes has to
     be the owner's, because the units the same run renders name the owner's home and nothing else
     will go looking in `/root` for the skills they were supposed to find.
@@ -1440,7 +1440,7 @@ class InstallationOwnerTests(PortableFixture):
                 "run_steps",
                 side_effect=lambda context: seen.append(context) or upgrade.UpgradeResult(),
             ),
-            mock.patch("secretary.host_apply.pwd.getpwuid", side_effect=AssertionError("owner probed")),
+            mock.patch("ummanu.host_apply.pwd.getpwuid", side_effect=AssertionError("owner probed")),
         ):
             code = self.run_upgrade_command(dry_run=True, runtime_user="named")
 
@@ -1456,22 +1456,22 @@ class InstallationOwnerTests(PortableFixture):
         self.assertTrue(self.shell_skill("claude", "portable-skill").is_file())
         self.assertEqual(
             (self.home / "bin" / "portable-skill").resolve(),
-            self.product / "skills" / "roles" / "secretary" / "portable-skill" / "portable-skill.sh",
+            self.product / "skills" / "roles" / "ummanu" / "portable-skill" / "portable-skill.sh",
         )
         self.assert_invoker_home_untouched()
 
     def test_role_worktrees_belong_to_the_owner(self) -> None:
         """Not written here; decided from a home, and it must be the owner's."""
-        agent = self.product / "src" / "secretary" / "automations" / "agents" / "curator"
+        agent = self.product / "src" / "ummanu" / "automations" / "agents" / "curator"
         agent.mkdir(parents=True, exist_ok=True)
         (agent / "automation.toml").write_text('name = "curator"\nskill = "curate"\n', encoding="utf-8")
         (self.product / "pyproject.toml").write_text(
-            '[tool.secretary]\nagent-specs = "src/secretary/automations/agents"\n', encoding="utf-8"
+            '[tool.ummanu]\nagent-specs = "src/ummanu/automations/agents"\n', encoding="utf-8"
         )
 
         worktrees = upgrade.desired_role_worktrees(self.product, self.home)
 
-        self.assertEqual(worktrees, [self.home / "orca" / "workspaces" / "secretary" / "curator"])
+        self.assertEqual(worktrees, [self.home / "orca" / "workspaces" / "ummanu" / "curator"])
 
     def test_a_configured_workspaces_root_still_wins_over_the_owners_home(self) -> None:
         elsewhere = self.root / "elsewhere"
@@ -1489,7 +1489,7 @@ class InstallationOwnerTests(PortableFixture):
         self.assertEqual(role_skills.bin_dir(self.home), self.home / "bin")
 
     def test_an_installation_owned_by_a_missing_account_is_refused_before_any_write(self) -> None:
-        with mock.patch("secretary.host_apply.pwd.getpwnam", side_effect=KeyError("operator")):
+        with mock.patch("ummanu.host_apply.pwd.getpwnam", side_effect=KeyError("operator")):
             code, output = self.capture(lambda: self.run_upgrade_command())
 
         self.assertEqual(code, 2)
@@ -1513,7 +1513,7 @@ class ProductRootDefaultTests(PortableFixture):
     """
 
     def test_the_configured_checkout_wins_over_the_one_running_the_command(self) -> None:
-        with mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(self.product)}):
+        with mock.patch.dict(os.environ, {"UMMANU_REPO": str(self.product)}):
             self.assertEqual(upgrade.default_product_root(), self.product)
             self.assertEqual(
                 installation._product_root(SimpleNamespace(product_root=None)),
@@ -1521,7 +1521,7 @@ class ProductRootDefaultTests(PortableFixture):
             )
 
     def test_with_nothing_configured_the_default_hangs_off_the_running_users_home(self) -> None:
-        self.assertEqual(upgrade.default_product_root(), self.invoker_home / "secretary")
+        self.assertEqual(upgrade.default_product_root(), self.invoker_home / "ummanu")
         self.assertNotEqual(str(upgrade.default_product_root()), RUNNING_CHECKOUT)
 
     def test_the_default_role_skill_manifest_is_the_configured_checkouts(self) -> None:
@@ -1530,7 +1530,7 @@ class ProductRootDefaultTests(PortableFixture):
         The manifest of the module running the command is never the answer: a candidate checkout
         auditing itself would report the host in sync with a registry it does not run.
         """
-        with mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(self.product)}):
+        with mock.patch.dict(os.environ, {"UMMANU_REPO": str(self.product)}):
             resolved = role_skills.manifest_path()
 
         self.assertEqual(resolved, role_skills.product_manifest_path(self.product))
@@ -1539,7 +1539,7 @@ class ProductRootDefaultTests(PortableFixture):
     def test_a_named_manifest_and_a_named_root_both_outrank_the_configured_checkout(self) -> None:
         named = self.root / "named" / "manifest.toml"
         explicit = self.root / "explicit" / "manifest.toml"
-        env = {"TA_SECRETARY_REPO": str(self.product), role_skills.MANIFEST_ENV: str(named)}
+        env = {"UMMANU_REPO": str(self.product), role_skills.MANIFEST_ENV: str(named)}
 
         with mock.patch.dict(os.environ, env):
             self.assertEqual(role_skills.manifest_path(), named)
@@ -1547,7 +1547,7 @@ class ProductRootDefaultTests(PortableFixture):
 
     def test_an_audit_with_no_named_checkout_reads_the_configured_ones_skills(self) -> None:
         """End to end through the CLI, which is where the default is actually taken."""
-        with mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(self.product)}):
+        with mock.patch.dict(os.environ, {"UMMANU_REPO": str(self.product)}):
             code, report = self.run_json_cli(
                 ["role-skills", "audit", "--instance", str(self.instance), "--json"]
             )
@@ -1561,7 +1561,7 @@ class ProductRootDefaultTests(PortableFixture):
 
     def test_an_explicitly_named_checkout_still_wins_over_the_configured_one(self) -> None:
         decoy = self.root / "decoy"
-        with mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(decoy)}):
+        with mock.patch.dict(os.environ, {"UMMANU_REPO": str(decoy)}):
             seen: list[upgrade.UpgradeContext] = []
             with mock.patch.object(
                 upgrade,
@@ -1648,13 +1648,13 @@ class RefusedBeforeAnyWriteTests(PortableFixture):
 
     def test_a_malformed_product_manifest_is_named_before_anything_is_materialized(self) -> None:
         manifest = role_skills.product_manifest_path(self.product)
-        manifest.write_text("[roles.secretary\n", encoding="utf-8")
+        manifest.write_text("[roles.ummanu\n", encoding="utf-8")
 
         self.assert_refused(self.run_upgrade(), manifest)
 
     def test_a_malformed_instance_overlay_is_named_before_anything_is_materialized(self) -> None:
         overlay = self.own_a_skill()
-        overlay.write_text("[roles.secretary]\nskills = [1]\n", encoding="utf-8")
+        overlay.write_text("[roles.ummanu]\nskills = [1]\n", encoding="utf-8")
 
         self.assert_refused(self.run_upgrade(), overlay)
 
@@ -1677,7 +1677,7 @@ class RefusedBeforeAnyWriteTests(PortableFixture):
         Readable is not deliverable, and the difference has to be found in the same step as a
         syntax error: the head snapshot is written two steps before the skills are.
         """
-        source = self.product / "skills" / "roles" / "secretary" / "portable-skill"
+        source = self.product / "skills" / "roles" / "ummanu" / "portable-skill"
         (source / "SKILL.md").unlink()
 
         self.assert_refused(self.run_upgrade(), source / "SKILL.md")
@@ -1715,7 +1715,7 @@ class RefusedBeforeAnyWriteTests(PortableFixture):
         venv_python.write_text(f"#!/bin/sh\nprintf '' > {marker}\nexit 0\n", encoding="utf-8")
         venv_python.chmod(0o755)
         manifest = role_skills.product_manifest_path(self.product)
-        manifest.write_text("[roles.secretary\n", encoding="utf-8")
+        manifest.write_text("[roles.ummanu\n", encoding="utf-8")
 
         result = self.run_upgrade(changed_paths=("pyproject.toml",))
 
@@ -1749,14 +1749,14 @@ class RefusedBeforeAnyWriteTests(PortableFixture):
 
 
 class ShippedRegistryHomeTests(unittest.TestCase):
-    """The product's portable registry ships beside `secretary.runtime.heads`, and both canons load."""
+    """The product's portable registry ships beside `ummanu.runtime.heads`, and both canons load."""
 
     ROOT = Path(__file__).resolve().parents[1]
 
     def test_the_product_fallback_is_the_registry_the_runtime_ships(self) -> None:
         path, owner = canonical_path(self.ROOT)
         self.assertEqual(
-            (path, owner), (self.ROOT / "src" / "secretary" / "runtime" / "heads.toml", PRODUCT_ORIGIN)
+            (path, owner), (self.ROOT / "src" / "ummanu" / "runtime" / "heads.toml", PRODUCT_ORIGIN)
         )
         self.assertEqual(path.resolve(), shipped_heads.HEADS_TOML.resolve())
         self.assertTrue(canonical_heads(self.ROOT)["profiles"])

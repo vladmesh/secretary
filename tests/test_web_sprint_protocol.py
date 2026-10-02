@@ -27,22 +27,30 @@ from pathlib import Path
 from typing import Any, ClassVar
 from unittest import mock
 
-from secretary import sprints as sprints_module
-from secretary.board.audit_contract import PROTOCOL_EVENT_RECORD_TYPE
-from secretary.cli import main
-from secretary.config import validate
-from secretary.knowledge_write import list_knowledge_documents
-from secretary.runtime.head.identity import publish_heartbeat
-from secretary.sprint_close import CLOSE_NOT_DONE
-from secretary.sprint_observer import EXECUTOR_PINNED, EXECUTOR_UNSET, REVIEWER_FIELD, WORKER_FIELD
-from secretary.sprints import SPRINT_BOARD_NAME, SPRINT_CLOSEOUT, _close_step_request_id
-from secretary.tasks import _STATE_BY_COLUMN, TaskError, TaskWriter, task_audit_for
-from secretary.webproto import section as section_module
-from secretary.webproto import sources, sprint_requests, store_io
-from secretary.webproto import sprint_reads as sprint_reads_module
-from secretary.webproto.boundary import GUARDED, operations
-from secretary.webproto.commands import _EXIT_BY_CODE, EXIT_CONFLICT, EXIT_PENDING
-from secretary.webproto.errors import (
+from tests.observer_identity import bind_observer
+from tests.sprint_close_fixtures import CLOSEOUT_BODY, init_state_repo
+from tests.webproto_sprint_fixtures import (
+    OBSERVER_PROFILE,
+    REVIEWER_PROFILE,
+    WORKER_PROFILE,
+    SprintProtocolFixture,
+)
+from ummanu import sprints as sprints_module
+from ummanu.board.audit_contract import PROTOCOL_EVENT_RECORD_TYPE
+from ummanu.cli import main
+from ummanu.config import validate
+from ummanu.knowledge_write import list_knowledge_documents
+from ummanu.runtime.head.identity import publish_heartbeat
+from ummanu.sprint_close import CLOSE_NOT_DONE
+from ummanu.sprint_observer import EXECUTOR_PINNED, EXECUTOR_UNSET, REVIEWER_FIELD, WORKER_FIELD
+from ummanu.sprints import SPRINT_BOARD_NAME, SPRINT_CLOSEOUT, _close_step_request_id
+from ummanu.tasks import _STATE_BY_COLUMN, TaskError, TaskWriter, task_audit_for
+from ummanu.webproto import section as section_module
+from ummanu.webproto import sources, sprint_requests, store_io
+from ummanu.webproto import sprint_reads as sprint_reads_module
+from ummanu.webproto.boundary import GUARDED, operations
+from ummanu.webproto.commands import _EXIT_BY_CODE, EXIT_CONFLICT, EXIT_PENDING
+from ummanu.webproto.errors import (
     OperationPending,
     OwnerConflict,
     ReadError,
@@ -50,15 +58,15 @@ from secretary.webproto.errors import (
     TaskNotFound,
     ValidationRefused,
 )
-from secretary.webproto.runs import RunStoreError
-from secretary.webproto.sprint_ops import (
+from ummanu.webproto.runs import RunStoreError
+from ummanu.webproto.sprint_ops import (
     COMMENT_PENDING_REASON,
     PENDING_REASON,
     SPRINT_CLOSE_OPERATION,
     SPRINT_COMMENT_OPERATION,
     SprintOperationLayer,
 )
-from secretary.webproto.sprint_reads import (
+from ummanu.webproto.sprint_reads import (
     ACCEPTANCE_ISSUE,
     COMMENT_ABSENT,
     COMMENT_SAVED,
@@ -79,15 +87,7 @@ from secretary.webproto.sprint_reads import (
     TRANSITION_UNKNOWN,
     SprintReadLayer,
 )
-from secretary.webproto.sprint_requests import SprintRequestStore
-from tests.observer_identity import bind_observer
-from tests.sprint_close_fixtures import CLOSEOUT_BODY, init_state_repo
-from tests.webproto_sprint_fixtures import (
-    OBSERVER_PROFILE,
-    REVIEWER_PROFILE,
-    WORKER_PROFILE,
-    SprintProtocolFixture,
-)
+from ummanu.webproto.sprint_requests import SprintRequestStore
 
 #: What a call to the board writes with. Reads of this layer make none of these, and the sprint
 #: board a fresh installation does not have is one of the things they do not create.
@@ -163,9 +163,9 @@ class CreateTests(SprintProtocolFixture):
         value = document["sprint"]["sprint"]["value"]
         self.assertEqual(value["goal"], "Give webproto a sprint create")
         self.assertEqual(value["definition_of_done"], "the operation exists and is tested")
-        self.assertEqual(value["product"], "secretary")
+        self.assertEqual(value["product"], "ummanu")
         self.assertEqual(value["issues"], ["issue:open"])
-        self.assertEqual(value["reservations"], ["secretary"])
+        self.assertEqual(value["reservations"], ["ummanu"])
         self.assertEqual(value["status"], "open")
         self.assertEqual(
             document["sprint"]["observer"]["declared"]["profile"], OBSERVER_PROFILE
@@ -173,17 +173,17 @@ class CreateTests(SprintProtocolFixture):
 
     def test_the_create_leaves_the_audit_and_the_reservation_index_the_writer_leaves(self) -> None:
         """The existing audit and reservations are kept because the existing writer keeps them."""
-        from secretary.sprints import SPRINT_CREATED, active_sprint_projects
+        from ummanu.sprints import SPRINT_CREATED, active_sprint_projects
 
         reference = self.reference_of(self.create())
         kinds = [str(event.get("kind") or "") for event in task_audit_for(self.board).events()]
         self.assertIn(SPRINT_CREATED, kinds)
-        self.assertEqual(active_sprint_projects(self.data_dir), {"secretary": [reference]})
+        self.assertEqual(active_sprint_projects(self.data_dir), {"ummanu": [reference]})
 
     def test_a_sprint_on_a_project_another_open_sprint_holds_is_an_owner_conflict(self) -> None:
         self.create()
         with self.assertRaises(OwnerConflict) as refused:
-            self.create(request_id="req-2", projects=["secretary"], issues=["issue:open"])
+            self.create(request_id="req-2", projects=["ummanu"], issues=["issue:open"])
         self.assertIn("already reserved by an open sprint", str(refused.exception))
         self.assertEqual(len(self.sprint_rows()), 1)
 
@@ -270,7 +270,7 @@ class IdempotencyTests(SprintProtocolFixture):
     """Criteria 3 and 4: a request id owns the sprint, and a half-done create is resumed."""
 
     def test_local_run_exceptions_reach_entity_reads_and_request_fingerprint(self) -> None:
-        entries = [{"project": "secretary", "argv": ["docker", "run", "two words"], "rationale": "owner's exact probe"}]
+        entries = [{"project": "ummanu", "argv": ["docker", "run", "two words"], "rationale": "owner's exact probe"}]
         created = self.create(local_run_exceptions=entries)
         self.assertEqual(validate(created, "web-sprint", created["kind"]), [])
         self.assertEqual(created["sprint"]["sprint"]["value"]["local_run_exceptions"], entries)
@@ -283,7 +283,7 @@ class IdempotencyTests(SprintProtocolFixture):
 
     def test_old_web_create_fingerprint_keeps_the_empty_default(self) -> None:
         created = self.create()
-        with mock.patch("secretary.sprints.SprintWriter.create") as never:
+        with mock.patch("ummanu.sprints.SprintWriter.create") as never:
             repeated = self.create(local_run_exceptions=[])
         self.assertEqual(self.reference_of(repeated), self.reference_of(created))
         never.assert_not_called()
@@ -298,7 +298,7 @@ class IdempotencyTests(SprintProtocolFixture):
     def test_a_repeat_calls_no_writer_at_all(self) -> None:
         """The shortcut is the point: a repeat cannot create a second observer if it never writes."""
         reference = self.reference_of(self.create())
-        with mock.patch("secretary.sprints.SprintWriter.create") as never:
+        with mock.patch("ummanu.sprints.SprintWriter.create") as never:
             repeat = self.create()
         never.assert_not_called()
         self.assertEqual(self.reference_of(repeat), reference)
@@ -324,7 +324,7 @@ class IdempotencyTests(SprintProtocolFixture):
         `write_text_atomic` raises a bare `RuntimeError`, which the boundary deliberately does not
         translate, and a full disk here escaped as that raw exception instead of the typed answer
         below. The seam this now goes through
-        (:func:`secretary.webproto.store_io.write_document`) is what makes the two agree.
+        (:func:`ummanu.webproto.store_io.write_document`) is what makes the two agree.
         """
         real = store_io.write_text_atomic
 
@@ -417,17 +417,17 @@ class OptionsTests(SprintProtocolFixture):
     def test_the_catalogue_offers_products_open_issues_projects_and_heads(self) -> None:
         options = self.reads().sprint_options()
         self.assertEqual(options["kind"], "sprint_options")
-        self.assertEqual([item["id"] for item in options["products"]["items"]], ["other", "secretary"])
+        self.assertEqual([item["id"] for item in options["products"]["items"]], ["other", "ummanu"])
         refs = [item["ref"] for item in options["issues"]["items"]]
         self.assertEqual(refs, ["issue:foreign", "issue:open"])
         self.assertNotIn("issue:done", refs, "a closed issue is refused, so it is never offered")
         self.assertEqual(
             {item["ref"]: item["product"] for item in options["issues"]["items"]},
-            {"issue:open": "secretary", "issue:foreign": "other"},
+            {"issue:open": "ummanu", "issue:foreign": "other"},
         )
         self.assertEqual(
             [item["id"] for item in options["projects"]["items"]],
-            ["other", "secretary", "secretary-instance"],
+            ["other", "secretary-instance", "ummanu"],
         )
 
     def test_a_project_an_open_sprint_holds_is_marked_as_held(self) -> None:
@@ -435,7 +435,7 @@ class OptionsTests(SprintProtocolFixture):
         held = {
             item["id"]: item["reserved_by"] for item in self.reads().sprint_options()["projects"]["items"]
         }
-        self.assertEqual(held["secretary"], [reference])
+        self.assertEqual(held["ummanu"], [reference])
         self.assertEqual(held["other"], [])
 
     def test_the_profile_catalogue_is_the_installed_registry_and_not_a_constant(self) -> None:
@@ -608,7 +608,7 @@ class SprintStateTests(SprintProtocolFixture):
         value = self.reads().sprint_state(reference)["sprint"]["value"]
         self.assertEqual(value["goal"], "Give webproto a sprint create")
         self.assertEqual(value["definition_of_done"], "the operation exists and is tested")
-        self.assertEqual(value["reservations"], ["secretary"])
+        self.assertEqual(value["reservations"], ["ummanu"])
         self.assertEqual(value["issues"], ["issue:open"])
         self.assertEqual(value["status"], "open")
         self.assertIsNone(value["current_task"])
@@ -617,8 +617,8 @@ class SprintStateTests(SprintProtocolFixture):
         self.assertEqual(value["executors"]["reviewer"]["state"], EXECUTOR_UNSET)
 
     def test_the_last_resume_entry_of_a_sprint_is_on_the_page(self) -> None:
-        from secretary.sprints import SprintWriter
         from tests.observer_identity import bind_observer
+        from ummanu.sprints import SprintWriter
 
         reference = self.reference_of(self.create())
         bind_observer(self, reference)
@@ -633,7 +633,7 @@ class SprintStateTests(SprintProtocolFixture):
                 "selected_step": "the create operation",
                 "selected_why": "the layer owes the transport a contract",
                 "rejected_alternatives": "a second scheduler",
-                "current_task": "secretary-1569",
+                "current_task": "ummanu-1569",
                 "dod_state": "DoD 4 in progress",
                 "next_safe_step": "write the transport",
             },
@@ -689,7 +689,7 @@ class LayerPropertyTests(SprintProtocolFixture):
         import ast
 
         source = (
-            Path(__file__).resolve().parents[1] / "src" / "secretary" / "webproto" / "sprint_ops.py"
+            Path(__file__).resolve().parents[1] / "src" / "ummanu" / "webproto" / "sprint_ops.py"
         ).read_text(encoding="utf-8")
         tree = ast.parse(source)
         layer = next(
@@ -727,7 +727,7 @@ class LayerPropertyTests(SprintProtocolFixture):
         """The promise as it is meant: this layer speaks no transport to its caller.
 
         Direct imports, deliberately. A transitive scan would be a different and false claim: the
-        layer's access to the board is a database client, and `secretary.tasks` has imported a
+        layer's access to the board is a database client, and `ummanu.tasks` has imported a
         driver since long before this card -- as `reads.py`,
         `admission.py`, `ops.py` and `run_events.py` all show. What the promise means, and what is
         checked here and in the refusal tests above, is that nothing of the transport reaches the
@@ -743,7 +743,7 @@ class LayerPropertyTests(SprintProtocolFixture):
             quart argparse sys
             """.split()
         )
-        root = Path(__file__).resolve().parents[1] / "src" / "secretary" / "webproto"
+        root = Path(__file__).resolve().parents[1] / "src" / "ummanu" / "webproto"
         offenders: list[str] = []
         for name in ("sprint_ops.py", "sprint_reads.py", "sprint_requests.py"):
             tree = ast.parse((root / name).read_text(encoding="utf-8"), filename=name)
@@ -773,7 +773,7 @@ class LayerPropertyTests(SprintProtocolFixture):
             self.create(request_id="req-2")
         self.assertEqual(refused.exception.code, "backend_unavailable")
         with mock.patch(
-            "secretary.webproto.sprint_reads.observer_snapshot", side_effect=RunStoreError("x")
+            "ummanu.webproto.sprint_reads.observer_snapshot", side_effect=RunStoreError("x")
         ), self.assertRaises(ReadError) as read_refused:
             self.reads().sprint_state(reference)
         self.assertEqual(read_refused.exception.code, "backend_unavailable")
@@ -812,15 +812,15 @@ class SprintWorkFixture(SprintProtocolFixture):
 
     def _card(self, sprint: str) -> str:
         """One Pipeline card of this sprint, created the way the observer creates one."""
-        from secretary.tasks import TaskWriter
         from tests.observer_identity import bind_observer
+        from ummanu.tasks import TaskWriter
 
         bind_observer(self, sprint)
         return str(
             TaskWriter(self.board, data_dir=self.data_dir).create(
                 role="observer",
                 actor="observer",
-                project="secretary",
+                project="ummanu",
                 task_type="code",
                 title="the current card",
                 sprint=sprint,
@@ -837,7 +837,7 @@ class SprintWorkFixture(SprintProtocolFixture):
         self.board.save_metadata(self.board.key_of(card), blocked_by=reason)
 
     def _current_task(self, sprint: str, card: str) -> None:
-        from secretary.sprints import SprintWriter
+        from ummanu.sprints import SprintWriter
 
         SprintWriter(self.board, data_dir=self.data_dir, instance=self.instance).set_current_task(
             role="observer", actor="observer", reference=sprint, task_reference=card
@@ -1083,7 +1083,7 @@ class SprintListTests(SprintWorkFixture):
 
     def test_the_listing_answers_every_sprint_with_what_it_is_doing(self) -> None:
         open_sprint = self.reference_of(self.create())
-        self.add_sprint_row("sprint:1001", status="closed", current_task="secretary-1435")
+        self.add_sprint_row("sprint:1001", status="closed", current_task="ummanu-1435")
 
         document = self.reads().sprint_list()
 
@@ -1103,7 +1103,7 @@ class SprintListTests(SprintWorkFixture):
 
     def test_the_status_filter_selects_and_an_unknown_status_is_refused(self) -> None:
         self.reference_of(self.create())
-        self.add_sprint_row("sprint:1001", status="closed", current_task="secretary-1435")
+        self.add_sprint_row("sprint:1001", status="closed", current_task="ummanu-1435")
 
         closed = self.reads().sprint_list(statuses=["closed"])
         self.assertEqual([item["ref"] for item in closed["sprints"]["items"]], ["sprint:1001"])
@@ -1114,7 +1114,7 @@ class SprintListTests(SprintWorkFixture):
 
     def test_a_closed_sprint_is_never_presented_as_working(self) -> None:
         """Criterion 3, in the two shapes the live board has it in."""
-        self.add_sprint_row("sprint:1001", status="closed", current_task="secretary-1435")
+        self.add_sprint_row("sprint:1001", status="closed", current_task="ummanu-1435")
         self.add_sprint_row("sprint:1030", status="closed")
 
         document = self.reads().sprint_list()
@@ -1137,7 +1137,7 @@ class SprintListTests(SprintWorkFixture):
 
     def test_a_watched_closed_sprint_answers_the_way_the_listing_does(self) -> None:
         """Criterion 2: one question, one answer, whichever operation is asked."""
-        self.add_sprint_row("sprint:1001", status="closed", current_task="secretary-1435")
+        self.add_sprint_row("sprint:1001", status="closed", current_task="ummanu-1435")
 
         watched = self.reads().sprint_state("sprint:1001")
         listed = self._entry(self.reads().sprint_list(), "sprint:1001")
@@ -1387,14 +1387,14 @@ class WaitingSourceIsolationTests(SprintWorkFixture):
 
     def test_an_open_decision_card_waits_on_the_po_and_then_on_the_owner(self) -> None:
         """secretary-1761: no head runs it, so its record is not `working`; the reason says who has it."""
-        from secretary.board.owner_handover import waiting_owner
+        from ummanu.board.owner_handover import waiting_owner
 
         reference = self.reference_of(self.create())
         bind_observer(self, reference)
         writer = TaskWriter(self.board, data_dir=self.data_dir)
         card = str(
             writer.create(
-                role="observer", actor="observer", project="secretary", task_type="decision",
+                role="observer", actor="observer", project="ummanu", task_type="decision",
                 title="the question", sprint=reference,
             )["task"]["ref"]
         )
@@ -1455,7 +1455,7 @@ class WaitingSourceIsolationTests(SprintWorkFixture):
 
     def test_an_ended_sprint_answers_from_its_own_row_whatever_the_dispatcher_does(self) -> None:
         """A closed sprint is closed: the section may not borrow an unrelated unavailability."""
-        self.add_sprint_row("sprint:1001", status="closed", current_task="secretary-1435")
+        self.add_sprint_row("sprint:1001", status="closed", current_task="ummanu-1435")
         self._break_production()
 
         work = self.reads().sprint_state("sprint:1001")["work"]
@@ -1468,11 +1468,11 @@ class WaitingSourceIsolationTests(SprintWorkFixture):
 
 
 class SprintReadCommandTests(SprintProtocolFixture):
-    """`secretary sprint list` and `secretary sprint status` as clients of the two operations.
+    """`ummanu sprint list` and `ummanu sprint status` as clients of the two operations.
 
     Criterion 6: the commands keep being what an operator types, and stop being a second reader.
     What is checked here is exactly that -- the document the command prints is the document the
-    operation returned, and a typed refusal reaches the exit status `secretary web-read` maps it to.
+    operation returned, and a typed refusal reaches the exit status `ummanu web-read` maps it to.
     """
 
     def _run(self, argv: list[str]) -> tuple[int, str, str]:
@@ -1502,8 +1502,8 @@ class SprintReadCommandTests(SprintProtocolFixture):
             self.board.call(
                 "chargeSprintE2e",
                 sprint_ref=reference,
-                task_ref="secretary-90",
-                dispatch_id="secretary-90-e2e-1-00000001",
+                task_ref="ummanu-90",
+                dispatch_id="ummanu-90-e2e-1-00000001",
                 at="2026-09-27T10:00:00Z",
             )
 
@@ -1511,11 +1511,11 @@ class SprintReadCommandTests(SprintProtocolFixture):
 
         self.assertEqual(code, 0, errors)
         e2e = json.loads(output)["sprint"]["value"]["e2e"]
-        self.assertEqual((e2e["summary"], e2e["cards"]), ("e2e: 1 of 3", ["secretary-90"]))
+        self.assertEqual((e2e["summary"], e2e["cards"]), ("e2e: 1 of 3", ["ummanu-90"]))
 
     def test_sprint_list_passes_its_filter_through_and_decides_nothing(self) -> None:
         self.create()
-        self.add_sprint_row("sprint:1001", status="closed", current_task="secretary-1435")
+        self.add_sprint_row("sprint:1001", status="closed", current_task="ummanu-1435")
 
         code, output, _errors = self._run(["sprint", "list", "--status", "closed"])
 
@@ -1600,9 +1600,9 @@ class ClosedSprintTruthTests(SprintProtocolFixture):
     card, qualified. `sprint status` names the status first, and `list` and `show` agree on budget.
     """
 
-    CLOSED_CARD = "secretary-1435"
-    STOPPED_CARD = "secretary-1436"
-    OPEN_CARD = "secretary-1437"
+    CLOSED_CARD = "ummanu-1435"
+    STOPPED_CARD = "ummanu-1436"
+    OPEN_CARD = "ummanu-1437"
 
     def setUp(self) -> None:
         super().setUp()
@@ -1611,13 +1611,13 @@ class ClosedSprintTruthTests(SprintProtocolFixture):
         self.add_sprint_row("sprint:1003", status="open", current_task=self.OPEN_CARD)
 
     def _run(self, argv: list[str], *, explicit: bool = True) -> tuple[int, str, str]:
-        """One command, told its installation by `--instance` or by the default `SECRETARY_INSTANCE`."""
+        """One command, told its installation by `--instance` or by the default `UMMANU_INSTANCE`."""
         output, errors = io.StringIO(), io.StringIO()
-        environment = {"SECRETARY_INSTANCE": str(self.instance), "SECRETARY_DATA_DIR": str(self.data_dir)}
+        environment = {"UMMANU_INSTANCE": str(self.instance), "UMMANU_DATA_DIR": str(self.data_dir)}
         flags = ["--instance", str(self.instance), "--data-dir", str(self.data_dir)] if explicit else []
         with (
             self.board_injected(),
-            mock.patch("secretary.sprint_commands.board_client", return_value=self.board),
+            mock.patch("ummanu.sprint_commands.board_client", return_value=self.board),
             mock.patch.dict("os.environ", environment),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
@@ -1698,7 +1698,7 @@ class ClosedSprintTruthTests(SprintProtocolFixture):
         self.assertEqual(opened["sprint"]["value"]["current_task"], self.OPEN_CARD)
 
     def test_list_and_show_answer_the_same_budget_by_the_installations_thresholds(self) -> None:
-        """issue:16277741: `list` and `show` agree, with `--instance` and with `SECRETARY_INSTANCE`."""
+        """issue:16277741: `list` and `show` agree, with `--instance` and with `UMMANU_INSTANCE`."""
         instance_file = self.instance / "instance.yaml"
         instance_file.write_text(
             instance_file.read_text(encoding="utf-8") + "sprint_budget:\n  signal: 12\n  hard: 30\n",
@@ -1770,7 +1770,7 @@ class CommentFixture(SprintProtocolFixture):
         `is_significant_observer_event` is what the dispatcher's delivery decision is made from, so
         this is the input a second wake would have to come from -- not a restatement of it.
         """
-        from secretary.tasks import is_significant_observer_event
+        from ummanu.tasks import is_significant_observer_event
 
         return [
             str(event.get("event_id") or "")
@@ -1787,8 +1787,8 @@ class CommentFixture(SprintProtocolFixture):
         """
         from types import SimpleNamespace
 
-        from secretary.dispatch.observer import ObserverRecord, _observer_event_state
-        from secretary.sprints import SprintReader
+        from ummanu.dispatch.observer import ObserverRecord, _observer_event_state
+        from ummanu.sprints import SprintReader
 
         runtime = SimpleNamespace(
             sprints=SprintReader(self.board, data_dir=self.data_dir, thresholds=None),
@@ -1959,7 +1959,7 @@ class CommentTests(CommentFixture):
 
     def test_a_half_written_comment_is_repeated_under_the_same_request_id(self) -> None:
         """`audit_pending` names this operation and this id, never the create's."""
-        from secretary.sprints import SprintWriter
+        from ummanu.sprints import SprintWriter
 
         with mock.patch.object(
             SprintWriter, "comment", side_effect=TaskError("audit_pending", "audit repair required", 4)
@@ -2125,7 +2125,7 @@ class CommentDeliveryFaultTests(CommentFixture):
 
     @contextlib.contextmanager
     def _journal_refuses(self) -> Any:
-        from secretary.board.sql_audit import SqlTaskAudit
+        from ummanu.board.sql_audit import SqlTaskAudit
 
         with mock.patch.object(
             SqlTaskAudit, "events", side_effect=PermissionError("audit journal denied")
@@ -2184,7 +2184,7 @@ class CommentDeliveryFaultTests(CommentFixture):
 
 
 class CommentCommandTests(CommentFixture):
-    """Criterion 8: `secretary sprint comment` as a client, and the read beside it."""
+    """Criterion 8: `ummanu sprint comment` as a client, and the read beside it."""
 
     def _run(self, argv: list[str]) -> tuple[int, str, str]:
         output, errors = io.StringIO(), io.StringIO()
@@ -2840,7 +2840,7 @@ class CloseFixture(SprintProtocolFixture):
             "Second issue",
             {
                 "record_type": "issue",
-                "issue_product": "secretary",
+                "issue_product": "ummanu",
                 "issue_kind": "bug",
                 "issue_priority": "P1",
             },
@@ -2860,7 +2860,7 @@ class CloseFixture(SprintProtocolFixture):
         return self.tasks.create(
             role="observer",
             actor="observer",
-            project="secretary",
+            project="ummanu",
             task_type="code",
             title=title,
             target="ready",
@@ -2993,8 +2993,8 @@ class CloseOperationTests(CloseFixture):
 
         released = answered["result"]["reservations"]
         self.assertEqual(released["source"]["name"], "reservations")
-        self.assertEqual(released["declared"], ["secretary"])
-        self.assertEqual(released["released"], ["secretary"])
+        self.assertEqual(released["declared"], ["ummanu"])
+        self.assertEqual(released["released"], ["ummanu"])
         self.assertEqual(released["held"], [])
 
     def test_the_close_is_not_a_completed_definition_of_done(self) -> None:
@@ -3139,15 +3139,15 @@ class ClosedSprintObserverTests(CloseFixture):
         self.close()
 
         # The observer of a closed sprint is ended by the production tick reconciling against the
-        # sprint board -- `secretary.dispatch.observer`, "closed or gone sprint -> stop the head
+        # sprint board -- `ummanu.dispatch.observer`, "closed or gone sprint -> stop the head
         # and drop the record". The close adds no second teardown, so the dispatcher's own state is
         # byte for byte what it was: no stop, no launch, no cursor moved.
         self.assertEqual(self.production_bytes(), production)
 
     def test_the_reservations_are_released_by_the_close_itself(self) -> None:
-        from secretary.sprints import active_sprint_projects
+        from ummanu.sprints import active_sprint_projects
 
-        self.assertEqual(active_sprint_projects(self.data_dir), {"secretary": [self.reference]})
+        self.assertEqual(active_sprint_projects(self.data_dir), {"ummanu": [self.reference]})
 
         self.close()
 
@@ -3184,7 +3184,7 @@ class PostCloseCommentTests(CloseFixture):
         self.assertEqual(committed["kind"], "commented")
 
     def test_it_changes_nothing_about_the_sprint(self) -> None:
-        from secretary.sprints import active_sprint_projects
+        from ummanu.sprints import active_sprint_projects
 
         self.comment()
 
@@ -3273,7 +3273,7 @@ class TerminalSprintWriteTests(SprintProtocolFixture):
 
     def _answer(self, reference: str, kind: str) -> tuple[str, ...]:
         """What `_write` does with this kind on this sprint, as the table's cells say it."""
-        from secretary.sprints import SprintWriter
+        from ummanu.sprints import SprintWriter
 
         writer = SprintWriter(self.board, data_dir=self.data_dir, instance=self.instance)
         try:
@@ -3431,7 +3431,7 @@ class CloseResultFaultTests(CloseFixture):
 
 
 class CloseCommandTests(CloseFixture):
-    """Criterion 8: `secretary sprint close` is a client, and its exit statuses are unchanged."""
+    """Criterion 8: `ummanu sprint close` is a client, and its exit statuses are unchanged."""
 
     def _run(self, argv: list[str]) -> tuple[int, str, str]:
         output, errors = io.StringIO(), io.StringIO()
@@ -3498,7 +3498,7 @@ class CloseCommandTests(CloseFixture):
 
     def test_a_half_written_close_keeps_the_status_that_says_repeat_it(self) -> None:
         """`audit_pending` was exit 4 before this command became a client, and it still is."""
-        from secretary.sprints import SprintWriter
+        from ummanu.sprints import SprintWriter
 
         with mock.patch.object(
             SprintWriter, "close", side_effect=TaskError("audit_pending", "repair required", 4)
@@ -3511,7 +3511,7 @@ class CloseCommandTests(CloseFixture):
         self.assertEqual(failure["data"]["action"]["operation"], SPRINT_CLOSE_OPERATION)
 
     def test_a_card_whose_work_is_live_keeps_its_conflict_status(self) -> None:
-        from secretary.sprints import SprintWriter
+        from ummanu.sprints import SprintWriter
 
         with mock.patch.object(
             SprintWriter, "close", side_effect=TaskError("live_work", "settle the head first", 3)

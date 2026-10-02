@@ -17,11 +17,11 @@ import time
 import unittest
 from pathlib import Path
 
-from secretary.dispatch.watchdog import head_process_status
-from secretary.runtime.head import HeadSpec, TaskRef
-from secretary.runtime.head.local_pty import protocol
-from secretary.runtime.head.local_pty.client import SupervisorClient, spawn_head
-from secretary.runtime.local_pty_head import (
+from ummanu.dispatch.watchdog import head_process_status
+from ummanu.runtime.head import HeadSpec, TaskRef
+from ummanu.runtime.head.local_pty import protocol
+from ummanu.runtime.head.local_pty.client import SupervisorClient, spawn_head
+from ummanu.runtime.local_pty_head import (
     DELIVERY_GRACE_SECONDS,
     STOP_CONFIRM_SECONDS,
     LocalPtyHeadRuntime,
@@ -92,7 +92,7 @@ class ShippedRuntimeDeadlineContractTests(unittest.TestCase):
             root=self.root,
             run_id="substrate-default",
             role="worker",
-            task="secretary-1511",
+            task="ummanu-1511",
             command=CHILD_COMMAND,
             quiet_seconds=0.1,
         )
@@ -126,7 +126,7 @@ class ShippedRuntimeDeadlineContractTests(unittest.TestCase):
         receipt = runtime.start(
             SPEC,
             str(self.workspace),
-            TaskRef.card("secretary-1511", document=str(self.workspace / "TASK.md")),
+            TaskRef.card("ummanu-1511", document=str(self.workspace / "TASK.md")),
             command=CHILD_COMMAND,
             title="deadline default contract",
             role="worker",

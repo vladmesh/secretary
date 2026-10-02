@@ -24,14 +24,14 @@ from pathlib import Path
 from typing import NamedTuple
 from unittest import mock
 
-from secretary import restore_commands
-from secretary.backup_policy import ARCHIVE_ROOT
-from secretary.board.sql_cards import SqlCardClient
-from secretary.cli import main as cli_main
-from secretary.data import export_memory, init_layout
-from secretary.host import CollectResult, HostInventory, build_plan
-from secretary.host_apply import resolve_packaged
-from secretary.restore import (
+from ummanu import restore_commands
+from ummanu.backup_policy import ARCHIVE_ROOT
+from ummanu.board.sql_cards import SqlCardClient
+from ummanu.cli import main as cli_main
+from ummanu.data import export_memory, init_layout
+from ummanu.host import CollectResult, HostInventory, build_plan
+from ummanu.host_apply import resolve_packaged
+from ummanu.restore import (
     RestoreError,
     import_normalized_board,
     restore_backup,
@@ -120,17 +120,17 @@ def _seed_producer(data_dir: Path, instance_dir: Path) -> tuple[list[dict[str, o
     """Fill a producer data root with restorable canon and derived state."""
     init_layout(data_dir)
     cards = [
-        _restore_card(task_id=12, reference="secretary-1", title="First", column="Ready"),
+        _restore_card(task_id=12, reference="ummanu-1", title="First", column="Ready"),
         _restore_card(
             task_id=13,
-            reference="secretary-2",
+            reference="ummanu-2",
             title="Second",
             column="Ready",
             position=2,
             comments=[{"ts": "2026-07-16T09:00:00Z", "text": "[worker]\nprogress"}],
         ),
         # Core archives exclude Done cards, so this card only survives a full restore.
-        _restore_card(task_id=14, reference="secretary-3", title="Third", column="Done"),
+        _restore_card(task_id=14, reference="ummanu-3", title="Third", column="Done"),
     ]
     board = data_dir / "board"
     (board / "cards.json").write_text(json.dumps({"version": 1, "cards": cards}), encoding="utf-8")
@@ -157,12 +157,12 @@ def _seed_producer(data_dir: Path, instance_dir: Path) -> tuple[list[dict[str, o
     debug = data_dir / "debug" / "orca-state"
     debug.mkdir(parents=True)
     (debug / "inventory.json").write_text('{"sessions": ["live-session"]}', encoding="utf-8")
-    worktrees = data_dir / "worktrees" / "secretary-1"
+    worktrees = data_dir / "worktrees" / "ummanu-1"
     worktrees.mkdir(parents=True)
     (worktrees / "checkout.txt").write_text("live worktree", encoding="utf-8")
     units = data_dir / "generated" / "units"
     units.mkdir(parents=True)
-    (units / "secretary-dispatcher.service").write_text("[Unit]\n", encoding="utf-8")
+    (units / "ummanu-dispatcher.service").write_text("[Unit]\n", encoding="utf-8")
     return cards, facts
 
 
@@ -182,12 +182,12 @@ def _create_fixture_backup(root: Path, *, kind: str) -> _Fixture:
     cards, facts = _seed_producer(source_data, source_instance)
     export = (source_data / "memory" / "export.ndjson").read_text(encoding="utf-8")
     with (
-        mock.patch("secretary.backup._reject_claimed_worker_context"),
-        mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-        mock.patch("secretary.backup._pipeline_action", return_value=None),
+        mock.patch("ummanu.backup._reject_claimed_worker_context"),
+        mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+        mock.patch("ummanu.backup._pipeline_action", return_value=None),
         fake_engine_dump(),
         mock.patch(
-            "secretary.backup.export_all",
+            "ummanu.backup.export_all",
             return_value=_producer_exports(
                 source_data, board=len(cards), memory=facts, artifacts=0, source="e2e"
             ),
@@ -312,7 +312,7 @@ class RestoreEndToEndTests(unittest.TestCase):
             with tarfile.open(fixture.archive) as archive:
                 names = archive.getnames()
                 cards = json.loads(
-                    archive.extractfile(f"{ARCHIVE_ROOT}/secretary-data/board/cards.json").read()
+                    archive.extractfile(f"{ARCHIVE_ROOT}/ummanu-data/board/cards.json").read()
                 )["cards"]
             # Done cards included: the full archive is the whole board, not the working set.
             self.assertEqual(
@@ -401,7 +401,7 @@ class RestoreEndToEndTests(unittest.TestCase):
             corrupt_root = root / "corrupt"
             with tarfile.open(fixture.archive) as bundle:
                 bundle.extractall(corrupt_root, filter="data")
-            (corrupt_root / ARCHIVE_ROOT / "secretary-data" / "board" / "cards.json").write_text(
+            (corrupt_root / ARCHIVE_ROOT / "ummanu-data" / "board" / "cards.json").write_text(
                 '{"version": 1, "cards": []}\n', encoding="utf-8"
             )
             with tarfile.open(fixture.archive, "w") as bundle:
@@ -474,7 +474,7 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
                 description="",
                 column_id=1,
                 swimlane_id=0,
-                reference="secretary-99",
+                reference="ummanu-99",
             )
 
             with self.assertRaisesRegex(RestoreError, "board is not empty"):

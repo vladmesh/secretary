@@ -16,11 +16,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.cli import main
-from secretary.data import export_board, init_layout, normalize_sprint_entity
-from secretary.dispatch.observer import render_observer_prompt
-from secretary.restore import RestoreError, import_normalized_board
-from secretary.sprint_observer import (
+from ummanu.cli import main
+from ummanu.data import export_board, init_layout, normalize_sprint_entity
+from ummanu.dispatch.observer import render_observer_prompt
+from ummanu.restore import RestoreError, import_normalized_board
+from ummanu.sprint_observer import (
     REVIEWER_FIELD,
     WORKER_FIELD,
     executor_malformed,
@@ -29,9 +29,9 @@ from secretary.sprint_observer import (
     head_choice,
     parse_executor,
 )
-from secretary.sprints import SprintReader, SprintWriter
-from secretary.board.sql_audit import SqlTaskAudit
-from secretary.tasks import TaskError, TaskWriter
+from ummanu.sprints import SprintReader, SprintWriter
+from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.tasks import TaskError, TaskWriter
 from tests.fakes.sprints import (
     KEEP_THE_ISSUE_OPEN,
     SprintBackendFixture,
@@ -132,11 +132,11 @@ class SprintExecutorPinTests(SprintFixture):
                         "--goal",
                         reference,
                         "--product",
-                        "secretary",
+                        "ummanu",
                         "--issue",
                         "issue:open",
                         "--project",
-                        "secretary",
+                        "ummanu",
                         "--ref",
                         reference,
                         "--request-id",
@@ -207,7 +207,7 @@ class SprintCardExecutorTests(SprintFixture):
         return self._tasks().create(
             role="observer",
             actor="observer",
-            project="secretary",
+            project="ummanu",
             task_type="code",
             title="work",
             target="ready",
@@ -296,16 +296,16 @@ class SprintExecutorRecoveryTests(SprintBackendFixture, unittest.TestCase):
         init_layout(source_data)
         init_layout(target_data)
         source = self.make_sprint_client()
-        instance = _write_project_registry(root, "secretary")
+        instance = _write_project_registry(root, "ummanu")
         writer = SprintWriter(source, data_dir=source_data, instance=instance)  # type: ignore[arg-type]
         reference = writer.create(
             role="po",
             actor="operator",
             goal="recovered",
             reference="sprint:recovered",
-            product="secretary",
+            product="ummanu",
             issues=["issue:open"],
-            projects=["secretary"],
+            projects=["ummanu"],
             observer=head_choice("codex-observer"),
             request_id="seed-create",
             **pins,
@@ -314,7 +314,7 @@ class SprintExecutorRecoveryTests(SprintBackendFixture, unittest.TestCase):
             TaskWriter(source, data_dir=source_data).create(  # type: ignore[arg-type]
                 role="observer",
                 actor="observer",
-                project="secretary",
+                project="ummanu",
                 task_type="code",
                 title="linked",
                 target="ready",
@@ -399,7 +399,7 @@ class CardEditExecutorTests(SprintFixture):
         return TaskWriter(self.client, data_dir=self.tmp.name).create(  # type: ignore[arg-type]
             role="observer",
             actor="observer",
-            project="secretary",
+            project="ummanu",
             task_type="code",
             title="work",
             target="ready",

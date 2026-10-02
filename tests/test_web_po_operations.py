@@ -20,20 +20,20 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import urlencode
 
-from secretary.po import store as po_store
-from secretary.po import token as po_token
-from secretary.po.models import DEFAULT_EFFORTS, DEFAULT_MODELS
-from secretary.po.queue import PoQueue
-from secretary.po.runner import PoRunner
-from secretary.po.service import PoService, listening
-from secretary.po.store import PoStore
-from secretary.web.app import WebApp
-from secretary.webproto.errors import PoRequestConflict, ValidationRefused
-from secretary.webproto.po_auth import PoTokenLayer
-from secretary.webproto.po_ops import PoLayer
 from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, eventually, unscoped_test_launch
 from tests.sql_backend_fixtures import PostgresBoard
 from tests.web_fakes import Recording
+from ummanu.po import store as po_store
+from ummanu.po import token as po_token
+from ummanu.po.models import DEFAULT_EFFORTS, DEFAULT_MODELS
+from ummanu.po.queue import PoQueue
+from ummanu.po.runner import PoRunner
+from ummanu.po.service import PoService, listening
+from ummanu.po.store import PoStore
+from ummanu.web.app import WebApp
+from ummanu.webproto.errors import PoRequestConflict, ValidationRefused
+from ummanu.webproto.po_auth import PoTokenLayer
+from ummanu.webproto.po_ops import PoLayer
 
 BOARD: PostgresBoard
 MODELS = {"claude": ("opus", "sonnet"), "codex": ("gpt-5.6-sol",)}
@@ -212,7 +212,7 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertEqual(sorted(item.session_id for item in self.store.sessions()), sorted(created))
 
     def test_the_installations_models_are_named_as_people_say_them_in_the_form_and_the_list(self) -> None:
-        from secretary.po.models import models_from_instance
+        from ummanu.po.models import models_from_instance
 
         # The live installation's `po.models`, as instance.yaml lists them.
         instance = {
@@ -293,7 +293,7 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertEqual((listed["effort"], listed["resolved_model"]), ("high", "claude-sonnet-5"))
 
     def test_the_new_session_form_preselects_the_first_model_of_the_chosen_cli(self) -> None:
-        from secretary.web.pages import _PO_FORM_SCRIPT, _po_new_session_form
+        from ummanu.web.pages import _PO_FORM_SCRIPT, _po_new_session_form
 
         models = {cli: list(values) for cli, values in DEFAULT_MODELS.items()}
         efforts = {cli: list(values) for cli, values in DEFAULT_EFFORTS.items()}
@@ -327,7 +327,7 @@ class PoWebOperationTests(unittest.TestCase):
     def test_a_session_row_says_model_effort_and_age_on_one_line_and_never_a_table(self) -> None:
         from datetime import UTC, datetime
 
-        from secretary.web.pages import po_page
+        from ummanu.web.pages import po_page
 
         now = datetime(2026, 9, 26, 12, 0, tzinfo=UTC)
         base = {"cli": "claude", "model": "fable", "first_message": "hi", "state": "open"}
@@ -387,7 +387,7 @@ class PoWebOperationTests(unittest.TestCase):
         self.assertIn("this installation offers no model for a PO session", closed)
 
     def test_enter_sends_the_message_once_and_shift_enter_keeps_a_newline(self) -> None:
-        from secretary.web.pages import _PO_SESSION_SCRIPT
+        from ummanu.web.pages import _PO_SESSION_SCRIPT
 
         page = self.page(self.create())
         self.assertIn("Enter to send, Shift+Enter for a new line", page)
@@ -994,7 +994,7 @@ class PoWebOperationTests(unittest.TestCase):
 
     def test_the_send_button_reaches_its_form_from_outside_it_because_a_form_holds_no_form(self) -> None:
         """`close` and `new session` are forms of their own, so `send` is bound by `form=` instead."""
-        from secretary.web.pages import _PO_SESSION_SCRIPT
+        from ummanu.web.pages import _PO_SESSION_SCRIPT
 
         page = self.page(self.create())
         send = page[page.index('<form class="sprint" id="po-send"') : page.index("</form>")]
@@ -1255,10 +1255,10 @@ class PoWebOperationTests(unittest.TestCase):
         import contextlib
         import io
 
-        from secretary.cli import main
+        from ummanu.cli import main
 
         out, err = io.StringIO(), io.StringIO()
-        environment = {key: value for key, value in os.environ.items() if key != "SECRETARY_PO_SESSION"}
+        environment = {key: value for key, value in os.environ.items() if key != "UMMANU_PO_SESSION"}
         with (
             mock.patch.dict(os.environ, {**environment, **(env or {})}, clear=True),
             contextlib.redirect_stdout(out),
@@ -1280,7 +1280,7 @@ class PoWebOperationTests(unittest.TestCase):
         )
         # Inside a PO turn the session comes from the turn's environment; a repeat changes nothing.
         for _ in range(2):
-            status, out, _ = self.po_rename_cli("--title", "Own", env={"SECRETARY_PO_SESSION": own})
+            status, out, _ = self.po_rename_cli("--title", "Own", env={"UMMANU_PO_SESSION": own})
             self.assertEqual((status, json.loads(out)["session_id"]), (0, own))
         self.assertEqual((self.store.session(named).title, self.store.session(own).title), ("Named", "Own"))
 

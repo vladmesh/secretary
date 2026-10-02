@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.tui import (
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.tui import (
     DELIVERY_RECEIPT_ACCEPTED,
     DELIVERY_RECEIPT_REFUSED,
     DELIVERY_RECEIPT_UNOBSERVED,
@@ -22,12 +22,12 @@ from secretary.dispatch.tui import (
     provider_progress_for_run,
     provider_turn_started,
 )
-from secretary.dispatch.worker_lifecycle import ContinuationProviderCondition
+from ummanu.dispatch.worker_lifecycle import ContinuationProviderCondition
 from tests.dispatcher_fixtures import SupervisedBackend
 from tests.fanout_fixtures import accepted_transport_run
-from secretary.runtime.codex_preflight import codex_provider_source_descriptor
-from secretary.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
-from secretary.runtime.tui_delivery import (
+from ummanu.runtime.codex_preflight import codex_provider_source_descriptor
+from ummanu.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
+from ummanu.runtime.tui_delivery import (
     DeliveryEvidence,
 )
 
@@ -38,13 +38,13 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
             root = Path(tmp) / "claude-projects"
-            with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(root)}):
+            with mock.patch.dict(os.environ, {"UMMANU_CLAUDE_PROJECTS": str(root)}):
                 run = prepare_claude_provider_progress_source(
                     HeadRun(
                         run_id="claude-late",
                         spec=HeadSpec(profile_id="claude", adapter="claude"),
                         workspace=str(workspace),
-                        task_ref=TaskRef.card("secretary-1517"),
+                        task_ref=TaskRef.card("ummanu-1517"),
                         role="worker",
                     )
                 )
@@ -82,13 +82,13 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
             claude_root = Path(tmp) / "claude-projects"
-            with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(claude_root)}):
+            with mock.patch.dict(os.environ, {"UMMANU_CLAUDE_PROJECTS": str(claude_root)}):
                 claude_run = prepare_claude_provider_progress_source(
                     HeadRun(
                         run_id="claude-bound",
                         spec=HeadSpec(profile_id="claude", adapter="claude"),
                         workspace=str(workspace),
-                        task_ref=TaskRef.card("secretary-1429"),
+                        task_ref=TaskRef.card("ummanu-1429"),
                         role="worker",
                     )
                 )
@@ -119,8 +119,8 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 '{"type":"event_msg","payload":{"type":"thread.started","thread_id":"parent"}}\n',
                 encoding="utf-8",
             )
-            from secretary.codex_provider_events import _range_digest, _read_source
-            from secretary.dispatch.worker_lifecycle import head_run_binding
+            from ummanu.codex_provider_events import _range_digest, _read_source
+            from ummanu.dispatch.worker_lifecycle import head_run_binding
 
             parsed = _read_source(codex_path)
             self.assertIsNotNone(parsed)
@@ -130,7 +130,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                     run_id="codex-bound",
                     spec=HeadSpec(profile_id="codex", adapter="codex"),
                     workspace=str(workspace),
-                    task_ref=TaskRef.card("secretary-1429"),
+                    task_ref=TaskRef.card("ummanu-1429"),
                     role="worker",
                 ).to_json()
             )
@@ -138,7 +138,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 run_id="codex-bound",
                 spec=HeadSpec(profile_id="codex", adapter="codex"),
                 workspace=str(workspace),
-                task_ref=TaskRef.card("secretary-1429"),
+                task_ref=TaskRef.card("ummanu-1429"),
                 role="worker",
             )
             source = {
@@ -185,7 +185,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                     run_id="claude-unbound",
                     spec=HeadSpec(profile_id="claude", adapter="claude"),
                     workspace=str(Path(tmp) / "workspace"),
-                    task_ref=TaskRef.card("secretary-1429"),
+                    task_ref=TaskRef.card("ummanu-1429"),
                     role="worker",
                 )
             )
@@ -200,7 +200,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 run_id="codex-unbound",
                 spec=HeadSpec(profile_id="codex", adapter="codex", model="gpt-5.6-terra"),
                 workspace=str(workspace),
-                task_ref=TaskRef.card("secretary-1435"),
+                task_ref=TaskRef.card("ummanu-1435"),
                 role="worker",
             )
             source = {
@@ -313,8 +313,8 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 "codex",
                 "TASK.md",
                 role="worker",
-                env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
-                task={"ref": "secretary-1173", "routing": {"codex_launch_mode": "exec"}},
+                env_name="UMMANU_DISPATCHER_WORKER_COMMAND",
+                task={"ref": "ummanu-1173", "routing": {"codex_launch_mode": "exec"}},
             )
 
         [start] = host.backend.starts
@@ -339,7 +339,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 "codex",
                 "TASK.md",
                 role="worker",
-                env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
+                env_name="UMMANU_DISPATCHER_WORKER_COMMAND",
                 launch_prompt="The full task is in TASK.md. Read it first.",
             )
 
@@ -523,7 +523,7 @@ class ClaudeTranscriptPathTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(projects)}):
+            with mock.patch.dict(os.environ, {"UMMANU_CLAUDE_PROJECTS": str(projects)}):
                 self.assertTrue(provider_turn_started(str(workspace), 1.0, adapter="claude"))
                 # Everything the criterion says is about the boundary: a turn older than the send
                 # is not this delivery's.
@@ -547,7 +547,7 @@ class ClaudeTranscriptPathTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(projects)}):
+            with mock.patch.dict(os.environ, {"UMMANU_CLAUDE_PROJECTS": str(projects)}):
                 self.assertIsNone(latest_claude_user_turn_for(str(workspace), 0.0))
 
 

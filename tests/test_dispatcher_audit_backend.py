@@ -16,15 +16,15 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.board.sql_audit import SqlTaskAudit
-from secretary.dispatch import bootstrap as dispatcher_bootstrap
-from secretary.dispatch.bootstrap import runtime_from_args
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.types import HostError
-from secretary.head_registry import materialize_snapshot, record_source
-from secretary.tasks import task_audit_for
 from tests.fakes.dispatcher import dispatcher_seed
 from tests.sql_backend_fixtures import CardStoreCase
+from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.dispatch import bootstrap as dispatcher_bootstrap
+from ummanu.dispatch.bootstrap import runtime_from_args
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.types import HostError
+from ummanu.head_registry import materialize_snapshot, record_source
+from ummanu.tasks import task_audit_for
 
 
 def _instance(root: Path, data_dir: Path) -> Path:
@@ -62,8 +62,8 @@ class RuntimeAuditSelectionTests(CardStoreCase):
         env = mock.patch.dict(
             os.environ,
             {
-                "SECRETARY_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
-                "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
+                "UMMANU_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
+                "UMMANU_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
             },
         )
         env.start()
@@ -71,7 +71,7 @@ class RuntimeAuditSelectionTests(CardStoreCase):
 
     def _runtime(self, client):
         with mock.patch.object(dispatcher_bootstrap, "board_client", return_value=client):
-            return runtime_from_args(str(self.instance), None, host_mode="noop", owner="secretary-production")
+            return runtime_from_args(str(self.instance), None, host_mode="noop", owner="ummanu-production")
 
     def test_every_reader_and_the_host_share_the_sql_audit(self) -> None:
         runtime = self._runtime(self.card_store(dispatcher_seed(), instance_dir=self.instance))

@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "adapter.schema.json",
+  "title": "Project adapter",
+  "description": "How the pipeline sets up, smoke-checks and validates a project (secretary-instance/adapters/<id>.yaml). Setup, smoke and local validation commands run in their own process group: when a command returns, normally or by timeout, nothing it started is left in that group. A command that leaves the group (setsid, a daemon) is unsupported, and nothing sweeps what it leaves behind.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["setup", "smoke", "validation", "artifact_policy"],
+  "properties": {
+    "setup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commands"],
+      "properties": {
+        "commands": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1},
+          "description": "Setup commands run on a clean worktree."
+        }
+      }
+    },
+    "smoke": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command"],
+      "properties": {
+        "command": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "validation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ci"],
+      "properties": {
+        "ci": {
+          "type": "string",
+          "enum": ["github", "local", "none"],
+          "description": "Where validation runs. 'local' needs a command, 'none' must be justified by 'missing'."
+        },
+        "command": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Local validation command, required when ci is 'local'."
+        },
+        "missing": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1},
+          "description": "What the gate could not cover, e.g. ['tests']. Required when ci is 'none'."
+        },
+        "required_checks": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1},
+          "description": "GitHub check names the gate judges by, e.g. ['test']. Matches an Actions check-run name or a legacy commit status context. Only meaningful when ci is 'github'; without it the gate judges by every check on the sha."
+        },
+        "e2e": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["workflow"],
+          "description": "An e2e GitHub Actions workflow the dispatcher dispatches once per code-card candidate SHA, after green CI and a green (or skipped) review and before the card becomes releasable (docs/PROTOCOLS.md 'E2E stage'), or, with placement after_merge, on main after the merge. Needs ci 'github'. The run is identified from GitHub's dispatch answer (return_run_details), so the workflow needs no extra input.",
+          "properties": {
+            "workflow": {
+              "oneOf": [
+                {"type": "string", "pattern": "^([A-Za-z0-9][A-Za-z0-9._-]{0,99}\\.ya?ml|[0-9]+)$"},
+                {"type": "integer", "minimum": 1}
+              ],
+              "description": "The workflow file name (e.g. e2e.yml) or its numeric id in the project's repository."
+            },
+            "inputs": {
+              "type": "object",
+              "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,99}$"},
+              "additionalProperties": {"type": ["string", "number", "boolean"]},
+              "description": "Static workflow_dispatch inputs sent with every dispatch."
+            },
+            "deadline": {
+              "type": "string",
+              "pattern": "^(?:[0-9]+d)?(?:[0-9]+h)?(?:[0-9]+m)?(?:[0-9]+s)?$",
+              "minLength": 2,
+              "description": "How long the run may take before the card is Blocked with deadline_passed, e.g. 90m or 6h. Default 6h."
+            },
+            "candidate_input": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,99}$",
+              "description": "The workflow_dispatch input that receives the candidate SHA, when the workflow takes one."
+            },
+            "dispatch_id_input": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_-]{0,99}$",
+              "description": "Optional: the workflow_dispatch input that receives the dispatcher's dispatch id. When declared, crash recovery attaches only a run whose run-name carries it. No static input and not candidate_input may share its name."
+            },
+            "placement": {
+              "enum": ["before_merge", "after_merge"],
+              "description": "Where the stage runs. before_merge (the default): on each code card's candidate, before it becomes releasable. after_merge: for a workflow that can only run on a commit whose releases the post-merge CI of main published; cards merge with no e2e, and once a merge commit's post-merge CI is green the dispatcher runs the workflow on main, on a branch it owns (pipeline-e2e/<dispatch id>) pointed at the newest green merge SHA, covering every card merged since the last run, with at most one run in flight per project (docs/PROTOCOLS.md 'After merge'). candidate_input then receives that SHA."
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {"required": ["e2e"]},
+          "then": {"properties": {"ci": {"const": "github"}}}
+        },
+        {
+          "if": {"required": ["ci"], "properties": {"ci": {"const": "local"}}},
+          "then": {"required": ["command"]}
+        },
+        {
+          "if": {"required": ["ci"], "properties": {"ci": {"const": "none"}}},
+          "then": {"required": ["missing"]}
+        }
+      ]
+    },
+    "artifact_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["write_project_files"],
+      "properties": {
+        "write_project_files": {
+          "type": "boolean",
+          "description": "Whether the pipeline may write files into the project repo."
+        }
+      }
+    },
+    "broad_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["import_package"],
+      "description": "The project's own broad suite: which module `check broad --module` runs, which package that run must import, and optionally which interpreter runs it. `additionalProperties: false` is why an unknown key here is refused outright, so this block has to describe the whole contract. Declaring it is mandatory for a project that gets cards: an adapter without it is refused as `broad_check_not_declared` and its cards block at preflight (issue:81a0a1e5c15225fa360e). It is not `required` here, because a missing contract is a fact about the project rather than a malformed adapter, and refusing it as `adapter_invalid` would hide which of the two is wrong.",
+      "properties": {
+        "interpreter": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional adapter-owned interpreter for module broad checks. A relative path is resolved from the candidate workspace, for example .venv/bin/python; that .venv remains exclusively adapter-owned. Omitted, the check runs on the interpreter that runs the wrapper, which dispatcher-launched workers receive from .ummanu-task-env/venv. The subprocess also prepends the candidate import roots and records the actual interpreter and import origin."
+        },
+        "import_package": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$",
+          "description": "Package the check process must import and prove came from the candidate workspace."
+        },
+        "module": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$",
+          "description": "The module a `python -m` runs: this project's broad suite. Without it nobody but the project itself could say which suite a broad check means, and the worker prompt had to print a placeholder. Not required by the schema, so an adapter written before this key existed is not suddenly malformed, and PR #331 stopped the contract layer refusing such a block too: omitting it means only that the caller has to name the suite itself, which `check broad`/`check show` with no `--module` reports as `no_broad_check_module`."
+        },
+        "args": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "The exact argument vector passed after the module. Kept as a list, never a rendered string, because `-k a b` and `-k 'a b'` render identically while running different checks."
+        }
+      }
+    }
+  }
+}

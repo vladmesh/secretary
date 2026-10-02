@@ -1,6 +1,6 @@
 ---
 name: retro
-description: The retro agent's procedure — walk fresh head transcripts and the memory search log, find concrete failures (an answer given from a canon fact without a memory_search and wrong, a repeat of a known mistake, a loop, an empty session) and file them as PROPOSALS in the board's first column. It implements nothing itself and moves no card to Ready. The third plugin of the secretary runtime, launched daily by a session-manager automation in the retro workspace.
+description: The retro agent's procedure — walk fresh head transcripts and the memory search log, find concrete failures (an answer given from a canon fact without a memory_search and wrong, a repeat of a known mistake, a loop, an empty session) and file them as PROPOSALS in the board's first column. It implements nothing itself and moves no card to Ready. The third plugin of the ummanu runtime, launched daily by a session-manager automation in the retro workspace.
 ---
 
 # Retro — the feedback loop
@@ -11,7 +11,7 @@ move them to `Ready`; a PO or a person does that.
 
 `Issues` is also the Product backlog, and a Product issue is not yours to create: you cannot choose its
 product, kind and priority. Your card is a different record in the same column, typed as an execution task
-awaiting triage, and `secretary task create --role retro --state issues` is the only way you write one:
+awaiting triage, and `ummanu task create --role retro --state issues` is the only way you write one:
 the board refuses a retro card in any other column.
 
 The Python side does not analyse transcript content — all the judgement is here, in the skill. The helpers
@@ -43,7 +43,7 @@ verdict of "no failures" beats noise.
 ### 1. Take the batch
 
 ```
-python3 -P -m secretary automations retro harvest
+python3 -P -m ummanu automations retro harvest
 ```
 
 Run it from your own workspace (the run's starting working directory is the retro worktree). **Do not `cd`**
@@ -66,7 +66,7 @@ MCP server that the fact really is in the canon. Do not draw the conclusion with
 Before wording the proposals, load the current cards:
 
 ```
-python3 -P -m secretary task list --state issues --state ready
+python3 -P -m ummanu task list --state issues --state ready
 ```
 
 Add `--project <canonical-id>` to narrow the list to the project you are about to file against.
@@ -83,7 +83,7 @@ Otherwise file one card per failure in `Issues` through the board CLI (board cre
 by the role environment; there is nothing to source separately):
 
 ```
-python3 -P -m secretary task create --role retro --state issues --type code \
+python3 -P -m ummanu task create --role retro --state issues --type code \
   --project <the project whose skill or infrastructure is being fixed> \
   --title "retro: <short failure pattern>" \
   --description "$(cat <<'EOF'
@@ -114,13 +114,13 @@ the curator's work once the card is taken into `Ready`.
 Afterwards you can record what you found:
 
 ```
-python3 -P -m secretary automations retro log-proposal --ref <project>-<id> [--ref <project>-<id> ...]
+python3 -P -m ummanu automations retro log-proposal --ref <project>-<id> [--ref <project>-<id> ...]
 ```
 
 ### 5. Move the watermark
 
 ```
-python3 -P -m secretary automations retro advance
+python3 -P -m ummanu automations retro advance
 ```
 
 Always at the end, both when proposals were filed and when the verdict is "no failures". Otherwise the next

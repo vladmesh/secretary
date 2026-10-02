@@ -4,7 +4,7 @@ Hermetic in the same sense the two layer suites are: no live Orca, no live board
 loopback socket this test binds itself, and no real worker. The board is a throwaway card store
 (`tests/sql_backend_fixtures.py`), the head
 backend is a fake that leaves behind exactly the artefacts a supervised head leaves, and every
-route is driven through :class:`secretary.web.app.WebApp` directly, which is the same object the
+route is driven through :class:`ummanu.web.app.WebApp` directly, which is the same object the
 socket handler calls.
 
 What is being pinned is that this transport is a transport: it adds no fact, and every refusal it
@@ -34,33 +34,35 @@ from urllib.parse import urlencode
 import yaml
 from jsonschema import Draft202012Validator
 
-from secretary.config import ConfigError, load_schema
-from secretary.runtime.head.identity import publish_heartbeat
-from secretary.runtime.head.local_pty import RUN_EXITED, RUN_STARTED
-from secretary.runtime.head.run import HeadRun
-from secretary.runtime.head.runtime import (
+from tests.fakes.tasks import SEED_COLUMN, empty_seed
+from tests.sql_backend_fixtures import card_store
+from ummanu.config import ConfigError, load_schema
+from ummanu.runtime.head.identity import publish_heartbeat
+from ummanu.runtime.head.local_pty import RUN_EXITED, RUN_STARTED
+from ummanu.runtime.head.run import HeadRun
+from ummanu.runtime.head.runtime import (
     HEAD_OK,
     DeliverReceipt,
     ObserveReceipt,
     StartReceipt,
     StopReceipt,
 )
-from secretary.runtime.heads import Registry
-from secretary.tasks import task_audit_for
-from secretary.web import pages
-from secretary.web.app import ROUTES, WebApp
-from secretary.web.server import (
+from ummanu.runtime.heads import Registry
+from ummanu.tasks import task_audit_for
+from ummanu.web import pages
+from ummanu.web.app import ROUTES, WebApp
+from ummanu.web.server import (
     DEFAULT_HOST,
     LoopbackOnly,
     build_server,
     check_bind,
     resolve_bind,
 )
-from secretary.web.statuses import HTTP_STATUS_BY_CODE, UNMAPPED_CODE_STATUS, status_for
-from secretary.webproto import errors as error_module
-from secretary.webproto.card_ops import CardOperationLayer
-from secretary.webproto.command_reads import CommandReadLayer
-from secretary.webproto.errors import (
+from ummanu.web.statuses import HTTP_STATUS_BY_CODE, UNMAPPED_CODE_STATUS, status_for
+from ummanu.webproto import errors as error_module
+from ummanu.webproto.card_ops import CardOperationLayer
+from ummanu.webproto.command_reads import CommandReadLayer
+from ummanu.webproto.errors import (
     InstallationUnavailable,
     InvalidCursor,
     OwnerConflict,
@@ -70,14 +72,12 @@ from secretary.webproto.errors import (
     TaskNotFound,
     ValidationRefused,
 )
-from secretary.webproto.ops import OperationLayer
-from secretary.webproto.pause_ops import PauseOperationLayer
-from secretary.webproto.pause_reads import PauseReadLayer
-from secretary.webproto.reads import ReadLayer
-from secretary.webproto.sprint_ops import SprintOperationLayer
-from secretary.webproto.sprint_reads import SprintReadLayer
-from tests.fakes.tasks import SEED_COLUMN, empty_seed
-from tests.sql_backend_fixtures import card_store
+from ummanu.webproto.ops import OperationLayer
+from ummanu.webproto.pause_ops import PauseOperationLayer
+from ummanu.webproto.pause_reads import PauseReadLayer
+from ummanu.webproto.reads import ReadLayer
+from ummanu.webproto.sprint_ops import SprintOperationLayer
+from ummanu.webproto.sprint_reads import SprintReadLayer
 
 SEED_STATE = {column: state for state, column in SEED_COLUMN.items()}
 
@@ -203,13 +203,13 @@ class TransportFixture(unittest.TestCase):
             "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
             encoding="utf-8",
         )
-        (instance_dir / "projects" / "secretary.yaml").write_text(
+        (instance_dir / "projects" / "ummanu.yaml").write_text(
             yaml.safe_dump(
                 {
-                    "id": "secretary",
+                    "id": "ummanu",
                     "repo": str(self.repo),
                     "enabled": True,
-                    "adapter": "secretary",
+                    "adapter": "ummanu",
                     "default_branch": "main",
                 }
             ),
@@ -242,7 +242,7 @@ class TransportFixture(unittest.TestCase):
             json.dumps({"phase": "production", "records": records}), encoding="utf-8"
         )
 
-    def _card(self, reference: str = "secretary-run-1", column: int = 1) -> int:
+    def _card(self, reference: str = "ummanu-run-1", column: int = 1) -> int:
         task_id = 40 + self._cards
         self._cards += 1
         self.backlog_key = task_id
@@ -255,7 +255,7 @@ class TransportFixture(unittest.TestCase):
             position=1,
             created=1720000000,
             project=None,
-            metadata={"project": "secretary", "task_type": "code", "slug": "run"},
+            metadata={"project": "ummanu", "task_type": "code", "slug": "run"},
         )
         return task_id
 
@@ -275,7 +275,7 @@ class TransportFixture(unittest.TestCase):
             "subject": {"kind": "card", "ref": ref},
             "ref": ref,
             "occurred_at": "2026-09-06T00:00:00Z",
-            "actor": {"role": "dispatcher", "id": "secretary-production"},
+            "actor": {"role": "dispatcher", "id": "ummanu-production"},
             "reason": f"event {ordinal}",
             "related_refs": [],
             "data": {},
@@ -395,8 +395,8 @@ class StatusMappingTests(unittest.TestCase):
     #: Per JSON route, because each POST holds its body to its own closed field list and a body
     #: another route's fields would be refused by the transport before the layer saw it.
     JSON_BODIES: ClassVar[dict[str, dict[str, Any]]] = {
-        "/api/runs/start": {"ref": "secretary-1", "request_id": "r", "profile": "p"},
-        "/api/runs/review": {"ref": "secretary-1", "request_id": "r", "profile": "p"},
+        "/api/runs/start": {"ref": "ummanu-1", "request_id": "r", "profile": "p"},
+        "/api/runs/review": {"ref": "ummanu-1", "request_id": "r", "profile": "p"},
         "/api/pause/drain": {"reason": "why"},
         "/api/pause/resume": {},
         "/api/sprints/{ref}/comment": {"request_id": "r", "body": "a comment"},
@@ -406,15 +406,15 @@ class StatusMappingTests(unittest.TestCase):
         "/api/providers/codex/reset-limit": {"request_id": "r"},
     }
     BODIES: ClassVar[dict[str, bytes]] = {
-        "json": json.dumps({"ref": "secretary-1", "request_id": "r", "profile": "p"}).encode("utf-8"),
+        "json": json.dumps({"ref": "ummanu-1", "request_id": "r", "profile": "p"}).encode("utf-8"),
         "form": urlencode(
             [
                 ("request_id", "r"),
-                ("product", "secretary"),
+                ("product", "ummanu"),
                 ("goal", "a goal"),
                 ("definition_of_done", "a definition of done"),
                 ("issues", "issue:1"),
-                ("projects", "secretary"),
+                ("projects", "ummanu"),
                 ("observer", "claude-observer"),
                 ("worker", ""),
                 ("reviewer", ""),
@@ -460,7 +460,7 @@ class StatusMappingTests(unittest.TestCase):
                 if route.pattern in self.ANSWERS_ITS_OWN_REFUSAL:
                     continue
                 path = (
-                    route.pattern.replace("{ref}", "secretary-1")
+                    route.pattern.replace("{ref}", "ummanu-1")
                     .replace("{run_id}", "pr-1")
                     .replace("{request_id}", "r-1")
                     .replace("{session}", "s-1")
@@ -472,13 +472,13 @@ class StatusMappingTests(unittest.TestCase):
 
     def test_a_refused_json_route_answers_the_protocol_code_itself(self) -> None:
         app = WebApp(*(RaisingLayer(OwnerConflict("somebody else has this card")) for _ in range(LAYERS)))
-        response = app.handle("GET", "/api/tasks/secretary-1")
+        response = app.handle("GET", "/api/tasks/ummanu-1")
         self.assertEqual(response.status, 409)
         self.assertEqual(json.loads(response.body)["error"]["code"], "owner_conflict")
 
     def test_a_refused_page_stays_a_page_and_carries_the_same_status(self) -> None:
         app = WebApp(*(RaisingLayer(TaskNotFound("no such card")) for _ in range(LAYERS)))
-        response = app.handle("GET", "/tasks/secretary-1")
+        response = app.handle("GET", "/tasks/ummanu-1")
         self.assertEqual(response.status, 404)
         self.assertIn("text/html", response.content_type)
         self.assertIn("no such card", response.body.decode("utf-8"))
@@ -551,7 +551,7 @@ class RouteTableTests(TransportFixture):
         for route in ROUTES:
             for word in ("shell", "exec", "eval", "command", "run-command", "cmd", "spawn", "proxy"):
                 self.assertNotIn(word, route.pattern, msg=route.pattern)
-        source = (REPO_ROOT / "src" / "secretary" / "web").rglob("*.py")
+        source = (REPO_ROOT / "src" / "ummanu" / "web").rglob("*.py")
         forbidden = {"subprocess", "os.system", "shutil", "pty"}
         offenders: list[str] = []
         for path in sorted(source):
@@ -580,7 +580,7 @@ class RouteTableTests(TransportFixture):
     def test_a_post_body_carrying_an_unknown_field_is_refused(self) -> None:
         response = self.post(
             "/api/runs/start",
-            {"ref": "secretary-run-1", "request_id": "r", "profile": WORKER_PROFILE, "command": "rm -rf /"},
+            {"ref": "ummanu-run-1", "request_id": "r", "profile": WORKER_PROFILE, "command": "rm -rf /"},
         )
         self.assertEqual(response.status, 400)
         self.assertEqual(self.json_of(response)["error"]["code"], "validation")
@@ -600,52 +600,52 @@ class RouteTableTests(TransportFixture):
 class CursorOverHttpTests(TransportFixture):
     def test_reading_resumes_from_the_cursor_a_client_kept(self) -> None:
         self._card()
-        self._journal([self._event("secretary-run-1", index) for index in range(3)])
+        self._journal([self._event("ummanu-run-1", index) for index in range(3)])
         app = self.app()
-        first = self.json_of(self.get("/api/tasks/secretary-run-1/events", query="limit=2", app=app))
+        first = self.json_of(self.get("/api/tasks/ummanu-run-1/events", query="limit=2", app=app))
         self.assertEqual(
-            [item["event_id"] for item in first["items"]], ["evt-secretary-run-1-0", "evt-secretary-run-1-1"]
+            [item["event_id"] for item in first["items"]], ["evt-ummanu-run-1-0", "evt-ummanu-run-1-1"]
         )
 
         # "A reconnection": a brand new application object, as a restarted browser or a second tab
         # would reach. The server holds nothing, so only the cursor decides where reading resumes.
-        self._journal([self._event("secretary-run-1", 3)])
+        self._journal([self._event("ummanu-run-1", 3)])
         resumed = self.json_of(
             self.get(
-                "/api/tasks/secretary-run-1/events",
+                "/api/tasks/ummanu-run-1/events",
                 query=f"cursor={first['next_cursor']}&limit=10",
                 app=self.app(),
             )
         )
         self.assertEqual(
             [item["event_id"] for item in resumed["items"]],
-            ["evt-secretary-run-1-2", "evt-secretary-run-1-3"],
+            ["evt-ummanu-run-1-2", "evt-ummanu-run-1-3"],
         )
         # And nothing was lost or repeated: the two pages together are the whole journal, once.
         self.assertEqual(
             [item["event_id"] for item in first["items"] + resumed["items"]],
-            [f"evt-secretary-run-1-{index}" for index in range(4)],
+            [f"evt-ummanu-run-1-{index}" for index in range(4)],
         )
 
     def test_the_same_cursor_read_twice_is_the_same_page(self) -> None:
         self._card()
-        self._journal([self._event("secretary-run-1", index) for index in range(4)])
+        self._journal([self._event("ummanu-run-1", index) for index in range(4)])
         app = self.app()
-        page = self.json_of(self.get("/api/tasks/secretary-run-1/events", query="limit=2", app=app))
+        page = self.json_of(self.get("/api/tasks/ummanu-run-1/events", query="limit=2", app=app))
         again = self.json_of(
-            self.get("/api/tasks/secretary-run-1/events", query=f"cursor={page['next_cursor']}", app=app)
+            self.get("/api/tasks/ummanu-run-1/events", query=f"cursor={page['next_cursor']}", app=app)
         )
         repeated = self.json_of(
-            self.get("/api/tasks/secretary-run-1/events", query=f"cursor={page['next_cursor']}", app=app)
+            self.get("/api/tasks/ummanu-run-1/events", query=f"cursor={page['next_cursor']}", app=app)
         )
         self.assertEqual(again["items"], repeated["items"])
 
     def test_a_broken_cursor_is_a_validation_refusal_and_not_a_reset(self) -> None:
         self._card()
-        self._journal([self._event("secretary-run-1", 0)])
+        self._journal([self._event("ummanu-run-1", 0)])
         for cursor in ("nonsense", "eyJyZWYiOiAibm90LXRoaXMtY2FyZCJ9"):
             with self.subTest(cursor=cursor):
-                response = self.get("/api/tasks/secretary-run-1/events", query=f"cursor={cursor}")
+                response = self.get("/api/tasks/ummanu-run-1/events", query=f"cursor={cursor}")
                 self.assertEqual(response.status, 400)
                 document = self.json_of(response)
                 self.assertEqual(document["error"]["code"], "validation")
@@ -654,18 +654,18 @@ class CursorOverHttpTests(TransportFixture):
 
     def test_a_cursor_belonging_to_another_card_is_refused_by_name(self) -> None:
         self._card()
-        self._card("secretary-run-2", column=1)
-        self._journal([self._event("secretary-run-1", 0), self._event("secretary-run-2", 0)])
-        foreign = self.json_of(self.get("/api/tasks/secretary-run-1/events"))["next_cursor"]
-        response = self.get("/api/tasks/secretary-run-2/events", query=f"cursor={foreign}")
+        self._card("ummanu-run-2", column=1)
+        self._journal([self._event("ummanu-run-1", 0), self._event("ummanu-run-2", 0)])
+        foreign = self.json_of(self.get("/api/tasks/ummanu-run-1/events"))["next_cursor"]
+        response = self.get("/api/tasks/ummanu-run-2/events", query=f"cursor={foreign}")
         self.assertEqual(response.status, 400)
-        self.assertIn("secretary-run-1", self.json_of(response)["error"]["message"])
+        self.assertIn("ummanu-run-1", self.json_of(response)["error"]["message"])
 
     def test_a_limit_that_is_not_a_page_size_is_refused_rather_than_clamped(self) -> None:
         self._card()
         for query in ("limit=0", "limit=-3", "limit=nine", "limit=100000"):
             with self.subTest(query=query):
-                self.assertEqual(self.get("/api/tasks/secretary-run-1/events", query=query).status, 400)
+                self.assertEqual(self.get("/api/tasks/ummanu-run-1/events", query=query).status, 400)
 
 
 # -- criteria 2 and 3: the pages, and a source that could not answer ------------------------------
@@ -703,7 +703,7 @@ class PageTests(TransportFixture):
         self._card()
         self._production(
             {
-                "secretary-run-1": {
+                "ummanu-run-1": {
                     "attempt_id": "attempt-1",
                     "state": "in_progress",
                     "worker_pid_file": str(self.tmp / "worker.pid"),
@@ -712,7 +712,7 @@ class PageTests(TransportFixture):
             }
         )
         markup = self.text_of(self.get("/"))
-        self.assertNotIn('href="/tasks/secretary-run-1"', markup)
+        self.assertNotIn('href="/tasks/ummanu-run-1"', markup)
         self.assertNotIn("In flight", markup)
         self.assertIn("Open sprints", markup)
 
@@ -722,8 +722,8 @@ class PageTests(TransportFixture):
             {"date_creation": 1, "comment": "[report:done]\nthe worker's own words"},
             {"date_creation": 2, "comment": "[review:green]\nthe reviewer's own words"},
         ])
-        self._journal([self._event("secretary-run-1", 0)])
-        markup = self.text_of(self.get("/tasks/secretary-run-1"))
+        self._journal([self._event("ummanu-run-1", 0)])
+        markup = self.text_of(self.get("/tasks/ummanu-run-1"))
         self.assertIn("the worker&#x27;s own words", markup)
         self.assertIn("the reviewer&#x27;s own words", markup)
         self.assertIn("review:green", markup)
@@ -742,7 +742,7 @@ class PageTests(TransportFixture):
         started = self.json_of(
             self.post(
                 "/api/runs/start",
-                {"ref": "secretary-run-1", "request_id": "web-1", "profile": WORKER_PROFILE},
+                {"ref": "ummanu-run-1", "request_id": "web-1", "profile": WORKER_PROFILE},
             )
         )
         pid_file = Path(started["run"]["pid_file"])
@@ -754,7 +754,7 @@ class PageTests(TransportFixture):
         self.assertEqual(read["state"]["value"], "unknown")
         self.assertFalse(read["state"]["ended"])
 
-        markup = self.text_of(self.get("/tasks/secretary-run-1"))
+        markup = self.text_of(self.get("/tasks/ummanu-run-1"))
         self.assertIn("state-unknown", markup)
         self.assertIn("belongs to another process", markup)
         self.assertIn("(open)", markup)
@@ -764,10 +764,10 @@ class PageTests(TransportFixture):
         started = self.json_of(
             self.post(
                 "/api/runs/start",
-                {"ref": "secretary-run-1", "request_id": "web-1", "profile": WORKER_PROFILE},
+                {"ref": "ummanu-run-1", "request_id": "web-1", "profile": WORKER_PROFILE},
             )
         )
-        open_markup = self.text_of(self.get("/tasks/secretary-run-1"))
+        open_markup = self.text_of(self.get("/tasks/ummanu-run-1"))
         self.assertIn("(open)", open_markup)
         self.assertNotIn("(over)", open_markup)
 
@@ -775,7 +775,7 @@ class PageTests(TransportFixture):
         result_path.parent.mkdir(parents=True, exist_ok=True)
         result_path.write_text(json.dumps({"status": "done"}), encoding="utf-8")
         self.assertTrue(self.json_of(self.get(f"/api/runs/{started['run']['run_id']}"))["state"]["ended"])
-        settled_markup = self.text_of(self.get("/tasks/secretary-run-1"))
+        settled_markup = self.text_of(self.get("/tasks/ummanu-run-1"))
         self.assertIn("(over)", settled_markup)
 
     def test_a_reviewer_verdict_is_on_the_card_page_and_not_only_in_the_json(self) -> None:
@@ -791,7 +791,7 @@ class PageTests(TransportFixture):
             self.post(
                 "/api/runs/review",
                 {
-                    "ref": "secretary-run-1",
+                    "ref": "ummanu-run-1",
                     "request_id": "web-review",
                     "profile": REVIEWER_PROFILE,
                     "worker_run_id": worker,
@@ -800,7 +800,7 @@ class PageTests(TransportFixture):
         )
         self._publish(review["review"]["run"], {"verdict": "red", "summary": "it does not stand"})
 
-        markup = self.text_of(self.get("/tasks/secretary-run-1"))
+        markup = self.text_of(self.get("/tasks/ummanu-run-1"))
         self.assertIn("verdict", markup)
         self.assertIn("red", markup)
         self.assertIn("it does not stand", markup)
@@ -818,17 +818,17 @@ class PageTests(TransportFixture):
         started = self.json_of(
             self.post(
                 "/api/runs/start",
-                {"ref": "secretary-run-1", "request_id": "web-1", "profile": WORKER_PROFILE},
+                {"ref": "ummanu-run-1", "request_id": "web-1", "profile": WORKER_PROFILE},
             )
         )
-        open_markup = self.text_of(self.get("/tasks/secretary-run-1"))
+        open_markup = self.text_of(self.get("/tasks/ummanu-run-1"))
         self.assertIn("this run has produced nothing yet.", open_markup)
 
         self._exited(started["run"], exit_code=7)
         read = self.json_of(self.get(f"/api/runs/{started['run']['run_id']}"))
         self.assertEqual(read["state"]["value"], "process_failed")
 
-        markup = self.text_of(self.get("/tasks/secretary-run-1"))
+        markup = self.text_of(self.get("/tasks/ummanu-run-1"))
         self.assertIn("state-process_failed", markup)
         self.assertIn("exit status 7", markup)
         self.assertIn("the head published no result", markup)
@@ -841,7 +841,7 @@ class PageTests(TransportFixture):
         started = self.json_of(
             self.post(
                 "/api/runs/start",
-                {"ref": "secretary-run-1", "request_id": request_id, "profile": WORKER_PROFILE},
+                {"ref": "ummanu-run-1", "request_id": request_id, "profile": WORKER_PROFILE},
             )
         )
         self._publish(started["run"], result)
@@ -878,7 +878,7 @@ class PageTests(TransportFixture):
 
     def test_a_card_with_no_history_says_so_rather_than_showing_nothing(self) -> None:
         self._card()
-        markup = self.text_of(self.get("/tasks/secretary-run-1"))
+        markup = self.text_of(self.get("/tasks/ummanu-run-1"))
         self.assertIn("no event has been recorded for this card.", markup)
 
     def test_an_unreadable_run_record_marks_one_section_and_leaves_the_page_standing(self) -> None:
@@ -893,12 +893,12 @@ class PageTests(TransportFixture):
         self.board.replace_comments(task_id, [
             {"date_creation": 1, "comment": "[report:done]\nwhat the worker said"}
         ])
-        self._journal([self._event("secretary-run-1", 0)])
+        self._journal([self._event("ummanu-run-1", 0)])
         runs = self.data_dir / "webproto" / "runs"
         runs.mkdir(parents=True, exist_ok=True)
         (runs / "pr-broken.json").write_text("{not json", encoding="utf-8")
 
-        response = self.get("/tasks/secretary-run-1")
+        response = self.get("/tasks/ummanu-run-1")
         self.assertEqual(response.status, 200)
         markup = self.text_of(response)
         self.assertIn("could not find out this card's product runs:", markup)
@@ -913,25 +913,25 @@ class PageTests(TransportFixture):
         runs = self.data_dir / "webproto" / "runs"
         runs.mkdir(parents=True, exist_ok=True)
         (runs / "pr-broken.json").write_text("{not json", encoding="utf-8")
-        response = self.get("/api/tasks/secretary-run-1/runs")
+        response = self.get("/api/tasks/ummanu-run-1/runs")
         self.assertEqual(response.status, 503)
         self.assertEqual(self.json_of(response)["error"]["code"], "backend_unavailable")
 
     def test_a_card_the_board_does_not_hold_is_a_404_page(self) -> None:
-        response = self.get("/tasks/secretary-absent")
+        response = self.get("/tasks/ummanu-absent")
         self.assertEqual(response.status, 404)
         self.assertIn("text/html", response.content_type)
 
     def test_a_page_escapes_what_the_board_gave_it(self) -> None:
         self._card(column=2)
         self.board.update(40, title="<script>alert(1)</script>")
-        markup = self.text_of(self.get("/tasks/secretary-run-1"))
+        markup = self.text_of(self.get("/tasks/ummanu-run-1"))
         self.assertNotIn("<script>alert(1)</script>", markup)
         self.assertIn("&lt;script&gt;", markup)
 
     def test_every_page_says_this_service_is_local_only(self) -> None:
         self._card()
-        for path in ("/", "/tasks/secretary-run-1"):
+        for path in ("/", "/tasks/ummanu-run-1"):
             with self.subTest(path=path):
                 self.assertIn("local only", self.text_of(self.get(path)))
         self.assertIn("no password", pages.LOOPBACK_NOTICE)
@@ -944,7 +944,7 @@ class IdempotentPostTests(TransportFixture):
     def test_the_same_post_twice_is_one_run_and_one_process(self) -> None:
         self._card()
         app = self.app()
-        payload = {"ref": "secretary-run-1", "request_id": "web-1", "profile": WORKER_PROFILE}
+        payload = {"ref": "ummanu-run-1", "request_id": "web-1", "profile": WORKER_PROFILE}
         first = self.post("/api/runs/start", payload, app=app)
         self.assertEqual(first.status, 200)
         # A reconnected client: a new application object, the same request id the browser kept.
@@ -952,7 +952,7 @@ class IdempotentPostTests(TransportFixture):
         self.assertEqual(second.status, 200)
         self.assertEqual(self.json_of(first)["run"]["run_id"], self.json_of(second)["run"]["run_id"])
         self.assertEqual(len(self.runtime.starts), 1)
-        listing = self.json_of(self.get("/api/tasks/secretary-run-1/runs"))
+        listing = self.json_of(self.get("/api/tasks/ummanu-run-1/runs"))
         self.assertEqual(
             [item["run"]["run_id"] for item in listing["items"]],
             [self.json_of(first)["run"]["run_id"]],
@@ -960,16 +960,16 @@ class IdempotentPostTests(TransportFixture):
 
     def test_a_repeat_naming_other_inputs_is_refused_rather_than_answered(self) -> None:
         self._card()
-        self._card("secretary-run-2")
+        self._card("ummanu-run-2")
         app = self.app()
         self.post(
             "/api/runs/start",
-            {"ref": "secretary-run-1", "request_id": "web-1", "profile": WORKER_PROFILE},
+            {"ref": "ummanu-run-1", "request_id": "web-1", "profile": WORKER_PROFILE},
             app=app,
         )
         response = self.post(
             "/api/runs/start",
-            {"ref": "secretary-run-2", "request_id": "web-1", "profile": WORKER_PROFILE},
+            {"ref": "ummanu-run-2", "request_id": "web-1", "profile": WORKER_PROFILE},
             app=self.app(),
         )
         self.assertEqual(response.status, 400)
@@ -979,8 +979,8 @@ class IdempotentPostTests(TransportFixture):
         self._card()
         for payload in (
             {"request_id": "web-1", "profile": WORKER_PROFILE},
-            {"ref": "secretary-run-1", "profile": WORKER_PROFILE},
-            {"ref": "secretary-run-1", "request_id": "web-1"},
+            {"ref": "ummanu-run-1", "profile": WORKER_PROFILE},
+            {"ref": "ummanu-run-1", "request_id": "web-1"},
         ):
             with self.subTest(payload=sorted(payload)):
                 response = self.post("/api/runs/start", payload)
@@ -993,7 +993,7 @@ class IdempotentPostTests(TransportFixture):
         started = self.json_of(
             self.post(
                 "/api/runs/start",
-                {"ref": "secretary-run-1", "request_id": "web-1", "profile": WORKER_PROFILE},
+                {"ref": "ummanu-run-1", "request_id": "web-1", "profile": WORKER_PROFILE},
                 app=app,
             )
         )
@@ -1010,7 +1010,7 @@ class IdempotentPostTests(TransportFixture):
         started = self.json_of(
             self.post(
                 "/api/runs/start",
-                {"ref": "secretary-run-1", "request_id": "web-1", "profile": WORKER_PROFILE},
+                {"ref": "ummanu-run-1", "request_id": "web-1", "profile": WORKER_PROFILE},
             )
         )
         run_id = started["run"]["run_id"]
@@ -1071,7 +1071,7 @@ class LoopbackTests(TransportFixture):
             check_bind("localhost")
 
     def test_the_command_defaults_to_loopback_and_refuses_anything_else(self) -> None:
-        from secretary.cli import build_parser
+        from ummanu.cli import build_parser
 
         args = build_parser().parse_args(["web-serve", "--instance", str(self.instance)])
         self.assertEqual(args.host, "127.0.0.1")
@@ -1096,7 +1096,7 @@ class LoopbackTests(TransportFixture):
         self.assertEqual(response.status, 200)
         self.assertIn("local only", markup)
 
-        connection.request("GET", "/api/tasks/secretary-absent")
+        connection.request("GET", "/api/tasks/ummanu-absent")
         refused = connection.getresponse()
         body = refused.read().decode("utf-8")
         self.assertEqual(refused.status, 404)
@@ -1105,7 +1105,7 @@ class LoopbackTests(TransportFixture):
         connection.request(
             "POST",
             "/api/runs/start",
-            body=json.dumps({"ref": "secretary-run-1", "request_id": "sock-1", "profile": WORKER_PROFILE}),
+            body=json.dumps({"ref": "ummanu-run-1", "request_id": "sock-1", "profile": WORKER_PROFILE}),
             headers={"Content-Type": "application/json"},
         )
         started = connection.getresponse()
@@ -1141,13 +1141,13 @@ class ExplodingApp:
 
 #: An exception whose text is exactly what must not be published: a credential in a DSN. Nothing has
 #: audited the message of a failure nobody expected, so neither the body nor the log may quote it.
-SECRET_MESSAGE = "connecting to postgresql://secretary_app:hunter2@127.0.0.1:5432/board failed"
+SECRET_MESSAGE = "connecting to postgresql://ummanu_app:hunter2@127.0.0.1:5432/board failed"
 
 
 class FailureContainmentTests(TransportFixture):
     """`http.server` answers an escaped exception by closing the connection with no response.
 
-    That is what `secretary-web.service` did for nineteen hours on 2026-09-11 (secretary-1624):
+    That is what `ummanu-web.service` did for nineteen hours on 2026-09-11 (secretary-1624):
     `jsonschema.exceptions._WrappedReferencingError: Unresolvable: adapter.schema.json` escaped
     `_Handler._answer`, and `GET /`, `GET /sprints/new` and `GET /api/system` all returned an empty
     reply. The transport now answers a bounded 500 instead and stays able to answer the next
@@ -1259,7 +1259,7 @@ class FailureContainmentTests(TransportFixture):
 
         connection = HTTPConnection(host, port, timeout=10)
         self.addCleanup(connection.close)
-        connection.request("GET", "/api/tasks/secretary-absent")
+        connection.request("GET", "/api/tasks/ummanu-absent")
         refused = connection.getresponse()
         document = json.loads(refused.read().decode("utf-8"))
 
@@ -1343,7 +1343,7 @@ class InstalledRouteTests(TransportFixture):
 
 
 class RequestDurationLineTests(TransportFixture):
-    """The one line per request `secretary-web.service` leaves in its journal, with a duration.
+    """The one line per request `ummanu-web.service` leaves in its journal, with a duration.
 
     Before secretary-1649 that line was the request line `BaseHTTPRequestHandler` prints from
     `send_response`: method, target, status, and nothing about the cost. The sprint's whole subject
@@ -1434,12 +1434,12 @@ class RequestDurationLineTests(TransportFixture):
         self._card()
         lines = self.drive(
             self.app(),
-            [("HEAD", "/"), ("GET", "/api/tasks/secretary-absent"), ("GET", "/nowhere")],
+            [("HEAD", "/"), ("GET", "/api/tasks/ummanu-absent"), ("GET", "/nowhere")],
         )
 
         self.assertEqual(
             [(line["method"], line["target"], line["status"]) for line in lines],
-            [("HEAD", "/", "200"), ("GET", "/api/tasks/secretary-absent", "404"), ("GET", "/nowhere", "404")],
+            [("HEAD", "/", "200"), ("GET", "/api/tasks/ummanu-absent", "404"), ("GET", "/nowhere", "404")],
         )
 
     def test_a_verb_this_service_does_not_serve_is_recorded_too(self) -> None:
@@ -1485,11 +1485,11 @@ class RequestDurationLineTests(TransportFixture):
 class ThinnessTests(unittest.TestCase):
     """Criterion 1's other half: this package reads the layer and nothing under it."""
 
-    ALLOWED_PREFIXES = ("secretary.web", "secretary.webproto")
+    ALLOWED_PREFIXES = ("ummanu.web", "ummanu.webproto")
 
     def test_the_transport_reaches_the_installation_only_through_the_layer(self) -> None:
         offenders: list[str] = []
-        for path in sorted((REPO_ROOT / "src" / "secretary" / "web").rglob("*.py")):
+        for path in sorted((REPO_ROOT / "src" / "ummanu" / "web").rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 modules = (
@@ -1502,7 +1502,7 @@ class ThinnessTests(unittest.TestCase):
                 offenders += [
                     f"{path.name}: {module}"
                     for module in modules
-                    if module.startswith("secretary.") and not module.startswith(self.ALLOWED_PREFIXES)
+                    if module.startswith("ummanu.") and not module.startswith(self.ALLOWED_PREFIXES)
                 ]
         self.assertEqual(offenders, [])
 

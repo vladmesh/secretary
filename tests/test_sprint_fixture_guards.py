@@ -6,7 +6,6 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from secretary.tasks import TaskError
 from tests import (
     test_sprint_executors,
     test_sprint_listing_budget,
@@ -14,6 +13,7 @@ from tests import (
     test_sprints,
 )
 from tests.fakes.sprints import SprintBackendFixture, SprintFixture
+from ummanu.tasks import TaskError
 
 SUITES = (
     test_sprints,

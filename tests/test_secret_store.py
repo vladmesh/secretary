@@ -11,10 +11,11 @@ from unittest import mock
 
 import yaml
 
-from secretary import installation, secret_commands, secret_store, state_repo
-from secretary.cli import main
-from secretary.config import validate
-from secretary.secret_store import (
+from tests.retired_board import LEGACY_ENV, LEGACY_SECRET_IDS, LEGACY_VALUES
+from ummanu import installation, secret_commands, secret_store, state_repo
+from ummanu.cli import main
+from ummanu.config import validate
+from ummanu.secret_store import (
     CATALOG_NAME,
     GITIGNORE_ENTRY,
     KEY_NAME,
@@ -35,8 +36,7 @@ from secretary.secret_store import (
     set_secret,
     store_divergence,
 )
-from secretary.secret_words import RECOVERY_WORDS
-from tests.retired_board import LEGACY_ENV, LEGACY_SECRET_IDS, LEGACY_VALUES
+from ummanu.secret_words import RECOVERY_WORDS
 
 
 def git(repo: Path, *args: str) -> str:
@@ -231,7 +231,7 @@ class RoundTripCase(SecretStoreCase):
             self.instance_dir,
             secret_id="github.app-key",
             value=multiline,
-            scope="project:secretary",
+            scope="project:ummanu",
             purpose="github app private key",
             actor="tester",
         )
@@ -291,7 +291,7 @@ class RoundTripCase(SecretStoreCase):
         envelope["version"] = secret_store.ENVELOPE_VERSION + 1
         with self.assertRaises(SecretStoreStateError) as caught:
             secret_store.open_value(key, envelope)
-        self.assertIn("upgrade secretary", str(caught.exception))
+        self.assertIn("upgrade ummanu", str(caught.exception))
 
     def test_tampering_with_the_open_header_breaks_the_seal(self) -> None:
         key = load_installation_key(self.instance_dir)
@@ -542,7 +542,7 @@ class LegacyBoardSecretTests(SecretStoreCase):
 # the round trip too.
 LIVE_RUNTIME_ENV = (
     "EXAMPLE_URL=https://board.example.invalid/rpc\n"
-    "EXAMPLE_API_USER=secretary\n"
+    "EXAMPLE_API_USER=ummanu\n"
     "EXAMPLE_API_TOKEN=1f2e3d4c5b6a==\n"
 )
 
@@ -557,7 +557,7 @@ class EnvStoreCase(SecretStoreCase):
         self.source.write_text(LIVE_RUNTIME_ENV, encoding="utf-8")
         os.chmod(self.source, 0o600)
         self.target = Path(self.tmpdir.name) / "materialized" / "runtime.env"
-        override = mock.patch.dict(os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(self.target)})
+        override = mock.patch.dict(os.environ, {"UMMANU_RUNTIME_ENV_FILE": str(self.target)})
         override.start()
         self.addCleanup(override.stop)
 
@@ -596,7 +596,7 @@ class ImportCase(EnvStoreCase):
                 ("example_url", {"target": "runtime-env", "order": 0}),
             ],
         )
-        self.assertEqual(read_secret(self.instance_dir, "example_api_user"), b"secretary")
+        self.assertEqual(read_secret(self.instance_dir, "example_api_user"), b"ummanu")
         self.assertEqual(store_divergence(self.instance_dir), ())
 
     def test_import_lands_as_one_commit(self) -> None:
@@ -630,12 +630,12 @@ class ImportCase(EnvStoreCase):
 
     def test_reimport_names_the_variable_that_moved(self) -> None:
         self.do_import()
-        self.source.write_text(LIVE_RUNTIME_ENV.replace("=secretary\n", "=secretary-two\n"), encoding="utf-8")
+        self.source.write_text(LIVE_RUNTIME_ENV.replace("=ummanu\n", "=ummanu-two\n"), encoding="utf-8")
         result = self.do_import()
         self.assertEqual(result.updated, ("example_api_user",))
         self.assertEqual(result.created, ())
         self.assertEqual(result.unchanged, ("example_url", "example_api_token"))
-        self.assertEqual(read_secret(self.instance_dir, "example_api_user"), b"secretary-two")
+        self.assertEqual(read_secret(self.instance_dir, "example_api_user"), b"ummanu-two")
         # Only the rotated envelope moves: the catalog says the same thing it did
         # before, so the commit does not restate it.
         touched = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
@@ -812,18 +812,18 @@ class MaterializeCase(EnvStoreCase):
 
     def test_the_target_path_comes_from_role_env_not_from_a_constant(self) -> None:
         moved = Path(self.tmpdir.name) / "elsewhere" / "runtime.env"
-        with mock.patch.dict(os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(moved)}):
+        with mock.patch.dict(os.environ, {"UMMANU_RUNTIME_ENV_FILE": str(moved)}):
             results = materialize_secrets(self.instance_dir)
         self.assertEqual(results[0].path, moved)
         self.assertEqual(moved.read_text(encoding="utf-8"), LIVE_RUNTIME_ENV)
         self.assertFalse(self.target.exists())
 
-    def test_secretary_runtime_env_pin_beats_an_ambient_ta_override(self) -> None:
+    def test_ummanu_runtime_env_pin_beats_an_ambient_ta_override(self) -> None:
         pinned = Path(self.tmpdir.name) / "recovery" / "runtime.env"
         ambient = Path(self.tmpdir.name) / "live" / "runtime.env"
         entry = {"materialize": {"target": "runtime-env"}}
         with mock.patch.dict(os.environ, {"TA_RUNTIME_ENV_FILE": str(ambient)}, clear=True):
-            with installation._runtime_environment({"SECRETARY_RUNTIME_ENV_FILE": str(pinned)}):
+            with installation._runtime_environment({"UMMANU_RUNTIME_ENV_FILE": str(pinned)}):
                 self.assertEqual(secret_store.materialize_path(self.instance_dir, entry), pinned)
 
     def test_a_second_run_leaves_the_file_byte_for_byte_the_same(self) -> None:
@@ -869,7 +869,7 @@ class MaterializeCase(EnvStoreCase):
             values,
             {
                 "EXAMPLE_API_TOKEN": "1f2e3d4c5b6a==",
-                "EXAMPLE_API_USER": "secretary",
+                "EXAMPLE_API_USER": "ummanu",
                 "EXAMPLE_URL": "https://board.example.invalid/rpc",
             },
         )
@@ -905,7 +905,7 @@ class MaterializeCase(EnvStoreCase):
             self.instance_dir,
             secret_id="app.token",
             value=b"app-value",
-            scope="project:secretary",
+            scope="project:ummanu",
             purpose="app credentials",
             environment="APP_TOKEN",
             materialize={"target": "file", "path": str(elsewhere)},
@@ -1205,7 +1205,7 @@ class CatalogSchemaCase(unittest.TestCase):
     def test_a_usable_record_validates(self) -> None:
         for instruction in (
             {"target": "runtime-env", "order": 0},
-            {"target": "file", "path": "/etc/secretary/app.env", "order": 7},
+            {"target": "file", "path": "/etc/ummanu/app.env", "order": 7},
         ):
             with self.subTest(instruction=instruction):
                 catalog = self.catalog({"environment": "EXAMPLE_URL", "materialize": instruction})
@@ -1465,7 +1465,7 @@ class SecretCliCase(SecretStoreCase):
                 "--id",
                 "binary.blob",
                 "--scope",
-                "project:secretary",
+                "project:ummanu",
                 "--purpose",
                 "raw bytes",
                 "--file",
@@ -1526,7 +1526,7 @@ class SecretCliCase(SecretStoreCase):
         self.assertNotIn("1f2e3d4c5b6a", out)
         self.assertNotIn("secretary-instance/secrets/values", out)
 
-        with mock.patch.dict(os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(target)}):
+        with mock.patch.dict(os.environ, {"UMMANU_RUNTIME_ENV_FILE": str(target)}):
             code, out, _ = self.run_cli(["secret", "materialize", "--instance", str(self.instance_dir)])
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["targets"][0]["path"], str(target))

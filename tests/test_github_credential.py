@@ -13,11 +13,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import installation, secret_store
-from secretary.checkpoint import CheckpointPusher, _credential_snapshot
-from secretary.cli import main
-from secretary.infra import github_credential
-from secretary.secret_words import RECOVERY_WORDS
+from ummanu import installation, secret_store
+from ummanu.checkpoint import CheckpointPusher, _credential_snapshot
+from ummanu.cli import main
+from ummanu.infra import github_credential
+from ummanu.secret_words import RECOVERY_WORDS
 
 
 def git(repo: Path, *args: str) -> str:
@@ -93,7 +93,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
                     *[f"{name}={value}" for name, value in environment.items()],
                     sys.executable,
                     "-c",
-                    "import secretary.infra.github_credential",
+                    "import ummanu.infra.github_credential",
                 ],
                 text=True,
                 capture_output=True,
@@ -170,7 +170,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         self.assertIn("content must", output)
         self.assertNotIn(token, output)
         source.write_text(token + "\n", encoding="utf-8")
-        with mock.patch("secretary.secret_commands.os.geteuid", return_value=os.geteuid() + 1):
+        with mock.patch("ummanu.secret_commands.os.geteuid", return_value=os.geteuid() + 1):
             code, output, _ = self.run_cli(argv)
         self.assertEqual(code, 2)
         self.assertIn("belongs to another user", output)
@@ -257,7 +257,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         bootstrap.chmod(0o600)
         selected = github_credential.select_private_remote_auth("initial-clone", bootstrap_file=bootstrap)
         self.assertEqual(selected.source, "bootstrap")
-        self.assertEqual(selected.environment["SECRETARY_GITHUB_BOOTSTRAP_FILE"], str(bootstrap))
+        self.assertEqual(selected.environment["UMMANU_GITHUB_BOOTSTRAP_FILE"], str(bootstrap))
         self.assertNotIn("credential.helper", " ".join(selected.environment))
 
         # Selection does not inspect the caller's filesystem identity. The
@@ -269,7 +269,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         self.set_token()
         managed = github_credential.select_private_remote_auth("recovery-reuse", instance_dir=self.instance)
         self.assertEqual(managed.source, "managed-store")
-        self.assertEqual(managed.environment["SECRETARY_CHECKPOINT_INSTANCE"], str(self.instance))
+        self.assertEqual(managed.environment["UMMANU_CHECKPOINT_INSTANCE"], str(self.instance))
         checkpoint = github_credential.select_private_remote_auth("checkpoint", instance_dir=self.instance)
         self.assertEqual(checkpoint.source, "managed-store")
         project_managed = github_credential.select_private_remote_auth(
@@ -293,7 +293,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
             calls.append((argv, kwargs["extra_env"]))
             return subprocess.CompletedProcess(argv, 0, "", "")
 
-        with mock.patch("secretary.infra.github_credential.state_repo.run_as_git_child", side_effect=run):
+        with mock.patch("ummanu.infra.github_credential.state_repo.run_as_git_child", side_effect=run):
             execution = github_credential.RemoteExecution(
                 remote,
                 "project-provision",
@@ -309,11 +309,11 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         bootstrap_argv, bootstrap_env = calls.pop()
         self.assertEqual(execution.source, "bootstrap")
         self.assertNotIn(token, " ".join(bootstrap_argv))
-        self.assertNotEqual(bootstrap_env["SECRETARY_GITHUB_BOOTSTRAP_FILE"], str(bootstrap))
-        self.assertFalse(Path(bootstrap_env["SECRETARY_GITHUB_BOOTSTRAP_FILE"]).exists())
+        self.assertNotEqual(bootstrap_env["UMMANU_GITHUB_BOOTSTRAP_FILE"], str(bootstrap))
+        self.assertFalse(Path(bootstrap_env["UMMANU_GITHUB_BOOTSTRAP_FILE"]).exists())
 
         self.set_token()
-        with mock.patch("secretary.infra.github_credential.state_repo.run_as_git_child", side_effect=run):
+        with mock.patch("ummanu.infra.github_credential.state_repo.run_as_git_child", side_effect=run):
             execution = github_credential.RemoteExecution(
                 remote, "project-provision", instance_dir=self.instance
             )
@@ -326,7 +326,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         managed_argv, managed_env = calls.pop()
         self.assertEqual(execution.source, "managed-store")
         self.assertEqual(managed_argv[:3], ["git", "-c", "credential.helper="])
-        self.assertEqual(managed_env["SECRETARY_CHECKPOINT_INSTANCE"], str(self.instance))
+        self.assertEqual(managed_env["UMMANU_CHECKPOINT_INSTANCE"], str(self.instance))
         self.assertNotIn(token, " ".join(managed_argv) + json.dumps(managed_env))
 
     def test_project_clone_refuses_credential_bearing_url_before_launch(self) -> None:
@@ -337,7 +337,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
             instance_dir=self.instance,
         )
         with (
-            mock.patch("secretary.infra.github_credential.state_repo.run_as_git_child") as run,
+            mock.patch("ummanu.infra.github_credential.state_repo.run_as_git_child") as run,
             self.assertRaisesRegex(github_credential.CredentialError, "credential-bearing"),
         ):
             remote.run_clone(
@@ -365,8 +365,8 @@ class ManagedGithubCredentialTests(unittest.TestCase):
 
         self.set_token()
         with (
-            mock.patch("secretary.installation.state_repo.git", side_effect=inspect),
-            mock.patch("secretary.installation.state_repo.run_git", side_effect=run),
+            mock.patch("ummanu.installation.state_repo.git", side_effect=inspect),
+            mock.patch("ummanu.installation.state_repo.run_git", side_effect=run),
         ):
             self.assertEqual(
                 installation._clone_or_reuse(remote, self.instance, recovery=True, dry_run=False),
@@ -375,13 +375,13 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         self.assertEqual(len(commands), 2)
         for args, environment in commands:
             self.assertEqual(args[:2], ["-c", "credential.helper="])
-            self.assertIn("SECRETARY_CHECKPOINT_INSTANCE", environment)
+            self.assertIn("UMMANU_CHECKPOINT_INSTANCE", environment)
 
         (self.instance / "secrets" / secret_store.KEY_NAME).unlink()
         commands.clear()
         with (
-            mock.patch("secretary.installation.state_repo.git", side_effect=inspect),
-            mock.patch("secretary.installation.state_repo.run_git", side_effect=run) as remote_run,
+            mock.patch("ummanu.installation.state_repo.git", side_effect=inspect),
+            mock.patch("ummanu.installation.state_repo.run_git", side_effect=run) as remote_run,
             self.assertRaisesRegex(installation.InstallError, "needs a bootstrap credential"),
         ):
             installation._clone_or_reuse(remote, self.instance, recovery=True, dry_run=False)
@@ -391,25 +391,25 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         bootstrap.write_text("fixture-bootstrap\n", encoding="utf-8")
         bootstrap.chmod(0o600)
         with (
-            mock.patch("secretary.installation.state_repo.git", side_effect=inspect),
-            mock.patch("secretary.installation.state_repo.run_git", side_effect=run),
+            mock.patch("ummanu.installation.state_repo.git", side_effect=inspect),
+            mock.patch("ummanu.installation.state_repo.run_git", side_effect=run),
         ):
             installation._clone_or_reuse(
                 remote, self.instance, recovery=True, dry_run=False, bootstrap_credential=bootstrap
             )
-        self.assertNotEqual(commands[0][1]["SECRETARY_GITHUB_BOOTSTRAP_FILE"], str(bootstrap))
-        self.assertTrue(commands[0][1]["SECRETARY_GITHUB_BOOTSTRAP_FILE"].endswith("/credential"))
+        self.assertNotEqual(commands[0][1]["UMMANU_GITHUB_BOOTSTRAP_FILE"], str(bootstrap))
+        self.assertTrue(commands[0][1]["UMMANU_GITHUB_BOOTSTRAP_FILE"].endswith("/credential"))
 
     def test_non_github_recovery_reuse_does_not_require_a_github_credential(self) -> None:
         remote = "file:///fixture/instance.git"
 
         with (
             mock.patch(
-                "secretary.installation.state_repo.git",
+                "ummanu.installation.state_repo.git",
                 side_effect=(remote + "\n", "", "", ""),
             ) as git,
             mock.patch(
-                "secretary.installation.state_repo.run_git",
+                "ummanu.installation.state_repo.run_git",
                 side_effect=lambda _instance, args, **_kwargs: subprocess.CompletedProcess(args, 0, "", ""),
             ) as remote_git,
         ):
@@ -457,7 +457,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
     def test_ssh_is_manual_bypass_and_other_https_is_refused_before_git(self) -> None:
         ssh = github_credential.RemoteExecution("git@github.com:example/private.git", "checkpoint")
         with mock.patch(
-            "secretary.infra.github_credential.state_repo.run_git",
+            "ummanu.infra.github_credential.state_repo.run_git",
             side_effect=lambda _instance, args, **_kwargs: subprocess.CompletedProcess(args, 0, "", ""),
         ) as run:
             ssh.run_instance(self.instance, ["fetch", "origin"], label="fixture")
@@ -468,7 +468,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
             "https://github.com.example/private.git", "checkpoint"
         )
         with (
-            mock.patch("secretary.infra.github_credential.state_repo.run_git") as run,
+            mock.patch("ummanu.infra.github_credential.state_repo.run_git") as run,
             self.assertRaisesRegex(github_credential.CredentialError, "unsupported"),
         ):
             unsupported.run_instance(self.instance, ["fetch", "origin"], label="fixture")
@@ -524,7 +524,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
             instance_dir=self.instance,
             bootstrap_file=bootstrap,
         )
-        restricted_tmp = Path(tempfile.mkdtemp(prefix="secretary-restricted-tmp-", dir="/tmp"))
+        restricted_tmp = Path(tempfile.mkdtemp(prefix="ummanu-restricted-tmp-", dir="/tmp"))
         restricted_tmp.chmod(0o700)
         self.addCleanup(restricted_tmp.rmdir)
         capability_directories: list[Path] = []
@@ -537,7 +537,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
 
         with (
             mock.patch.dict(os.environ, {"TMPDIR": str(restricted_tmp)}, clear=False),
-            mock.patch("secretary.infra.github_credential.tempfile.mkdtemp", side_effect=tracked_mkdtemp),
+            mock.patch("ummanu.infra.github_credential.tempfile.mkdtemp", side_effect=tracked_mkdtemp),
         ):
             result = remote.run_instance(
                 self.instance,
@@ -560,7 +560,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         source.chmod(0o600)
         info = source.lstat()
         with (
-            mock.patch("secretary.infra.github_credential.os.geteuid", return_value=0),
+            mock.patch("ummanu.infra.github_credential.os.geteuid", return_value=0),
             mock.patch.dict(os.environ, {"SUDO_UID": str(info.st_uid)}, clear=False),
         ):
             self.assertTrue(github_credential.bootstrap_file_owner_is_allowed(info))
@@ -568,7 +568,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
                 self.digest(github_credential._bootstrap_token(source)), self.digest("fixture-bootstrap")
             )
         with (
-            mock.patch("secretary.infra.github_credential.os.geteuid", return_value=0),
+            mock.patch("ummanu.infra.github_credential.os.geteuid", return_value=0),
             mock.patch.dict(os.environ, {"SUDO_UID": str(info.st_uid + 1)}, clear=False),
         ):
             self.assertFalse(github_credential.bootstrap_file_owner_is_allowed(info))
@@ -622,7 +622,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
                 return subprocess.CompletedProcess(args, 0, "origin\n", "")
             self.fail(f"unexpected command {args}")
 
-        with mock.patch("secretary.checkpoint.state_repo.run_git", side_effect=run_git):
+        with mock.patch("ummanu.checkpoint.state_repo.run_git", side_effect=run_git):
             state = CheckpointPusher(self.instance).push()
         self.assertEqual(state["status"], "failed")
         self.assertIn("missing/unavailable", state["reason"])
@@ -655,10 +655,10 @@ class ManagedGithubCredentialTests(unittest.TestCase):
 
         with (
             mock.patch(
-                "secretary.infra.github_credential._proc.run_isolated",
+                "ummanu.infra.github_credential._proc.run_isolated",
                 side_effect=subprocess.TimeoutExpired(["git", "clone"], 300),
             ),
-            mock.patch("secretary.infra.github_credential.tempfile.mkdtemp", side_effect=tracked_mkdtemp),
+            mock.patch("ummanu.infra.github_credential.tempfile.mkdtemp", side_effect=tracked_mkdtemp),
             self.assertRaisesRegex(
                 installation.InstallError, "clone instance remote: command timed out"
             ) as failure,
@@ -671,7 +671,7 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         self.assertNotIn("fixture-bootstrap", str(failure.exception))
         self.assertEqual(len(capability_directories), 2)
         self.assertTrue(
-            any(path.name.startswith("secretary-github-bootstrap-") for path in capability_directories)
+            any(path.name.startswith("ummanu-github-bootstrap-") for path in capability_directories)
         )
         self.assertTrue(all(not path.exists() for path in capability_directories))
         self.assertEqual(list(self.instance.glob(".clone.clone-*")), [])
@@ -686,14 +686,14 @@ class ManagedGithubCredentialTests(unittest.TestCase):
         for remote, expected in transports.items():
             with (
                 self.subTest(remote=remote),
-                mock.patch("secretary.checkpoint.state_repo.git", return_value=remote),
+                mock.patch("ummanu.checkpoint.state_repo.git", return_value=remote),
             ):
                 snapshot = _credential_snapshot(self.instance, {}, 1_700_000_000)
             self.assertEqual((snapshot["state"], snapshot["store"]), expected)
 
         (self.instance / "secrets" / secret_store.KEY_NAME).unlink()
         with mock.patch(
-            "secretary.checkpoint.state_repo.git",
+            "ummanu.checkpoint.state_repo.git",
             return_value="ssh://git@github.com/example/private.git",
         ):
             locked = _credential_snapshot(self.instance, {}, 1_700_000_000)

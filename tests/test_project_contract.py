@@ -3,14 +3,14 @@
 The card that pays for this is the one nobody wants to spend: a registered project whose adapter
 cannot name a check that attests it. Until now that was discovered by the worker, inside the
 workspace, after a head had been brought up — the round was gone before the refusal could be read.
-The rules therefore live in `secretary.projects.contract`, and both sides ask them: the worker's
-own `secretary check broad --module` and the dispatcher's preflight before a card is given out.
+The rules therefore live in `ummanu.projects.contract`, and both sides ask them: the worker's
+own `ummanu check broad --module` and the dispatcher's preflight before a card is given out.
 
-The live shape has moved twice since. Adapters now declare `broad_check` — `secretary` and
+The live shape has moved twice since. Adapters now declare `broad_check` — `ummanu` and
 `review-value-research` resolve `fit`, `codegen-orchestrator` and `service-template` resolve
 `undecidable relative_interpreter` — and the default an adapter that declares none used to inherit
 is gone. Silence from a registered project's adapter is `broad_check_not_declared`, a refusal that
-names the one true thing about it, rather than Secretary's contract lent to a project that never
+names the one true thing about it, rather than Ummanu's contract lent to a project that never
 asked for it.
 """
 
@@ -27,10 +27,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.cli import build_parser
-from secretary.dispatch.host import CommandHostRuntime
+from ummanu.cli import build_parser
+from ummanu.dispatch.host import CommandHostRuntime
 
-from secretary.projects.contract import (
+from ummanu.projects.contract import (
     ADAPTER_INVALID,
     ADAPTER_UNAVAILABLE,
     BROAD_CHECK_INCOMPLETE,
@@ -130,15 +130,15 @@ class ProjectContractTests(unittest.TestCase):
             "`cannot_attest_project` wording mislead every reader of it",
         )
 
-    def test_a_secretary_shaped_checkout_earns_the_same_refusal_as_any_other(self) -> None:
+    def test_a_ummanu_shaped_checkout_earns_the_same_refusal_as_any_other(self) -> None:
         """The second bad outcome the default had, and the less visible one.
 
-        A checkout that happens to hold a `secretary` package used to be handed a contract its
+        A checkout that happens to hold a `ummanu` package used to be handed a contract its
         owner never declared and attested against it. Layout decides nothing here any more: the
         adapter's silence is the answer, whatever the tree looks like.
         """
         self.adapter()
-        self.package("secretary")
+        self.package("ummanu")
 
         self.assertEqual(self.refusal().shape, BROAD_CHECK_NOT_DECLARED)
 
@@ -207,7 +207,7 @@ class ProjectContractTests(unittest.TestCase):
     def test_a_declared_contract_with_no_interpreter_uses_the_wrappers_own(self) -> None:
         """AC of issue:8b39e60e4df361c6138e: a supported contract must not require a missing venv.
 
-        The Secretary worktrees have no `.venv` and are not getting one. Since PR #329 the check
+        The Ummanu worktrees have no `.venv` and are not getting one. Since PR #329 the check
         subprocess prepends the candidate's own import roots to `sys.path` before importing the
         project, so a shared installation interpreter imports the CANDIDATE, not production —
         which is what makes "no interpreter named" both a legal and an honest contract, rather
@@ -602,12 +602,12 @@ class CatalogContractTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
         self.repo = self.root / "repo"
-        (self.repo / "src" / "secretary").mkdir(parents=True)
-        (self.repo / "src" / "secretary" / "__init__.py").write_text("", encoding="utf-8")
+        (self.repo / "src" / "ummanu").mkdir(parents=True)
+        (self.repo / "src" / "ummanu" / "__init__.py").write_text("", encoding="utf-8")
 
     def catalog(self, adapter_body: str | None = ADAPTER_BODY):
-        from secretary.dispatch.host import InstanceCatalog
-        from secretary.head_registry import snapshot_header
+        from ummanu.dispatch.host import InstanceCatalog
+        from ummanu.head_registry import snapshot_header
 
         instance = self.root / "instance"
         (instance / "heads").mkdir(parents=True)
@@ -617,7 +617,7 @@ class CatalogContractTests(unittest.TestCase):
             "version: 1\nname: contract\ndata_dir: "
             + str(self.root / "data")
             + "\noffsite:\n  instance_remote: git@example.invalid:x/y.git\n"
-            + "host:\n  unit_prefix: secretary-\n",
+            + "host:\n  unit_prefix: ummanu-\n",
             encoding="utf-8",
         )
         snapshot = (
@@ -642,15 +642,15 @@ class CatalogContractTests(unittest.TestCase):
         return InstanceCatalog(instance / "instance.yaml")
 
     def test_a_usable_contract_reaches_the_preflight_as_fit(self) -> None:
-        """The live AC4 case, through the dispatcher's own catalog: `secretary`'s own adapter, which
+        """The live AC4 case, through the dispatcher's own catalog: `ummanu`'s own adapter, which
         declares its contract. It is a named state with the contract in it, not an absence of a
         refusal."""
         verdict = self.catalog(
-            ADAPTER_BODY + "broad_check:\n  import_package: secretary\n  module: tests.broad\n"
+            ADAPTER_BODY + "broad_check:\n  import_package: ummanu\n  module: tests.broad\n"
         ).broad_check_verdict("example")
 
         self.assertEqual(verdict.state, CONTRACT_FIT)
-        self.assertEqual(verdict.contract.import_package, "secretary")
+        self.assertEqual(verdict.contract.import_package, "ummanu")
         self.assertEqual(verdict.contract.module, "tests.broad")
         self.assertEqual(verdict.contract.reason, "", "a project contract carries no CLI fallback")
 
@@ -711,7 +711,7 @@ class CatalogContractTests(unittest.TestCase):
         for command, verb in ((broad, "broad"), (show, "show")):
             vector = shlex.split(command)
             self.assertEqual(
-                vector[1:5], [str(host.production_runtime.interpreter), "-P", "-m", "secretary"]
+                vector[1:5], [str(host.production_runtime.interpreter), "-P", "-m", "ummanu"]
             )
             self.assertTrue(vector[0].startswith("PYTHONPATH="))
             expected = ["check", verb]
@@ -811,8 +811,8 @@ class CatalogContractTests(unittest.TestCase):
                 packet = host._worker_task_doc(task, "main", "attempt")
                 self.assertIn("Configuration gap", packet)
                 self.assertIn("Do not select a module yourself", packet)
-                self.assertNotIn(" -m secretary check broad ", packet)
-                self.assertNotIn(" -m secretary check show ", packet)
+                self.assertNotIn(" -m ummanu check broad ", packet)
+                self.assertNotIn(" -m ummanu check show ", packet)
         self.assertEqual(host._broad_check_invocation("unregistered"), ("", ""))
         self.assertEqual(host._broad_check_invocation(""), ("", ""))
 

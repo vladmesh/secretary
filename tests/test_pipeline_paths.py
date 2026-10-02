@@ -15,10 +15,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatch import pause as dispatcher_pause
-from secretary.runtime import launch_prefix, paths
-from secretary.runtime import role_env as runtime_role_env
-from secretary.runtime import resource_probe as health
+from ummanu.dispatch import pause as dispatcher_pause
+from ummanu.runtime import launch_prefix, paths
+from ummanu.runtime import role_env as runtime_role_env
+from ummanu.runtime import resource_probe as health
 
 
 class PortableDefaultTests(unittest.TestCase):
@@ -33,7 +33,7 @@ class PortableDefaultTests(unittest.TestCase):
     def test_the_instance_and_checkout_defaults_follow_the_running_user(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
             self.assertEqual(paths.default_instance_path(), Path(tmp) / "secretary-instance")
-            self.assertEqual(paths.default_product_root(), Path(tmp) / "secretary")
+            self.assertEqual(paths.default_product_root(), Path(tmp) / "ummanu")
 
     def test_an_instance_is_named_by_its_directory_or_its_config_file(self):
         self.assertEqual(paths.instance_dir("/srv/inst/instance.yaml"), Path("/srv/inst"))
@@ -58,18 +58,18 @@ class LauncherCheckoutTests(unittest.TestCase):
     All three launchers answer the same question and have to answer it the same way: the explicit
     ``TA_RUNTIME_PYTHONPATH``, then the checkout the installation is configured with, then a home
     default. A launcher that skipped the configured name would start an installation materialized
-    from an alternate checkout out of ``~/secretary`` — a version nobody upgraded, or nothing.
+    from an alternate checkout out of ``~/ummanu`` — a version nobody upgraded, or nothing.
     """
 
     SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
-    LAUNCHERS = ("secretary-agent-gate.sh", "secretary-start.sh")
+    LAUNCHERS = ("ummanu-agent-gate.sh", "ummanu-start.sh")
 
     def script_pythonpath(self, script: str, env: dict[str, str]) -> str:
         """Run the shipped PYTHONPATH assignment itself, in a shell with only this environment."""
         lines = (self.SCRIPTS / script).read_text(encoding="utf-8").splitlines()
         line = next(line for line in lines if line.startswith("export PYTHONPATH="))
         setup = ""
-        if script == "secretary-agent-gate.sh":
+        if script == "ummanu-agent-gate.sh":
             # The gate resolves this once, then derives both PYTHONPATH and its managed interpreter
             # from that same root.
             setup = next(line for line in lines if line.startswith("product_root=")) + "\n"
@@ -88,7 +88,7 @@ class LauncherCheckoutTests(unittest.TestCase):
         env = {
             "HOME": "/home/nobody",
             "TA_RUNTIME_PYTHONPATH": "/srv/named",
-            "TA_SECRETARY_REPO": "/srv/configured",
+            "UMMANU_REPO": "/srv/configured",
         }
         for script in self.LAUNCHERS:
             with self.subTest(script):
@@ -97,7 +97,7 @@ class LauncherCheckoutTests(unittest.TestCase):
             self.assertEqual(runtime_role_env.runtime_pythonpath(), "/srv/named/src")
 
     def test_every_launcher_falls_back_to_the_configured_checkout(self):
-        env = {"HOME": "/home/nobody", "TA_SECRETARY_REPO": "/srv/configured"}
+        env = {"HOME": "/home/nobody", "UMMANU_REPO": "/srv/configured"}
         for script in self.LAUNCHERS:
             with self.subTest(script):
                 self.assertEqual(self.script_pythonpath(script, env), "/srv/configured/src")
@@ -108,7 +108,7 @@ class LauncherCheckoutTests(unittest.TestCase):
         env = {"HOME": "/home/nobody"}
         for script in self.LAUNCHERS:
             with self.subTest(script):
-                self.assertEqual(self.script_pythonpath(script, env), "/home/nobody/secretary/src")
+                self.assertEqual(self.script_pythonpath(script, env), "/home/nobody/ummanu/src")
 
     def test_the_module_launcher_with_nothing_configured_uses_its_own_checkout(self):
         """A module already imported knows its tree is importable; a home path may not exist."""
@@ -116,7 +116,7 @@ class LauncherCheckoutTests(unittest.TestCase):
             self.assertEqual(runtime_role_env.runtime_pythonpath(), str(runtime_role_env.REPO_ROOT / "src"))
 
     def test_a_shell_launcher_keeps_an_inherited_pythonpath_behind_the_checkout(self):
-        env = {"HOME": "/home/nobody", "TA_SECRETARY_REPO": "/srv/configured", "PYTHONPATH": "/srv/extra"}
+        env = {"HOME": "/home/nobody", "UMMANU_REPO": "/srv/configured", "PYTHONPATH": "/srv/extra"}
         for script in self.LAUNCHERS:
             with self.subTest(script):
                 self.assertEqual(self.script_pythonpath(script, env), "/srv/configured/src:/srv/extra")
@@ -124,7 +124,7 @@ class LauncherCheckoutTests(unittest.TestCase):
     def test_the_launched_role_command_carries_the_configured_checkout(self):
         """`wrap_shell_command` renders the path the launcher resolved into the command itself."""
         with mock.patch.dict(
-            os.environ, {"HOME": "/home/nobody", "TA_SECRETARY_REPO": "/srv/configured"}, clear=True
+            os.environ, {"HOME": "/home/nobody", "UMMANU_REPO": "/srv/configured"}, clear=True
         ):
             command = runtime_role_env.wrap_shell_command("steward", "true")
 
@@ -137,13 +137,13 @@ class LaunchPrefixRenderingTests(unittest.TestCase):
     def test_the_shell_form_is_the_published_expression(self) -> None:
         self.assertEqual(
             launch_prefix.pythonpath_prefix(),
-            'PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}/src${PYTHONPATH:+:$PYTHONPATH}"',
+            'PYTHONPATH="${UMMANU_REPO:-$HOME/ummanu}/src${PYTHONPATH:+:$PYTHONPATH}"',
         )
 
     def test_the_resolved_form_writes_the_configured_checkout(self) -> None:
         self.assertEqual(
-            launch_prefix.pythonpath_prefix({"TA_SECRETARY_REPO": "/opt/secretary"}),
-            'PYTHONPATH=/opt/secretary/src"${PYTHONPATH:+:$PYTHONPATH}"',
+            launch_prefix.pythonpath_prefix({"UMMANU_REPO": "/opt/ummanu"}),
+            'PYTHONPATH=/opt/ummanu/src"${PYTHONPATH:+:$PYTHONPATH}"',
         )
 
 
@@ -193,8 +193,8 @@ class LegacyMirrorPathTests(unittest.TestCase):
     a mirror written there is a file none of the background roles read."""
 
     ENV = (
-        "SECRETARY_LEGACY_PAUSE_FILE",
-        "SECRETARY_LEGACY_PIPELINE_STATE_DIR",
+        "UMMANU_LEGACY_PAUSE_FILE",
+        "UMMANU_LEGACY_PIPELINE_STATE_DIR",
         "TA_PIPELINE_STATE_DIR",
         "TA_STATE",
     )
@@ -207,14 +207,14 @@ class LegacyMirrorPathTests(unittest.TestCase):
         self.assertFalse(str(path).endswith("triggered-agents/state/pipeline/pause.json"))
         self.assertNotIn(Path.home() / "triggered-agents", path.parents)
 
-    def test_legacy_mirror_path_points_at_secretary(self):
+    def test_legacy_mirror_path_points_at_ummanu(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             with mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(root)}, clear=False):
                 for name in self.ENV:
                     os.environ.pop(name, None)
                 path = dispatcher_pause.legacy_mirror_path()
-        self.assertEqual(path, root / "secretary" / "pipeline" / "state" / "pipeline" / "pause.json")
+        self.assertEqual(path, root / "ummanu" / "pipeline" / "state" / "pipeline" / "pause.json")
 
 
 if __name__ == "__main__":

@@ -1,12 +1,12 @@
 """The doctor lamp on the bottom bar, the page behind it, and the rule that decides its colour.
 
 Three questions, and each is asked of the real thing. The colour rule is asked of
-:func:`~secretary.webproto.reads.health_summary` and its severity table, because a colour is
+:func:`~ummanu.webproto.reads.health_summary` and its severity table, because a colour is
 decided from a code and not from a sentence. The cost is asked of :class:`
-~secretary.web.doctor.DoctorLayer` over a counting collector and a clock this test moves, because
+~ummanu.web.doctor.DoctorLayer` over a counting collector and a clock this test moves, because
 the lamp is on every page and the collection behind it is not cheap. And "recorded state only" is
 asked of the real read layer over a real instance, with the ways out of this process -- a
-subprocess, a socket, an HTTP request, the `secretary doctor` entry point -- taken away for the
+subprocess, a socket, an HTTP request, the `ummanu doctor` entry point -- taken away for the
 span of the read, so the assertion is about the path taken rather than about a comment.
 """
 
@@ -19,12 +19,14 @@ import unittest
 from typing import Any
 from unittest import mock
 
-from secretary.web import pages
-from secretary.web.app import ROUTES, WebApp
-from secretary.web.commands import health_layers
-from secretary.web.doctor import CACHE_SECONDS, DOCTOR_NOT_BUILT, DoctorLayer
-from secretary.webproto.errors import InstallationUnavailable
-from secretary.webproto.reads import (
+from tests.web_fakes import Recording, system_snapshot
+from tests.webproto_sprint_fixtures import SprintProtocolFixture
+from ummanu.web import pages
+from ummanu.web.app import ROUTES, WebApp
+from ummanu.web.commands import health_layers
+from ummanu.web.doctor import CACHE_SECONDS, DOCTOR_NOT_BUILT, DoctorLayer
+from ummanu.webproto.errors import InstallationUnavailable
+from ummanu.webproto.reads import (
     PROBLEM_SEVERITY,
     UNCLASSIFIED_SEVERITY,
     ReadLayer,
@@ -32,8 +34,6 @@ from secretary.webproto.reads import (
     lamp_colour,
     problem_severity,
 )
-from tests.web_fakes import Recording, system_snapshot
-from tests.webproto_sprint_fixtures import SprintProtocolFixture
 
 NOW = 1_800_000_000.0
 
@@ -366,7 +366,7 @@ class TheLampTests(TransportFixture):
 
 class TheLampCostsOneCollectionTests(TransportFixture):
     def page_paths(self) -> list[str]:
-        placeholders = {"ref": "secretary-9", "project": "secretary", "session": "s-1", "run_id": "r-1"}
+        placeholders = {"ref": "ummanu-9", "project": "ummanu", "session": "s-1", "run_id": "r-1"}
         paths = []
         for route in ROUTES:
             if not (route.page and route.method == "GET") or route.pattern.startswith("/po"):
@@ -429,8 +429,8 @@ class RecordedStateOnlyTests(SprintProtocolFixture):
             mock.patch("subprocess.check_output", refuse),
             mock.patch("socket.socket", refuse),
             mock.patch("urllib.request.urlopen", refuse),
-            mock.patch("secretary.cli.run_doctor", refuse),
-            mock.patch("secretary.cli.collect_doctor_inspection", refuse),
+            mock.patch("ummanu.cli.run_doctor", refuse),
+            mock.patch("ummanu.cli.collect_doctor_inspection", refuse),
         ):
             document = layer.doctor_snapshot()
             rendered = pages.doctor({"available": True, "reason": None, "document": document})
@@ -448,7 +448,7 @@ class RecordedStateOnlyTests(SprintProtocolFixture):
             return NOTHING_WRONG
 
         reads = ReadLayer(self.instance, data_dir=self.data_dir, offline=True)
-        with mock.patch("secretary.webproto.reads.collect_status", collect):
+        with mock.patch("ummanu.webproto.reads.collect_status", collect):
             snapshot = reads.health_snapshot()
         self.assertEqual(len(seen), 1)
         self.assertTrue(seen[0]["offline"])
@@ -470,7 +470,7 @@ class OneReadingTests(SprintProtocolFixture):
     def setUp(self) -> None:
         super().setUp()
         self.clock = NOW
-        from secretary.infra.doctor_record import RESULT_PATH, identity, publish, utc
+        from ummanu.infra.doctor_record import RESULT_PATH, identity, publish, utc
         (self.data_dir / RESULT_PATH).parent.mkdir(parents=True)
         publish(self.data_dir / RESULT_PATH, {
             "schema_version": 1, "installation": identity(self.instance, self.data_dir),
@@ -485,7 +485,7 @@ class OneReadingTests(SprintProtocolFixture):
             self.collected += 1
             return self.status
 
-        self.enterContext(mock.patch("secretary.webproto.reads.collect_status", collect))
+        self.enterContext(mock.patch("ummanu.webproto.reads.collect_status", collect))
         self.reads, self.doctor = health_layers(
             str(self.instance), data_dir=str(self.data_dir), offline=True, now=lambda: self.clock
         )
@@ -493,7 +493,7 @@ class OneReadingTests(SprintProtocolFixture):
     def stored(self, *, findings=None, **changes):
         import json
 
-        from secretary.infra.doctor_record import RESULT_PATH, publish
+        from ummanu.infra.doctor_record import RESULT_PATH, publish
 
         path = self.data_dir / RESULT_PATH
         document = json.loads(path.read_text())
@@ -506,7 +506,7 @@ class OneReadingTests(SprintProtocolFixture):
         self.doctor._cached = None
 
     def test_union_preserves_status_and_doctor_findings_identity_and_the_recorded_run_time(self):
-        from secretary.infra.doctor_record import utc
+        from ummanu.infra.doctor_record import utc
         finding = {"code": "recovery_bypass", "message": "ambient Git credential configuration exists",
                    "capability": "checkpoint-git-authentication", "kind": "credential-helper"}
         self.stored(findings=[finding])
@@ -534,7 +534,7 @@ class OneReadingTests(SprintProtocolFixture):
         self.assertEqual(self.doctor.doctor_snapshot()["colour"], "yellow")
 
     def test_missing_corrupt_expired_failed_wrong_installation_and_unavailable_are_explicit(self):
-        from secretary.infra.doctor_record import RESULT_PATH, utc
+        from ummanu.infra.doctor_record import RESULT_PATH, utc
         self.status = EVERY_PROBLEM
         path = self.data_dir / RESULT_PATH
         original = path.read_bytes()
@@ -567,7 +567,7 @@ class OneReadingTests(SprintProtocolFixture):
                     self.assertIn("recorded doctor is " + expected, self.app().handle("GET", "/doctor").body.decode())
 
     def test_periodic_producer_preserves_baseline_and_cached_pages_through_completion(self):
-        from secretary.infra import doctor_record as records
+        from ummanu.infra import doctor_record as records
 
         finding = {"code": "recovery_bypass", "message": "ambient credential configuration",
                    "capability": "checkpoint-git-authentication"}
@@ -605,7 +605,7 @@ class OneReadingTests(SprintProtocolFixture):
         self.assertEqual(self.collected, 3)
 
     def test_initial_and_stuck_collecting_states_are_shared_by_dashboard_lamp_and_doctor(self):
-        from secretary.infra import doctor_record as records
+        from ummanu.infra import doctor_record as records
 
         path = self.data_dir / records.RESULT_PATH
         path.unlink()
@@ -718,7 +718,7 @@ class OneReadingTests(SprintProtocolFixture):
         def request(index: int) -> None:
             pages_seen[index] = app.handle("GET", "/").body.decode("utf-8")
 
-        with mock.patch("secretary.webproto.reads.collect_status", blocked):
+        with mock.patch("ummanu.webproto.reads.collect_status", blocked):
             first = threading.Thread(target=request, args=(0,))
             first.start()
             self.assertTrue(entered.wait(10), "the first request never reached the collector")
@@ -785,7 +785,7 @@ class OneReadingTests(SprintProtocolFixture):
             self.collected += 1
             raise OSError("production state is unreadable")
 
-        with mock.patch("secretary.webproto.reads.collect_status", refuse):
+        with mock.patch("ummanu.webproto.reads.collect_status", refuse):
             panel = self.panel()
             lamp = self.doctor.doctor_snapshot()
         self.assertEqual(panel["source"]["state"], "unavailable")

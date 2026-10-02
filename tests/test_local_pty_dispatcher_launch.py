@@ -29,33 +29,33 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary.dispatch.head_status import head_status
-from secretary.dispatch.heartbeat import heartbeat_identity, sprint_task
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.observer import (
+from tests.fakes.dispatcher import FakeCatalog
+from tests.production_runtime_fixtures import registered_production_runtime
+from ummanu.dispatch.head_status import head_status
+from ummanu.dispatch.heartbeat import heartbeat_identity, sprint_task
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.observer import (
     ObserverRecord,
     observer_head_is_dead,
     observer_head_status,
     put_observers,
 )
-from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatch.watchdog import (
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.watchdog import (
     HEARTBEAT_IDENTITY_MISMATCH,
     HEARTBEAT_LIVE_MATCH,
     head_process_status,
     head_run_process_status,
 )
-from secretary.dispatch.worker_lifecycle import WorkerContinuation, WorkerContinuationStage
-from secretary.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
-from secretary.runtime.head.command import with_pid_heartbeat
-from secretary.runtime.head.identity import publish_heartbeat
-from secretary.runtime.head.local_pty import protocol
-from secretary.runtime.head.local_pty.journal import RUN_STARTED, read_events
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
-from secretary.runtime.tui_delivery import READINESS_BUSY
-from secretary.runtime.tui_delivery import delivery_readiness_state as _delivery_readiness_state
-from tests.fakes.dispatcher import FakeCatalog
-from tests.production_runtime_fixtures import registered_production_runtime
+from ummanu.dispatch.worker_lifecycle import WorkerContinuation, WorkerContinuationStage
+from ummanu.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
+from ummanu.runtime.head.command import with_pid_heartbeat
+from ummanu.runtime.head.identity import publish_heartbeat
+from ummanu.runtime.head.local_pty import protocol
+from ummanu.runtime.head.local_pty.journal import RUN_STARTED, read_events
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from ummanu.runtime.tui_delivery import READINESS_BUSY
+from ummanu.runtime.tui_delivery import delivery_readiness_state as _delivery_readiness_state
 
 PROFILE = "claude-local-pty"
 #: The stand-in head: it writes down which process it is and what it was run with, then stays up.
@@ -132,9 +132,9 @@ class LocalPtyDispatcherLaunchTests(unittest.TestCase):
         environment = mock.patch.dict(
             os.environ,
             {
-                "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "orca-workspaces"),
-                "SECRETARY_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
-                "SECRETARY_CLAUDE_PROJECTS": str(self.root / "claude-projects"),
+                "UMMANU_DISPATCHER_WORKSPACES_ROOT": str(self.root / "orca-workspaces"),
+                "UMMANU_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
+                "UMMANU_CLAUDE_PROJECTS": str(self.root / "claude-projects"),
             },
         )
         environment.start()
@@ -234,15 +234,15 @@ class LocalPtyDispatcherLaunchTests(unittest.TestCase):
         ):
             launched = self.host._launch(
                 str(workspace),
-                f"secretary-9001 {role}",
+                f"ummanu-9001 {role}",
                 PROFILE,
                 str(workspace / "TASK.md"),
                 role=role,
-                env_name="SECRETARY_1698_NO_COMMAND_OVERRIDE",
-                task={"ref": "secretary-9001"},
+                env_name="UMMANU_1698_NO_COMMAND_OVERRIDE",
+                task={"ref": "ummanu-9001"},
             )
         kind = "review" if role == "reviewer" else "worker"
-        return launched, str(Path(os.environ["SECRETARY_DISPATCHER_BODY_DIR"]) / f"secretary-{kind}-pid-")
+        return launched, str(Path(os.environ["UMMANU_DISPATCHER_BODY_DIR"]) / f"ummanu-{kind}-pid-")
 
     def test_a_worker_and_a_reviewer_raised_on_local_pty_run_their_heads(self) -> None:
         for role in ("worker", "reviewer"):
@@ -262,7 +262,7 @@ class LocalPtyDispatcherLaunchTests(unittest.TestCase):
                 )
                 self.assertEqual(status["state"], HEARTBEAT_LIVE_MATCH, status)
                 self.assertEqual(status["pid"], head)
-                self.assertEqual(status["record"]["task"], "card:secretary-9001")
+                self.assertEqual(status["record"]["task"], "card:ummanu-9001")
                 self.assertEqual(status["record"]["role"], role)
                 self._reap()
 
@@ -280,12 +280,12 @@ class LocalPtyDispatcherLaunchTests(unittest.TestCase):
             ):
                 launched[role] = self.host._launch(
                     str(workspace),
-                    f"secretary-9001 {role}",
+                    f"ummanu-9001 {role}",
                     PROFILE,
                     str(workspace / "TASK.md"),
                     role=role,
-                    env_name="SECRETARY_1698_NO_COMMAND_OVERRIDE",
-                    task={"ref": "secretary-9001"},
+                    env_name="UMMANU_1698_NO_COMMAND_OVERRIDE",
+                    task={"ref": "ummanu-9001"},
                 )
         worker, reviewer = (HeadRun.from_json(launched[role].head_run) for role in ("worker", "reviewer"))
         record = DispatcherRecord(
@@ -311,12 +311,12 @@ class LocalPtyDispatcherLaunchTests(unittest.TestCase):
         runtime.host = self.host
         runtime.data_dir = self.root / "data"
         runtime.production_state.load.return_value = {}
-        runtime.production_state.records.return_value = {"secretary-9001": record}
+        runtime.production_state.records.return_value = {"ummanu-9001": record}
 
         def no_orca(argv: Any, **_kwargs: Any) -> Any:
             self.fail(f"head-status called {argv!r} for a workspace whose heads are all supervised")
 
-        with mock.patch("secretary._proc.run", no_orca):
+        with mock.patch("ummanu._proc.run", no_orca):
             deadline = time.monotonic() + 15.0
             while True:
                 answer = head_status(runtime, workspace=str(workspace))
@@ -375,14 +375,14 @@ class LocalPtyObserverPromptTests(unittest.TestCase):
             mock.patch.dict(
                 os.environ,
                 {
-                    "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "orca-workspaces"),
-                    "SECRETARY_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
-                    "SECRETARY_CLAUDE_PROJECTS": str(self.root / "claude-projects"),
+                    "UMMANU_DISPATCHER_WORKSPACES_ROOT": str(self.root / "orca-workspaces"),
+                    "UMMANU_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
+                    "UMMANU_CLAUDE_PROJECTS": str(self.root / "claude-projects"),
                 },
             ),
-            mock.patch("secretary.runtime.local_pty_head.PROMPT_QUIET_SECONDS", 0.5),
-            mock.patch("secretary.runtime.local_pty_head.PROMPT_POLL_SECONDS", 0.05),
-            mock.patch("secretary.runtime.local_pty_head.SUBMIT_CONFIRM_SECONDS", 3.0),
+            mock.patch("ummanu.runtime.local_pty_head.PROMPT_QUIET_SECONDS", 0.5),
+            mock.patch("ummanu.runtime.local_pty_head.PROMPT_POLL_SECONDS", 0.05),
+            mock.patch("ummanu.runtime.local_pty_head.SUBMIT_CONFIRM_SECONDS", 3.0),
         ]
         for patch in patches:
             patch.start()
@@ -493,18 +493,18 @@ class LocalPtyRetainedWorkerContinuationTests(unittest.TestCase):
         ):
             launched = self.host._launch(
                 str(workspace),
-                "secretary-9001 worker",
+                "ummanu-9001 worker",
                 PROFILE,
                 str(workspace / "TASK.md"),
                 role="worker",
-                env_name="SECRETARY_1702_NO_COMMAND_OVERRIDE",
-                task={"ref": "secretary-9001"},
+                env_name="UMMANU_1702_NO_COMMAND_OVERRIDE",
+                task={"ref": "ummanu-9001"},
                 launch_prompt=f"Read {workspace}/TASK.md and do its task.",
             )
         run = HeadRun.from_json(launched.head_run)
         self.assertEqual(run.spec.runtime, LOCAL_PTY_RUNTIME)
         record = DispatcherRecord(
-            worker="secretary-9001-worker",
+            worker="ummanu-9001-worker",
             head=PROFILE,
             review_head=PROFILE,
             attempt_id="attempt-1702",
@@ -540,7 +540,7 @@ class LocalPtyRetainedWorkerContinuationTests(unittest.TestCase):
             mock.patch.object(CommandHostRuntime, "_worker_task_doc", return_value="# Task, round 2\n"),
             mock.patch.object(self.host.catalog, "integration_base", return_value="main", create=True),
         ):
-            self.host.resume_worker({"ref": "secretary-9001", "project": "secretary"}, record)
+            self.host.resume_worker({"ref": "ummanu-9001", "project": "ummanu"}, record)
 
         submitted = self._submitted()
         self.assertEqual(len(submitted), 2, submitted)
@@ -586,10 +586,10 @@ class ObserverTaskIdentityTests(unittest.TestCase):
             "the fallback the stop paths and observer_head_status hand over",
         )
         self.assertEqual(
-            heartbeat_identity(run_id="r", role="worker", task_ref=TaskRef.card("secretary-1698").to_json())[
+            heartbeat_identity(run_id="r", role="worker", task_ref=TaskRef.card("ummanu-1698").to_json())[
                 "task"
             ],
-            "card:secretary-1698",
+            "card:ummanu-1698",
         )
 
     def test_a_new_observer_record_is_a_live_match_with_the_single_prefix(self) -> None:
@@ -643,7 +643,7 @@ class ObserverTaskIdentityTests(unittest.TestCase):
     def test_the_stop_paths_expect_the_single_prefix(self) -> None:
         from types import SimpleNamespace
 
-        from secretary.dispatch.cleanup import CleanupOwner
+        from ummanu.dispatch.cleanup import CleanupOwner
         host = CommandHostRuntime(
             FakeCatalog(), self.root / "data", mode="real",
             production_runtime=registered_production_runtime(self.root),

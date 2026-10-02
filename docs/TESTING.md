@@ -6,7 +6,7 @@ Dispatcher-owned exact-SHA GitHub CI is the complete test contract. It validates
 | Suite | CI job | Scope |
 | --- | --- | --- |
 | unit | test / unit | Isolated product and protocol behaviour. |
-| component | test / component | Individual Secretary components and their direct adapters. |
+| component | test / component | Individual Ummanu components and their direct adapters. |
 | runtime-component | test / runtime-component | Runtime and local-PTY component boundaries. |
 | integration-recovery | test / integration-recovery | Backup, checkpoint, restore and recovery flows. |
 | integration-memory | test / integration-memory | Memory and curator integration flows. |
@@ -28,7 +28,7 @@ manifest invalid before any suite starts. When changing the runner or manifest, 
 
 A missing required dependency is an infrastructure failure, never a green skip:
 
-- `integration-memory` needs `secretary[memory]`;
+- `integration-memory` needs `ummanu[memory]`;
 - PostgreSQL tests (for example `tests.test_board_store_schema`, `tests.test_postgres_recovery`,
   and the `integration-board`, `integration-dispatcher` and `integration-heads` card-store fixtures) need Docker, Compose, `postgres:16`, psycopg,
   SQLAlchemy and Alembic. They use disposable Compose projects and volumes on dynamically selected
@@ -51,7 +51,7 @@ and after each suite; a green suite requires identical snapshots. Evidence keeps
 and at most ten changed-status entries.
 
 Each suite also uploads raw coverage `coverage.<suite>` as `ci-coverage-<suite>-<sha>` (line and branch
-coverage of `src/secretary`, the background agents' `secretary.automations` included; coverage is a CI-only dependency). The
+coverage of `src/ummanu`, the background agents' `ummanu.automations` included; coverage is a CI-only dependency). The
 aggregate step rejects missing, malformed or uncombinable data as an infrastructure failure and
 publishes `ci-coverage-combined-<sha>` with `combined-coverage.json` (per-file executed/missing/excluded
 lines and branches and the branch summary; coverage.py's per-function and per-class regions, which restate
@@ -93,7 +93,7 @@ suite, run the broad profile once through the receipt wrapper.
 
     python3 -m tests.broad
 
-The Secretary project's local broad suite: the manifest's `unit` and `component` modules only. Use it,
+The Ummanu project's local broad suite: the manifest's `unit` and `component` modules only. Use it,
 not bare `python3 -m unittest` (repository-wide discovery of all nine suites). The other seven suites
 run only in exact-SHA GitHub CI. A green local broad receipt is a worker's evidence for its round, never
 a substitute for that gate.
@@ -106,8 +106,8 @@ before any test module (`tests/test_health_suite_command.py` pins this).
 A registered project names its broad suite in its adapter's `broad_check` block (`module`, optional
 `args`, `import_package`, optional `interpreter`), so the receipt wrapper needs no flag:
 
-    python3 -m secretary check broad --reuse
-    python3 -m secretary check show
+    python3 -m ummanu check broad --reuse
+    python3 -m ummanu check show
 
 `--module` overrides the declared suite. With no declared or given module the command refuses with
 `no_broad_check_module`.
@@ -124,7 +124,7 @@ deadline, grace and stop-confirmation wiring. It belongs only to `runtime-compon
 
 ## Changed Python lint
 
-The dispatcher-owned `.secretary-task-env/venv` installs the candidate's `.[dev]` extra when its adapter
+The dispatcher-owned `.ummanu-task-env/venv` installs the candidate's `.[dev]` extra when its adapter
 declares `broad_check` without `broad_check.interpreter`, and puts its tools on worker and reviewer
 `PATH`. Without `broad_check` it stays bare. The receipt wrapper and protocol/report/verdict commands
 use the absolute production interpreter; only the inner broad suite uses the candidate venv. An
@@ -179,7 +179,7 @@ Notes:
   `durability=excluded` and are structural, not an SLO. The full real-audit comment benchmark is opt-in:
 
   ```console
-  SECRETARY_FULL_BULK_BENCHMARK=1 PYTHONPATH=src python3 -m unittest -v \
+  UMMANU_FULL_BULK_BENCHMARK=1 PYTHONPATH=src python3 -m unittest -v \
     tests.test_bulk_comment_restore.DurableAuditBenchmark.test_full_production_shape_real_audit
   ```
 
@@ -190,5 +190,5 @@ Notes:
 - Whether the installed web service works is a host check, not a test:
   [Operations](OPERATIONS.md#running-a-card-through-the-installed-service) and
   [Auditing what is exposed](OPERATIONS.md#auditing-what-is-exposed).
-- Never point a test or rehearsal at `/home/dev/secretary-data`, `/home/dev/secretary-instance`,
+- Never point a test or rehearsal at `/home/dev/ummanu-data`, `/home/dev/secretary-instance`,
   production systemd or a live observer.

@@ -20,7 +20,7 @@ import ast
 import unittest
 from pathlib import Path
 
-from secretary.runtime.head import (
+from ummanu.runtime.head import (
     EXITED,
     HeadNudgeFailed,
     HeadRun,
@@ -29,18 +29,18 @@ from secretary.runtime.head import (
     TaskRef,
     post_delivery_run,
 )
-from secretary.runtime.head import operations as head_operations
+from ummanu.runtime.head import operations as head_operations
 
 HEAD_PACKAGE = Path(head_operations.__file__).parent
 
 
 CODEX = HeadSpec(profile_id="codex-worker", adapter="codex", effort="high", codex_mode="tui")
-WORKSPACE = "/tmp/does-not-need-to-exist/secretary-1412"
+WORKSPACE = "/tmp/does-not-need-to-exist/ummanu-1412"
 
 
 class HeadOperationTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.task = TaskRef.card("secretary-1412", document=f"{WORKSPACE}/TASK.md")
+        self.task = TaskRef.card("ummanu-1412", document=f"{WORKSPACE}/TASK.md")
 
     def test_post_delivery_run_refuses_a_foreign_identity(self) -> None:
         before = HeadRun("run-local", CODEX, WORKSPACE, self.task, role="worker")
@@ -69,9 +69,9 @@ class TaskPointerTests(unittest.TestCase):
 
     def test_all_three_kinds_of_task_document_can_carry_a_head(self) -> None:
         for task_ref in (
-            TaskRef.card("secretary-1412", document=f"{WORKSPACE}/TASK.md"),
+            TaskRef.card("ummanu-1412", document=f"{WORKSPACE}/TASK.md"),
             TaskRef.sprint("sprint:848"),
-            TaskRef.standing("observer", document="/var/lib/secretary/observer.md"),
+            TaskRef.standing("observer", document="/var/lib/ummanu/observer.md"),
         ):
             with self.subTest(kind=task_ref.kind):
                 run = HeadRun("run-pointed", CODEX, WORKSPACE, task_ref)
@@ -85,7 +85,7 @@ class TaskPointerTests(unittest.TestCase):
         self.assertEqual(run.task_ref.document, "")
 
     def test_a_pointer_of_no_known_kind_is_refused(self) -> None:
-        from secretary.runtime.head import TaskRefError
+        from ummanu.runtime.head import TaskRefError
 
         with self.assertRaises(TaskRefError):
             TaskRef(kind="whatever", ref="x")

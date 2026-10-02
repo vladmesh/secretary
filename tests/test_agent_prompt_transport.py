@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from secretary.runtime.agent_prompt_transport import (
+from ummanu.runtime.agent_prompt_transport import (
     AGENT_PROMPT_MAX_BYTES,
     BRACKETED_PASTE_END,
     BRACKETED_PASTE_START,

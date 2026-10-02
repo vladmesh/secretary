@@ -1,0 +1,11 @@
+[Unit]
+Description=Record Ummanu doctor about once a minute
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=60s
+AccuracySec=1s
+Unit=ummanu-doctor.service
+
+[Install]
+WantedBy=timers.target

@@ -1,12 +1,12 @@
 ---
 name: observe-sprint
-description: "Run an open sprint as the observer head the dispatcher launched: recover semantic state from the sprint entity and board, cut one card at a time, classify Assessment and Blocked evidence, and write concise semantic resumes. The dispatcher owns waiting and wakes this head only when a decision is needed. This is the observer role's skill, not the interactive secretary's."
+description: "Run an open sprint as the observer head the dispatcher launched: recover semantic state from the sprint entity and board, cut one card at a time, classify Assessment and Blocked evidence, and write concise semantic resumes. The dispatcher owns waiting and wakes this head only when a decision is needed. This is the observer role's skill, not the interactive ummanu's."
 ---
 
 # Observe Sprint
 
 You are the observer head of one open sprint. The dispatcher launched you and keeps you until the
-sprint closes. You are not the interactive secretary: its skills (such as `open-sprint`) do not apply
+sprint closes. You are not the interactive ummanu: its skills (such as `open-sprint`) do not apply
 to you, and knowledge documents are not your state.
 
 You are not a worker or a reviewer. Cards are claimed and executed by the dispatcher, and code is
@@ -26,15 +26,15 @@ disappears when the head restarts.
 The sprint and its fields:
 
 ```bash
-python3 -P -m secretary sprint show --ref <sprint-ref>
-python3 -P -m secretary sprint status --ref <sprint-ref>
+python3 -P -m ummanu sprint show --ref <sprint-ref>
+python3 -P -m ummanu sprint status --ref <sprint-ref>
 ```
 
 The sprint's cards, and one card:
 
 ```bash
-python3 -P -m secretary task list --sprint <sprint-ref>
-python3 -P -m secretary task show --ref <card-ref>
+python3 -P -m ummanu task list --sprint <sprint-ref>
+python3 -P -m ummanu task show --ref <card-ref>
 ```
 
 Roles in calls: everything you write is in your own name, `--role observer --actor observer`: your
@@ -75,7 +75,7 @@ A note of your own on the sprint (the runbook of an external action, the reason 
 comment in your name. It asks nobody anything and wakes nobody, you included:
 
 ```bash
-python3 -P -m secretary sprint comment --ref <sprint-ref> --role observer --actor observer --body-file <note.md>
+python3 -P -m ummanu sprint comment --ref <sprint-ref> --role observer --actor observer --body-file <note.md>
 ```
 
 ## Asking the PO: a decision or an operation card
@@ -88,10 +88,10 @@ left there, and nothing brings its answer back to you. Cut a card on your sprint
   It names the production it touches, a project of the registry or `none`.
 
 ```bash
-python3 -P -m secretary task create --role observer --actor observer \
+python3 -P -m ummanu task create --role observer --actor observer \
   --project <repo> --type decision --title "<the question>" \
   --state ready --sprint <sprint-ref> --body-file <question.md>
-python3 -P -m secretary task create --role observer --actor observer \
+python3 -P -m ummanu task create --role observer --actor observer \
   --project <repo> --type operation --title "<the action>" \
   --state ready --sprint <sprint-ref> --touches-production <project>|none --body-file <action.md>
 ```
@@ -114,14 +114,14 @@ machine-derived CI, delivery or board telemetry. The one exception is the closin
 the sprint's delivery counts — see step 11.
 
 ```bash
-python3 -P -m secretary sprint resume --ref <sprint-ref> --role observer --body-file <file.json>
+python3 -P -m ummanu sprint resume --ref <sprint-ref> --role observer --body-file <file.json>
 ```
 
 When `sprint status` shows a non-idle `observer.launch.record.delivery`, its `delivery_id` and
 `through_event` belong to the turn that woke you. Add both to this command:
 
 ```bash
-python3 -P -m secretary sprint resume --ref <sprint-ref> --role observer --body-file <file.json> \
+python3 -P -m ummanu sprint resume --ref <sprint-ref> --role observer --body-file <file.json> \
   --delivery-id <delivery_id> --through-event <through_event>
 ```
 
@@ -235,7 +235,7 @@ from the sprint's `repositories`, and linked to the sprint immediately. The spec
 (pointers, not copy-paste), checkable Acceptance criteria, Out of scope.
 
 ```bash
-python3 -P -m secretary task create --role observer --actor observer \
+python3 -P -m ummanu task create --role observer --actor observer \
   --project <repo> --type code --title "<short title>" \
   --state ready --sprint <sprint-ref> \
   --head <worker-profile> --review-head <reviewer-profile> \
@@ -245,7 +245,7 @@ python3 -P -m secretary task create --role observer --actor observer \
 Then record it as the current card:
 
 ```bash
-python3 -P -m secretary sprint current-task --ref <sprint-ref> --role observer --actor observer --task <card-ref>
+python3 -P -m ummanu sprint current-task --ref <sprint-ref> --role observer --actor observer --task <card-ref>
 ```
 
 The reviewer comes from a different family than the worker:
@@ -264,7 +264,7 @@ mechanical trivial change; it still runs the gate and merges on release.
 
 A `research` or `infra` card publishes no branch, pull request or CI run. An infra worker's done report
 carries `## What was done` and `## How to verify`, which become the card's completion record. A research
-worker leaves its report in `.secretary-report/report.md` of its workspace; before the card parks in
+worker leaves its report in `.ummanu-report/report.md` of its workspace; before the card parks in
 Assessment the dispatcher commits that directory to `state/knowledge/reports/<card ref>/` and links it,
 so read the report there when you decide.
 
@@ -287,7 +287,7 @@ performs it: merge and Done for a release, a fresh worker round for a rework, Bl
 you then recut:
 
 ```bash
-python3 -P -m secretary task decide --role observer --actor observer --ref <card-ref> \
+python3 -P -m ummanu task decide --role observer --actor observer --ref <card-ref> \
   --kind release|rework|reslice --reason-file <reason.md>
 ```
 
@@ -307,7 +307,7 @@ A reslice successor usually needs the predecessor's unreleased content. It inher
 a **seed**, and never inherits the predecessor's branch as an integration base:
 
 ```bash
-python3 -P -m secretary task create --role observer --actor observer \
+python3 -P -m ummanu task create --role observer --actor observer \
   --project <project> --type code --title '<title>' --body-file <spec.md> --sprint <sprint-ref> \
   --seed-ref <predecessor candidate sha> --supersedes <predecessor card ref>
 ```
@@ -434,7 +434,7 @@ a defect of the current card, which goes into that card's rework, nor for anythi
 to reach its goal.
 
 ```bash
-python3 -P -m secretary issue create --role observer --actor observer \
+python3 -P -m ummanu issue create --role observer --actor observer \
   --kind bug|feature|question|improvement --priority P0|P1|P2|P3 --title "<the problem>" \
   --description "<what is observed, the evidence (refs, files, commands), why it is outside this sprint>" \
   --request-id <stable-id>
@@ -484,7 +484,7 @@ When the Definition of Done is confirmed by a check against the default branch a
    holds outside Done, so write those verdicts first (the format is in `docs/PROTOCOLS.md`) and pass
    them as one file, with the reason and the closeout the close writes into knowledge:
    ```bash
-   python3 -P -m secretary sprint close --ref <sprint-ref> --role observer --actor observer \
+   python3 -P -m ummanu sprint close --ref <sprint-ref> --role observer --actor observer \
      --reason "<why the sprint closes>" --decisions-file <decisions>.yaml --closeout-file <closeout>.md
    ```
    You close your own sprint only: any other is refused (`observer_sprint_mismatch`). Every step of the

@@ -14,9 +14,9 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from secretary.board import backend
-from secretary.tasks import TaskError
 from tests.retired_board import RETIRED_STORE
+from ummanu.board import backend
+from ummanu.tasks import TaskError
 
 
 class EntityIdentityTests(unittest.TestCase):
@@ -79,20 +79,20 @@ class BoardHostIdentityTests(unittest.TestCase):
     """The `report`/`verdict`/`decide` path resolves a card number from any stored identity."""
 
     def _host(self, identity: str):
-        from secretary.board.sql_host import SqlBoardHost
+        from ummanu.board.sql_host import SqlBoardHost
 
         host = SqlBoardHost.__new__(SqlBoardHost)
         host.client = object()
-        with mock.patch("secretary.board.sql_host.TaskReader") as reader:
-            reader.return_value.show.return_value = {"id": identity, "ref": "secretary-468"}
-            return host._card_task_id("secretary-468")
+        with mock.patch("ummanu.board.sql_host.TaskReader") as reader:
+            reader.return_value.show.return_value = {"id": identity, "ref": "ummanu-468"}
+            return host._card_task_id("ummanu-468")
 
     def test_a_card_minted_now_or_before_the_cutover_resolves_to_its_number(self) -> None:
         self.assertEqual(self._host(f"task_{RETIRED_STORE}_468"), 468)
         self.assertEqual(self._host("task_postgres_468"), 468)
 
     def test_an_identity_outside_the_convention_is_still_refused(self) -> None:
-        from secretary.board.transitions import BoardProtocolError
+        from ummanu.board.transitions import BoardProtocolError
 
         for identity in ("sprint_postgres_468", "task-468"):
             with self.subTest(identity=identity), self.assertRaises(BoardProtocolError):
@@ -103,13 +103,13 @@ class SprintIdentityTests(unittest.TestCase):
     """`_sprint_number` reads a sprint identity through the same function."""
 
     def test_a_sprint_minted_now_or_before_the_cutover_resolves_to_its_number(self) -> None:
-        from secretary.sprints import _sprint_number
+        from ummanu.sprints import _sprint_number
 
         self.assertEqual(_sprint_number({"id": f"sprint_{RETIRED_STORE}_9"}), 9)
         self.assertEqual(_sprint_number({"id": "sprint_postgres_9"}), 9)
 
     def test_a_missing_sprint_is_still_a_named_refusal(self) -> None:
-        from secretary.sprints import _sprint_number
+        from ummanu.sprints import _sprint_number
 
         with self.assertRaises(TaskError) as raised:
             _sprint_number(None)
@@ -133,7 +133,7 @@ class BoardClientTests(unittest.TestCase):
             self.assertIn("board store", raised.exception.message)
 
     def test_a_missing_board_store_env_prints_a_named_refusal(self) -> None:
-        from secretary import task_commands
+        from ummanu import task_commands
 
         stderr = StringIO()
         with redirect_stderr(stderr):
@@ -151,14 +151,14 @@ class DriverRefusalTests(unittest.TestCase):
     """`psycopg`'s exceptions are translated where the adapter raises them, not above it."""
 
     def test_a_driver_that_is_not_installed_is_a_named_refusal(self) -> None:
-        from secretary.board.sql_cards import _driver_error
+        from ummanu.board.sql_cards import _driver_error
 
         error = _driver_error("open a connection", ModuleNotFoundError("No module named 'psycopg'"))
         self.assertEqual(error.code, "backend_unavailable")
         self.assertIn("driver is not installed", error.message)
 
     def test_the_client_s_own_refusal_is_already_in_the_dictionary(self) -> None:
-        from secretary.board.sql_cards import SqlCardError
+        from ummanu.board.sql_cards import SqlCardError
 
         error = SqlCardError("two cards share one card number")
         self.assertIsInstance(error, TaskError)

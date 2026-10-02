@@ -33,21 +33,21 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import _proc
-from secretary.dispatch import head_status as head_status_module
-from secretary.dispatch.head_status import (
+from ummanu import _proc
+from ummanu.dispatch import head_status as head_status_module
+from ummanu.dispatch.head_status import (
     HEAD_ABSENT,
     HEAD_ALIVE,
     HEAD_UNPROVEN,
     head_status,
 )
-from secretary.dispatch.head_vitality_episode import VitalityEpisode, VitalityVerdict
-from secretary.dispatch.heartbeat import run_heartbeat_identity
-from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatch.watchdog import HEARTBEAT_LIVE_MATCH, pid_file_path
-from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
-from secretary.runtime.head.local_pty.journal import INPUT_ACCEPTED, RUN_STARTED, TURN_STARTED, JournalWriter
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from ummanu.dispatch.head_vitality_episode import VitalityEpisode, VitalityVerdict
+from ummanu.dispatch.heartbeat import run_heartbeat_identity
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.watchdog import HEARTBEAT_LIVE_MATCH, pid_file_path
+from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef
+from ummanu.runtime.head.local_pty.journal import INPUT_ACCEPTED, RUN_STARTED, TURN_STARTED, JournalWriter
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
 
 # The measured inventory, in the shape the live CLI returns it: a bare shell, a dropped shell, and
 # the worker's own pty -- all listed, and none of them carrying a word about what is drawn.
@@ -105,7 +105,7 @@ def measured_layouts(workspace: str, drawn: list[dict] | None = None) -> list[di
                 "tabs": [
                     {
                         "tabId": node.get("tabId", "tab-1"),
-                        "title": "secretary-1450 worker",
+                        "title": "ummanu-1450 worker",
                         "activeLeafId": node.get("leafId", ""),
                         "panes": dict(node, type="terminal", connected=True, active=True),
                     }
@@ -141,7 +141,7 @@ class _FakeRuntime:
 
 
 class HeadStatusTests(unittest.TestCase):
-    ref = "secretary-1450"
+    ref = "ummanu-1450"
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -149,8 +149,8 @@ class HeadStatusTests(unittest.TestCase):
         self.root = Path(self.tmpdir.name)
         self.workspace = self.root / "ws"
         self.workspace.mkdir()
-        previous = os.environ.get("SECRETARY_DISPATCHER_BODY_DIR")
-        os.environ["SECRETARY_DISPATCHER_BODY_DIR"] = str(self.root)
+        previous = os.environ.get("UMMANU_DISPATCHER_BODY_DIR")
+        os.environ["UMMANU_DISPATCHER_BODY_DIR"] = str(self.root)
         self.addCleanup(self._restore_body_dir, previous)
         self.terminals = [dict(entry) for entry in MEASURED_TERMINALS]
         self.layouts: list[dict] | None = measured_layouts(str(self.workspace))
@@ -160,9 +160,9 @@ class HeadStatusTests(unittest.TestCase):
 
     def _restore_body_dir(self, previous: str | None) -> None:
         if previous is None:
-            os.environ.pop("SECRETARY_DISPATCHER_BODY_DIR", None)
+            os.environ.pop("UMMANU_DISPATCHER_BODY_DIR", None)
         else:
-            os.environ["SECRETARY_DISPATCHER_BODY_DIR"] = previous
+            os.environ["UMMANU_DISPATCHER_BODY_DIR"] = previous
 
     # -- the live installation, faked at its transport ------------------------------------
 
@@ -430,7 +430,7 @@ class HeadStatusTests(unittest.TestCase):
             worker_head_run={"run_id": "run-other"},
             state="in_progress",
         )
-        runtime = _FakeRuntime({self.ref: here, "secretary-1": elsewhere})
+        runtime = _FakeRuntime({self.ref: here, "ummanu-1": elsewhere})
 
         with mock.patch.object(_proc, "run", self._orca):
             answer = head_status(runtime, workspace=str(self.workspace))
@@ -476,7 +476,7 @@ class HeadStatusTests(unittest.TestCase):
         journal = JournalWriter(run_dir / "journal.jsonl", run_id).open()
         self.addCleanup(journal.close)
         clock = mock.patch(
-            "secretary.runtime.head.local_pty.journal.time.time", side_effect=[100.0, 110.0, 120.0]
+            "ummanu.runtime.head.local_pty.journal.time.time", side_effect=[100.0, 110.0, 120.0]
         )
         with clock:
             journal.append(RUN_STARTED, head_pid=1)

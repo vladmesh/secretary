@@ -24,10 +24,10 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary.board.backend import record_key
-from secretary.board.sql_cards import SqlCardClient, SqlCardError
-from secretary.board.sql_sprints import sprint_key
 from tests.sql_backend_fixtures import PostgresBoard
+from ummanu.board.backend import record_key
+from ummanu.board.sql_cards import SqlCardClient, SqlCardError
+from ummanu.board.sql_sprints import sprint_key
 
 BOARD: PostgresBoard
 
@@ -58,9 +58,9 @@ def _seed(client: SqlCardClient, n: int) -> None:
     """
     q = client._execute
     with client.transaction():
-        for project in ("secretary", "zeta"):
+        for project in ("ummanu", "zeta"):
             q("INSERT INTO projects (project_id) VALUES (%s)", (project,))
-        for product in ("secretary", "zeta"):
+        for product in ("ummanu", "zeta"):
             q(
                 "INSERT INTO products (product_id, board_key, title, description, state, extensions, "
                 "created_at, updated_at) VALUES (%s,%s,%s,'',%s,%s::jsonb,%s,%s)",
@@ -71,7 +71,7 @@ def _seed(client: SqlCardClient, n: int) -> None:
                     _at(0), _at(1),
                 ),
             )
-            for project in ("zeta", "secretary"):
+            for project in ("zeta", "ummanu"):
                 q("INSERT INTO product_projects (product_id, project_id) VALUES (%s,%s)", (product, project))
             q(
                 "INSERT INTO product_comments (product_id, marker, body, created_at) VALUES (%s,'po',%s,%s)",
@@ -85,7 +85,7 @@ def _seed(client: SqlCardClient, n: int) -> None:
                 "priority, state, close_reason, extensions, created_at, updated_at) "
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s)",
                 (
-                    issue, record_key("issue", issue), "secretary" if index % 2 else "zeta",
+                    issue, record_key("issue", issue), "ummanu" if index % 2 else "zeta",
                     f"Issue {index}", f"body {index}", ("bug", "feature", "question")[index % 3],
                     f"P{index % 4}", "closed" if closed else "open",
                     "resolved" if closed else None,
@@ -109,7 +109,7 @@ def _seed(client: SqlCardClient, n: int) -> None:
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s::jsonb,%s::jsonb,%s,%s,%s)",
                 (
                     ref, sprint_key(ref), number, f"Goal {number}", f"DoD {number}",
-                    "secretary" if number % 2 else None, status,
+                    "ummanu" if number % 2 else None, status,
                     json.dumps({"profile": "claude-observer", "b": 1}) if number % 2 else None,
                     "codex-high" if number % 2 else None, "claude-opus" if number % 4 == 1 else None,
                     json.dumps({"z": 1, "a": [number]}) if number % 3 == 0 else None,
@@ -170,7 +170,7 @@ def _seed(client: SqlCardClient, n: int) -> None:
                     "INSERT INTO sprint_comments (sprint_ref, marker, body, created_at) VALUES (%s,NULL,%s,%s)",
                     (ref, f"{body} {ref}", _at(20 if body == "later" else 5)),
                 )
-        refs = [f"secretary-{number}" for number in range(1, n + 1)]
+        refs = [f"ummanu-{number}" for number in range(1, n + 1)]
         states = ("ready", "in_progress", "done", "blocked")
         for index, ref in enumerate(refs):
             q(
@@ -179,11 +179,11 @@ def _seed(client: SqlCardClient, n: int) -> None:
                 "quota_snapshot_at, sprint_ref, extensions, created_at, updated_at, date_moved) "
                 "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s)",
                 (
-                    ref, index + 1, "secretary", f"Card {index}", "", "research" if index % 3 == 0 else "code",
+                    ref, index + 1, "ummanu", f"Card {index}", "", "research" if index % 3 == 0 else "code",
                     states[index % 4], index % 5 == 4, index, "required" if index % 2 else None,
                     index % 3 == 0, "worker" if index % 2 else None, f"slug-{index}", index % 3,
                     _at(index) if index % 2 else None, "sprint:1" if index % 2 else None,
-                    json.dumps({"extra": {"swimlane": "secretary", "extra": str(index)}}),
+                    json.dumps({"extra": {"swimlane": "ummanu", "extra": str(index)}}),
                     _at(index), _at(index + 1), _at(index + 2),
                 ),
             )
@@ -225,7 +225,7 @@ class _PerRecordOracle:
         self.q = client._query
 
     def card_metadata(self, key: int) -> dict[str, str]:
-        from secretary.board.sql_cards import _rfc3339, _text
+        from ummanu.board.sql_cards import _rfc3339, _text
 
         ref = self.q("SELECT task_ref FROM tasks WHERE board_key = %s", (key,))[0][0]
         values = self.q(
@@ -279,7 +279,7 @@ class _PerRecordOracle:
         return meta
 
     def card_comments(self, key: int) -> list[dict[str, Any]]:
-        from secretary.board.sql_cards import _epoch
+        from ummanu.board.sql_cards import _epoch
 
         ref = self.q("SELECT task_ref FROM tasks WHERE board_key = %s", (key,))[0][0]
         return [
@@ -292,7 +292,7 @@ class _PerRecordOracle:
         ]
 
     def record_metadata(self, kind: str, key: int) -> dict[str, str]:
-        from secretary.board.sql_product_issues import ISSUE_KEYS, PRODUCT_KEYS, _text
+        from ummanu.board.sql_product_issues import ISSUE_KEYS, PRODUCT_KEYS, _text
 
         if kind == "product":
             identifier = self.q("SELECT product_id FROM products WHERE board_key = %s", (key,))[0][0]
@@ -332,7 +332,7 @@ class _PerRecordOracle:
         return meta
 
     def record_comments(self, kind: str, key: int) -> list[dict[str, Any]]:
-        from secretary.board.sql_cards import _epoch
+        from ummanu.board.sql_cards import _epoch
 
         table, column = ("product_comments", "product_id") if kind == "product" else ("issue_comments", "issue_id")
         identifier = self.q(
@@ -349,7 +349,7 @@ class _PerRecordOracle:
         ]
 
     def sprint_metadata(self, key: int) -> dict[str, str]:
-        from secretary.board.sql_sprints import _rfc3339
+        from ummanu.board.sql_sprints import _rfc3339
 
         reference = self.q("SELECT ref FROM sprints WHERE board_key = %s", (key,))[0][0]
         goal, dod, product, status, observer, worker, reviewer, current, source, exceptions = self.q(
@@ -414,7 +414,7 @@ class _PerRecordOracle:
         return values
 
     def sprint_comments(self, key: int) -> list[dict[str, Any]]:
-        from secretary.board.sql_sprints import _epoch
+        from ummanu.board.sql_sprints import _epoch
 
         reference = self.q("SELECT ref FROM sprints WHERE board_key = %s", (key,))[0][0]
         return [
@@ -495,7 +495,7 @@ class StatementCountTests(_Case):
         self.assertEqual(small, large, f"statements grew with the records: {measured}")
 
     def test_listing_all_issues(self) -> None:
-        from secretary.product_issues import ProductIssueStore
+        from ummanu.product_issues import ProductIssueStore
 
         def listing(client: SqlCardClient) -> list[dict[str, Any]]:
             root = Path(client.instance_dir)
@@ -505,13 +505,13 @@ class StatementCountTests(_Case):
         self.assert_bounded(self.listed(listing))
 
     def test_listing_all_sprints(self) -> None:
-        from secretary.sprints import SprintReader
+        from ummanu.sprints import SprintReader
 
         self.assert_bounded(self.listed(lambda client: SprintReader(client).list(create=False)))
         self.assert_bounded(self.listed(lambda client: SprintReader(client).export()))
 
     def test_listing_all_tasks(self) -> None:
-        from secretary.tasks import TaskReader
+        from ummanu.tasks import TaskReader
 
         self.assert_bounded(self.listed(lambda client: TaskReader(client).list()))
         self.assert_bounded(self.listed(lambda client: list(TaskReader(client).restore_snapshot())))

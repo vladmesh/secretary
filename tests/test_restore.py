@@ -11,22 +11,22 @@ from pathlib import Path
 from typing import ClassVar
 from unittest import mock
 
-import secretary.restore as restore_module
-from secretary import restore_commands
-from secretary.checkpoint import _validate_board
-from secretary.cli import main as cli_main
-from secretary.data import (
+import ummanu.restore as restore_module
+from ummanu import restore_commands
+from ummanu.checkpoint import _validate_board
+from ummanu.cli import main as cli_main
+from ummanu.data import (
     export_board,
     init_layout,
     normalize_board_card,
 )
-from secretary.host import CollectResult, HostInventory, build_plan
-from secretary.host_apply import resolve_packaged
-from secretary.product_issues import (
+from ummanu.host import CollectResult, HostInventory, build_plan
+from ummanu.host_apply import resolve_packaged
+from ummanu.product_issues import (
     ProductIssueValidationError,
     validate_product_issue_records,
 )
-from secretary.restore import (
+from ummanu.restore import (
     RestoreError,
     _normalized_cards,
     _restored_order_mismatch,
@@ -37,7 +37,7 @@ from secretary.restore import (
     restore_findings,
     restore_state,
 )
-from secretary.tasks import TaskReader, TaskWriter, task_audit_for
+from ummanu.tasks import TaskReader, TaskWriter, task_audit_for
 from tests.fakes.tasks import empty_seed
 from tests.runtime_account_fixtures import fixture_runtime_account
 from tests.restore_fixtures import (
@@ -72,14 +72,14 @@ class RestoreTests(unittest.TestCase):
             "event_id": "historical-event",
             "request_id": "historical-request",
             "kind": "commented",
-            "ref": "secretary-1",
+            "ref": "ummanu-1",
             "payload": {"body_sha256": "a" * 64},
         }
         for source in ("json", "ndjson"):
             with self.subTest(source=source), tempfile.TemporaryDirectory() as tmpdir:
-                data_dir = Path(tmpdir) / "secretary-data"
+                data_dir = Path(tmpdir) / "ummanu-data"
                 init_layout(data_dir)
-                self._write_restore_cards(data_dir, [_restore_card(reference="secretary-1")])
+                self._write_restore_cards(data_dir, [_restore_card(reference="ummanu-1")])
                 if source == "json":
                     (data_dir / "board" / "audit.json").write_text(
                         json.dumps({"version": 1, "events": [historical]}),
@@ -97,17 +97,17 @@ class RestoreTests(unittest.TestCase):
                 )
 
     @staticmethod
-    def _product_card(*, projects: str = '["secretary"]') -> dict[str, object]:
+    def _product_card(*, projects: str = '["ummanu"]') -> dict[str, object]:
         # A Product's lane is its own id on the store (§8.6), which is what its export names.
         card = _restore_card(
-            reference="product:secretary", title="Secretary", column="Issues", position=1,
-            swimlane="secretary",
+            reference="product:ummanu", title="Ummanu", column="Issues", position=1,
+            swimlane="ummanu",
         )
         card["fields"]["task_type"] = ""
         card["fields"]["project"] = ""
         card["metadata"] = {
             "record_type": "product",
-            "product_id": "secretary",
+            "product_id": "ummanu",
             "product_projects": projects,
         }
         return card
@@ -116,20 +116,20 @@ class RestoreTests(unittest.TestCase):
         """secretary-1025: a card parked in Assessment survives the durability path intact."""
         live_card = {
             "id": 42,
-            "reference": "secretary-1025",
+            "reference": "ummanu-1025",
             "title": "Parked",
             "description": "waiting for the observer",
             "column": "Assessment",
-            "swimlane": "Secretary",
+            "swimlane": "Ummanu",
             "position": 1,
             "task_type": "code",
-            "project": "secretary",
-            "metadata": {"record_type": "task", "project": "secretary", "task_type": "code"},
+            "project": "ummanu",
+            "metadata": {"record_type": "task", "project": "ummanu", "task_type": "code"},
             "comments": [{"ts": "10", "text": "[reviewer]\nverdict"}],
         }
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             export = export_board(
                 data_dir,
@@ -148,7 +148,7 @@ class RestoreTests(unittest.TestCase):
             client = card_store(self, empty_seed())
             self.assertEqual(import_normalized_board(data_dir, client=client), 1)
 
-            restored = TaskReader(client).show("secretary-1025")
+            restored = TaskReader(client).show("ummanu-1025")
             self.assertEqual(restored["state"], "assessment")
             self.assertEqual(restored["title"], "Parked")
             self.assertEqual(restored["comments"][0]["body"], "[reviewer]\nverdict")
@@ -159,9 +159,9 @@ class RestoreTests(unittest.TestCase):
     def test_a_restored_card_and_its_comment_carry_the_postgres_card_identity(self) -> None:
         """secretary-1669 review: restore events are new writes, so they name the one card backend."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
-            card = _restore_card(reference="secretary-42", comments=[{"text": "[worker]\nkept"}])
+            card = _restore_card(reference="ummanu-42", comments=[{"text": "[worker]\nkept"}])
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
             )
@@ -169,11 +169,11 @@ class RestoreTests(unittest.TestCase):
 
             self.assertEqual(import_normalized_board(data_dir, client=client), 1)
 
-            identity = TaskReader(client).show("secretary-42")["id"]
+            identity = TaskReader(client).show("ummanu-42")["id"]
             self.assertEqual(identity, "task_postgres_12")
             events = {
                 event["kind"]: event
-                for event in task_audit_for(client).events("secretary-42")
+                for event in task_audit_for(client).events("ummanu-42")
                 if event["kind"] in {"restored_bulk", "restored_comment"}
             }
             self.assertEqual(set(events), {"restored_bulk", "restored_comment"})
@@ -185,7 +185,7 @@ class RestoreTests(unittest.TestCase):
 
     def test_import_never_enters_the_interactive_comment_writers(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             card = _restore_card()
             card["comments"] = [
@@ -198,7 +198,7 @@ class RestoreTests(unittest.TestCase):
             client = card_store(self, empty_seed())
             with (
                 mock.patch(
-                    "secretary.tasks.TaskWriter.restore_comment",
+                    "ummanu.tasks.TaskWriter.restore_comment",
                     side_effect=AssertionError("interactive Card writer entered"),
                 ),
             ):
@@ -207,7 +207,7 @@ class RestoreTests(unittest.TestCase):
 
     def test_import_never_enters_interactive_card_create_or_full_card_reads(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [_restore_card()]}), encoding="utf-8"
@@ -224,7 +224,7 @@ class RestoreTests(unittest.TestCase):
 
     def test_missing_card_from_fresh_snapshot_is_a_recorded_parity_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [_restore_card()]}), encoding="utf-8"
@@ -250,21 +250,21 @@ class RestoreTests(unittest.TestCase):
     def test_duplicate_export_is_rejected_before_replacing_the_prior_good_pair(self):
         card = {
             "id": 193,
-            "reference": "secretary-784",
+            "reference": "ummanu-784",
             "title": "Original",
             "description": "",
             "column": "Done",
-            "swimlane": "Secretary",
+            "swimlane": "Ummanu",
             "position": 1,
             "closed": True,
             "task_type": "code",
-            "project": "secretary",
-            "metadata": {"record_type": "task", "project": "secretary", "task_type": "code"},
+            "project": "ummanu",
+            "metadata": {"record_type": "task", "project": "ummanu", "task_type": "code"},
             "comments": [],
         }
         duplicate = {**card, "id": 784, "title": "Collision", "position": 2}
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": []}) + "\n", encoding="utf-8"
@@ -273,7 +273,7 @@ class RestoreTests(unittest.TestCase):
             good_json = (data_dir / "board" / "cards.json").read_bytes()
             good_ndjson = (data_dir / "board" / "cards.ndjson").read_bytes()
 
-            with self.assertRaisesRegex(RuntimeError, "duplicate references secretary-784"):
+            with self.assertRaisesRegex(RuntimeError, "duplicate references ummanu-784"):
                 export_board(
                     data_dir,
                     instance_dir=Path(tmpdir),
@@ -288,7 +288,7 @@ class RestoreTests(unittest.TestCase):
 
     def test_restore_rejects_json_ndjson_parity_drift(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             card = _restore_card()
             (data_dir / "board" / "cards.json").write_text(
@@ -301,9 +301,9 @@ class RestoreTests(unittest.TestCase):
     def test_restore_reads_a_card_without_a_record_type_as_a_task(self):
         """secretary-1678: archives already taken hold older task rows whose export named no kind."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
-            card = _restore_card(reference="secretary-7")
+            card = _restore_card(reference="ummanu-7")
             del card["metadata"]["record_type"]
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
@@ -312,14 +312,14 @@ class RestoreTests(unittest.TestCase):
 
             self.assertEqual(import_normalized_board(data_dir, client=client), 1)
 
-            restored = TaskReader(client).show("secretary-7")
+            restored = TaskReader(client).show("ummanu-7")
             self.assertEqual(restored["record_type"], "task")
             self.assertEqual(restore_state(data_dir)["board_parity"], "complete")
 
     def test_restore_refuses_a_card_with_an_unknown_record_type(self):
         """A card whose stated kind is none of the three cannot be placed, so it is refused by reference."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             card = _restore_card(column="Issues")
             card["metadata"] = {"record_type": "epic"}
@@ -328,22 +328,22 @@ class RestoreTests(unittest.TestCase):
             )
             client = card_store(self, empty_seed())
 
-            with self.assertRaisesRegex(RestoreError, "secretary-1"):
+            with self.assertRaisesRegex(RestoreError, "ummanu-1"):
                 import_normalized_board(data_dir, client=client)
 
             self.assertEqual(client.card_count(), 0)
 
     def test_restore_rejects_a_closed_card_missing_from_the_export(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
-            card = _restore_card(reference="secretary-1")
+            card = _restore_card(reference="ummanu-1")
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
             )
             client = card_store(self, empty_seed())
             client.add_card(
-                99, "secretary-99", title="Old closed card", closed=True, lane=None,
+                99, "ummanu-99", title="Old closed card", closed=True, lane=None,
                 metadata={"task_type": "code"},
             )
 
@@ -354,14 +354,14 @@ class RestoreTests(unittest.TestCase):
 
     def test_normalized_records_reject_duplicate_or_unknown_product_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             duplicate = self._product_card()
             duplicate["reference"] = "product:other"
             duplicate["metadata"] = {
                 "record_type": "product",
-                "product_id": "secretary",
-                "product_projects": '["secretary"]',
+                "product_id": "ummanu",
+                "product_projects": '["ummanu"]',
             }
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [self._product_card(projects='["unknown"]'), duplicate]}),
@@ -369,20 +369,20 @@ class RestoreTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(RestoreError, "unknown registered project"):
-                _normalized_cards(data_dir, registered_project_ids={"secretary"})
+                _normalized_cards(data_dir, registered_project_ids={"ummanu"})
 
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [self._product_card(), duplicate]}), encoding="utf-8"
             )
-            duplicate["reference"] = "product:secretary"
+            duplicate["reference"] = "product:ummanu"
             with self.assertRaisesRegex(ProductIssueValidationError, "duplicate Product id"):
                 validate_product_issue_records(
-                    [self._product_card(), duplicate], registered_project_ids={"secretary"}
+                    [self._product_card(), duplicate], registered_project_ids={"ummanu"}
                 )
 
     def test_normalized_records_reject_missing_product_kind_and_priority(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             issue = _restore_card(reference="issue:12", column="Issues")
             issue["metadata"] = {
@@ -398,7 +398,7 @@ class RestoreTests(unittest.TestCase):
             with self.assertRaisesRegex(RestoreError, "no registered Product"):
                 _normalized_cards(data_dir)
 
-            issue["metadata"]["issue_product"] = "secretary"
+            issue["metadata"]["issue_product"] = "ummanu"
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [self._product_card(), issue]}), encoding="utf-8"
             )
@@ -416,7 +416,7 @@ class RestoreTests(unittest.TestCase):
     def test_empty_bootstrap_stays_outside_restore_doctor_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             instance = _write_instance_to(root / "instance", "test", data_dir)
             bootstrap_empty(instance)
 
@@ -426,7 +426,7 @@ class RestoreTests(unittest.TestCase):
     def test_empty_bootstrap_plan_has_no_handoffs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             instance = _write_instance_to(root / "instance", "test", data_dir)
 
             plan = bootstrap_empty(instance, dry_run=True)
@@ -443,40 +443,40 @@ class RestoreTests(unittest.TestCase):
 
     def test_reconcile_marker_does_not_create_restore_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             mark_reconcile_applied(data_dir)
             self.assertFalse((data_dir / "restore-state.json").exists())
 
     def test_restored_board_uses_normalized_export_shape_idempotently(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             exported = normalize_board_card(
                 {
                     "id": 12,
-                    "reference": "secretary-1",
+                    "reference": "ummanu-1",
                     "title": "Restore",
                     "column": "Ready",
-                    "swimlane": "Secretary",
+                    "swimlane": "Ummanu",
                     "position": 1,
                     "task_type": "code",
-                    "project": "secretary",
+                    "project": "ummanu",
                 },
                 {
                     "id": 12,
-                    "reference": "secretary-1",
+                    "reference": "ummanu-1",
                     "title": "Restore",
                     "description": "body",
                     "column": "Ready",
                     "task_type": "code",
-                    "project": "secretary",
+                    "project": "ummanu",
                     "claim": "worker",
-                    "blocked_by": "secretary-0",
+                    "blocked_by": "ummanu-0",
                     "metadata": {
                         "record_type": "task",
                         "claim": "worker",
-                        "blocked_by": "secretary-0",
+                        "blocked_by": "ummanu-0",
                         "complexity": "hard",
                         "resolved_head": "",
                         "resolved_review_head": "",
@@ -496,15 +496,15 @@ class RestoreTests(unittest.TestCase):
             self.assertEqual(import_normalized_board(data_dir, client=client), 1)
 
             self.assertEqual(client.card_count(), 1)
-            self.assertEqual(client.row(12)["reference"], "secretary-1")
+            self.assertEqual(client.row(12)["reference"], "ummanu-1")
             self.assertEqual(client.metadata(12)["claim"], "worker")
-            self.assertEqual(client.metadata(12)["blocked_by"], "secretary-0")
+            self.assertEqual(client.metadata(12)["blocked_by"], "ummanu-0")
             # An empty routing value is no value (§3.5), which is what the export said.
             self.assertEqual(client.metadata(12).get("resolved_head", ""), "")
             self.assertEqual(client.metadata(12).get("resolved_review_head", ""), "")
             self.assertEqual(client.row(12)["position"], 1)
             self.assertEqual(
-                TaskReader(client).show("secretary-1")["extensions"]["extra"]["swimlane"], "Secretary"
+                TaskReader(client).show("ummanu-1")["extensions"]["extra"]["swimlane"], "Ummanu"
             )
             self.assertEqual(
                 [call[1]["content"] for call in client.calls if call[0] == "createComment"],
@@ -513,7 +513,7 @@ class RestoreTests(unittest.TestCase):
 
     def test_reindex_and_restore_findings_are_derived_from_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             # No instance dir here, so the rebuild falls back to legacy canon.
             _seed_legacy_facts(data_dir)
@@ -531,7 +531,7 @@ class RestoreTests(unittest.TestCase):
         # restore, so the new sprint step must not turn doctor red on it.
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             init_layout(data_dir)
             instance = _write_instance_to(root / "instance", "test", data_dir, heads=True)
             (data_dir / "restore-state.json").write_text(
@@ -554,7 +554,7 @@ class RestoreTests(unittest.TestCase):
 
     def test_recovery_that_records_sprint_progress_still_reports_it_unfinished(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             (data_dir / "restore-state.json").write_text(
                 json.dumps(
@@ -575,7 +575,7 @@ class RestoreTests(unittest.TestCase):
     def test_default_reindex_keeps_the_model_cache_out_of_tmp(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             init_layout(data_dir)
             instance = _write_instance_to(root / "instance", "test", data_dir)
             _seed_instance_facts(instance, {"global/one.md": "fact\n"})
@@ -587,8 +587,8 @@ class RestoreTests(unittest.TestCase):
             with mock.patch.dict(
                 sys.modules,
                 {
-                    "secretary.memory_service": memory_service,
-                    "secretary.memory_reindex": memory_reindex,
+                    "ummanu.memory_service": memory_service,
+                    "ummanu.memory_reindex": memory_reindex,
                 },
             ):
                 self.assertEqual(rebuild_memory_index(data_dir, instance), 1)
@@ -602,11 +602,11 @@ class RestoreTests(unittest.TestCase):
 
     def test_board_restore_orders_positions_within_each_column_and_swimlane(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             cards = []
             # A card reference ends in its number (§9); the three keep the same order by name.
-            for reference, position in (("secretary-30", 1), ("secretary-10", 2), ("secretary-20", 3)):
+            for reference, position in (("ummanu-30", 1), ("ummanu-10", 2), ("ummanu-20", 3)):
                 card = _restore_card()
                 card["reference"] = reference
                 card["title"] = reference
@@ -621,7 +621,7 @@ class RestoreTests(unittest.TestCase):
             restored = sorted(client.restore_card_rows(), key=lambda task: int(task["position"]))
             self.assertEqual(
                 [task["reference"] for task in restored],
-                ["secretary-30", "secretary-10", "secretary-20"],
+                ["ummanu-30", "ummanu-10", "ummanu-20"],
             )
             self.assertEqual([task["position"] for task in restored], [1, 2, 3])
 
@@ -633,7 +633,7 @@ class RestoreTests(unittest.TestCase):
 
     def test_board_restore_moves_empty_swimlane_to_default_lane(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             card = _restore_card()
             card["swimlane"] = ""
@@ -654,7 +654,7 @@ class RestoreTests(unittest.TestCase):
 
     def test_board_restore_serializes_concurrent_imports(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [_restore_card()]}), encoding="utf-8"
@@ -662,7 +662,7 @@ class RestoreTests(unittest.TestCase):
             client = card_store(self, empty_seed())
             entered, release = threading.Event(), threading.Event()
             results: list[tuple[str, object]] = []
-            from secretary import task_restore
+            from ummanu import task_restore
 
             original = task_restore.restore_cards_batched
 
@@ -677,7 +677,7 @@ class RestoreTests(unittest.TestCase):
                 except Exception as exc:  # noqa: BLE001 - the thread returns any restore failure.
                     results.append(("error", exc))
 
-            with mock.patch("secretary.task_restore.restore_cards_batched", side_effect=paused_create):
+            with mock.patch("ummanu.task_restore.restore_cards_batched", side_effect=paused_create):
                 first = threading.Thread(target=run_restore)
                 first.start()
                 self.assertTrue(entered.wait(timeout=5))
@@ -690,14 +690,14 @@ class RestoreTests(unittest.TestCase):
             self.assertFalse(first.is_alive())
             self.assertFalse(second.is_alive())
             self.assertEqual(sorted(results), [("ok", 1), ("ok", 1)])
-            self.assertEqual([task["reference"] for task in client.restore_card_rows()], ["secretary-1"])
+            self.assertEqual([task["reference"] for task in client.restore_card_rows()], ["ummanu-1"])
             self.assertEqual(len([call for call in client.calls if call[0] == "createTask"]), 1)
             self.assertEqual(restore_state(data_dir)["board_parity"], "complete")
 
     def test_reindex_cli_uses_published_parity_not_sqlite_schema(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             init_layout(data_dir)
             instance = _write_instance_to(root / "instance", "test", data_dir)
             facts = _seed_instance_facts(instance, {"global/one.md": "fact\n"})
@@ -708,7 +708,7 @@ class RestoreTests(unittest.TestCase):
             venv_python.parent.mkdir(parents=True)
             venv_python.symlink_to(sys.executable)
             completed = subprocess.CompletedProcess([], 0, '{"ok":true,"parity":{"indexed":2}}', "")
-            with mock.patch("secretary.restore.subprocess.run", return_value=completed) as run:
+            with mock.patch("ummanu.restore.subprocess.run", return_value=completed) as run:
                 self.assertEqual(
                     rebuild_memory_index(
                         data_dir,
@@ -735,7 +735,7 @@ class RestoreTests(unittest.TestCase):
     def test_reindex_cli_reports_public_contract_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             init_layout(data_dir)
             instance = _write_instance_to(root / "instance", "test", data_dir)
             _seed_instance_facts(instance, {"global/one.md": "fact\n"})
@@ -744,7 +744,7 @@ class RestoreTests(unittest.TestCase):
             script.chmod(0o755)
             completed = subprocess.CompletedProcess([], 1, '{"ok":false,"error":"index parity failed"}', "")
             with (
-                mock.patch("secretary.restore.subprocess.run", return_value=completed),
+                mock.patch("ummanu.restore.subprocess.run", return_value=completed),
                 self.assertRaisesRegex(RestoreError, "index parity failed"),
             ):
                 rebuild_memory_index(
@@ -759,7 +759,7 @@ class RestoreTests(unittest.TestCase):
     def test_reindex_timeout_is_a_restore_error(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             init_layout(data_dir)
             instance = _write_instance_to(root / "instance", "test", data_dir)
             _seed_instance_facts(instance, {"global/one.md": "fact\n"})
@@ -767,7 +767,7 @@ class RestoreTests(unittest.TestCase):
             script.write_text("", encoding="utf-8")
             script.chmod(0o755)
             with (
-                mock.patch("secretary.restore.subprocess.run", side_effect=subprocess.TimeoutExpired([], 1)),
+                mock.patch("ummanu.restore.subprocess.run", side_effect=subprocess.TimeoutExpired([], 1)),
                 self.assertRaisesRegex(RestoreError, "could not rebuild memory index"),
             ):
                 rebuild_memory_index(
@@ -781,7 +781,7 @@ class RestoreTests(unittest.TestCase):
 
     def test_restore_board_wraps_missing_backend_configuration(self):
         with tempfile.TemporaryDirectory() as tmpdir, mock.patch.dict(os.environ, {}, clear=True):
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [_restore_card()]}), encoding="utf-8"
@@ -792,10 +792,10 @@ class RestoreTests(unittest.TestCase):
     def test_restore_handoff_reaches_green_doctor_only_after_reconcile(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             instance = _write_instance_to(root / "instance", "test", data_dir, host=True)
             with (instance / "instance.yaml").open("a", encoding="utf-8") as stream:
-                stream.write("  foreign_units:\n    - secretary-supervisor.timer\n")
+                stream.write("  foreign_units:\n    - ummanu-supervisor.timer\n")
             bootstrap_empty(instance)
             card = _restore_card()
             (data_dir / "board" / "cards.json").write_text(
@@ -824,7 +824,7 @@ class RestoreTests(unittest.TestCase):
                 fixture = root / "host"
                 fixture.mkdir()
                 live_units = {resource.name for resource in desired if resource.kind == "unit"}
-                live_units.add("secretary-supervisor.timer")
+                live_units.add("ummanu-supervisor.timer")
                 (fixture / "units.txt").write_text("\n".join(sorted(live_units)), encoding="utf-8")
                 self.assertEqual(
                     main(
@@ -856,7 +856,7 @@ class RestoreTests(unittest.TestCase):
     def test_restore_reconcile_fails_closed_before_marking_state(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
-            data_dir = root / "secretary-data"
+            data_dir = root / "ummanu-data"
             instance = _write_instance_to(root / "instance", "test", data_dir, heads=True)
             bootstrap_empty(instance)
 
@@ -875,29 +875,29 @@ class PreUpgradeCheckpointBagTests(unittest.TestCase):
     def _pre_upgrade_cards(self) -> list[dict[str, object]]:
         shown = {
             "id": 12,
-            "reference": "secretary-1",
+            "reference": "ummanu-1",
             "title": "Steward sweep",
             "description": "body",
             "column": "Ready",
             "task_type": "research",
-            "project": "secretary",
+            "project": "ummanu",
             "metadata": {"record_type": "task", "steward_report": "1"},
         }
         first = normalize_board_card(
-            {"id": 12, "reference": "secretary-1", "column": "Ready", "swimlane": "Secretary", "position": 1},
+            {"id": 12, "reference": "ummanu-1", "column": "Ready", "swimlane": "Ummanu", "position": 1},
             shown,
         )
         second = normalize_board_card(
-            {"id": 13, "reference": "secretary-2", "column": "Ready", "position": 2},
+            {"id": 13, "reference": "ummanu-2", "column": "Ready", "position": 2},
             {
                 **shown,
                 "id": 13,
-                "reference": "secretary-2",
+                "reference": "ummanu-2",
                 "metadata": {"record_type": "task", "note": "from metadata"},
             },
         )
         second["extensions"] = {
-            "retired_board": {"steward_report": "1", "note": "shadowed", "swimlane": "Secretary"},
+            "retired_board": {"steward_report": "1", "note": "shadowed", "swimlane": "Ummanu"},
         }
         return [first, second]
 
@@ -908,25 +908,25 @@ class PreUpgradeCheckpointBagTests(unittest.TestCase):
 
         reader = TaskReader(client)
         self.assertEqual(
-            reader.show("secretary-1")["extensions"],
-            {"extra": {"record_type": "task", "steward_report": "1", "swimlane": "Secretary"}},
+            reader.show("ummanu-1")["extensions"],
+            {"extra": {"record_type": "task", "steward_report": "1", "swimlane": "Ummanu"}},
         )
         # `metadata` names `note` itself, so it wins; the bag's other fields and its lane arrive.
         self.assertEqual(
-            reader.show("secretary-2")["extensions"],
+            reader.show("ummanu-2")["extensions"],
             {
                 "extra": {
                     "record_type": "task",
                     "note": "from metadata",
                     "steward_report": "1",
-                    "swimlane": "Secretary",
+                    "swimlane": "Ummanu",
                 }
             },
         )
 
     def test_a_pre_upgrade_checkpoint_restores_its_bag_under_the_current_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             cards = self._pre_upgrade_cards()
             (data_dir / "board" / "cards.json").write_text(
@@ -941,8 +941,8 @@ class PreUpgradeCheckpointBagTests(unittest.TestCase):
     def test_a_pre_upgrade_archive_restores_its_bag_under_the_current_key(self) -> None:
         import tarfile
 
-        from secretary.backup_policy import ARCHIVE_ROOT
-        from secretary.restore import restore_backup
+        from ummanu.backup_policy import ARCHIVE_ROOT
+        from ummanu.restore import restore_backup
         from tests.restore_fixtures import _core_archive, _write_checksums, _write_instance
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -950,7 +950,7 @@ class PreUpgradeCheckpointBagTests(unittest.TestCase):
             instance = _write_instance(root, "test")
             archive = _core_archive(root, "test")
             payload = root / ARCHIVE_ROOT
-            board = payload / "secretary-data" / "board"
+            board = payload / "ummanu-data" / "board"
             cards = self._pre_upgrade_cards()
             (board / "cards.json").write_text(json.dumps({"version": 1, "cards": cards}), encoding="utf-8")
             (board / "cards.ndjson").write_text(
@@ -966,7 +966,7 @@ class PreUpgradeCheckpointBagTests(unittest.TestCase):
 
             restore_backup(archive, instance)
 
-            self.assertBagKept(root / "secretary-data")
+            self.assertBagKept(root / "ummanu-data")
 
 
 class RestoredNonTaskSwimlaneTests(unittest.TestCase):
@@ -996,7 +996,7 @@ class RestoredNonTaskSwimlaneTests(unittest.TestCase):
         issue["fields"]["project"] = ""
         issue["metadata"] = {
             "record_type": "issue",
-            "issue_product": "secretary",
+            "issue_product": "ummanu",
             "issue_kind": "bug",
             "issue_priority": "P0",
         }
@@ -1006,7 +1006,7 @@ class RestoredNonTaskSwimlaneTests(unittest.TestCase):
 
     def test_a_refused_create_is_reported_as_a_create_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             self._seed(data_dir)
             client = card_store(self, empty_seed())
             served = client.call
@@ -1035,7 +1035,7 @@ class RestoredCodexLaunchModeTests(unittest.TestCase):
     def _card(mode: str) -> dict[str, object]:
         return {
             "fields": {},
-            "metadata": {"project": "secretary", "task_type": "code", "codex_launch_mode": mode},
+            "metadata": {"project": "ummanu", "task_type": "code", "codex_launch_mode": mode},
         }
 
     def test_a_legacy_exec_card_restores_with_no_launch_mode(self) -> None:
@@ -1055,7 +1055,7 @@ class RestoredCodexLaunchModeTests(unittest.TestCase):
         card["metadata"]["codex_launch_mode"] = mode
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "secretary-data"
+            data_dir = Path(tmpdir) / "ummanu-data"
             init_layout(data_dir)
             board = data_dir / "board"
             (board / "cards.json").write_text(json.dumps({"version": 1, "cards": [card]}), encoding="utf-8")
@@ -1073,35 +1073,35 @@ class RestoredCodexLaunchModeTests(unittest.TestCase):
         stored = client.metadata(12).get("codex_launch_mode")
         self.assertNotEqual(stored, "exec")
         self.assertFalse(stored)
-        self.assertIsNone(TaskReader(client).show("secretary-1")["routing"]["codex_launch_mode"])
+        self.assertIsNone(TaskReader(client).show("ummanu-1")["routing"]["codex_launch_mode"])
 
     def test_a_restored_interactive_card_keeps_its_mode_in_the_backend(self) -> None:
         """Only the retired value is removed; compatible routing data restores untouched."""
         client = self._import_legacy_card("tui")
 
         self.assertEqual(client.metadata(12).get("codex_launch_mode"), "tui")
-        self.assertEqual(TaskReader(client).show("secretary-1")["routing"]["codex_launch_mode"], "tui")
+        self.assertEqual(TaskReader(client).show("ummanu-1")["routing"]["codex_launch_mode"], "tui")
 
     def test_the_export_and_live_views_of_a_legacy_card_agree(self) -> None:
         """Both sides of the restore comparison read that card as carrying no mode, so a
         legitimately restored card is never reported as a parity mismatch."""
         exported = restore_module._core_from_export(
             {
-                "reference": "secretary-1",
+                "reference": "ummanu-1",
                 "title": "t",
                 "description": "d",
                 "column": "Ready",
                 "fields": {},
-                "metadata": {"project": "secretary", "task_type": "code", "codex_launch_mode": "exec"},
+                "metadata": {"project": "ummanu", "task_type": "code", "codex_launch_mode": "exec"},
             }
         )
         live = restore_module._core_from_live(
             {
-                "ref": "secretary-1",
+                "ref": "ummanu-1",
                 "title": "t",
                 "description": "d",
                 "state": "ready",
-                "project": "secretary",
+                "project": "ummanu",
                 "type": "code",
                 "routing": {"complexity": "standard", "family_preference": "auto", "codex_launch_mode": None},
             }
@@ -1117,22 +1117,22 @@ class RestoredCardKindParityTests(unittest.TestCase):
     @staticmethod
     def _export(**metadata: str) -> dict[str, object]:
         return {
-            "reference": "secretary-1",
+            "reference": "ummanu-1",
             "title": "t",
             "description": "d",
             "column": "Ready",
             "fields": {},
-            "metadata": {"project": "secretary", "task_type": "research", **metadata},
+            "metadata": {"project": "ummanu", "task_type": "research", **metadata},
         }
 
     @staticmethod
     def _live(**fields: object) -> dict[str, object]:
         return {
-            "ref": "secretary-1",
+            "ref": "ummanu-1",
             "title": "t",
             "description": "d",
             "state": "ready",
-            "project": "secretary",
+            "project": "ummanu",
             "type": "research",
             "routing": {"complexity": "standard", "family_preference": "auto"},
             **fields,
@@ -1173,7 +1173,7 @@ class RestoredOrderParityTests(unittest.TestCase):
         position: int,
         *,
         column: str = "Issues",
-        swimlane: str = "secretary",
+        swimlane: str = "ummanu",
         closed: bool = False,
     ) -> dict[str, object]:
         return {
@@ -1217,8 +1217,8 @@ class RestoredOrderParityTests(unittest.TestCase):
 
     def test_swimlanes_are_ordered_independently(self) -> None:
         cards = [
-            self._card("a", 1, swimlane="secretary"),
-            self._card("b", 2, swimlane="secretary"),
+            self._card("a", 1, swimlane="ummanu"),
+            self._card("b", 2, swimlane="ummanu"),
             self._card("c", 1, swimlane="codegen"),
             self._card("d", 2, swimlane="codegen"),
         ]

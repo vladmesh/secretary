@@ -18,11 +18,11 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.board.sql_audit import SqlTaskAudit
-from secretary.task_restore import RestoreCommentOccurrence, restore_comments_batched
-from secretary.tasks import TaskError
 from tests.fakes.tasks import CardSeed
 from tests.sql_backend_fixtures import card_store
+from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.task_restore import RestoreCommentOccurrence, restore_comments_batched
+from ummanu.tasks import TaskError
 
 
 def _seed(references: list[str]) -> CardSeed:
@@ -31,7 +31,7 @@ def _seed(references: list[str]) -> CardSeed:
         {"id": key, "reference": reference, "title": reference, "column_id": 2}
         for key, reference in enumerate(sorted(references), 1)
     ]
-    return CardSeed(tasks, {int(task["id"]): {"project": "secretary"} for task in tasks})
+    return CardSeed(tasks, {int(task["id"]): {"project": "ummanu"} for task in tasks})
 
 
 def _items(histories: dict[str, list[str]]) -> list[RestoreCommentOccurrence]:
@@ -67,13 +67,13 @@ class BulkCommentRestoreTests(unittest.TestCase):
         return sum(method == "createComment" for method, _params in writer.client.calls)
 
     def test_identical_occurrences_prefix_and_second_import_are_exact(self) -> None:
-        target = {"secretary-1": ["same", "middle", "same"]}
+        target = {"ummanu-1": ["same", "middle", "same"]}
         writer = self._writer(target)
         writer.client.add_comment(1, "same", created=1)
         restore_comments_batched(writer, _items(target))
         restore_comments_batched(writer, _items(target))
-        self.assertEqual(self._comments(writer, 1), target["secretary-1"])
-        events = writer.audit.events("secretary-1", kind="restored_comment")
+        self.assertEqual(self._comments(writer, 1), target["ummanu-1"])
+        events = writer.audit.events("ummanu-1", kind="restored_comment")
         self.assertEqual([event["payload"]["restore_occurrence"] for event in events], [0, 0, 1])
         self.assertTrue(all("restore_body" not in event["payload"] for event in events))
         self.assertEqual(self._creates(writer), 2)
@@ -83,20 +83,20 @@ class BulkCommentRestoreTests(unittest.TestCase):
                 self.assertEqual(event["backend"]["kind"], "postgres")
 
     def test_staging_failure_precedes_every_backend_mutation(self) -> None:
-        writer = self._writer({"secretary-1": ["record"]})
+        writer = self._writer({"ummanu-1": ["record"]})
         with (
             mock.patch.object(writer.audit, "stage", side_effect=OSError("full")),
             self.assertRaises(OSError),
         ):
-            restore_comments_batched(writer, _items({"secretary-1": ["record"]}))
+            restore_comments_batched(writer, _items({"ummanu-1": ["record"]}))
         self.assertEqual(self._creates(writer), 0)
         self.assertEqual(self._comments(writer, 1), [])
 
     def test_non_prefix_destination_history_fails_before_a_write(self) -> None:
-        writer = self._writer({"secretary-1": ["expected"]})
+        writer = self._writer({"ummanu-1": ["expected"]})
         writer.client.add_comment(1, "foreign", created=1)
         with self.assertRaisesRegex(TaskError, "normalized prefix"):
-            restore_comments_batched(writer, _items({"secretary-1": ["expected"]}))
+            restore_comments_batched(writer, _items({"ummanu-1": ["expected"]}))
         self.assertEqual(self._creates(writer), 0)
 
 
@@ -120,7 +120,7 @@ class DurableAuditBenchmark(unittest.TestCase):
         return duration, events, creates
 
     def test_real_audit_cost_per_occurrence(self) -> None:
-        histories = self._fixture(40, 120, "secretary-")
+        histories = self._fixture(40, 120, "ummanu-")
         duration, events, creates = self._measure_durable(histories)
         self.assertEqual(events, 120)
         self.assertEqual(creates, 120)
@@ -130,11 +130,11 @@ class DurableAuditBenchmark(unittest.TestCase):
         )
 
     @unittest.skipUnless(
-        os.environ.get("SECRETARY_FULL_BULK_BENCHMARK") == "1",
+        os.environ.get("UMMANU_FULL_BULK_BENCHMARK") == "1",
         "full durable benchmark is an explicit receipt, not a routine shard cost",
     )
     def test_full_production_shape_real_audit(self) -> None:
-        cards = self._fixture(1_429, 14_174, "secretary-")
+        cards = self._fixture(1_429, 14_174, "ummanu-")
         card_seconds, card_events, _creates = self._measure_durable(cards)
         self.assertEqual(card_events, 14_174)
         print(

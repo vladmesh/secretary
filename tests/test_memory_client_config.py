@@ -8,7 +8,7 @@ import tomllib
 import unittest
 from pathlib import Path
 
-from secretary.memory.client_config import (
+from ummanu.memory.client_config import (
     ClientConfigError,
     reconcile_claude,
     reconcile_clients,
@@ -21,7 +21,7 @@ class MemoryClientConfigTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.command = self.root / "product" / ".venv" / "bin" / "secretary-memory-po-bridge"
+        self.command = self.root / "product" / ".venv" / "bin" / "ummanu-memory-po-bridge"
         self.command.parent.mkdir(parents=True)
         self.command.write_text("#!/bin/sh\n", encoding="utf-8")
         self.data_dir = self.root / "data"
@@ -32,7 +32,7 @@ class MemoryClientConfigTests(unittest.TestCase):
         path.write_text(
             'model = "operator-choice"\n\n'
             '[mcp_servers.memory]\nurl = "http://127.0.0.1:8077/mcp"\n'
-            'bearer_token_env_var = "SECRETARY_MEMORY_ACCESS_TOKEN"\n\n'
+            'bearer_token_env_var = "UMMANU_MEMORY_ACCESS_TOKEN"\n\n'
             '[mcp_servers.other]\ncommand = "keep-me"\n',
             encoding="utf-8",
         )

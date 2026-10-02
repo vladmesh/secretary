@@ -12,6 +12,24 @@ instance repository   one private repository per owner: config + state/
 host runtime          local runtime, rebuilt from the checkpoint; not canonical
 ```
 
+## Names on the host
+
+A recovery recreates these names; nothing reads an older spelling of them.
+
+| What | Name |
+|---|---|
+| Product checkout and venv | `~/ummanu`, `~/ummanu/.venv` (console scripts `ummanu`, `ummanu-memory-*`) |
+| Data plane | `~/ummanu-data` unless `instance.yaml` `data_dir` says otherwise |
+| Instance repository | `~/secretary-instance` (it keeps its name) |
+| systemd units | `ummanu-*` from `packaging/systemd/` (`host.unit_prefix: ummanu-`), e.g. `ummanu-dispatcher-production.timer`, `ummanu-po.service`, `ummanu-instance-maintenance.timer` |
+| Role worktrees | `~/orca/workspaces/ummanu/<role>` |
+| Environment | `UMMANU_INSTANCE`, `UMMANU_DATA_DIR`, `UMMANU_REPO`, `UMMANU_RUNTIME_ENV_FILE`, and every other `UMMANU_*` key |
+| Board store | Compose project `ummanu-board-store`, file `/opt/ummanu/postgres-compose.yml`, container `ummanu-board-store-postgres-1`, volume `ummanu-board-store_board-db`, label `ummanu.production-board`; database `ummanu`, roles `ummanu_owner`, `ummanu_app`, `ummanu_read`; `board-store.env` keys `UMMANU_DB_*` |
+| Cold archives | `<data_dir>/backups/ummanu-backup-<kind>-<stamp>.tar`, manifest `"tool": "ummanu"` |
+
+An installation from before the product rename is moved onto these names once, by the transition in
+`docs/RENAME.md` §T3; archives taken before it restore only with the pre-transition code.
+
 The private repository is the only Git canon for the data plane: one remote, one HEAD, one RPO.
 
 ## Source of truth
@@ -28,7 +46,7 @@ The canon is the normalised minimum needed to resume work:
   `heads/` holds this installation's `heads.toml` canon when it has one, the generated `heads.yaml`
   snapshot, and the `source.yaml` pin (installed heads canon, checkout, exact revision). After a
   restore the pin identifies the heads configuration and product ref that were running; moving the
-  snapshot to a new checkout is `secretary upgrade`'s job;
+  snapshot to a new checkout is `ummanu upgrade`'s job;
 - board export: the logical files `cards.ndjson`, `sprints.ndjson`, `events.ndjson`, `audit.ndjson`,
   `export.json` and the analytics seal `analytics-manifest.json`, stored in `state/board` in the
   split layout (see [Layout](#layout));
@@ -62,7 +80,7 @@ Outside the canon, rebuilt or kept in an optional cold archive:
 - transcripts, artifacts, backups;
 - terminals, worktrees and generated host state (systemd units from `packaging/systemd/`). The
   product is canonical for these: units are compiled from packaging templates, and those timers are
-  the background roles' only schedule. `secretary reconcile apply` and `secretary upgrade`
+  the background roles' only schedule. `ummanu reconcile apply` and `ummanu upgrade`
   re-materialise them idempotently, so unit names stay stable. The Orca automations the background
   roles ran as before sprint:1459 are not recovered.
 
@@ -90,7 +108,7 @@ The local export in the data directory stays flat. Only the copy committed into 
 split, so a checkpoint's Git cost follows what changed instead of the size of the board
 (secretary-1656):
 
-- `layout.json` marks the split layout (`secretary.board.checkpoint-layout`, version 2). A directory
+- `layout.json` marks the split layout (`ummanu.board.checkpoint-layout`, version 2). A directory
   without it is the flat layout every earlier checkpoint used: one file per logical file.
 - `cards.ndjson` and `sprints.ndjson` are stored one line per file, `<dir>/<index // 1000>/<index>`,
   in line order. Changing one card rewrites one small blob and the two trees above it; a checkpoint
@@ -131,10 +149,10 @@ Six writers touch the repository, each with its own pathspec:
 
 - tick writer: `state/board`, `state/runs`, at the cadence above, under the tick lock;
 - memory writer: `state/memory`, on `propose`/`commit`/`supersede`;
-- knowledge writer: `state/knowledge`, on `secretary knowledge write`;
+- knowledge writer: `state/knowledge`, on `ummanu knowledge write`;
 - secret writer: `secrets/`, on `secret init/set/import/remove` (`list` and `materialize` do not
   commit);
-- head-registry writer: `heads/heads.yaml`, `heads/source.yaml`, on `secretary upgrade`; it commits and
+- head-registry writer: `heads/heads.yaml`, `heads/source.yaml`, on `ummanu upgrade`; it commits and
   immediately pushes the pair;
 - local-configuration writer: `.gitignore`, when local configuration such as `board-store.env`
   needs a durable exclusion.
@@ -177,17 +195,17 @@ not a hard memory limit.
 
 `gc.auto=0` and `maintenance.auto=false` stop every `git commit` from starting Git's implicit
 `gc --auto`, which would otherwise pack the repository inside whichever checkpoint tick first crosses
-the loose-object threshold. Packing runs from `secretary-instance-maintenance.timer` instead (daily,
-`Persistent=true`): its service runs `secretary instance-maintenance`, which is `git gc --auto` with
+the loose-object threshold. Packing runs from `ummanu-instance-maintenance.timer` instead (daily,
+`Persistent=true`): its service runs `ummanu instance-maintenance`, which is `git gc --auto` with
 Git's stock thresholds (6,700 loose objects, 50 packs) restated on the command line, so a quiet day
 costs one object count. That packing step takes no state-repo lock: it touches objects only, and the
 two ref-writing parts of `gc` (`pack-refs`, reflog expiry) are switched off for it. Reflogs are then
 expired as a separate step under the state-repo lock, the only moment a checkpoint can wait on
-maintenance, bounded at 60 seconds. `secretary status` lists the timer under `host.schedules` with
+maintenance, bounded at 60 seconds. `ummanu status` lists the timer under `host.schedules` with
 `last_trigger`, and the service under `host.units` reads `failed` after a failed run; the run's
 before/after object counts are in its journal.
 
-The same maintenance command also inventories only containers carrying `secretary.test-board`
+The same maintenance command also inventories only containers carrying `ummanu.test-board`
 with a valid owner PID. It removes one by full ID only after two label checks and two definitive
 dead-owner checks; a production marker protects the container. Docker's anonymous-only
 `volume prune` requires an effective client API of 1.42 or newer and leaves named or in-use volumes
@@ -214,7 +232,7 @@ checkpoint, records the reason in status and retries next tick:
 
 ### Analytics checkpoint seal v2
 
-`analytics-manifest.json` is `secretary.board.analytics-checkpoint` version 2, the boundary for
+`analytics-manifest.json` is `ummanu.board.analytics-checkpoint` version 2, the boundary for
 offline analytics projection. Its object has exactly `schema`, `version`, `checkpoint_id` and `files`.
 `files` has exactly one entry each for the logical `events.ndjson`, `cards.ndjson`, `sprints.ndjson`,
 `audit.ndjson` and `export.json`, each with path, lowercase SHA-256 and byte count of the logical
@@ -250,7 +268,7 @@ installation secrets. `board-store.env` is local connection material that bootst
 not restored from the secret store. Forge access and interactive head logins stay in the operator's password manager; the product
 never copies them to the host.
 
-The secret store (`secretary/secret_store.py`, `secrets/`) is a recoverable canon in the same
+The secret store (`ummanu/secret_store.py`, `secrets/`) is a recoverable canon in the same
 repository: a metadata catalog and versioned encrypted envelopes, tracked in Git and pushed with the
 checkpoint. The repository never contains the raw installation key (`secrets/installation.key`,
 gitignored, `0600`) or the recovery phrase, which `secret init` shows once and the product stores
@@ -267,8 +285,8 @@ per-worker isolation.
 The checkpoint scan distinguishes configuration from credentials. It reads values whose runtime
 variable names identify credentials (`*_TOKEN`, `*_PAT`, `*_IDENTITY`, `*_KEY`, `*_SECRET`, passwords,
 credentials, auth, webhooks) and URLs with embedded userinfo. With the installation key present it also
-reads catalog values under sensitive names or values matching a credential shape. `SECRETARY_DATA_DIR`,
-`TA_SECRETARY_REPO` or a board URL without userinfo are not secrets. A locked or incomplete store is a
+reads catalog values under sensitive names or values matching a credential shape. `UMMANU_DATA_DIR`,
+`UMMANU_REPO` or a board URL without userinfo are not secrets. A locked or incomplete store is a
 `doctor` finding but does not halt checkpointing; runtime-file and pattern scans still run. Protocol
 text is redacted by the same credential-specific redactor before it reaches the board or audit; known
 token and webhook formats are a second fail-closed scan layer.
@@ -283,7 +301,7 @@ are in [Operations](OPERATIONS.md#checkpoint-and-project-github-access). For rec
 - A clean host cannot read the encrypted store before cloning it. Supply one external bootstrap
   credential with `--bootstrap-credential-file TOKEN_FILE` (mode `0600`, owned by the `sudo` caller or
   the effective user) or `--bootstrap-credential-stdin` (cannot share stdin with the recovery phrase).
-- Secretary copies it into a mode-`0600` operation-scoped capability owned by the installation-user
+- Ummanu copies it into a mode-`0600` operation-scoped capability owned by the installation-user
   Git child and removes it on success or failure. It is not retained and is not an ongoing checkpoint
   source.
 - A rerun fetches the existing checkout with the supplied bootstrap credential, or else the unlocked
@@ -347,7 +365,7 @@ check that the restored rows match them. No
 archive carries a database password, role secret, `board-store.env` or the memory model cache
 `memory/fastembed-cache` (the index rebuild downloads the model again).
 
-`secretary restore-postgres ARCHIVE --instance TARGET` restores only
+`ummanu restore-postgres ARCHIVE --instance TARGET` restores only
 into a distinct disposable target whose `board-store.env`, container, database and owner/app/read roles
 are managed by the board-store lifecycle. It verifies archive identity and checksums, refuses the
 source endpoint, migrates the target to the recorded head, verifies roles, requires every application
@@ -358,21 +376,21 @@ database untouched; repair or recreate only the target before retrying.
 
 ## Fresh install and recovery
 
-Install the product with the memory extra. On Ubuntu 24.04, `secretary bootstrap` installs Docker
+Install the product with the memory extra. On Ubuntu 24.04, `ummanu bootstrap` installs Docker
 and Compose from the distribution and provisions, migrates and role-verifies the PostgreSQL board
 store, with no recovery phrase or manual board credentials. Heads run on local-pty, which ships
 with the product; before A20 step 9 bootstrap also installed Orca, the session manager heads then ran
-in, and its X server. `secretary install` installs no
+in, and its X server. `ummanu install` installs no
 runtime and checks that the board store is reachable before changing live state.
 
 ```bash
 python3 -m pip install '.[memory]'
-sudo secretary bootstrap \
+sudo ummanu bootstrap \
   --instance-remote git@github.com:OWNER/secretary-instance.git \
   --instance-dir INSTANCE \
   --installation-user INSTALL_USER
 
-sudo secretary install \
+sudo ummanu install \
   --instance-remote git@github.com:OWNER/secretary-instance.git \
   --instance-dir INSTANCE \
   --installation-user INSTALL_USER
@@ -385,7 +403,7 @@ a dirty checkout, a different remote, an arbitrary non-empty data target or an u
 On a clean host, recovery bootstraps and then runs `recover` instead of `install`:
 
 ```bash
-sudo secretary recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user USER \
+sudo ummanu recover --instance-remote REMOTE --instance-dir INSTANCE --installation-user USER \
   --bootstrap-credential-file TOKEN_FILE --recovery-phrase-file PHRASE_FILE
 ```
 
@@ -402,7 +420,7 @@ Later recovery of that checkout fetches the tracked branch without tags and merg
 or replaces an existing checkout and never unshallows one.
 
 A non-empty target that is not a valid instance repository is refused, not overwritten. Inspect and
-preserve it, then remove it outside Secretary or choose a fresh `--instance-dir`. A dirty checkout,
+preserve it, then remove it outside Ummanu or choose a fresh `--instance-dir`. A dirty checkout,
 different origin, invalid repository or unsupported non-fast-forward is also left untouched and
 refused. A clean tree alone never proves product ownership.
 
@@ -431,7 +449,7 @@ refused. A clean tree alone never proves product ownership.
 7. Runs the pre-host materialiser: regenerates the installed head snapshot and source pin, commits the
    pair locally, attempts managed fast-forward-only publication, then synchronises role skills and
    recreates role worktrees (owned by `--installation-user` under `sudo`). A publication failure is a
-   degraded result that does not stop later safe steps; ordinary `secretary upgrade` stops at it.
+   degraded result that does not stop later safe steps; ordinary `ummanu upgrade` stops at it.
 8. Rebuilds the pipeline worktree's live run journal from the checkpoint, before any dispatcher unit is
    installed or started.
 9. Applies host units, performs any required memory recovery and
@@ -446,7 +464,7 @@ refused. A clean tree alone never proves product ownership.
 host-packaging lookup. The product root to materialise comes from `--product-root` or the
 configured/default root, not from the pin.
 
-`secretary recover --dry-run` checks checkout, credentials, runtime prerequisites and checkpoint
+`ummanu recover --dry-run` checks checkout, credentials, runtime prerequisites and checkpoint
 integrity and prints steps as `would-change`. It writes no data plane, does not touch the board and
 runs neither the memory reindex nor the host materialiser.
 
@@ -520,7 +538,7 @@ head.
 
 ### Retry
 
-Rerunning the same `secretary recover` command is the only supported retry. The checkout is
+Rerunning the same `ummanu recover` command is the only supported retry. The checkout is
 fast-forward only; completed board import and memory indexing are skipped while the board, run,
 memory-fact and binding identity still matches; successful checkouts are untouched; only
 missing/failed checkouts and their dependent host resources are retried. The identity length-delimits
@@ -552,13 +570,13 @@ Preview is read-only. It lists active and archived Pipeline rows with backend ID
 a bounded title, retention evidence, proposed collision-free references, refusals and a plan hash:
 
 ```bash
-secretary task repair-references-preview --instance INSTANCE --data-dir DATA_DIR
+ummanu task repair-references-preview --instance INSTANCE --data-dir DATA_DIR
 ```
 
 Apply names that plan and every proposed row by backend ID; put the non-secret reason in a file:
 
 ```bash
-secretary task repair-references-apply --role po --instance INSTANCE --data-dir DATA_DIR \
+ummanu task repair-references-apply --role po --instance INSTANCE --data-dir DATA_DIR \
   --plan-id PLAN_ID --task-id BACKEND_ID --request-id REQUEST_ID --reason-file REASON_FILE
 ```
 

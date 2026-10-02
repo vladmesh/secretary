@@ -20,13 +20,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from secretary.automations.agents.curator import discover
-from secretary.automations.agents.pipeline import codex_sessions as pipeline_codex_sessions
-from secretary.dispatch import commands as dispatch_commands
-from secretary.dispatch import tui as dispatcher_tui
-from secretary.runtime import codex_home as codex_home_module
-from secretary.runtime import codex_preflight, heads
-from secretary.runtime.codex_preflight import (
+from ummanu.automations.agents.curator import discover
+from ummanu.automations.agents.pipeline import codex_sessions as pipeline_codex_sessions
+from ummanu.dispatch import commands as dispatch_commands
+from ummanu.dispatch import tui as dispatcher_tui
+from ummanu.runtime import codex_home as codex_home_module
+from ummanu.runtime import codex_preflight, heads
+from ummanu.runtime.codex_preflight import (
     CODEX_HOME_DATA_DIR,
     CODEX_HOME_ENV,
     CODEX_HOME_PROFILE,
@@ -35,9 +35,9 @@ from secretary.runtime.codex_preflight import (
     codex_home,
     resolve_codex_home,
 )
-from secretary.runtime.head import HeadCommandError, render_head_command
+from ummanu.runtime.head import HeadCommandError, render_head_command
 
-SRC = Path(__file__).resolve().parents[1] / "src" / "secretary"
+SRC = Path(__file__).resolve().parents[1] / "src" / "ummanu"
 RESOLVERS = {"codex_home", "resolve_codex_home"}
 
 
@@ -54,7 +54,7 @@ class ResolverOrderTests(unittest.TestCase):
         self.data_home.mkdir(parents=True)
         # The suite pins TA_CODEX_HOME for every test; the lower rungs are only reachable without it.
         env = mock.patch.dict(
-            os.environ, _without("TA_CODEX_HOME", "SECRETARY_DATA_DIR", "SECRETARY_INSTANCE"), clear=True
+            os.environ, _without("TA_CODEX_HOME", "UMMANU_DATA_DIR", "UMMANU_INSTANCE"), clear=True
         )
         env.start()
         self.addCleanup(env.stop)
@@ -98,7 +98,7 @@ class ResolverOrderTests(unittest.TestCase):
 
     def test_the_data_dir_comes_from_the_environment_the_launch_carries(self) -> None:
         self.log_in()
-        os.environ["SECRETARY_DATA_DIR"] = str(self.data_dir)
+        os.environ["UMMANU_DATA_DIR"] = str(self.data_dir)
         self.assertEqual(codex_home({}), str(self.data_home))
 
     def test_the_data_dir_comes_from_an_explicitly_selected_instance(self) -> None:
@@ -111,7 +111,7 @@ class ResolverOrderTests(unittest.TestCase):
             "offsite:\n  instance_remote: https://example.invalid/instance.git\n",
             encoding="utf-8",
         )
-        os.environ["SECRETARY_INSTANCE"] = str(instance)
+        os.environ["UMMANU_INSTANCE"] = str(instance)
         # The leaf resolver reads no instance file; the installation helper does, and so does a
         # launching process once it has bound the data dir.
         with self.assertRaises(CodexHomeLoginMissing):
@@ -122,7 +122,7 @@ class ResolverOrderTests(unittest.TestCase):
         )
         with codex_home_module.bound_data_dir():
             self.assertEqual(codex_home({}), str(self.data_dir.resolve() / "codex-home"))
-        self.assertNotIn("SECRETARY_DATA_DIR", os.environ)
+        self.assertNotIn("UMMANU_DATA_DIR", os.environ)
 
     def test_no_selected_installation_is_refused_with_the_fix(self) -> None:
         self.log_in()
@@ -131,20 +131,20 @@ class ResolverOrderTests(unittest.TestCase):
             with self.assertRaises(CodexHomeLoginMissing) as caught:
                 resolve()
             self.assertIsNone(caught.exception.home)
-            self.assertIn("SECRETARY_DATA_DIR", str(caught.exception))
+            self.assertIn("UMMANU_DATA_DIR", str(caught.exception))
             self.assertIn("<data_dir>/codex-home", str(caught.exception))
 
     def test_a_bound_data_dir_is_scoped_and_never_replaces_the_operators(self) -> None:
         self.log_in()
         with codex_home_module.bound_data_dir(self.data_dir):
-            self.assertEqual(os.environ["SECRETARY_DATA_DIR"], str(self.data_dir))
+            self.assertEqual(os.environ["UMMANU_DATA_DIR"], str(self.data_dir))
             self.assertEqual(codex_home({}), str(self.data_home))
-        self.assertNotIn("SECRETARY_DATA_DIR", os.environ)
+        self.assertNotIn("UMMANU_DATA_DIR", os.environ)
 
-        os.environ["SECRETARY_DATA_DIR"] = "/tmp/operator-data"
+        os.environ["UMMANU_DATA_DIR"] = "/tmp/operator-data"
         with codex_home_module.bound_data_dir(self.data_dir):
-            self.assertEqual(os.environ["SECRETARY_DATA_DIR"], "/tmp/operator-data")
-        self.assertEqual(os.environ["SECRETARY_DATA_DIR"], "/tmp/operator-data")
+            self.assertEqual(os.environ["UMMANU_DATA_DIR"], "/tmp/operator-data")
+        self.assertEqual(os.environ["UMMANU_DATA_DIR"], "/tmp/operator-data")
 
     def test_a_dispatcher_operation_launches_against_its_own_data_dir(self) -> None:
         """The production entry binds the runtime's data dir around the operation that launches."""
@@ -156,17 +156,17 @@ class ResolverOrderTests(unittest.TestCase):
             return {"status": "ok"}
 
         runtime = mock.Mock(data_dir=self.data_dir)
-        args = mock.Mock(instance="unused", data_dir=None, host_mode="noop", owner="secretary-production")
+        args = mock.Mock(instance="unused", data_dir=None, host_mode="noop", owner="ummanu-production")
         with (
-            mock.patch("secretary.dispatch.commands.runtime_from_args", return_value=runtime),
+            mock.patch("ummanu.dispatch.commands.runtime_from_args", return_value=runtime),
             contextlib.redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(dispatch_commands._run_production(args, operation), 0)
         self.assertEqual(seen, [str(self.data_home)])
-        self.assertNotIn("SECRETARY_DATA_DIR", os.environ)
+        self.assertNotIn("UMMANU_DATA_DIR", os.environ)
 
     def test_a_head_launched_after_the_login_renders_the_data_dir_home(self) -> None:
-        os.environ["SECRETARY_DATA_DIR"] = str(self.data_dir)
+        os.environ["UMMANU_DATA_DIR"] = str(self.data_dir)
         workspace = str(self.data_dir.parent.resolve())
         # Before the login there is no command to render: the renderer refuses with the fix.
         with self.assertRaises(HeadCommandError) as caught:
@@ -179,7 +179,7 @@ class ResolverOrderTests(unittest.TestCase):
         self.assertTrue(after.startswith(f"CODEX_HOME={self.data_home} codex "), after)
 
     def test_the_trust_preflight_writes_into_the_home_the_launch_names(self) -> None:
-        os.environ["SECRETARY_DATA_DIR"] = str(self.data_dir)
+        os.environ["UMMANU_DATA_DIR"] = str(self.data_dir)
         self.log_in()
         workspace = self.data_dir.parent / "workspace"
         workspace.mkdir()
@@ -188,7 +188,7 @@ class ResolverOrderTests(unittest.TestCase):
         self.assertIn(str(workspace.resolve()), trusted)
 
     def test_the_session_readers_put_the_current_home_first(self) -> None:
-        os.environ["SECRETARY_DATA_DIR"] = str(self.data_dir)
+        os.environ["UMMANU_DATA_DIR"] = str(self.data_dir)
         # With no login there is no current home, and a reader still scans rather than raising.
         self.assertEqual(pipeline_codex_sessions.sessions_roots()[0], self.data_home / "sessions")
         os.environ["TA_CODEX_HOME"] = str(self.data_dir.parent / "env-home")
@@ -223,13 +223,13 @@ class LiveSessionCutoverTests(unittest.TestCase):
             {
                 **_without(
                     "TA_CODEX_HOME",
-                    "SECRETARY_INSTANCE",
+                    "UMMANU_INSTANCE",
                     "TA_CODEX_SESSIONS",
-                    "SECRETARY_CODEX_SESSIONS",
+                    "UMMANU_CODEX_SESSIONS",
                     "TA_CODEX_SESSIONS_DIR",
                 ),
                 "HOME": str(self.home),
-                "SECRETARY_DATA_DIR": str(self.data_dir),
+                "UMMANU_DATA_DIR": str(self.data_dir),
             },
             clear=True,
         )
@@ -309,7 +309,7 @@ class LiveSessionCutoverTests(unittest.TestCase):
         self.assertEqual(pipeline_codex_sessions.sessions_roots(), [override])
         self.assertEqual(dispatcher_tui._sessions_roots(), [override])
         os.environ.pop("TA_CODEX_SESSIONS")
-        os.environ["SECRETARY_CODEX_SESSIONS"] = str(override)
+        os.environ["UMMANU_CODEX_SESSIONS"] = str(override)
         self.assertEqual(dispatcher_tui._sessions_roots(), [override])
         with mock.patch.object(discover, "CODEX_SESSIONS", override):
             self.rollout(self.data_home, "data-head", turn_at=datetime.now(UTC))

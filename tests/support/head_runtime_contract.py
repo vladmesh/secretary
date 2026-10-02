@@ -31,7 +31,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from secretary.runtime.head import (
+from ummanu.runtime.head import (
     EXITED,
     HEAD_ALIVE,
     HEAD_BUSY,

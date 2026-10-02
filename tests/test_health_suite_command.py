@@ -47,7 +47,7 @@ import tests.broad
 
 print("tests-imported=%s" % ("tests" in sys.modules))
 print("patched=%s" % Path(os.environ.get("TA_PIPELINE_STATE_DIR", "")).name.startswith(
-    "secretary-tests-pipeline-state."
+    "ummanu-tests-pipeline-state."
 ))
 print("no-test-module-imported=%s" % (not any(
     name == "tests.test" or name.startswith("tests.test_") for name in sys.modules
@@ -103,7 +103,7 @@ class DocumentedHealthSuiteCommandTests(unittest.TestCase):
         self.assertTrue(
             outcome["no-test-module-imported"],
             "the default must be installed by the package import itself, not by whichever test "
-            "module happens to be imported first — that accident is secretary-748",
+            "module happens to be imported first — that accident is ummanu-748",
         )
         self.assertTrue(
             outcome["names-a-suite"],

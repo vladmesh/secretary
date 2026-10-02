@@ -14,11 +14,11 @@ import zlib
 from pathlib import Path
 from unittest import mock
 
-from secretary import state_repo
-from secretary.checkpoint import CheckpointWriter
-from secretary.cli import main
-from secretary.config import validate_instance
-from secretary.host import (
+from ummanu import state_repo
+from ummanu.checkpoint import CheckpointWriter
+from ummanu.cli import main
+from ummanu.config import validate_instance
+from ummanu.host import (
     Expectations,
     LiveHostSource,
     SystemdLayout,
@@ -28,14 +28,14 @@ from secretary.host import (
     load_packaged_units,
     packaging_root,
 )
-from secretary.host_apply import resolve_packaged
-from secretary.infra import instance_maintenance
-from secretary.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
+from ummanu.host_apply import resolve_packaged
+from ummanu.infra import instance_maintenance
+from ummanu.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UNITS = REPO_ROOT / "packaging" / "systemd"
-SERVICE = "secretary-instance-maintenance.service"
-TIMER = "secretary-instance-maintenance.timer"
+SERVICE = "ummanu-instance-maintenance.service"
+TIMER = "ummanu-instance-maintenance.timer"
 
 
 def _git(root: Path, *args: str) -> str:
@@ -485,7 +485,7 @@ class MaintenanceUnitTests(unittest.TestCase):
     def _rendered(self) -> dict[str, bytes]:
         units = load_packaged_units(
             UNITS,
-            "secretary-",
+            "ummanu-",
             SystemdLayout(
                 REPO_ROOT, Path("/srv/instance"), Path("/srv/data"), "operator", Path("/home/operator")
             ),
@@ -498,7 +498,7 @@ class MaintenanceUnitTests(unittest.TestCase):
         self.assertIn("Type=oneshot\n", service)
         self.assertIn("User=operator\n", service)
         self.assertIn(
-            f"ExecStart={REPO_ROOT}/.venv/bin/secretary instance-maintenance --instance /srv/instance\n",
+            f"ExecStart={REPO_ROOT}/.venv/bin/ummanu instance-maintenance --instance /srv/instance\n",
             service,
         )
         self.assertIn("IOSchedulingClass=idle\n", service)
@@ -522,17 +522,17 @@ class MaintenanceUnitTests(unittest.TestCase):
         self.assertIn("WantedBy=timers.target\n", timer)
 
     def test_the_plan_owns_both_units_unless_the_component_is_opted_out(self):
-        units = load_packaged_units(UNITS, "secretary-")
+        units = load_packaged_units(UNITS, "ummanu-")
         planned = {
             resource.name
-            for resource in build_plan({"host": {"unit_prefix": "secretary-"}}, [], packaged=units)
+            for resource in build_plan({"host": {"unit_prefix": "ummanu-"}}, [], packaged=units)
         }
         opted_out = {
             resource.name
             for resource in build_plan(
                 {
                     "host": {
-                        "unit_prefix": "secretary-",
+                        "unit_prefix": "ummanu-",
                         "components": {"instance-maintenance": {"enabled": False}},
                     }
                 },
@@ -552,7 +552,7 @@ class MaintenanceStatusTests(unittest.TestCase):
         instance = REPO_ROOT / "examples" / "instance"
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(REPO_ROOT)}),
+            mock.patch.dict(os.environ, {"UMMANU_REPO": str(REPO_ROOT)}),
         ):
             fixture = Path(tmp)
             report = validate_instance(instance)
@@ -615,7 +615,7 @@ class MaintenanceStatusTests(unittest.TestCase):
 
         expected = Expectations(
             units={TIMER, SERVICE},
-            unit_prefix="secretary-",
+            unit_prefix="ummanu-",
             unit_runtime={TIMER: (True, True), SERVICE: (False, False)},
         )
         result = RuntimeHost().collect(expected)

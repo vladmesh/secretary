@@ -19,15 +19,15 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary.dispatch.runtime import DispatcherRuntime
-from secretary.tasks import TaskReader, TaskWriter, task_audit_for
-from secretary.webproto.pause_ops import PauseOperationLayer
-from secretary.webproto.pause_reads import PauseReadLayer
 from tests.fakes.dispatcher import FakeCatalog, FakeHost, FakeSprints
 from tests.webproto_sprint_fixtures import SprintProtocolFixture
+from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.tasks import TaskReader, TaskWriter, task_audit_for
+from ummanu.webproto.pause_ops import PauseOperationLayer
+from ummanu.webproto.pause_reads import PauseReadLayer
 
 #: The card the fixture's Pipeline board already holds, in Ready.
-EXISTING_CARD = "secretary-12"
+EXISTING_CARD = "ummanu-12"
 
 
 class PauseProtocolFixture(SprintProtocolFixture):
@@ -43,7 +43,7 @@ class PauseProtocolFixture(SprintProtocolFixture):
         # directory the whole test process shares, and the next suite to ask whether the pipeline
         # is paused would be answered by this one's drain (`tests/test_hermetic_pipeline_state.py`).
         legacy = mock.patch.dict(
-            os.environ, {"SECRETARY_LEGACY_PAUSE_FILE": str(self.tmp / "legacy-pause.json")}
+            os.environ, {"UMMANU_LEGACY_PAUSE_FILE": str(self.tmp / "legacy-pause.json")}
         )
         legacy.start()
         self.addCleanup(legacy.stop)
@@ -56,7 +56,7 @@ class PauseProtocolFixture(SprintProtocolFixture):
             self.data_dir,
             FakeCatalog(instance_dir=self.instance),  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
-            owner="secretary-dispatcher",
+            owner="ummanu-dispatcher",
             sprints=FakeSprints(),
         )
 

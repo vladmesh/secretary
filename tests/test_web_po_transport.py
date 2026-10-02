@@ -18,15 +18,15 @@ from threading import Thread
 from typing import Any, ClassVar
 from urllib.parse import urlencode
 
-from secretary.config import validate
-from secretary.po import token as po_token
-from secretary.po.models import DEFAULT_EFFORTS, DEFAULT_MODELS, efforts_from_instance, models_from_instance
-from secretary.web import pages
-from secretary.web.app import PO_FORM_FIELDS, PO_OPEN_ROUTES, ROUTES, WebApp, requires_po_token
-from secretary.web.server import build_server
-from secretary.webproto.errors import InstallationUnavailable, RuntimeUnavailable
-from secretary.webproto.po_auth import PoTokenLayer
 from tests.web_fakes import Recording, system_snapshot
+from ummanu.config import validate
+from ummanu.po import token as po_token
+from ummanu.po.models import DEFAULT_EFFORTS, DEFAULT_MODELS, efforts_from_instance, models_from_instance
+from ummanu.web import pages
+from ummanu.web.app import PO_FORM_FIELDS, PO_OPEN_ROUTES, ROUTES, WebApp, requires_po_token
+from ummanu.web.server import build_server
+from ummanu.webproto.errors import InstallationUnavailable, RuntimeUnavailable
+from ummanu.webproto.po_auth import PoTokenLayer
 
 PO_ROUTES = {
     ("POST", "/po/login"),
@@ -289,7 +289,7 @@ class PoRequestIdCoverageTests(PoGateFixture):
 
     def test_sessions_turns_and_request_rows_are_written_only_inside_the_request_transaction(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        store = root / "src" / "secretary" / "po" / "store.py"
+        store = root / "src" / "ummanu" / "po" / "store.py"
         tree = ast.parse(store.read_text(encoding="utf-8"))
         inserts: dict[str, set[str]] = {"po_sessions": set(), "po_turns": set(), "po_requests": set()}
         recorders: set[str] = set()

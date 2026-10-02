@@ -19,7 +19,7 @@ class DeadPaneDeferralTests(unittest.TestCase):
         banned = (
             "HeadPaneBusy",
             "HeadPaneNotReady",
-            "SECRETARY_BRINGUP_DEFER_ATTEMPTS",
+            "UMMANU_BRINGUP_DEFER_ATTEMPTS",
             "pane_never_ready",
         )
         for directory in (ROOT / "src", ROOT / "docs"):
@@ -50,14 +50,14 @@ LEGACY_FLAT_MODULES = frozenset(
     """.split()
 )
 
-# The background agents (curator, retro, steward) are `secretary.automations`, built on top of the
-# rest of `secretary`: the package may import any `secretary` module, and no other `secretary` module
-# imports it back. The one admitted edge is the `automations` subcommand of `secretary.cli`, which
+# The background agents (curator, retro, steward) are `ummanu.automations`, built on top of the
+# rest of `ummanu`: the package may import any `ummanu` module, and no other `ummanu` module
+# imports it back. The one admitted edge is the `automations` subcommand of `ummanu.cli`, which
 # hands its argv to the composition root through an import inside the handler, so no other command
 # pays for the agents' wiring. The package was the top-level `triggered_agents` until sprint:1459;
 # that name must not come back anywhere.
-AUTOMATIONS_PACKAGE = "secretary.automations"
-AUTOMATIONS_ENTRY = "src/secretary/cli.py"
+AUTOMATIONS_PACKAGE = "ummanu.automations"
+AUTOMATIONS_ENTRY = "src/ummanu/cli.py"
 RETIRED_AGENTS_PACKAGE = "triggered_agents"
 
 
@@ -93,18 +93,18 @@ def _imports_retired_agents_package(relative: str, source: str) -> list[str]:
 
 
 def _imports_automations(relative: str, source: str) -> list[str]:
-    """Every back edge from a `secretary` module outside the agents into `secretary.automations`."""
-    if relative.startswith("src/secretary/automations/"):
+    """Every back edge from a `ummanu` module outside the agents into `ummanu.automations`."""
+    if relative.startswith("src/ummanu/automations/"):
         return []
     offenders: set[str] = set()
     for node, module, top_level in _absolute_imports(relative, source):
-        # `from secretary import automations` names the package through its alias.
+        # `from ummanu import automations` names the package through its alias.
         if not _names(module, AUTOMATIONS_PACKAGE):
             continue
         if relative == AUTOMATIONS_ENTRY and not top_level:
             continue
         offenders.add(f"{relative}:{node.lineno}: {AUTOMATIONS_PACKAGE}")
-    if relative.startswith("src/secretary/"):
+    if relative.startswith("src/ummanu/"):
         tree = ast.parse(source, filename=relative)
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.level and (
@@ -115,14 +115,14 @@ def _imports_automations(relative: str, source: str) -> list[str]:
     return sorted(offenders)
 
 
-# Orca is gone from the product's own code (A20, secretary-1725): no module under `src/secretary`
+# Orca is gone from the product's own code (A20, secretary-1725): no module under `src/ummanu`
 # imports the pane host, the Orca head backend or an Orca RPC client, and no string constant in it
 # names the `orca` / `orca-cli` program. The rule scans the program name itself, wherever the string
 # sits, rather than resolving call shapes: an alias, a wrapper or a shell cannot hide a name that is
 # looked for in every constant. What is still there is on `ORCA_ALLOWLIST`, one finding each, with
 # the owner decision that keeps it. Step 9 (secretary-1726) left only two: neither runs a program.
-SOURCE_ROOT = ROOT / "src" / "secretary"
-BANNED_ORCA_MODULES = ("secretary.runtime.pane_host", "secretary.runtime.orca_legacy_head")
+SOURCE_ROOT = ROOT / "src" / "ummanu"
+BANNED_ORCA_MODULES = ("ummanu.runtime.pane_host", "ummanu.runtime.orca_legacy_head")
 BANNED_ORCA_LAST_COMPONENTS = frozenset({"pane_host", "orca_legacy_head", "orca_rpc"})
 ORCA_PROGRAMS = frozenset({"orca", "orca-cli"})
 _DOTTED_NAME = re.compile(r"\.*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*")
@@ -152,14 +152,14 @@ class OrcaFinding:
 
 ORCA_ALLOWLIST = (
     OrcaAllowance(
-        "src/secretary/host.py",
+        "src/ummanu/host.py",
         '{"unit", "orca"}',
         "orca",
         "owner decision, step 8: the legacy `orca` record kind in host-managed.json stays loadable; "
         "a kind, not a program",
     ),
     OrcaAllowance(
-        "src/secretary/upgrade.py",
+        "src/ummanu/upgrade.py",
         'workspace_root.parent.name == "orca"',
         "orca",
         "owner decision, step 11: the role worktree root `~/orca/workspaces`, compared by name; "
@@ -169,7 +169,7 @@ ORCA_ALLOWLIST = (
 
 
 def _module_of(relative: str) -> str:
-    """`src/secretary/automations/runtime/dispatch.py` -> `secretary.automations.runtime.dispatch`."""
+    """`src/ummanu/automations/runtime/dispatch.py` -> `ummanu.automations.runtime.dispatch`."""
     parts = Path(relative).with_suffix("").parts
     parts = parts[1:] if parts and parts[0] == "src" else parts
     return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
@@ -321,7 +321,7 @@ def _orca_offenders(relative: str, source: str) -> list[str]:
 
 
 class NoOrcaInSourceTests(unittest.TestCase):
-    """The one Orca rule: over every module under `src/secretary`, with one explicit allowlist."""
+    """The one Orca rule: over every module under `src/ummanu`, with one explicit allowlist."""
 
     def _sources(self):
         for path in sorted(SOURCE_ROOT.rglob("*.py")):
@@ -352,29 +352,29 @@ class NoOrcaInSourceTests(unittest.TestCase):
                 self.assertIn(allowance, excused, "no flagged line matches this entry any more")
 
     def test_each_planted_route_to_orca_fails_the_rule(self) -> None:
-        planted = "src/secretary/runtime/planted.py"
+        planted = "src/ummanu/runtime/planted.py"
         for source in (
             "import subprocess\nsubprocess.run('orca')\n",
             "import subprocess as sp\nsp.run(['orca', 'x'])\n",
             "from subprocess import run as launch\nlaunch('orca-cli')\n",
             "import subprocess\nsubprocess.run(['/bin/sh', '-c', 'orca terminal list'])\n",
             "import os\nos.system('orca')\n",
-            "from importlib import import_module\nimport_module('secretary.runtime.pane_host')\n",
+            "from importlib import import_module\nimport_module('ummanu.runtime.pane_host')\n",
             # Beyond the card's six: a later word under `-c`, a path, the imports in each form.
             "import subprocess\nsubprocess.run(['sh', '-c', 'cd /tmp && orca terminal list'])\n",
             "BIN = '/usr/local/bin/orca-cli status'\n",
-            "from secretary.runtime.pane_host import Pane\n",
+            "from ummanu.runtime.pane_host import Pane\n",
             "from ..runtime import pane_host\n",
-            "def f():\n    import secretary.runtime.orca_legacy_head\n",
+            "def f():\n    import ummanu.runtime.orca_legacy_head\n",
             "from . import orca_rpc\n",
             "from .orca_rpc import call\n",
-            "__import__('secretary.automations.runtime.orca_rpc')\n",
+            "__import__('ummanu.automations.runtime.orca_rpc')\n",
         ):
             with self.subTest(source=source):
                 self.assertTrue(_orca_offenders(planted, source), source)
 
     def test_a_path_component_or_a_longer_word_passes_the_rule(self) -> None:
-        planted = "src/secretary/runtime/planted.py"
+        planted = "src/ummanu/runtime/planted.py"
         for source in (
             "from pathlib import Path\nROOT = Path.home() / 'orca' / 'workspaces'\n",
             "import os\nROOT = os.path.join(home, 'orca')\n",
@@ -385,16 +385,16 @@ class NoOrcaInSourceTests(unittest.TestCase):
 
     def test_an_allowlisted_line_is_excused_only_in_its_own_file(self) -> None:
         line = 'if resource.kind not in {"unit", "orca"}:\n    pass\n'
-        self.assertEqual(_orca_offenders("src/secretary/host.py", line), [])
-        self.assertTrue(_orca_offenders("src/secretary/runtime/planted.py", line))
+        self.assertEqual(_orca_offenders("src/ummanu/host.py", line), [])
+        self.assertTrue(_orca_offenders("src/ummanu/runtime/planted.py", line))
 
     def test_the_allowlist_keeps_only_the_two_owner_decisions(self) -> None:
         """A20 step 9 (secretary-1726) emptied the step-9 class: no entry excuses a program."""
         self.assertEqual(
             {(allowance.path, allowance.line, allowance.value) for allowance in ORCA_ALLOWLIST},
             {
-                ("src/secretary/host.py", '{"unit", "orca"}', "orca"),
-                ("src/secretary/upgrade.py", 'workspace_root.parent.name == "orca"', "orca"),
+                ("src/ummanu/host.py", '{"unit", "orca"}', "orca"),
+                ("src/ummanu/upgrade.py", 'workspace_root.parent.name == "orca"', "orca"),
             },
         )
         for allowance in ORCA_ALLOWLIST:
@@ -406,22 +406,22 @@ class NoOrcaInSourceTests(unittest.TestCase):
         """The allowed constant is excused once; everything else the line carries is reported."""
         for path, source, expected in (
             (
-                "src/secretary/host.py",
-                'if x in {"unit", "orca"}: import secretary.runtime.pane_host\n',
-                ["imports secretary.runtime.pane_host"],
+                "src/ummanu/host.py",
+                'if x in {"unit", "orca"}: import ummanu.runtime.pane_host\n',
+                ["imports ummanu.runtime.pane_host"],
             ),
             (
-                "src/secretary/upgrade.py",
+                "src/ummanu/upgrade.py",
                 'workspace_root.parent.name == "orca"; os.system("orca-cli")\n',
                 ["names the orca program: 'orca-cli'"],
             ),
             (
-                "src/secretary/upgrade.py",
+                "src/ummanu/upgrade.py",
                 'workspace_root.parent.name == "orca"; os.system("orca")\n',
                 ["names the orca program: 'orca'"],
             ),
             (
-                "src/secretary/host.py",
+                "src/ummanu/host.py",
                 'if x in {"unit", "orca"}: subprocess.run(["sh", "-c", "orca terminal list"])\n',
                 [
                     "names the orca program: 'orca terminal list'",
@@ -434,9 +434,9 @@ class NoOrcaInSourceTests(unittest.TestCase):
                 self.assertEqual([offender.split(": ", 1)[1] for offender in offenders], expected)
 
 
-# The dispatcher state machine lives in `secretary.dispatch.runtime`. The retired flat root module
+# The dispatcher state machine lives in `ummanu.dispatch.runtime`. The retired flat root module
 # must not come back, and nothing may import it under its old name.
-RETIRED_DISPATCHER_MODULE = ("secretary", "dispatcher")
+RETIRED_DISPATCHER_MODULE = ("ummanu", "dispatcher")
 
 
 class SourceLayoutTests(unittest.TestCase):
@@ -451,13 +451,13 @@ class SourceLayoutTests(unittest.TestCase):
                     offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: {module}")
         self.assertEqual(offenders, [])
 
-    def test_new_secretary_modules_do_not_widen_the_flat_root(self) -> None:
-        current = {path.name for path in (ROOT / "src" / "secretary").glob("*.py")}
+    def test_new_ummanu_modules_do_not_widen_the_flat_root(self) -> None:
+        current = {path.name for path in (ROOT / "src" / "ummanu").glob("*.py")}
         self.assertEqual(current - LEGACY_FLAT_MODULES, set())
 
     def test_retired_dispatcher_root_module_stays_retired(self) -> None:
         """The retired flat dispatcher root module is gone and nothing imports it by its old name."""
-        self.assertFalse((ROOT / "src" / "secretary" / "dispatcher.py").exists())
+        self.assertFalse((ROOT / "src" / "ummanu" / "dispatcher.py").exists())
         retired = ".".join(RETIRED_DISPATCHER_MODULE)
         offenders: list[str] = []
         for tree_root in ("src", "tests", "scripts"):
@@ -476,11 +476,11 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertEqual(offenders, [])
 
     def test_dispatcher_claim_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(
+        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(
             encoding="utf-8"
         )
         production_source = (
-            ROOT / "src" / "secretary" / "dispatch" / "production.py"
+            ROOT / "src" / "ummanu" / "dispatch" / "production.py"
         ).read_text(encoding="utf-8")
         for helper in (
             "_failover_collapse",
@@ -493,14 +493,14 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertNotIn("runtime._claim(", production_source)
 
     def test_dispatcher_worker_launch_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(
+        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(
             encoding="utf-8"
         )
         claim_source = (
-            ROOT / "src" / "secretary" / "dispatch" / "claim.py"
+            ROOT / "src" / "ummanu" / "dispatch" / "claim.py"
         ).read_text(encoding="utf-8")
         worker_launch_source = (
-            ROOT / "src" / "secretary" / "dispatch" / "worker_launch.py"
+            ROOT / "src" / "ummanu" / "dispatch" / "worker_launch.py"
         ).read_text(encoding="utf-8")
         for helper in (
             "_launch_worker_after_claim",
@@ -517,8 +517,8 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertIn("def resolve_headless_worker(", worker_launch_source)
 
     def test_dispatcher_worker_report_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
-        report_source = (ROOT / "src" / "secretary" / "dispatch" / "worker_report.py").read_text(encoding="utf-8")
+        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
+        report_source = (ROOT / "src" / "ummanu" / "dispatch" / "worker_report.py").read_text(encoding="utf-8")
         for helper in (
             "_record_infra_completion", "_accept_stale_infrastructure_done",
             "_block_repeated_infrastructure_done", "_reject_stale_done", "_prompt_worker_report",
@@ -546,15 +546,15 @@ class SourceLayoutTests(unittest.TestCase):
         )
         for entry in ("worker_report_marker", "handle_worker_report", "prompt_worker_report"):
             self.assertIn(f"def {entry}(", report_source)
-        self.assertNotIn("from secretary.dispatch.runtime import", report_source)
+        self.assertNotIn("from ummanu.dispatch.runtime import", report_source)
 
     def test_dispatcher_gate_lifecycle_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
+        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
         gate_source = (
-            ROOT / "src" / "secretary" / "dispatch" / "gate_lifecycle.py"
+            ROOT / "src" / "ummanu" / "dispatch" / "gate_lifecycle.py"
         ).read_text(encoding="utf-8")
         gate_domain_source = (
-            ROOT / "src" / "secretary" / "dispatch" / "gate.py"
+            ROOT / "src" / "ummanu" / "dispatch" / "gate.py"
         ).read_text(encoding="utf-8")
         helpers = (
             "_run_gate",
@@ -586,12 +586,12 @@ class SourceLayoutTests(unittest.TestCase):
         ):
             self.assertIn(f"def {entry}(", gate_source)
         self.assertIn("def reset_infrastructure_reruns(", gate_domain_source)
-        self.assertNotIn("from secretary.dispatch.runtime import", gate_source)
+        self.assertNotIn("from ummanu.dispatch.runtime import", gate_source)
 
     def test_dispatcher_review_verdict_parking_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
+        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
         verdict_source = (
-            ROOT / "src" / "secretary" / "dispatch" / "review_verdict.py"
+            ROOT / "src" / "ummanu" / "dispatch" / "review_verdict.py"
         ).read_text(encoding="utf-8")
         helpers = (
             "_parks_for_decision",
@@ -617,12 +617,12 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertNotIn("\n    def _advance_assessment(", dispatcher_source)
         self.assertIn("_advance_assessment(self, task, records, payload, attempt_id)", dispatcher_source)
         self.assertNotIn("\n    def _release_parked(", dispatcher_source)
-        self.assertNotIn("from secretary.dispatch.runtime import", verdict_source)
+        self.assertNotIn("from ummanu.dispatch.runtime import", verdict_source)
 
     def test_dispatcher_assessment_decision_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
+        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
         decision_source = (
-            ROOT / "src" / "secretary" / "dispatch" / "assessment_decision.py"
+            ROOT / "src" / "ummanu" / "dispatch" / "assessment_decision.py"
         ).read_text(encoding="utf-8")
         for helper in (
             "_advance_assessment",
@@ -642,21 +642,21 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertIn("release_lifecycle.release_parked(", decision_source)
         self.assertNotIn("runtime._release_parked(", decision_source)
         self.assertNotIn("\n    def _release_parked(", dispatcher_source)
-        self.assertNotIn("from secretary.dispatch.runtime import", decision_source)
+        self.assertNotIn("from ummanu.dispatch.runtime import", decision_source)
 
     def test_dispatcher_release_completion_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
+        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
         release_source = (
-            ROOT / "src" / "secretary" / "dispatch" / "release_lifecycle.py"
+            ROOT / "src" / "ummanu" / "dispatch" / "release_lifecycle.py"
         ).read_text(encoding="utf-8")
         gate_source = (
-            ROOT / "src" / "secretary" / "dispatch" / "gate_lifecycle.py"
+            ROOT / "src" / "ummanu" / "dispatch" / "gate_lifecycle.py"
         ).read_text(encoding="utf-8")
         verdict_source = (
-            ROOT / "src" / "secretary" / "dispatch" / "review_verdict.py"
+            ROOT / "src" / "ummanu" / "dispatch" / "review_verdict.py"
         ).read_text(encoding="utf-8")
         decision_source = (
-            ROOT / "src" / "secretary" / "dispatch" / "assessment_decision.py"
+            ROOT / "src" / "ummanu" / "dispatch" / "assessment_decision.py"
         ).read_text(encoding="utf-8")
 
         for helper in (
@@ -690,12 +690,12 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertNotIn("runtime._block_merge_path(", verdict_source)
         self.assertNotIn("runtime._release_effect(", verdict_source)
         self.assertNotIn("runtime._release_parked(", decision_source)
-        self.assertNotIn("from secretary.dispatch.runtime import", release_source)
+        self.assertNotIn("from ummanu.dispatch.runtime import", release_source)
 
     def test_dispatcher_attempt_accounting_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
+        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
         accounting_source = (
-            ROOT / "src" / "secretary" / "dispatch" / "attempt_accounting.py"
+            ROOT / "src" / "ummanu" / "dispatch" / "attempt_accounting.py"
         ).read_text(encoding="utf-8")
         for helper in (
             "pending_attempt_usage",
@@ -723,7 +723,7 @@ class SourceLayoutTests(unittest.TestCase):
             "record_attempt_usage",
         ):
             self.assertIn(f"def {entry}(", accounting_source)
-        for path in (ROOT / "src" / "secretary" / "dispatch").glob("*.py"):
+        for path in (ROOT / "src" / "ummanu" / "dispatch").glob("*.py"):
             if path.name == "attempt_accounting.py":
                 continue
             source = path.read_text(encoding="utf-8")
@@ -736,12 +736,12 @@ class SourceLayoutTests(unittest.TestCase):
                 "runtime.publish_pending_attempt_usage(",
             ):
                 self.assertNotIn(legacy_call, source, path.name)
-        self.assertNotIn("from secretary.dispatch.runtime import", accounting_source)
+        self.assertNotIn("from ummanu.dispatch.runtime import", accounting_source)
 
     def test_dispatcher_wait_vitality_flow_is_package_owned(self) -> None:
-        dispatcher_source = (ROOT / "src" / "secretary" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
+        dispatcher_source = (ROOT / "src" / "ummanu" / "dispatch" / "runtime.py").read_text(encoding="utf-8")
         wait_source = (
-            ROOT / "src" / "secretary" / "dispatch" / "wait_vitality.py"
+            ROOT / "src" / "ummanu" / "dispatch" / "wait_vitality.py"
         ).read_text(encoding="utf-8")
         helpers = (
             "_decide_wait_by_verdict",
@@ -764,12 +764,12 @@ class SourceLayoutTests(unittest.TestCase):
             "reduce_and_store_vitality_episode",
         ):
             self.assertIn(f"def {entry}(", wait_source)
-        self.assertNotIn("from secretary.dispatch.runtime import", wait_source)
+        self.assertNotIn("from ummanu.dispatch.runtime import", wait_source)
 
     def test_the_retired_agents_package_stays_retired(self) -> None:
         """`src/triggered_agents` is gone, and nothing in `src/`, `tests/` or `scripts/` imports it."""
         self.assertFalse((ROOT / "src" / RETIRED_AGENTS_PACKAGE).exists())
-        self.assertTrue((ROOT / "src" / "secretary" / "automations" / "composition.py").is_file())
+        self.assertTrue((ROOT / "src" / "ummanu" / "automations" / "composition.py").is_file())
         offenders: list[str] = []
         for tree_root in ("src", "tests", "scripts"):
             for path in sorted((ROOT / tree_root).rglob("*.py")):
@@ -781,17 +781,17 @@ class SourceLayoutTests(unittest.TestCase):
         for relative, source in (
             ("tests/test_planted.py", "from triggered_agents import __main__\n"),
             ("scripts/planted.py", "import triggered_agents.runtime.dispatch as d\n"),
-            ("src/secretary/planted.py", "def f():\n    from triggered_agents.agents import x\n"),
+            ("src/ummanu/planted.py", "def f():\n    from triggered_agents.agents import x\n"),
         ):
             with self.subTest(relative):
                 self.assertEqual(len(_imports_retired_agents_package(relative, source)), 1)
         self.assertEqual(
-            _imports_retired_agents_package("tests/x.py", "from secretary.automations import composition\n"), []
+            _imports_retired_agents_package("tests/x.py", "from ummanu.automations import composition\n"), []
         )
 
-    def test_no_secretary_module_imports_the_agents_back(self) -> None:
-        """The dependency runs one way: `secretary.automations` -> the rest of `secretary`."""
-        package = ROOT / "src" / "secretary"
+    def test_no_ummanu_module_imports_the_agents_back(self) -> None:
+        """The dependency runs one way: `ummanu.automations` -> the rest of `ummanu`."""
+        package = ROOT / "src" / "ummanu"
         offenders: list[str] = []
         for path in sorted(package.rglob("*.py")):
             relative = path.relative_to(ROOT).as_posix()
@@ -804,35 +804,35 @@ class SourceLayoutTests(unittest.TestCase):
             {(module, top) for _, module, top in _absolute_imports(AUTOMATIONS_ENTRY, entry)},
         )
 
-    def test_a_planted_back_edge_is_caught_anywhere_in_secretary(self) -> None:
+    def test_a_planted_back_edge_is_caught_anywhere_in_ummanu(self) -> None:
         for relative, source in (
-            ("src/secretary/dispatch/planted.py", "from secretary.automations import __main__\n"),
-            ("src/secretary/planted.py", "import secretary.automations.runtime.dispatch as d\n"),
-            ("src/secretary/runtime/planted.py", "def f():\n    from secretary.automations.agents import x\n"),
-            ("src/secretary/board/planted.py", "from secretary import automations\n"),
-            ("src/secretary/planted.py", "from .automations import composition\n"),
-            (AUTOMATIONS_ENTRY, "from secretary.automations.composition import main\n"),
+            ("src/ummanu/dispatch/planted.py", "from ummanu.automations import __main__\n"),
+            ("src/ummanu/planted.py", "import ummanu.automations.runtime.dispatch as d\n"),
+            ("src/ummanu/runtime/planted.py", "def f():\n    from ummanu.automations.agents import x\n"),
+            ("src/ummanu/board/planted.py", "from ummanu import automations\n"),
+            ("src/ummanu/planted.py", "from .automations import composition\n"),
+            (AUTOMATIONS_ENTRY, "from ummanu.automations.composition import main\n"),
         ):
             with self.subTest(relative, source=source):
                 self.assertEqual(len(_imports_automations(relative, source)), 1)
         # The admitted directions are not back edges.
-        self.assertEqual(_imports_automations("src/secretary/x.py", "from secretary import tasks\n"), [])
+        self.assertEqual(_imports_automations("src/ummanu/x.py", "from ummanu import tasks\n"), [])
         self.assertEqual(
             _imports_automations(
-                "src/secretary/automations/composition.py", "from secretary.automations import __main__\n"
+                "src/ummanu/automations/composition.py", "from ummanu.automations import __main__\n"
             ),
             [],
         )
         self.assertEqual(
             _imports_automations(
-                AUTOMATIONS_ENTRY, "def run():\n    from secretary.automations.composition import main\n"
+                AUTOMATIONS_ENTRY, "def run():\n    from ummanu.automations.composition import main\n"
             ),
             [],
         )
 
-    def test_secretary_never_names_triggered_agents(self) -> None:
-        """`grep -rn triggered_agents src/secretary` is empty: code, data and comments alike."""
-        package = ROOT / "src" / "secretary"
+    def test_ummanu_never_names_triggered_agents(self) -> None:
+        """`grep -rn triggered_agents src/ummanu` is empty: code, data and comments alike."""
+        package = ROOT / "src" / "ummanu"
         mentions: set[str] = set()
         for path in sorted(package.rglob("*")):
             if not path.is_file() or "__pycache__" in path.parts:
@@ -843,8 +843,8 @@ class SourceLayoutTests(unittest.TestCase):
         self.assertEqual(mentions, set())
 
 
-# Every place in `secretary` that builds the *file* audit (`TaskAudit` over a data dir) rather than
-# asking `secretary.tasks.task_audit_for` for the audit owner of a card client, and the reason each
+# Every place in `ummanu` that builds the *file* audit (`TaskAudit` over a data dir) rather than
+# asking `ummanu.tasks.task_audit_for` for the audit owner of a card client, and the reason each
 # one may. `requests`/`board_events` is the card audit (`docs/BOARD_STORE.md` §7.3), so a live
 # reader built from the file journal of a data directory alone answers from a store the
 # installation does not write: on 2026-09-10 that made a committed
@@ -883,16 +883,16 @@ class FileAuditOwnershipTests(unittest.TestCase):
     """A live audit reader follows its card client, and the exceptions are named with their reasons."""
 
     def _constructions(self) -> dict[str, list[int]]:
-        """Every call of a `TaskAudit` name in `src/secretary`, by module and line."""
+        """Every call of a `TaskAudit` name in `src/ummanu`, by module and line."""
         found: dict[str, list[int]] = {}
-        for path in sorted((ROOT / "src" / "secretary").rglob("*.py")):
+        for path in sorted((ROOT / "src" / "ummanu").rglob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 if not isinstance(node, ast.Call):
                     continue
                 target = node.func
                 if isinstance(target, ast.Name) and target.id == "TaskAudit":
-                    key = str(path.relative_to(ROOT / "src" / "secretary"))
+                    key = str(path.relative_to(ROOT / "src" / "ummanu"))
                     found.setdefault(key, []).append(node.lineno)
         return found
 
@@ -903,7 +903,7 @@ class FileAuditOwnershipTests(unittest.TestCase):
             offenders,
             [],
             "these modules build the file journal's TaskAudit from a data directory instead of "
-            "asking secretary.tasks.task_audit_for for the audit owner of their card client",
+            "asking ummanu.tasks.task_audit_for for the audit owner of their card client",
         )
 
     def test_every_named_module_still_builds_one(self) -> None:
@@ -912,8 +912,8 @@ class FileAuditOwnershipTests(unittest.TestCase):
 
     def test_the_file_audit_is_gone_and_the_canon_names_its_owner(self) -> None:
         """No `TaskAudit` to build, and no canon that falls back to one (secretary-1673)."""
-        from secretary import tasks
-        from secretary.board.events import BoardEventCanon
+        from ummanu import tasks
+        from ummanu.board.events import BoardEventCanon
 
         self.assertFalse(hasattr(tasks, "TaskAudit"))
         parameters = inspect.signature(BoardEventCanon.__init__).parameters
@@ -933,14 +933,14 @@ class FileAuditOwnershipTests(unittest.TestCase):
         that has to change this list.
         """
         for module, selector in LIVE_AUDIT_SELECTORS.items():
-            source = (ROOT / "src" / "secretary" / module).read_text(encoding="utf-8")
+            source = (ROOT / "src" / "ummanu" / module).read_text(encoding="utf-8")
             with self.subTest(module=module):
                 self.assertIn(selector, source, module)
 
     def test_the_card_audit_has_one_owner(self) -> None:
         """`task_audit_for` returns the SQL audit whatever it is handed; no card writer builds a file one."""
-        from secretary.board.sql_audit import SqlTaskAudit
-        from secretary.tasks import task_audit_for
+        from ummanu.board.sql_audit import SqlTaskAudit
+        from ummanu.tasks import task_audit_for
 
         self.assertIsInstance(task_audit_for(mock.sentinel.client, "/nonexistent"), SqlTaskAudit)
         source = inspect.getsource(task_audit_for)
@@ -978,12 +978,12 @@ class FileAuditOwnershipTests(unittest.TestCase):
         module writes names its kind through a name (`BOARD_STORE_KIND`), never a store literal. The
         only literal kind is the dispatcher's own, which names no store.
         """
-        from secretary.board.backend import entity_id
+        from ummanu.board.backend import entity_id
 
         self.assertEqual(list(inspect.signature(entity_id).parameters), ["kind", "number"])
         non_store_kinds = {"dispatcher"}
         for path in _source_modules():
-            module = str(path.relative_to(ROOT / "src")).removeprefix("secretary/")
+            module = str(path.relative_to(ROOT / "src")).removeprefix("ummanu/")
             tree = ast.parse(path.read_text(encoding="utf-8"))
             backends: list[ast.AST] = []
             for node in ast.walk(tree):
@@ -1021,8 +1021,8 @@ class FileAuditOwnershipTests(unittest.TestCase):
         ids, all but three already in SQL `requests`, and those three were dispatcher records, not
         Product/Issue ones; `board/pending-audit` was empty (secretary-1670).
         """
-        from secretary.board.sql_audit import SqlTaskAudit
-        from secretary.product_issues import ProductIssueStore
+        from ummanu.board.sql_audit import SqlTaskAudit
+        from ummanu.product_issues import ProductIssueStore
 
         self.assertFalse(hasattr(ProductIssueStore, "_require_sql_legacy_namespace_free"))
         self.assertNotIn("legacy_audit", inspect.getsource(ProductIssueStore))
@@ -1031,7 +1031,7 @@ class FileAuditOwnershipTests(unittest.TestCase):
 
     def test_the_sprint_traversal_cannot_be_built_from_a_data_directory(self) -> None:
         """`_AuditOnce` takes records or an audit owner, and has no directory to fall back to."""
-        from secretary.sprints import _AuditOnce
+        from ummanu.sprints import _AuditOnce
 
         parameters = inspect.signature(_AuditOnce.__init__).parameters
         self.assertEqual([name for name in parameters if name != "self"], ["events", "audit"])
@@ -1048,13 +1048,13 @@ class IndirectFileAuditReaderTests(unittest.TestCase):
     """
 
     def test_the_file_event_reader_is_gone(self) -> None:
-        from secretary.webproto import journal
+        from ummanu.webproto import journal
 
         self.assertFalse(hasattr(journal, "EventJournal"))
 
     def test_the_read_layer_selects_its_event_reader_from_its_client(self) -> None:
         """Both card-event operations read the owner the client names, and neither a file by default."""
-        source = (ROOT / "src" / "secretary" / "webproto" / "reads.py").read_text(encoding="utf-8")
+        source = (ROOT / "src" / "ummanu" / "webproto" / "reads.py").read_text(encoding="utf-8")
         self.assertIn("task_audit_for(", source)
         self.assertIn("CommittedAudit(", source)
         for operation in ("def task_snapshot", "def task_events"):
@@ -1065,7 +1065,7 @@ class IndirectFileAuditReaderTests(unittest.TestCase):
 
     def test_the_sql_reader_never_touches_a_path(self) -> None:
         """`CommittedAudit` has no data directory to read: it pages what its audit owner traverses."""
-        from secretary.webproto.journal import CommittedAudit
+        from ummanu.webproto.journal import CommittedAudit
 
         parameters = inspect.signature(CommittedAudit.__init__).parameters
         self.assertEqual([name for name in parameters if name != "self"], ["audit", "backend"])
@@ -1079,11 +1079,11 @@ class OneBoardClientTests(unittest.TestCase):
     """There is one board client, built in one place, and nothing in the environment selects it."""
 
     def test_the_client_is_built_from_the_instance_and_never_from_the_environment(self) -> None:
-        from secretary.board import backend
+        from ummanu.board import backend
 
         parameters = inspect.signature(backend.board_client).parameters
         self.assertEqual([name for name in parameters], ["instance_dir", "serves", "role"])
-        tree = ast.parse((ROOT / "src" / "secretary" / "board" / "backend.py").read_text(encoding="utf-8"))
+        tree = ast.parse((ROOT / "src" / "ummanu" / "board" / "backend.py").read_text(encoding="utf-8"))
         environment = [
             node.lineno
             for node in ast.walk(tree)
@@ -1097,7 +1097,7 @@ class OneBoardClientTests(unittest.TestCase):
         An alias is a board module that only imports from `sql_host`: the shape the old host module
         would keep if it stayed behind as a compatibility name.
         """
-        board = ROOT / "src" / "secretary" / "board"
+        board = ROOT / "src" / "ummanu" / "board"
         self.assertTrue((board / "sql_host.py").exists())
         aliases: list[str] = []
         for path in sorted(board.glob("*.py")):
@@ -1105,7 +1105,7 @@ class OneBoardClientTests(unittest.TestCase):
                 continue
             body = ast.parse(path.read_text(encoding="utf-8")).body
             imports_host = any(
-                isinstance(node, ast.ImportFrom) and node.module == "secretary.board.sql_host" for node in body
+                isinstance(node, ast.ImportFrom) and node.module == "ummanu.board.sql_host" for node in body
             )
             only_imports = all(
                 isinstance(node, (ast.Import, ast.ImportFrom))
@@ -1128,15 +1128,15 @@ if __name__ == "__main__":
 # One home for each of these. A second copy is how the role environment ended up with a façade and
 # two entry points (issue:a45731709558936b7b6a, secretary-1683): each lived where its first caller
 # was, and the next caller copied rather than imported.
-ROLE_ENV_HOME = "secretary/runtime/role_env.py"
+ROLE_ENV_HOME = "ummanu/runtime/role_env.py"
 # The one writer of `resource_health.json`, and the only module that may name the file: every reader
 # resolves it through `head_health.resource_health_path`.
-HEAD_HEALTH_HOME = "secretary/head_health.py"
+HEAD_HEALTH_HOME = "ummanu/head_health.py"
 RESOURCE_HEALTH_FILE = "resource_health.json"
 SINGLE_HOME_ASSIGNMENTS = {
     "ROLE_ALLOWLIST": ROLE_ENV_HOME,
     "SENSITIVE_ENV_NAME_RE": ROLE_ENV_HOME,
-    "CODEX_EFFORTS": "secretary/runtime/head/command.py",
+    "CODEX_EFFORTS": "ummanu/runtime/head/command.py",
     # The resource-health vocabulary. A second writer once kept its own GREEN/RED cache beside it
     # (`triggered_agents/agents/pipeline/health.py`, gone in secretary-1690).
     "LAUNCH_ALLOWED_STATUSES": HEAD_HEALTH_HOME,
@@ -1146,7 +1146,7 @@ SINGLE_HOME_ASSIGNMENTS = {
 SINGLE_HOME_FUNCTIONS = {
     "is_sensitive_env_name": ROLE_ENV_HOME,
     # The board's batched transport; the JSON-RPC Kanboard client that had its own is gone.
-    "call_batch": "secretary/board/sql_cards.py",
+    "call_batch": "ummanu/board/sql_cards.py",
 }
 
 
@@ -1213,30 +1213,30 @@ class SingleHomeTests(unittest.TestCase):
 
     def test_each_second_copy_is_caught(self) -> None:
         probes = {
-            "role_env module": ("secretary/automations/runtime/role_env.py", "X = 1\n"),
-            "ROLE_ALLOWLIST": ("secretary/session.py", "ROLE_ALLOWLIST = {}\n"),
-            "SENSITIVE_ENV_NAME_RE": ("secretary/tasks.py", "SENSITIVE_ENV_NAME_RE = None\n"),
+            "role_env module": ("ummanu/automations/runtime/role_env.py", "X = 1\n"),
+            "ROLE_ALLOWLIST": ("ummanu/session.py", "ROLE_ALLOWLIST = {}\n"),
+            "SENSITIVE_ENV_NAME_RE": ("ummanu/tasks.py", "SENSITIVE_ENV_NAME_RE = None\n"),
             "sensitive-name pattern": (
-                "secretary/automations/runtime/scrub.py",
+                "ummanu/automations/runtime/scrub.py",
                 'import re\nNAMES = re.compile(r"(^|_)(TOKEN|SECRET)(_|$)")\n',
             ),
             "def is_sensitive_env_name": (
-                "secretary/checkpoint.py",
+                "ummanu/checkpoint.py",
                 "def is_sensitive_env_name(n):\n    return n\n",
             ),
-            "CODEX_EFFORTS": ("secretary/dispatch/launcher.py", "CODEX_EFFORTS: dict = {}\n"),
+            "CODEX_EFFORTS": ("ummanu/dispatch/launcher.py", "CODEX_EFFORTS: dict = {}\n"),
             "LAUNCH_ALLOWED_STATUSES": (
-                "secretary/automations/runtime/dispatch.py",
+                "ummanu/automations/runtime/dispatch.py",
                 'LAUNCH_ALLOWED_STATUSES = frozenset({"green"})\n',
             ),
-            "PROBE_TTL_SECONDS": ("secretary/runtime/resource_probe.py", "PROBE_TTL_SECONDS = 300\n"),
+            "PROBE_TTL_SECONDS": ("ummanu/runtime/resource_probe.py", "PROBE_TTL_SECONDS = 300\n"),
             # The shape the deleted second writer had: its own cache file next to its own state.
             "resource-health file": (
-                "secretary/automations/agents/pipeline/health.py",
+                "ummanu/automations/agents/pipeline/health.py",
                 'from pathlib import Path\nHEALTH_FILE = Path("state") / "resource_health.json"\n',
             ),
             "def call_batch": (
-                "secretary/board/kanboard.py",
+                "ummanu/board/kanboard.py",
                 "class Client:\n    def call_batch(self, calls):\n        return []\n",
             ),
         }
@@ -1250,13 +1250,13 @@ class SingleHomeTests(unittest.TestCase):
             _second_copies(
                 {
                     ROLE_ENV_HOME: 'ROLE_ALLOWLIST = {}\nSENSITIVE_ENV_NAME_RE = r"(^|_)(TOKEN)(_|$)"\n',
-                    "secretary/board/sql_cards.py": "def call_batch(calls):\n    return []\n",
+                    "ummanu/board/sql_cards.py": "def call_batch(calls):\n    return []\n",
                     HEAD_HEALTH_HOME: (
                         'PROBE_BROKEN = "probe_broken"\n'
                         'def resource_health_path(d):\n    return d / "dispatcher" / "resource_health.json"\n'
                     ),
                     # A reader that mentions the file in prose is not a writer.
-                    "secretary/automations/agents/steward/signals.py": '"""Reads the resource_health.json cache."""\n',
+                    "ummanu/automations/agents/steward/signals.py": '"""Reads the resource_health.json cache."""\n',
                 }
             ),
             [],

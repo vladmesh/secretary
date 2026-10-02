@@ -18,11 +18,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest import mock
 
-from secretary.board.e2e_record import e2e_state
-from secretary.board.owner_events import OwnerEventStore
-from secretary.board.wait_card import wait_spec, wait_state
-from secretary.dispatch import e2e_stage
-from secretary.tasks import TaskWriter
 from tests.dispatcher_fixtures import CARD_REF
 from tests.e2e_stage_fixtures import (
     BRANCH,
@@ -37,6 +32,11 @@ from tests.e2e_stage_fixtures import (
 )
 from tests.integration_setup import require_disposable_board_fixture
 from tests.sql_backend_fixtures import PostgresBoard
+from ummanu.board.e2e_record import e2e_state
+from ummanu.board.owner_events import OwnerEventStore
+from ummanu.board.wait_card import wait_spec, wait_state
+from ummanu.dispatch import e2e_stage
+from ummanu.tasks import TaskWriter
 
 
 def setUpModule() -> None:
@@ -370,7 +370,7 @@ class E2eStageTests(E2eStageFixture, unittest.TestCase):
         crashed: list[str] = []
 
         def crash_on_the_wait_ref(writer: TaskWriter, **fields: Any) -> None:
-            if not crashed and '"wait_ref":"secretary-' in fields["state"]:
+            if not crashed and '"wait_ref":"ummanu-' in fields["state"]:
                 crashed.append(fields["state"])
                 raise SimulatedCrash("the dispatcher died before recording the wait card")
             record(writer, **fields)
@@ -443,7 +443,7 @@ class E2eStageTests(E2eStageFixture, unittest.TestCase):
         self.to_waiting()
         wait = self.wait_ref()
         later = datetime.now(UTC) + timedelta(hours=3)
-        with mock.patch("secretary.dispatch.wait_cards.utcnow", return_value=later):
+        with mock.patch("ummanu.dispatch.wait_cards.utcnow", return_value=later):
             self.assertEqual(self.tick_wait()["action"], "wait-ended")
         self.assertEqual(wait_state(self.reader.show(wait)).result["outcome"], "deadline_passed")
 
@@ -521,7 +521,7 @@ class E2eStageTests(E2eStageFixture, unittest.TestCase):
             ]
         }
         self.writer.record_e2e_state(
-            role="dispatcher", actor="secretary-pilot", reference=CARD_REF, state=json.dumps(previous)
+            role="dispatcher", actor="ummanu-pilot", reference=CARD_REF, state=json.dumps(previous)
         )
         self._run_worker_to_validate()
 

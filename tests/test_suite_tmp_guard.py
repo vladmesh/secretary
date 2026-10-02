@@ -1,8 +1,8 @@
 """The test run leaves the host's temporary directory as it found it (secretary-1663).
 
 `tests/__init__.py` claims one temporary root for the whole run, points TMPDIR and `tempfile` at it,
-and at exit fails the run when a `secretary-*` or `orca-*` entry is still in it. Before that, one
-module alone had left 1,320 `secretary-web-process-coherence-*` directories in the production host's
+and at exit fails the run when a `ummanu-*` or `orca-*` entry is still in it. Before that, one
+module alone had left 1,320 `ummanu-web-process-coherence-*` directories in the production host's
 `/tmp`, one batch per suite run. These tests hold both halves: the redirect is in force, and a run
 that leaks fails, names the entry, and still leaves the host's temporary directory empty.
 """
@@ -29,21 +29,21 @@ class SuiteTemporaryRootTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as scratch:
             self.assertEqual(Path(scratch).parent, root)
 
-    def test_only_secretary_and_orca_entries_count_as_leaks(self) -> None:
+    def test_only_ummanu_and_orca_entries_count_as_leaks(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
             root = Path(scratch)
             for name in (
-                "secretary-web-process-coherence-abc",
+                "ummanu-web-process-coherence-abc",
                 "orca-watcher-canary-x",
                 "tmpabc123",
-                "secretary-agent-prompt-locks",
+                "ummanu-agent-prompt-locks",
             ):
                 (root / name).mkdir()
-            (root / "secretary-report.md").write_text("", encoding="utf-8")
+            (root / "ummanu-report.md").write_text("", encoding="utf-8")
 
             self.assertEqual(
                 tests.suite_tmp_leaks(root),
-                ["orca-watcher-canary-x", "secretary-report.md", "secretary-web-process-coherence-abc"],
+                ["orca-watcher-canary-x", "ummanu-report.md", "ummanu-web-process-coherence-abc"],
             )
         self.assertEqual(tests.suite_tmp_leaks(root), [])
 
@@ -71,19 +71,19 @@ class SuiteTemporaryGuardProcessTests(unittest.TestCase):
         return done, left
 
     def test_a_run_that_cleans_up_exits_as_it_would_and_leaves_nothing(self) -> None:
-        done, left = self.run_child("with tempfile.TemporaryDirectory(prefix='secretary-clean-'):\n    pass")
+        done, left = self.run_child("with tempfile.TemporaryDirectory(prefix='ummanu-clean-'):\n    pass")
 
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(left, [])
 
     def test_a_leaking_run_fails_names_the_entry_and_still_leaves_nothing(self) -> None:
         done, left = self.run_child(
-            "tempfile.mkdtemp(prefix='secretary-leaked-')\ntempfile.mkdtemp(prefix='unrelated-')"
+            "tempfile.mkdtemp(prefix='ummanu-leaked-')\ntempfile.mkdtemp(prefix='unrelated-')"
         )
 
         self.assertEqual(done.returncode, 1)
         self.assertIn("left temporary entries behind", done.stderr)
-        self.assertIn("secretary-leaked-", done.stderr)
+        self.assertIn("ummanu-leaked-", done.stderr)
         self.assertNotIn("unrelated-", done.stderr)
         self.assertEqual(left, [])
 

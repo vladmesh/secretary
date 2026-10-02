@@ -8,11 +8,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import cli, status, upgrade
-from secretary.host_apply import SystemdUnitInstaller
-from secretary.runtime.head.memory import scope_unit
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.runtime_scope_fixtures import host_fixture
+from ummanu import cli, status, upgrade
+from ummanu.host_apply import SystemdUnitInstaller
+from ummanu.runtime.head.memory import scope_unit
 
 root, data, run_id = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
 unit = scope_unit(run_id)
@@ -62,7 +62,7 @@ if run_id not in [row["run_id"] for row in snapshot["host"]["runtime_scopes"]]:
 # before it can terminate the fixture.
 native_product = root / "native-product"
 (native_product / "packaging/systemd").mkdir(parents=True)
-native_instance = {**instance, "host": {"unit_prefix": "secretary-head-",
+native_instance = {**instance, "host": {"unit_prefix": "ummanu-head-",
                                        "components": {"dispatcher-production": {"enabled": False}}}}
 native_report = SimpleNamespace(**{**vars(report), "instance": native_instance, "host": native_instance["host"]})
 (data / "host-managed.json").write_text('{"version":1,"resources":[]}\n')

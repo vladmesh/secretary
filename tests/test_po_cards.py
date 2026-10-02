@@ -22,33 +22,6 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from secretary.board.completion_evidence import (
-    NO_CANDIDATE_KINDS,
-    has_candidate,
-    missing_completion_evidence,
-    po_completion_fields,
-    po_completion_record,
-    render_po_completion_record,
-    review_required,
-)
-from secretary.board.models import Actor, CardState, EntityKind, Event
-from secretary.board.task_routing import TaskMetadata, TaskReview, TaskType, default_review
-from secretary.board.transitions import transition_for
-from secretary.cli import main
-from secretary.dispatch.po_cards import (
-    PO_BLOCKED_ACTION,
-    PO_SUBMITTED,
-    _po_record,
-    complete_command,
-)
-from secretary.dispatch.production import ProbeAbort, _probe_runtime
-from secretary.dispatch.runtime import DispatcherRuntime
-from secretary.dispatch.state import DispatcherRecord, attempt_request_id
-from secretary.po import store as po_store
-from secretary.po.client import OutcomeUnknown
-from secretary.po.service import listening
-from secretary.po.sprints import SprintRecord
-from secretary.tasks import TaskError, TaskWriter, is_significant_card_event, is_significant_observer_event
 from tests.po_card_fakes import (
     DECISION_BODY,
     OPERATION_BODY,
@@ -59,6 +32,33 @@ from tests.po_card_fakes import (
 )
 from tests.po_cli_fakes import eventually
 from tests.po_fake_store import FakePoStore, FakeSprints
+from ummanu.board.completion_evidence import (
+    NO_CANDIDATE_KINDS,
+    has_candidate,
+    missing_completion_evidence,
+    po_completion_fields,
+    po_completion_record,
+    render_po_completion_record,
+    review_required,
+)
+from ummanu.board.models import Actor, CardState, EntityKind, Event
+from ummanu.board.task_routing import TaskMetadata, TaskReview, TaskType, default_review
+from ummanu.board.transitions import transition_for
+from ummanu.cli import main
+from ummanu.dispatch.po_cards import (
+    PO_BLOCKED_ACTION,
+    PO_SUBMITTED,
+    _po_record,
+    complete_command,
+)
+from ummanu.dispatch.production import ProbeAbort, _probe_runtime
+from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.dispatch.state import DispatcherRecord, attempt_request_id
+from ummanu.po import store as po_store
+from ummanu.po.client import OutcomeUnknown
+from ummanu.po.service import listening
+from ummanu.po.sprints import SprintRecord
+from ummanu.tasks import TaskError, TaskWriter, is_significant_card_event, is_significant_observer_event
 
 
 class ClaimAndSubmitTests(DispatcherFixture):
@@ -137,7 +137,7 @@ class ClaimAndSubmitTests(DispatcherFixture):
         self.assertEqual(positions, sorted(positions))
         self.assertEqual(
             complete_command(REF, "decision", submission.complete_request_id),
-            f"python3 -P -m secretary task complete --ref {REF} --role po --kind decision --body-file <file> "
+            f"python3 -P -m ummanu task complete --ref {REF} --role po --kind decision --body-file <file> "
             f"--request-id {submission.complete_request_id}",
         )
 
@@ -319,7 +319,7 @@ class SettleTests(DispatcherFixture):
 class DispatcherEntryTests(unittest.TestCase):
     def test_the_tick_hands_a_po_card_to_its_own_lane_before_any_head_path(self) -> None:
         runtime = SimpleNamespace()
-        with mock.patch("secretary.dispatch.runtime._advance_po_card", return_value={"action": "po"}) as lane:
+        with mock.patch("ummanu.dispatch.runtime._advance_po_card", return_value={"action": "po"}) as lane:
             for kind in ("decision", "operation"):
                 outcome = DispatcherRuntime._tick_task(runtime, card(kind, state="in_progress"), {}, {}, "a-1")
                 self.assertEqual(outcome, {"action": "po"})
@@ -363,7 +363,7 @@ class CreateValidationTests(unittest.TestCase):
 
     def create(self, kind: str, role: str = "observer", **fields: Any) -> dict:
         return self.writer.create(
-            role=role, actor=role, project="secretary", task_type=kind, title="T", **fields
+            role=role, actor=role, project="ummanu", task_type=kind, title="T", **fields
         )
 
     def test_every_refused_flag_and_the_missing_sprint_is_refused_with_a_reason(self) -> None:
@@ -374,7 +374,7 @@ class CreateValidationTests(unittest.TestCase):
                 ({"sprint": SPRINT, "review_head": "claude-opus"}, "takes no --review-head"),
                 ({"sprint": SPRINT, "review": "required"}, "takes no --review required"),
                 ({"sprint": SPRINT, "live_impact": True}, "takes no --live-impact"),
-                ({"sprint": SPRINT, "seed_ref": "abc123", "supersedes": "secretary-1"}, "takes no --seed-ref"),
+                ({"sprint": SPRINT, "seed_ref": "abc123", "supersedes": "ummanu-1"}, "takes no --seed-ref"),
                 ({"sprint": SPRINT, "base_branch": "main"}, "takes no --base-branch"),
             ):
                 for role in ("observer", "po"):
@@ -407,13 +407,13 @@ class CreateValidationTests(unittest.TestCase):
             writer.return_value.create.return_value = {"action": "created"}
             with (
                 tempfile.TemporaryDirectory() as tmp,
-                mock.patch("secretary.task_commands.TaskWriter", writer),
-                mock.patch("secretary.task_commands.card_client"),
+                mock.patch("ummanu.task_commands.TaskWriter", writer),
+                mock.patch("ummanu.task_commands.card_client"),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 code = main(
                     ["task", "create", "--role", "observer", "--instance", tmp, "--data-dir", tmp,
-                     "--project", "secretary", "--type", kind, "--title", "T", "--sprint", SPRINT]
+                     "--project", "ummanu", "--type", kind, "--title", "T", "--sprint", SPRINT]
                 )
             self.assertEqual(code, 0)
             kwargs = writer.return_value.create.call_args.kwargs
@@ -423,8 +423,8 @@ class CreateValidationTests(unittest.TestCase):
         writer.return_value.complete.return_value = {"action": "completed"}
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch("secretary.task_commands.TaskWriter", writer),
-            mock.patch("secretary.task_commands.card_client"),
+            mock.patch("ummanu.task_commands.TaskWriter", writer),
+            mock.patch("ummanu.task_commands.card_client"),
             contextlib.redirect_stdout(io.StringIO()),
         ):
             body = f"{tmp}/body.md"
@@ -494,7 +494,7 @@ class TaskCompleteTests(unittest.TestCase):
         stored = {**self.card, "comments": [{"marker": "po", "body": comment}]}
         self.assertEqual(
             po_completion_record(stored),
-            {"Decision": "Ship the narrow cut.", "How to verify": "`secretary sprint show --ref sprint:1`"},
+            {"Decision": "Ship the narrow cut.", "How to verify": "`ummanu sprint show --ref sprint:1`"},
         )
 
     def test_the_same_id_with_another_record_is_a_conflict(self) -> None:

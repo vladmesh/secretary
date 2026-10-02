@@ -2,7 +2,7 @@
 
 The three reads DoD 11 of sprint:1469 renders: a card's `origin`, `wait` and `e2e` blocks in its task
 snapshot; the cards a PO session delegated, from one board listing; and `work.waiting_on` of
-`secretary sprint status`, derived from the sprint's live cards and nothing else. The board is a
+`ummanu sprint status`, derived from the sprint's live cards and nothing else. The board is a
 throwaway card store (`tests/sql_backend_fixtures.py`); the metadata is written as the writers write
 it, into the extension bag.
 """
@@ -17,18 +17,18 @@ import unittest
 from datetime import UTC, datetime
 from pathlib import Path
 
-from secretary.board.owner_handover import WAITING_OWNER, WAITING_OWNER_BY, WAITING_OWNER_REASON
-from secretary.board.po_origin import PO_ORIGIN, PO_RETURN, origin_text
-from secretary.board.wait_card import WAIT_SPEC, WAIT_STATE, build_wait_spec
-from secretary.cli import main
-from secretary.config import validate
-from secretary.webproto.reads import ReadLayer
 from tests.fakes.dispatcher import dispatcher_seed
 from tests.sql_backend_fixtures import card_store
 from tests.webproto_sprint_fixtures import SprintProtocolFixture
+from ummanu.board.owner_handover import WAITING_OWNER, WAITING_OWNER_BY, WAITING_OWNER_REASON
+from ummanu.board.po_origin import PO_ORIGIN, PO_RETURN, origin_text
+from ummanu.board.wait_card import WAIT_SPEC, WAIT_STATE, build_wait_spec
+from ummanu.cli import main
+from ummanu.config import validate
+from ummanu.webproto.reads import ReadLayer
 
 T0 = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
-REPO = "vladmesh/secretary"
+REPO = "vladmesh/ummanu"
 RUN_URL = f"https://github.com/{REPO}/actions/runs/4242"
 SESSION = "3f0a6c2e-origin-session"
 SUCCESSOR = "9b7d1e44-successor-session"
@@ -44,8 +44,8 @@ def _instance(root: Path, data_dir: Path) -> Path:
         "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
         encoding="utf-8",
     )
-    (instance_dir / "projects" / "secretary.yaml").write_text(
-        "id: secretary\nrepo: /projects/secretary\nenabled: true\nadapter: secretary\ndefault_branch: main\n",
+    (instance_dir / "projects" / "ummanu.yaml").write_text(
+        "id: ummanu\nrepo: /projects/ummanu\nenabled: true\nadapter: ummanu\ndefault_branch: main\n",
         encoding="utf-8",
     )
     return instance_dir
@@ -75,17 +75,17 @@ def _wait_metadata(*, result: bool = False, sprint: str = "sprint:1") -> dict[st
 
 def _e2e_metadata(*, state: str = "waiting", budget_wait: str = "") -> dict[str, str]:
     run = {
-        "dispatch_id": "secretary-520-e2e-1-00000001",
+        "dispatch_id": "ummanu-520-e2e-1-00000001",
         "sha": "0123456789abcdef0123456789abcdef01234567",
         "repo": REPO,
-        "branch": "pipeline/secretary-520",
+        "branch": "pipeline/ummanu-520",
         "workflow": "e2e.yml",
         "intent_at": "2026-09-27T12:00:00Z",
         "dispatch": "sent",
         "run_id": 4242,
         "run_url": RUN_URL,
         "head_sha": "0123456789abcdef0123456789abcdef01234567" if state != "identifying" else "",
-        "wait_ref": "secretary-530",
+        "wait_ref": "ummanu-530",
     }
     document: dict = {"runs": [run]}
     if budget_wait:
@@ -99,7 +99,7 @@ def _e2e_metadata(*, state: str = "waiting", budget_wait: str = "") -> dict[str,
 
 
 AM_RUN_URL = f"https://github.com/{REPO}/actions/runs/5150"
-AM_DISPATCH = "secretary-551-e2e-am-1-00000001"
+AM_DISPATCH = "ummanu-551-e2e-am-1-00000001"
 
 
 def _after_merge_run(**changes: object) -> dict:
@@ -108,18 +108,18 @@ def _after_merge_run(**changes: object) -> dict:
         "dispatch_id": AM_DISPATCH,
         "sha": "c0ffee0000000000000000000000000000000000",
         "repo": REPO,
-        "branch": "e2e/after-merge/secretary-551",
+        "branch": "e2e/after-merge/ummanu-551",
         "workflow": "e2e.yml",
         "intent_at": "2026-09-28T10:00:00Z",
         "dispatch": "sent",
         "run_id": 5150,
         "run_url": AM_RUN_URL,
         "head_sha": "c0ffee0000000000000000000000000000000000",
-        "wait_ref": "secretary-559",
+        "wait_ref": "ummanu-559",
         "placement": "after_merge",
         "covered": [
-            {"ref": "secretary-550", "merge_sha": "a" * 40},
-            {"ref": "secretary-551", "merge_sha": "b" * 40},
+            {"ref": "ummanu-550", "merge_sha": "a" * 40},
+            {"ref": "ummanu-551", "merge_sha": "b" * 40},
         ],
     }
     if changes.get("resolution"):
@@ -158,7 +158,7 @@ class DelegationReadFixture(unittest.TestCase):
         self, key: int, ref: str, *, session: str = SESSION, successor: str = "", **metadata
     ) -> None:
         values = {
-            "project": "secretary",
+            "project": "ummanu",
             "task_type": "decision",
             PO_ORIGIN: origin_text(session, "req-po-1"),
         }
@@ -184,13 +184,13 @@ class DelegationReadFixture(unittest.TestCase):
 
 class TaskSnapshotBlockTests(DelegationReadFixture):
     def test_the_snapshot_carries_origin_with_returns_wait_and_e2e(self) -> None:
-        self.delegated(20, "secretary-520", successor=SUCCESSOR, **_e2e_metadata())
-        self.returned("secretary-520", "evt-1", "blocked", session=SESSION, status="delivered")
+        self.delegated(20, "ummanu-520", successor=SUCCESSOR, **_e2e_metadata())
+        self.returned("ummanu-520", "evt-1", "blocked", session=SESSION, status="delivered")
         self.board.add_card(
-            21, "secretary-530", state="in_progress", metadata={"project": "secretary", **_wait_metadata()}
+            21, "ummanu-530", state="in_progress", metadata={"project": "ummanu", **_wait_metadata()}
         )
 
-        card = self.layer().task_snapshot("secretary-520")["card"]["value"]
+        card = self.layer().task_snapshot("ummanu-520")["card"]["value"]
         self.assertEqual(card["origin"]["po_session"], SESSION)
         self.assertEqual(card["origin"]["current_session"], SUCCESSOR)
         self.assertEqual(
@@ -198,27 +198,27 @@ class TaskSnapshotBlockTests(DelegationReadFixture):
             [("blocked", "delivered", SESSION)],
         )
         self.assertEqual(card["e2e"]["runs"][0]["run"], RUN_URL)
-        self.assertEqual(card["e2e"]["runs"][0]["wait_card"], "secretary-530")
+        self.assertEqual(card["e2e"]["runs"][0]["wait_card"], "ummanu-530")
         self.assertIsNone(card["wait"])
 
-        waiting = self.layer().task_snapshot("secretary-530")["card"]["value"]
+        waiting = self.layer().task_snapshot("ummanu-530")["card"]["value"]
         self.assertEqual(waiting["wait"]["state"], "waiting")
         self.assertEqual(waiting["wait"]["target"]["link"], RUN_URL)
         self.assertIsNone(waiting["origin"])
         self.assertIsNone(waiting["e2e"])
 
     def test_a_card_with_none_of_the_blocks_carries_nulls(self) -> None:
-        card = self.layer().task_snapshot("secretary-510")["card"]["value"]
+        card = self.layer().task_snapshot("ummanu-510")["card"]["value"]
         self.assertEqual((card["origin"], card["wait"], card["e2e"]), (None, None, None))
 
 
 class PoDelegatedTests(DelegationReadFixture):
     def test_the_session_lists_what_it_delegated_and_inherited_from_one_board_listing(self) -> None:
-        self.delegated(20, "secretary-520")
-        self.returned("secretary-520", "evt-1", "blocked", session=SESSION, status="delivered")
-        self.returned("secretary-520", "evt-2", "done", session=None, status=None)
-        self.delegated(21, "secretary-521", session=OTHER, successor=SESSION)
-        self.delegated(22, "secretary-522", session=OTHER)
+        self.delegated(20, "ummanu-520")
+        self.returned("ummanu-520", "evt-1", "blocked", session=SESSION, status="delivered")
+        self.returned("ummanu-520", "evt-2", "done", session=None, status=None)
+        self.delegated(21, "ummanu-521", session=OTHER, successor=SESSION)
+        self.delegated(22, "ummanu-522", session=OTHER)
         self.board.calls.clear()
         self.board.batch_calls.clear()
 
@@ -228,8 +228,8 @@ class PoDelegatedTests(DelegationReadFixture):
         self.assertEqual(
             [(item["ref"], item["relation"], item["type"], item["state"]) for item in document["items"]],
             [
-                ("secretary-520", "delegated", "decision", "in_progress"),
-                ("secretary-521", "inherited", "decision", "in_progress"),
+                ("ummanu-520", "delegated", "decision", "in_progress"),
+                ("ummanu-521", "inherited", "decision", "in_progress"),
             ],
         )
         last = document["items"][0]["last_return"]
@@ -244,7 +244,7 @@ class PoDelegatedTests(DelegationReadFixture):
         )
 
     def test_a_session_that_delegated_nothing_is_an_empty_list(self) -> None:
-        self.delegated(20, "secretary-520", session=OTHER)
+        self.delegated(20, "ummanu-520", session=OTHER)
         self.assertEqual(self.layer().po_delegated(SESSION)["items"], [])
         self.assertEqual(self.layer().po_delegated("")["items"], [])
 
@@ -261,7 +261,7 @@ class PoDelegatedTests(DelegationReadFixture):
 
 
 class SprintStatusWaitingOnTests(SprintProtocolFixture):
-    """`secretary sprint status` prints `work.waiting_on`: every kind, from the sprint's cards alone."""
+    """`ummanu sprint status` prints `work.waiting_on`: every kind, from the sprint's cards alone."""
 
     def _run(self, reference: str) -> dict:
         output, errors = io.StringIO(), io.StringIO()
@@ -283,28 +283,28 @@ class SprintStatusWaitingOnTests(SprintProtocolFixture):
 
     def _card(self, key: int, ref: str, sprint: str, state: str, **metadata: str) -> None:
         self.board.add_card(
-            key, ref, state=state, metadata={"project": "secretary", "sprint_ref": sprint, **metadata}
+            key, ref, state=state, metadata={"project": "ummanu", "sprint_ref": sprint, **metadata}
         )
 
     def test_waiting_on_names_each_run_owner_and_po_card(self) -> None:
         reference = self.reference_of(self.create())
-        self._card(40, "secretary-540", reference, "in_progress", **_wait_metadata(sprint=reference))
-        self._card(41, "secretary-541", reference, "validate", **_e2e_metadata())
-        self._card(42, "secretary-542", reference, "in_progress", task_type="decision", **_handed())
+        self._card(40, "ummanu-540", reference, "in_progress", **_wait_metadata(sprint=reference))
+        self._card(41, "ummanu-541", reference, "validate", **_e2e_metadata())
+        self._card(42, "ummanu-542", reference, "in_progress", task_type="decision", **_handed())
         self._card(
             43,
-            "secretary-543",
+            "ummanu-543",
             reference,
             "validate",
-            **_e2e_metadata(state="waiting", budget_wait="secretary-599"),
+            **_e2e_metadata(state="waiting", budget_wait="ummanu-599"),
         )
-        self._card(44, "secretary-544", reference, "in_progress", task_type="operation")
+        self._card(44, "ummanu-544", reference, "in_progress", task_type="operation")
         # Nothing to wait for: a finished wait, a code card in Ready, a decision already done.
-        self._card(45, "secretary-545", reference, "done", **_wait_metadata(result=True, sprint=reference))
-        self._card(46, "secretary-546", reference, "ready", task_type="code")
-        self._card(47, "secretary-547", reference, "done", task_type="decision", **_handed())
+        self._card(45, "ummanu-545", reference, "done", **_wait_metadata(result=True, sprint=reference))
+        self._card(46, "ummanu-546", reference, "ready", task_type="code")
+        self._card(47, "ummanu-547", reference, "done", task_type="decision", **_handed())
         # Another sprint's waiting card is not this sprint's.
-        self._card(48, "secretary-548", "", "in_progress", task_type="decision")
+        self._card(48, "ummanu-548", "", "in_progress", task_type="decision")
 
         document = self._run(reference)
         self.assertEqual(validate(document, "web-sprint", document["kind"]), [])
@@ -314,24 +314,24 @@ class SprintStatusWaitingOnTests(SprintProtocolFixture):
         self.assertEqual(
             found,
             {
-                ("run", "secretary-540"),
-                ("run", "secretary-541"),
-                ("owner", "secretary-542"),
-                ("run", "secretary-543"),
-                ("owner", "secretary-543"),
-                ("po", "secretary-544"),
+                ("run", "ummanu-540"),
+                ("run", "ummanu-541"),
+                ("owner", "ummanu-542"),
+                ("run", "ummanu-543"),
+                ("owner", "ummanu-543"),
+                ("po", "ummanu-544"),
             },
         )
         for entry in waiting_on:
             self.assertEqual(set(entry), {"kind", "card", "detail"})
             self.assertTrue(entry["detail"] and "\n" not in entry["detail"])
         detail = {(entry["kind"], entry["card"]): entry["detail"] for entry in waiting_on}
-        self.assertIn(RUN_URL, detail[("run", "secretary-540")])
-        self.assertIn("deadline", detail[("run", "secretary-540")])
-        self.assertIn(RUN_URL, detail[("run", "secretary-541")])
-        self.assertIn("payment card", detail[("owner", "secretary-542")])
-        self.assertIn("secretary-599", detail[("owner", "secretary-543")])
-        self.assertIn("with the PO", detail[("po", "secretary-544")])
+        self.assertIn(RUN_URL, detail[("run", "ummanu-540")])
+        self.assertIn("deadline", detail[("run", "ummanu-540")])
+        self.assertIn(RUN_URL, detail[("run", "ummanu-541")])
+        self.assertIn("payment card", detail[("owner", "ummanu-542")])
+        self.assertIn("ummanu-599", detail[("owner", "ummanu-543")])
+        self.assertIn("with the PO", detail[("po", "ummanu-544")])
 
     def _merged(self, key: int, ref: str, sprint: str, mark: dict, carried: list | None = None) -> None:
         document: dict = {"runs": [], "after_merge": mark}
@@ -347,23 +347,23 @@ class SprintStatusWaitingOnTests(SprintProtocolFixture):
             "state": "covered",
             "dispatch_id": AM_DISPATCH,
             "run_url": AM_RUN_URL,
-            "carrier": "secretary-551",
+            "carrier": "ummanu-551",
         }
-        self._merged(50, "secretary-550", reference, covered)
-        self._merged(51, "secretary-551", reference, {**covered, "merge_sha": "b" * 40}, [_after_merge_run()])
-        self._merged(52, "secretary-552", reference, {"merge_sha": "c" * 40, "state": "pending"})
+        self._merged(50, "ummanu-550", reference, covered)
+        self._merged(51, "ummanu-551", reference, {**covered, "merge_sha": "b" * 40}, [_after_merge_run()])
+        self._merged(52, "ummanu-552", reference, {"merge_sha": "c" * 40, "state": "pending"})
 
         document = self._run(reference)
         self.assertEqual(validate(document, "web-sprint", document["kind"]), [])
         waiting_on = document["work"]["waiting_on"]
         self.assertEqual(
             sorted((entry["kind"], entry["card"]) for entry in waiting_on),
-            [("run", "secretary-550"), ("run", "secretary-551"), ("run", "secretary-552")],
+            [("run", "ummanu-550"), ("run", "ummanu-551"), ("run", "ummanu-552")],
         )
         detail = {entry["card"]: entry["detail"] for entry in waiting_on}
-        self.assertIn(AM_RUN_URL, detail["secretary-550"])
-        self.assertIn(AM_RUN_URL, detail["secretary-551"])
-        self.assertEqual(detail["secretary-552"], "queued for the next after-merge run")
+        self.assertIn(AM_RUN_URL, detail["ummanu-550"])
+        self.assertIn(AM_RUN_URL, detail["ummanu-551"])
+        self.assertEqual(detail["ummanu-552"], "queued for the next after-merge run")
 
     def test_after_a_green_after_merge_run_neither_card_waits(self) -> None:
         reference = self.reference_of(self.create())
@@ -372,12 +372,12 @@ class SprintStatusWaitingOnTests(SprintProtocolFixture):
             "state": "green",
             "dispatch_id": AM_DISPATCH,
             "run_url": AM_RUN_URL,
-            "carrier": "secretary-551",
+            "carrier": "ummanu-551",
         }
-        self._merged(50, "secretary-550", reference, green)
+        self._merged(50, "ummanu-550", reference, green)
         self._merged(
             51,
-            "secretary-551",
+            "ummanu-551",
             reference,
             {**green, "merge_sha": "b" * 40},
             [_after_merge_run(resolution="green")],
@@ -386,16 +386,16 @@ class SprintStatusWaitingOnTests(SprintProtocolFixture):
 
     def test_a_sprint_waiting_on_nothing_prints_an_empty_list(self) -> None:
         reference = self.reference_of(self.create())
-        self._card(46, "secretary-546", reference, "ready", task_type="code")
+        self._card(46, "ummanu-546", reference, "ready", task_type="code")
         self.assertEqual(self._run(reference)["work"]["waiting_on"], [])
 
     def test_the_listing_carries_the_same_list_per_sprint(self) -> None:
         reference = self.reference_of(self.create())
-        self._card(44, "secretary-544", reference, "in_progress", task_type="operation")
+        self._card(44, "ummanu-544", reference, "in_progress", task_type="operation")
         item = next(
             entry for entry in self.reads().sprint_list()["sprints"]["items"] if entry["ref"] == reference
         )
-        self.assertEqual([entry["card"] for entry in item["waiting_on"]], ["secretary-544"])
+        self.assertEqual([entry["card"] for entry in item["waiting_on"]], ["ummanu-544"])
 
 
 if __name__ == "__main__":

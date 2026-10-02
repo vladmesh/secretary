@@ -23,9 +23,9 @@ import unittest
 from pathlib import Path
 from typing import Any
 
-os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
+os.environ.setdefault("UMMANU_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
-from secretary.dispatch.head_vitality import (
+from ummanu.dispatch.head_vitality import (
     CHILD_CPU_ADVANCE_MS,
     ProcessState,
     ProgressState,
@@ -34,7 +34,7 @@ from secretary.dispatch.head_vitality import (
     VitalitySnapshot,
     snapshots_from_status,
 )
-from secretary.dispatch.head_vitality_episode import (
+from ummanu.dispatch.head_vitality_episode import (
     CHILD_ACTIVITY_CEILING_DEFAULT,
     DEFAULT_VITALITY_THRESHOLDS,
     VitalityEpisode,
@@ -43,8 +43,8 @@ from secretary.dispatch.head_vitality_episode import (
     interrupted_command_note,
     reduce_vitality,
 )
-from secretary.dispatch.head_vitality_guard import assert_destructive_allowed
-from secretary.runtime.head.children import COMMAND_LIMIT, read_head_children
+from ummanu.dispatch.head_vitality_guard import assert_destructive_allowed
+from ummanu.runtime.head.children import COMMAND_LIMIT, read_head_children
 
 RUN_ID = "run-child"
 THRESHOLDS = VitalityThresholds(suspect_after=300.0, confirm_after=600.0)

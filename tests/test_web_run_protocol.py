@@ -31,12 +31,15 @@ from unittest import mock
 
 import yaml
 
-from secretary.cli import main
-from secretary.config import validate
-from secretary.runtime.head.identity import publish_heartbeat
-from secretary.runtime.head.local_pty import RUN_EXITED, RUN_STARTED
-from secretary.runtime.head.run import HeadRun, StopInitiator
-from secretary.runtime.head.runtime import (
+from tests.fakes.dispatcher import dispatcher_seed
+from tests.fakes.tasks import SEED_COLUMN
+from tests.sql_backend_fixtures import card_store
+from ummanu.cli import main
+from ummanu.config import validate
+from ummanu.runtime.head.identity import publish_heartbeat
+from ummanu.runtime.head.local_pty import RUN_EXITED, RUN_STARTED
+from ummanu.runtime.head.run import HeadRun, StopInitiator
+from ummanu.runtime.head.runtime import (
     HEAD_ALIVE,
     HEAD_BUSY,
     HEAD_GONE,
@@ -46,25 +49,22 @@ from secretary.runtime.head.runtime import (
     StartReceipt,
     StopReceipt,
 )
-from secretary.runtime.heads import Registry
-from secretary.webproto import admission as admission_module
-from secretary.webproto import lifecycle as lifecycle_module
-from secretary.webproto import ops as ops_module
-from secretary.webproto import run_events, run_state, store_io, workspaces
-from secretary.webproto.boundary import GUARDED, IMPLEMENTATION_FAILURES, ProtocolBoundary, operations
-from secretary.webproto.errors import (
+from ummanu.runtime.heads import Registry
+from ummanu.webproto import admission as admission_module
+from ummanu.webproto import lifecycle as lifecycle_module
+from ummanu.webproto import ops as ops_module
+from ummanu.webproto import run_events, run_state, store_io, workspaces
+from ummanu.webproto.boundary import GUARDED, IMPLEMENTATION_FAILURES, ProtocolBoundary, operations
+from ummanu.webproto.errors import (
     OwnerConflict,
     ReadError,
     RunNotFound,
     RuntimeUnavailable,
     ValidationRefused,
 )
-from secretary.webproto.ops import OperationLayer
-from secretary.webproto.reads import ReadLayer
-from secretary.webproto.runs import RAISED, UNRESOLVED, ProductRun, RunStore, RunStoreError
-from tests.fakes.dispatcher import dispatcher_seed
-from tests.fakes.tasks import SEED_COLUMN
-from tests.sql_backend_fixtures import card_store
+from ummanu.webproto.ops import OperationLayer
+from ummanu.webproto.reads import ReadLayer
+from ummanu.webproto.runs import RAISED, UNRESOLVED, ProductRun, RunStore, RunStoreError
 
 SEED_STATE = {column: state for state, column in SEED_COLUMN.items()}
 
@@ -252,13 +252,13 @@ class ProductRuntimeFixture(unittest.TestCase):
             "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
             encoding="utf-8",
         )
-        (instance_dir / "projects" / "secretary.yaml").write_text(
+        (instance_dir / "projects" / "ummanu.yaml").write_text(
             yaml.safe_dump(
                 {
-                    "id": "secretary",
+                    "id": "ummanu",
                     "repo": str(self.repo),
                     "enabled": True,
-                    "adapter": "secretary",
+                    "adapter": "ummanu",
                     "default_branch": "main",
                 }
             ),
@@ -286,7 +286,7 @@ class ProductRuntimeFixture(unittest.TestCase):
             subprocess.run(argv, cwd=repo, env=env, check=True, capture_output=True)
         return repo
 
-    def _backlog_card(self, reference: str = "secretary-run-1", column: int = 1) -> None:
+    def _backlog_card(self, reference: str = "ummanu-run-1", column: int = 1) -> None:
         task_id = 40 + self._cards
         self._cards += 1
         self.backlog_key = task_id
@@ -299,7 +299,7 @@ class ProductRuntimeFixture(unittest.TestCase):
             position=1,
             created=1720000000,
             project=None,
-            metadata={"project": "secretary", "task_type": "code", "slug": "run"},
+            metadata={"project": "ummanu", "task_type": "code", "slug": "run"},
         )
 
     def layer(self, **kwargs) -> OperationLayer:
@@ -325,7 +325,7 @@ class ProductRuntimeFixture(unittest.TestCase):
             clock=lambda: self.clock,
         )
 
-    def start(self, request_id: str = "req-1", ref: str = "secretary-run-1") -> dict[str, Any]:
+    def start(self, request_id: str = "req-1", ref: str = "ummanu-run-1") -> dict[str, Any]:
         return self.layer().run_start(ref, request_id=request_id, profile=WORKER_PROFILE)
 
     def reserve_sprint(self, project: str, sprint: str) -> None:
@@ -355,7 +355,7 @@ class StartTests(ProductRuntimeFixture):
         self.assertFalse(Path(run["workspace"], "TASK.md").exists())
         body = Path(run["run_dir"], "TASK.md").read_text(encoding="utf-8")
         self.assertIn("Add a line to README.md.", body)
-        self.assertIn("SECRETARY_RUN_RESULT", body)
+        self.assertIn("UMMANU_RUN_RESULT", body)
 
     def test_an_interactive_head_is_pointed_at_its_task_after_it_comes_up(self) -> None:
         """A TUI that is still drawing its banner takes a line into an unsent composer."""
@@ -409,13 +409,13 @@ class StartTests(ProductRuntimeFixture):
 
     def test_a_profile_on_the_other_backend_is_refused_rather_than_run_here(self) -> None:
         with self.assertRaises(ValidationRefused) as refused:
-            self.layer().run_start("secretary-run-1", request_id="req-x", profile="orca-held-worker")
+            self.layer().run_start("ummanu-run-1", request_id="req-x", profile="orca-held-worker")
         self.assertIn("local-pty", str(refused.exception))
         self.assertEqual(self.runtime.starts, [])
 
     def test_an_unknown_profile_is_a_typed_refusal(self) -> None:
         with self.assertRaises(ValidationRefused):
-            self.layer().run_start("secretary-run-1", request_id="req-y", profile="no-such-head")
+            self.layer().run_start("ummanu-run-1", request_id="req-y", profile="no-such-head")
 
     def test_a_bring_up_that_fails_closes_the_run_it_opened(self) -> None:
         """A card is never left owned by a run whose head was never raised."""
@@ -425,7 +425,7 @@ class StartTests(ProductRuntimeFixture):
 
         self.runtime.start = refuse
         # `RuntimeUnavailable`, not the backend's own `OSError`: since
-        # :mod:`secretary.webproto.boundary` the layer's contract is that a caller sees a protocol
+        # :mod:`ummanu.webproto.boundary` the layer's contract is that a caller sees a protocol
         # code, and this is the case that class was written for -- "the product runtime could not
         # raise, reach or record a head". What this test is about is unchanged and asserted below:
         # the run the failed bring-up opened is closed, and the card is admitted again.
@@ -457,7 +457,7 @@ class IdempotencyTests(ProductRuntimeFixture):
     def test_a_reconnecting_client_reads_the_same_run_rather_than_starting_one(self) -> None:
         first = self.start(request_id="req-reconnect")
         # A whole new layer object: nothing of the first call is remembered in this process.
-        again = self.layer().run_start("secretary-run-1", request_id="req-reconnect", profile=WORKER_PROFILE)
+        again = self.layer().run_start("ummanu-run-1", request_id="req-reconnect", profile=WORKER_PROFILE)
         self.assertEqual(again["run"]["run_id"], first["run"]["run_id"])
         self.assertEqual(len(self.runtime.starts), 1)
 
@@ -497,10 +497,10 @@ class IdempotencyTests(ProductRuntimeFixture):
         self.assertEqual(len(self.runtime.starts), 1)
 
     def test_a_repeat_with_different_inputs_is_refused_rather_than_answered(self) -> None:
-        self._backlog_card("secretary-run-2")
+        self._backlog_card("ummanu-run-2")
         self.start(request_id="req-same")
         with self.assertRaises(ValidationRefused) as refused:
-            self.start(request_id="req-same", ref="secretary-run-2")
+            self.start(request_id="req-same", ref="ummanu-run-2")
         self.assertIn("different inputs", str(refused.exception))
         self.assertEqual(len(self.runtime.starts), 1)
 
@@ -564,14 +564,14 @@ class ReviewTests(ProductRuntimeFixture):
 
     def test_a_card_with_no_worker_run_has_nothing_to_review(self) -> None:
         with self.assertRaises(RunNotFound):
-            self.layer().run_review(request_id="rev-1", profile=REVIEWER_PROFILE, ref="secretary-run-1")
+            self.layer().run_review(request_id="rev-1", profile=REVIEWER_PROFILE, ref="ummanu-run-1")
 
 
 class AdmissionTests(ProductRuntimeFixture):
     """Criterion 4: one gate, one order, and every start path through it."""
 
     def test_an_open_sprint_reservation_refuses_the_run(self) -> None:
-        self.reserve_sprint("secretary", "sprint:1427")
+        self.reserve_sprint("ummanu", "sprint:1427")
         with self.assertRaises(OwnerConflict) as refused:
             self.start()
         self.assertIn("sprint:1427", str(refused.exception))
@@ -580,12 +580,12 @@ class AdmissionTests(ProductRuntimeFixture):
     def test_a_card_in_the_dispatcher_lane_is_refused_by_its_state(self) -> None:
         # `secretary-510` is the fixture board's Ready card: the dispatcher's own lane.
         with self.assertRaises(OwnerConflict) as refused:
-            self.layer().run_start("secretary-510", request_id="req-lane", profile=WORKER_PROFILE)
+            self.layer().run_start("ummanu-510", request_id="req-lane", profile=WORKER_PROFILE)
         self.assertIn("production dispatcher's lane", str(refused.exception))
 
     def test_a_durable_dispatcher_record_refuses_the_run(self) -> None:
         (self.data_dir / "dispatcher" / "production-state.json").write_text(
-            json.dumps({"records": {"secretary-run-1": {"attempt_id": "a", "state": "validate"}}}),
+            json.dumps({"records": {"ummanu-run-1": {"attempt_id": "a", "state": "validate"}}}),
             encoding="utf-8",
         )
         with self.assertRaises(OwnerConflict) as refused:
@@ -625,10 +625,10 @@ class AdmissionTests(ProductRuntimeFixture):
                 profile=REVIEWER_PROFILE,
                 worker_run_id=worker["run"]["run_id"],
             )
-            self._backlog_card("secretary-run-2")
+            self._backlog_card("ummanu-run-2")
             with contextlib.suppress(OwnerConflict):
-                self.layer().run_start("secretary-run-2", request_id="req-2", profile=WORKER_PROFILE)
-        self.assertEqual(seen, ["secretary-run-1", "secretary-run-2"])
+                self.layer().run_start("ummanu-run-2", request_id="req-2", profile=WORKER_PROFILE)
+        self.assertEqual(seen, ["ummanu-run-1", "ummanu-run-2"])
 
     def test_the_gate_decides_in_the_order_it_documents(self) -> None:
         """Six refusals at once, and the first of the documented six is the one that answers.
@@ -638,12 +638,12 @@ class AdmissionTests(ProductRuntimeFixture):
         not be reported as one this layer holds. Peeling them off one at a time is what proves the
         order rather than the set.
         """
-        self._backlog_card("secretary-run-3")
+        self._backlog_card("ummanu-run-3")
         task_id = self.backlog_key
         self.board.save_metadata(task_id, project="not-registered")
-        self.reserve_sprint("secretary", "sprint:1427")
+        self.reserve_sprint("ummanu", "sprint:1427")
         (self.data_dir / "dispatcher" / "production-state.json").write_text(
-            json.dumps({"records": {"secretary-run-3": {"state": "validate"}}}), encoding="utf-8"
+            json.dumps({"records": {"ummanu-run-3": {"state": "validate"}}}), encoding="utf-8"
         )
 
         def refusal(ref: str) -> str:
@@ -652,19 +652,19 @@ class AdmissionTests(ProductRuntimeFixture):
             return str(raised.exception)
 
         # 1. the card exists, before anything else is asked.
-        self.assertIn("holds no card", refusal("secretary-does-not-exist"))
+        self.assertIn("holds no card", refusal("ummanu-does-not-exist"))
         # 2. its project is registered, before the reservation index is consulted.
-        self.assertIn("not registered", refusal("secretary-run-3"))
-        self.board.save_metadata(task_id, project="secretary")
+        self.assertIn("not registered", refusal("ummanu-run-3"))
+        self.board.save_metadata(task_id, project="ummanu")
         # 3. the reservation, before the card's own state.
-        self.assertIn("sprint:1427", refusal("secretary-run-3"))
+        self.assertIn("sprint:1427", refusal("ummanu-run-3"))
         self.reserve_sprint("other", "sprint:1427")
         # 4. the card's state, before the dispatcher's durable record.
         self.board.move(self.backlog_key, "ready")
-        self.assertIn("dispatcher's lane", refusal("secretary-run-3"))
+        self.assertIn("dispatcher's lane", refusal("ummanu-run-3"))
         self.board.move(self.backlog_key, "issues")
         # 5. the dispatcher's record, before this layer's own runs.
-        self.assertIn("durable record", refusal("secretary-run-3"))
+        self.assertIn("durable record", refusal("ummanu-run-3"))
 
 
     # -- the fence reads one fact ---------------------------------------------------------------
@@ -674,8 +674,8 @@ class AdmissionTests(ProductRuntimeFixture):
         payload = {
             "run_id": run_id,
             "request_id": f"req-{run_id}",
-            "ref": "secretary-run-1",
-            "project": "secretary",
+            "ref": "ummanu-run-1",
+            "project": "ummanu",
             "role": "worker",
             "profile": WORKER_PROFILE,
             "started_at": self.clock,
@@ -687,7 +687,7 @@ class AdmissionTests(ProductRuntimeFixture):
 
     def _admit(self) -> Any:
         return admission_module.admit(
-            "secretary-run-1",
+            "ummanu-run-1",
             report=self.layer().report(),
             data_dir=self.data_dir,
             board=self.board,
@@ -734,7 +734,7 @@ class AdmissionTests(ProductRuntimeFixture):
         import ast
 
         tree = ast.parse(
-            (REPO_ROOT / "src" / "secretary" / "webproto" / "admission.py").read_text(encoding="utf-8")
+            (REPO_ROOT / "src" / "ummanu" / "webproto" / "admission.py").read_text(encoding="utf-8")
         )
         forbidden = {"running", "finished", "process_failed", "source_unavailable", "unknown"}
         offenders: list[str] = []
@@ -762,8 +762,8 @@ class RunStateTests(ProductRuntimeFixture):
         payload = {
             "run_id": "pr-test",
             "request_id": "req",
-            "ref": "secretary-run-1",
-            "project": "secretary",
+            "ref": "ummanu-run-1",
+            "project": "ummanu",
             "role": "worker",
             "profile": WORKER_PROFILE,
             "run_dir": str(run_dir),
@@ -901,7 +901,7 @@ class RunStateTests(ProductRuntimeFixture):
 
     def test_a_window_is_never_consulted(self) -> None:
         """Criterion 5's last sentence: a pane or panel is not evidence of a live run."""
-        source = (REPO_ROOT / "src" / "secretary" / "webproto" / "run_state.py").read_text(encoding="utf-8")
+        source = (REPO_ROOT / "src" / "ummanu" / "webproto" / "run_state.py").read_text(encoding="utf-8")
         for word in ("pane", "terminal list", "session"):
             self.assertNotIn(f"{word}(", source)
 
@@ -917,7 +917,7 @@ class SettlingTests(ProductRuntimeFixture):
 
     def test_a_run_past_its_deadline_is_ended_without_a_result(self) -> None:
         document = self.layer(deadline_seconds=10.0).run_start(
-            "secretary-run-1", request_id="req-deadline", profile=WORKER_PROFILE
+            "ummanu-run-1", request_id="req-deadline", profile=WORKER_PROFILE
         )
         run_id = document["run"]["run_id"]
         self.clock += 11.0
@@ -948,7 +948,7 @@ class EventVisibilityTests(ProductRuntimeFixture):
     def test_the_run_is_read_back_through_the_read_layer_that_already_exists(self) -> None:
         document = self.start()
         run_id = document["run"]["run_id"]
-        page = self.reads().task_events("secretary-run-1", None, limit=10)
+        page = self.reads().task_events("ummanu-run-1", None, limit=10)
         started = [item for item in page["items"] if item["kind"] == run_events.STARTED]
         self.assertEqual(len(started), 1)
         self.assertEqual(started[0]["data"]["run_id"], run_id)
@@ -956,7 +956,7 @@ class EventVisibilityTests(ProductRuntimeFixture):
 
         self.runtime.publish_result(run_id, {"status": "done"})
         self.layer().run_state(run_id)
-        snapshot = self.reads().task_snapshot("secretary-run-1")
+        snapshot = self.reads().task_snapshot("ummanu-run-1")
         kinds = [item["kind"] for item in snapshot["events"]["items"]]
         self.assertEqual(kinds, [run_events.STARTED, run_events.FINISHED])
         finished = snapshot["events"]["items"][-1]
@@ -966,11 +966,11 @@ class EventVisibilityTests(ProductRuntimeFixture):
     def test_the_cursor_still_continues_across_the_run_events(self) -> None:
         document = self.start()
         run_id = document["run"]["run_id"]
-        first = self.reads().task_events("secretary-run-1", None, limit=10)
+        first = self.reads().task_events("ummanu-run-1", None, limit=10)
         self.assertEqual([item["kind"] for item in first["items"]], [run_events.STARTED])
         self.runtime.publish_result(run_id, {"status": "done"})
         self.layer().run_state(run_id)
-        after = self.reads().task_events("secretary-run-1", first["next_cursor"], limit=10)
+        after = self.reads().task_events("ummanu-run-1", first["next_cursor"], limit=10)
         self.assertEqual([item["kind"] for item in after["items"]], [run_events.FINISHED])
 
     def test_the_ending_is_published_once_however_often_it_is_observed(self) -> None:
@@ -978,7 +978,7 @@ class EventVisibilityTests(ProductRuntimeFixture):
         self.runtime.publish_result(run_id, {"status": "done"})
         for _ in range(3):
             self.layer().run_state(run_id)
-        page = self.reads().task_events("secretary-run-1", None, limit=50)
+        page = self.reads().task_events("ummanu-run-1", None, limit=50)
         finished = [item for item in page["items"] if item["kind"] == run_events.FINISHED]
         self.assertEqual(len(finished), 1)
 
@@ -995,12 +995,12 @@ class EventVisibilityTests(ProductRuntimeFixture):
             with self.assertRaises(RuntimeUnavailable):
                 self.start(request_id="lost-start-event")
         self.assertEqual(
-            self.reads().task_events("secretary-run-1", None, limit=10)["items"], []
+            self.reads().task_events("ummanu-run-1", None, limit=10)["items"], []
         )
 
         again = self.start(request_id="lost-start-event")
         self.assertEqual(len(self.runtime.starts), 1)
-        page = self.reads().task_events("secretary-run-1", None, limit=10)
+        page = self.reads().task_events("ummanu-run-1", None, limit=10)
         started = [item for item in page["items"] if item["kind"] == run_events.STARTED]
         self.assertEqual(len(started), 1)
         self.assertEqual(started[0]["data"]["run_id"], again["run"]["run_id"])
@@ -1014,12 +1014,12 @@ class EventVisibilityTests(ProductRuntimeFixture):
         ):
             with self.assertRaises(RuntimeUnavailable):
                 self.layer().run_state(run_id)
-        kinds = [item["kind"] for item in self.reads().task_events("secretary-run-1", None, limit=10)["items"]]
+        kinds = [item["kind"] for item in self.reads().task_events("ummanu-run-1", None, limit=10)["items"]]
         self.assertEqual(kinds, [run_events.STARTED])
 
         state = self.layer().run_state(run_id)
         self.assertEqual(state["state"]["value"], "finished")
-        page = self.reads().task_events("secretary-run-1", None, limit=10)
+        page = self.reads().task_events("ummanu-run-1", None, limit=10)
         finished = [item for item in page["items"] if item["kind"] == run_events.FINISHED]
         self.assertEqual(len(finished), 1)
         self.assertEqual(finished[0]["data"]["result"], {"status": "done"})
@@ -1038,7 +1038,7 @@ class EventVisibilityTests(ProductRuntimeFixture):
             path.unlink()
         for _ in range(2):
             self.layer().run_state(run_id)
-        page = self.reads().task_events("secretary-run-1", None, limit=50)
+        page = self.reads().task_events("ummanu-run-1", None, limit=50)
         finished = [item for item in page["items"] if item["kind"] == run_events.FINISHED]
         self.assertEqual(len(finished), 1)
         self.assertEqual(finished[0]["data"]["result"], {"status": "done"})
@@ -1107,7 +1107,7 @@ class LifecycleTests(ProductRuntimeFixture):
             self.runtime.start, self.runtime.stop = real_start, real_stop
 
     def test_every_spawning_or_closing_path_goes_through_the_one_place(self) -> None:
-        self._backlog_card("secretary-run-2")
+        self._backlog_card("ummanu-run-2")
         with self._only_inside_advance() as seen:
             # 1. a start that succeeds
             worker = self.start(request_id="req-one")
@@ -1128,7 +1128,7 @@ class LifecycleTests(ProductRuntimeFixture):
                 status=HEAD_GONE, reason="the head is gone"
             )
             with self.assertRaises(RuntimeUnavailable):
-                self.start(request_id="req-two", ref="secretary-run-2")
+                self.start(request_id="req-two", ref="ummanu-run-2")
         phases = {run_id: [to for owner, to in seen if owner == run_id] for run_id, _ in seen}
         self.assertEqual(phases[worker_id][:2], ["raising", "raised"])
         self.assertIn("settled", phases[worker_id])
@@ -1142,7 +1142,7 @@ class LifecycleTests(ProductRuntimeFixture):
         import ast
 
         offenders: list[str] = []
-        for path in sorted((REPO_ROOT / "src" / "secretary" / "webproto").glob("*.py")):
+        for path in sorted((REPO_ROOT / "src" / "ummanu" / "webproto").glob("*.py")):
             if path.name == "lifecycle.py":
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -1190,7 +1190,7 @@ class LifecycleTests(ProductRuntimeFixture):
         because it starts and stops none. The lifecycle claim itself, a real head ended by a
         recovered record and confirmed gone, is executed in `RealHeadOwnershipTests`.
         """
-        from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
+        from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
 
         run_id = self.start(request_id="req-address")["run"]["run_id"]
         stored = RunStore(self.data_dir).get(run_id)
@@ -1286,7 +1286,7 @@ class LifecycleTests(ProductRuntimeFixture):
             settled["state"]["result"]["value"], {"status": "done", "summary": "it finished after all"}
         )
         # And the run's one terminal event says so too, on the card's own history.
-        page = self.reads().task_events("secretary-run-1", None, limit=50)
+        page = self.reads().task_events("ummanu-run-1", None, limit=50)
         finished = [item for item in page["items"] if item["kind"] == run_events.FINISHED]
         self.assertEqual(len(finished), 1)
         self.assertEqual(finished[0]["data"]["state"], "finished")
@@ -1347,12 +1347,12 @@ class LifecycleTests(ProductRuntimeFixture):
 
         # The one terminal event says the same thing the document does, and the card's history
         # never carries the accusation.
-        page = self.reads().task_events("secretary-run-1", None, limit=50)
+        page = self.reads().task_events("ummanu-run-1", None, limit=50)
         finished = [item for item in page["items"] if item["kind"] == run_events.FINISHED]
         self.assertEqual(len(finished), 1)
         self.assertEqual(finished[0]["data"]["state"], "source_unavailable")
         self.assertEqual(finished[0]["data"]["reason"], state["reason"])
-        snapshot = self.reads().task_snapshot("secretary-run-1")
+        snapshot = self.reads().task_snapshot("ummanu-run-1")
         published = [item for item in snapshot["events"]["items"] if item["kind"] == run_events.FINISHED]
         self.assertEqual(published[0]["data"]["state"], "source_unavailable")
         self.assertEqual(published[0]["data"]["reason"], state["reason"])
@@ -1403,8 +1403,8 @@ class RealHeadFixture(ProductRuntimeFixture):
 
     def real_backend(self):
         """The real supervised backend, over this fixture's own data directory, reaped afterwards."""
-        from secretary.dispatch.watchdog import head_process_status
-        from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
+        from ummanu.dispatch.watchdog import head_process_status
+        from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
 
         root = self.data_dir / "webproto" / "heads"
         self.addCleanup(self._reap, root)
@@ -1418,7 +1418,7 @@ class RealHeadFixture(ProductRuntimeFixture):
         substituted here. Everything the claims are about (the record, the ordering, the backend,
         the result file, the exit status, the stop and its confirmation) is real.
         """
-        from secretary.runtime.head.command import HeadCommand
+        from ummanu.runtime.head.command import HeadCommand
 
         pending = list(rendered)
 
@@ -1462,7 +1462,7 @@ class RealHeadOwnershipTests(RealHeadFixture):
     """The outermost claim of this card, executed rather than derived.
 
     Everywhere else the backend is a double, deliberately: a unit test must not raise real agents.
-    But "Secretary owns the process" has one edge that a double cannot stand in for, because the
+    But "Ummanu owns the process" has one edge that a double cannot stand in for, because the
     thing being claimed is that the *durable record alone* is enough to end a real process. So this
     one test raises a real head under the real `LocalPtyHeadRuntime`, through the product's own
     start path, then throws the handle away -- a brand new runtime object with no memory of that
@@ -1477,13 +1477,13 @@ class RealHeadOwnershipTests(RealHeadFixture):
     """
 
     def test_a_real_head_is_stopped_by_a_record_recovered_from_the_store(self) -> None:
-        from secretary.dispatch.watchdog import (
+        from ummanu.dispatch.watchdog import (
             HEARTBEAT_DEAD,
             HEARTBEAT_LIVE_MATCH,
             head_process_status,
         )
-        from secretary.runtime.head.command import HeadCommand
-        from secretary.runtime.local_pty_head import LocalPtyHeadRuntime, head_run_journal
+        from ummanu.runtime.head.command import HeadCommand
+        from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime, head_run_journal
 
         root = self.data_dir / "webproto" / "heads"
         backend = LocalPtyHeadRuntime(root, head_process_status=head_process_status)
@@ -1507,7 +1507,7 @@ class RealHeadOwnershipTests(RealHeadFixture):
             ),
         ):
             document = self.layer(runtime_factory=lambda _root: backend).run_start(
-                "secretary-run-1", request_id="req-real-head", profile=REVIEWER_PROFILE
+                "ummanu-run-1", request_id="req-real-head", profile=REVIEWER_PROFILE
             )
 
         run_id = document["run"]["run_id"]
@@ -1539,7 +1539,7 @@ class RealHeadOwnershipTests(RealHeadFixture):
 
         receipt = recovered_runtime.stop(
             recovered_head,
-            StopInitiator("secretary.webproto", "stopped by a record recovered from the store"),
+            StopInitiator("ummanu.webproto", "stopped by a record recovered from the store"),
         )
 
         self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
@@ -1583,7 +1583,7 @@ class RealBackendContractTests(RealHeadFixture):
         layer = self.layer(runtime_factory=lambda _root: backend)
         with self.commands(self._publishing(REAL_RESULT)):
             started = layer.run_start(
-                "secretary-run-1", request_id="req-real-result", profile=REVIEWER_PROFILE
+                "ummanu-run-1", request_id="req-real-result", profile=REVIEWER_PROFILE
             )
         run_id = started["run"]["run_id"]
         self.assertEqual(started["state"]["value"], "running")
@@ -1608,7 +1608,7 @@ class RealBackendContractTests(RealHeadFixture):
         layer = self.layer(runtime_factory=lambda _root: backend)
         with self.commands(f"{self.PRODUCT_CHILD} exit 7"):
             started = layer.run_start(
-                "secretary-run-1", request_id="req-real-failure", profile=REVIEWER_PROFILE
+                "ummanu-run-1", request_id="req-real-failure", profile=REVIEWER_PROFILE
             )
         run_id = started["run"]["run_id"]
         self._await(
@@ -1627,7 +1627,7 @@ class RealBackendContractTests(RealHeadFixture):
         # And it is on the card's own history as an ending, once.
         finished = [
             event
-            for event in self.reads().task_events("secretary-run-1", None)["items"]
+            for event in self.reads().task_events("ummanu-run-1", None)["items"]
             if event["kind"] == run_events.FINISHED
         ]
         self.assertEqual(len(finished), 1)
@@ -1642,7 +1642,7 @@ class RealBackendContractTests(RealHeadFixture):
         layer = self.layer(runtime_factory=lambda _root: backend)
         with self.commands(self._publishing(REAL_RESULT), self._publishing(REAL_VERDICT)):
             worker = layer.run_start(
-                "secretary-run-1", request_id="req-real-worker", profile=REVIEWER_PROFILE
+                "ummanu-run-1", request_id="req-real-worker", profile=REVIEWER_PROFILE
             )["run"]["run_id"]
             self._await(
                 lambda: layer.run_state(worker)["state"]["ended"],
@@ -1678,7 +1678,7 @@ class RealBackendContractTests(RealHeadFixture):
 
 
 def _journal_of(run_dir: Path) -> tuple[dict[str, Any], ...]:
-    from secretary.runtime.local_pty_head import head_run_journal
+    from ummanu.runtime.local_pty_head import head_run_journal
 
     return head_run_journal(run_dir)
 
@@ -1697,9 +1697,9 @@ def _alive(pid: int) -> bool:
 class ErrorContractTests(ProductRuntimeFixture):
     """The layer's failure vocabulary, kept in one place and checked for every operation.
 
-    `secretary.webproto` promises that what leaves an operation is a typed protocol code, because
+    `ummanu.webproto` promises that what leaves an operation is a typed protocol code, because
     that promise is what lets each transport hold one code table and one containment branch. Before
-    :mod:`secretary.webproto.boundary` the promise was kept a call site at a time, and `run_list`
+    :mod:`ummanu.webproto.boundary` the promise was kept a call site at a time, and `run_list`
     was the site that forgot: an unreadable run record escaped as `RunStoreError`, past a transport
     that catches only `ReadError`, and took a whole card page down.
 
@@ -1710,16 +1710,16 @@ class ErrorContractTests(ProductRuntimeFixture):
     rather than by naming the ones somebody remembered.
     """
 
-    REF = "secretary-run-1"
+    REF = "ummanu-run-1"
 
     READ_CALLS = {
         "report": lambda layer: layer.report(),
         "data_dir": lambda layer: layer.data_dir(),
         "system_snapshot": lambda layer: layer.system_snapshot(),
         "health_snapshot": lambda layer: layer.health_snapshot(),
-        "task_snapshot": lambda layer: layer.task_snapshot("secretary-run-1"),
-        "task_events": lambda layer: layer.task_events("secretary-run-1", None, limit=10),
-        "head_view": lambda layer: layer.head_view("secretary-run-1", "a" * 32),
+        "task_snapshot": lambda layer: layer.task_snapshot("ummanu-run-1"),
+        "task_events": lambda layer: layer.task_events("ummanu-run-1", None, limit=10),
+        "head_view": lambda layer: layer.head_view("ummanu-run-1", "a" * 32),
         "po_delegated": lambda layer: layer.po_delegated("session-contract"),
     }
 
@@ -1728,13 +1728,13 @@ class ErrorContractTests(ProductRuntimeFixture):
         "data_dir": lambda layer: layer.data_dir(),
         "store": lambda layer: layer.store(),
         "run_start": lambda layer: layer.run_start(
-            "secretary-run-1", request_id="contract-start", profile=WORKER_PROFILE
+            "ummanu-run-1", request_id="contract-start", profile=WORKER_PROFILE
         ),
         "run_review": lambda layer: layer.run_review(
-            request_id="contract-review", profile=REVIEWER_PROFILE, ref="secretary-run-1"
+            request_id="contract-review", profile=REVIEWER_PROFILE, ref="ummanu-run-1"
         ),
         "run_state": lambda layer: layer.run_state("pr-contract"),
-        "run_list": lambda layer: layer.run_list("secretary-run-1"),
+        "run_list": lambda layer: layer.run_list("ummanu-run-1"),
     }
 
     # -- what the roster is worth -------------------------------------------------------------
@@ -1817,12 +1817,12 @@ class ErrorContractTests(ProductRuntimeFixture):
     def test_a_filesystem_that_refuses_a_run_record_is_a_code_and_not_a_bare_error(self) -> None:
         """The atomic writer's `RuntimeError` is the one durable failure the boundary cannot see.
 
-        `secretary._fsutil.write_text_atomic` turns its `OSError` into a `RuntimeError`, and
+        `ummanu._fsutil.write_text_atomic` turns its `OSError` into a `RuntimeError`, and
         `RuntimeError` is deliberately outside `IMPLEMENTATION_FAILURES` -- it is what a defect of
         this layer travels as. So a full disk under the run store escaped as a raw exception, past
         every `except RunStoreError` and past a transport that catches `ReadError`. It is
         translated at the one seam this layer writes files through
-        (:func:`secretary.webproto.store_io.write_document`), and this is that hole under
+        (:func:`ummanu.webproto.store_io.write_document`), and this is that hole under
         `run_start`, which has had it since secretary-1562.
         """
 
@@ -1867,7 +1867,7 @@ class FileWriteSeamTests(unittest.TestCase):
 
     def test_every_file_this_layer_writes_goes_through_the_one_seam(self) -> None:
         offenders: list[str] = []
-        for path in sorted((REPO_ROOT / "src" / "secretary" / "webproto").glob("*.py")):
+        for path in sorted((REPO_ROOT / "src" / "ummanu" / "webproto").glob("*.py")):
             if path.name == "store_io.py":
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
@@ -1887,7 +1887,7 @@ class FileWriteSeamTests(unittest.TestCase):
 
     def test_the_seam_is_where_this_layer_actually_writes(self) -> None:
         writers: set[str] = set()
-        for path in sorted((REPO_ROOT / "src" / "secretary" / "webproto").glob("*.py")):
+        for path in sorted((REPO_ROOT / "src" / "ummanu" / "webproto").glob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             if any(name == "write_document" for _line, name, _args in self._calls(tree)):
                 writers.add(path.name)
@@ -1911,7 +1911,7 @@ class OrcaAbsenceTests(ProductRuntimeFixture):
     * **no Orca import** on any module of the layer -- neither the pane host, nor the legacy
       backend, nor the control plane's Orca-facing terminal readers;
     * **no Orca call** on the start path or the result-reading path: with
-      `secretary.dispatch.head_status` replaced by a detonator, `run_start`, `run_state` and
+      `ummanu.dispatch.head_status` replaced by a detonator, `run_start`, `run_state` and
       `run_review` all complete. The pane host whose verbs were detonated here too is deleted
       (secretary-1725), and `test_architecture` forbids importing it anywhere;
     * **no `orca` process**: every child process the two paths spawn is captured, and none of them
@@ -1923,9 +1923,9 @@ class OrcaAbsenceTests(ProductRuntimeFixture):
 
     FORBIDDEN_IMPORTS = frozenset(
         """
-        secretary.automations.runtime.orca_rpc secretary.runtime.pane_host
-        secretary.runtime.orca_legacy_head secretary.runtime.tui_delivery
-        secretary.dispatch.head_status secretary.dispatch.host secretary.dispatch.review
+        ummanu.automations.runtime.orca_rpc ummanu.runtime.pane_host
+        ummanu.runtime.orca_legacy_head ummanu.runtime.tui_delivery
+        ummanu.dispatch.head_status ummanu.dispatch.host ummanu.dispatch.review
         orca
         """.split()
     )
@@ -1934,7 +1934,7 @@ class OrcaAbsenceTests(ProductRuntimeFixture):
         import ast
 
         found: list[tuple[str, str]] = []
-        for path in sorted((REPO_ROOT / "src" / "secretary" / "webproto").glob("*.py")):
+        for path in sorted((REPO_ROOT / "src" / "ummanu" / "webproto").glob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):
@@ -1961,7 +1961,7 @@ class OrcaAbsenceTests(ProductRuntimeFixture):
 
         with (
             mock.patch("subprocess.run", watched_run),
-            mock.patch.dict("sys.modules", {"secretary.dispatch.head_status": None}),
+            mock.patch.dict("sys.modules", {"ummanu.dispatch.head_status": None}),
         ):
             document = self.start(request_id="req-orca")
             run_id = document["run"]["run_id"]
@@ -1986,13 +1986,13 @@ class OrcaAbsenceTests(ProductRuntimeFixture):
             # arguments it chooses it with. Only the backend object is a double, so that a unit
             # test never raises a real head.
             layer = self.layer(runtime_factory=None)
-            layer.run_start("secretary-run-1", request_id="req-named", profile=WORKER_PROFILE)
+            layer.run_start("ummanu-run-1", request_id="req-named", profile=WORKER_PROFILE)
         self.assertTrue(seen, "the start path builds a backend by name")
         for call in seen:
             self.assertEqual(call["name"], "local-pty")
             self.assertEqual(call["root"], self.data_dir / "webproto" / "heads")
             # And liveness is the product's one launch-identity reader, not a scheme of its own.
-            from secretary.dispatch.watchdog import head_process_status
+            from ummanu.dispatch.watchdog import head_process_status
 
             self.assertIs(call["identity"], head_process_status)
 
@@ -2045,7 +2045,7 @@ class WebRunCommandTests(ProductRuntimeFixture):
     def _patched(self):
         layer = self.layer()
         with mock.patch(
-            "secretary.webproto.commands.OperationLayer",
+            "ummanu.webproto.commands.OperationLayer",
             lambda instance, **kwargs: layer,
         ):
             yield
@@ -2056,7 +2056,7 @@ class WebRunCommandTests(ProductRuntimeFixture):
                 "web-run",
                 "start",
                 "--ref",
-                "secretary-run-1",
+                "ummanu-run-1",
                 "--request-id",
                 "cli-1",
                 "--profile",
@@ -2071,7 +2071,7 @@ class WebRunCommandTests(ProductRuntimeFixture):
             self.assertIn("state: running", out)
             self.assertIn("workspace:", out)
 
-            code, out, _ = self._run("web-run", "list", "--ref", "secretary-run-1")
+            code, out, _ = self._run("web-run", "list", "--ref", "ummanu-run-1")
             self.assertEqual(code, 0)
             self.assertIn(run_id, out)
             # The listing carries each run's state, not just its record: an open run that reads
@@ -2079,13 +2079,13 @@ class WebRunCommandTests(ProductRuntimeFixture):
             self.assertIn("running (open)", out)
 
     def test_an_owner_conflict_exits_on_its_own_status(self) -> None:
-        self.reserve_sprint("secretary", "sprint:1427")
+        self.reserve_sprint("ummanu", "sprint:1427")
         with self._patched():
             code, _, err = self._run(
                 "web-run",
                 "start",
                 "--ref",
-                "secretary-run-1",
+                "ummanu-run-1",
                 "--request-id",
                 "cli-2",
                 "--profile",

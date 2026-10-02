@@ -1,4 +1,4 @@
-"""`secretary.runtime.resource_probe`: the registry's probe entry, and how `head_health` reads it.
+"""`ummanu.runtime.resource_probe`: the registry's probe entry, and how `head_health` reads it.
 
 Every provider call is a fake: no test here spends a token or touches a network.
 """
@@ -15,10 +15,10 @@ import urllib.error
 from pathlib import Path
 from unittest import mock
 
-from secretary import head_health
-from secretary.head_health import HeadHealth
-from secretary.runtime import codex_preflight, heads, resource_probe
-from secretary.runtime.resource_probe import ProbeResult
+from ummanu import head_health
+from ummanu.head_health import HeadHealth
+from ummanu.runtime import codex_preflight, heads, resource_probe
+from ummanu.runtime.resource_probe import ProbeResult
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,7 +35,7 @@ class _Catalog:
         return {"resource": head}
 
     def resource(self, resource: str) -> dict:
-        return {"probe": f"python3 -P -m secretary.runtime.resource_probe --resource {resource}"}
+        return {"probe": f"python3 -P -m ummanu.runtime.resource_probe --resource {resource}"}
 
 
 class CliContractTests(unittest.TestCase):
@@ -75,7 +75,7 @@ class CliContractTests(unittest.TestCase):
     def test_the_module_runs_as_the_registry_names_it(self) -> None:
         """The shipped registry's command shape, end to end, on the one id that calls no provider."""
         completed = subprocess.run(
-            [sys.executable, "-P", "-m", "secretary.runtime.resource_probe", "--resource", "nope"],
+            [sys.executable, "-P", "-m", "ummanu.runtime.resource_probe", "--resource", "nope"],
             capture_output=True,
             text=True,
             timeout=60,
@@ -90,7 +90,7 @@ class CliContractTests(unittest.TestCase):
         for rid, resource in registry.resources.items():
             with self.subTest(rid):
                 self.assertEqual(
-                    resource["probe"], f"python3 -P -m secretary.runtime.resource_probe --resource {rid}"
+                    resource["probe"], f"python3 -P -m ummanu.runtime.resource_probe --resource {rid}"
                 )
                 self.assertIn(rid, resource_probe.BUILTIN_PROBES)
 

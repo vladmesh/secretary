@@ -16,7 +16,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from secretary.runtime.head.local_pty.client import spawn_head
+from ummanu.runtime.head.local_pty.client import spawn_head
 
 
 def main() -> int:
@@ -31,7 +31,7 @@ def main() -> int:
         root=args.root,
         run_id=args.run_id,
         role="worker",
-        task="secretary-1463",
+        task="ummanu-1463",
         command=args.command,
         quiet_seconds=0.4,
     )

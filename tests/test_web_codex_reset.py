@@ -18,10 +18,11 @@ from typing import Any
 from unittest import mock
 from urllib.error import HTTPError, URLError
 
-from secretary.tasks import TaskError
-from secretary.web import pages
-from secretary.web.app import WebApp
-from secretary.web.provider_usage import (
+from tests.web_fakes import Recording
+from ummanu.tasks import TaskError
+from ummanu.web import pages
+from ummanu.web.app import WebApp
+from ummanu.web.provider_usage import (
     CLAUDE_USAGE_URL,
     CODEX_RESET_CONSUME_URL,
     CODEX_RESET_CREDITS_URL,
@@ -29,13 +30,12 @@ from secretary.web.provider_usage import (
     CODEX_USAGE_URL,
     ProviderUsageLayer,
 )
-from secretary.webproto.command_reads import CommandReadLayer
-from secretary.webproto.provider_ops import (
+from ummanu.webproto.command_reads import CommandReadLayer
+from ummanu.webproto.provider_ops import (
     CODEX_RESET_KIND,
     NO_CREDIT,
     ProviderOperationLayer,
 )
-from tests.web_fakes import Recording
 
 NOW = 1_800_000_000.0
 #: A token shaped like none a provider issues, so finding it anywhere is finding a leak.
@@ -135,8 +135,8 @@ class ResetFixture(unittest.TestCase):
         )
         self.audit = MemoryAudit()
         for seam in (
-            "secretary.webproto.provider_ops.task_audit_for",
-            "secretary.webproto.command_reads.task_audit_for",
+            "ummanu.webproto.provider_ops.task_audit_for",
+            "ummanu.webproto.command_reads.task_audit_for",
         ):
             self.enterContext(mock.patch(seam, lambda *_args, **_kwargs: self.audit))
         self.layer = ProviderOperationLayer(
@@ -500,8 +500,8 @@ class ButtonTests(unittest.TestCase):
             self.assertIn(script, pages._page("t", "<p>x</p>"))
         self.assertLess(script.index("window.confirm(button.dataset.confirm)"), script.index("fetch("))
         self.assertIn("/api/providers/codex/reset-limit", script)
-        self.assertIn("secretaryReloadWhenIdle", script)
-        self.assertIn("window.secretaryReloadWhenIdle", pages._REFRESH_SCRIPT)
+        self.assertIn("ummanuReloadWhenIdle", script)
+        self.assertIn("window.ummanuReloadWhenIdle", pages._REFRESH_SCRIPT)
         self.assertNotIn("location.reload", script, "the reset reloads only through the page's rule")
 
 

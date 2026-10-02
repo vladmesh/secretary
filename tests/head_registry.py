@@ -7,7 +7,7 @@ from pathlib import Path
 
 import yaml
 
-from secretary.head_registry import snapshot_header
+from ummanu.head_registry import snapshot_header
 
 
 def write_installed_pair(instance: Path, snapshot: str) -> Path:

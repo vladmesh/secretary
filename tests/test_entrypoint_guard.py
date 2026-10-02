@@ -14,11 +14,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import upgrade
-from secretary.dispatch import entrypoint_guard, production_checkout
-from secretary.dispatch.production_checkout import ProductionActivationRefused
-from secretary.dispatch.runtime_preflight import PACKAGE
-from secretary.dispatch.types import HostError
+from ummanu import upgrade
+from ummanu.dispatch import entrypoint_guard, production_checkout
+from ummanu.dispatch.production_checkout import ProductionActivationRefused
+from ummanu.dispatch.runtime_preflight import PACKAGE
+from ummanu.dispatch.types import HostError
 
 PREFLIGHT = f"src/{PACKAGE}/dispatch/runtime_preflight.py"
 MANIFEST = f'[project]\nname = "product"\n\n[project.scripts]\n{PACKAGE} = "{PACKAGE}.cli:main"\n'

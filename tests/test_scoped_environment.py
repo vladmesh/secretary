@@ -13,13 +13,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.po.runner import turn_environment
-from secretary.po import PO_REQUEST_ENV, PO_SESSION_ENV
-from secretary.runtime.head.command import with_pid_heartbeat
-from secretary.runtime.head.local_pty import scope_bootstrap, scope_environment, scope_launcher
-from secretary.runtime.head.local_pty.client import LocalPtySpawnError, _supervisor_environment, spawn_head
-from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
-from secretary.runtime.head.memory import OOM_STREAM_ENV, scope_argv, scope_unit
+from ummanu.po.runner import turn_environment
+from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV
+from ummanu.runtime.head.command import with_pid_heartbeat
+from ummanu.runtime.head.local_pty import scope_bootstrap, scope_environment, scope_launcher
+from ummanu.runtime.head.local_pty.client import LocalPtySpawnError, _supervisor_environment, spawn_head
+from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+from ummanu.runtime.head.memory import OOM_STREAM_ENV, scope_argv, scope_unit
 from tests.scoped_environment_fixtures import deployed_scope_argv
 
 
@@ -34,10 +34,10 @@ class ScopedEnvironmentTests(unittest.TestCase):
                 executable = bin_dir / "only-prepared-cli"
                 executable.write_text(
                     "#!/usr/bin/env python3\n"
-                    "import json,os,sys,pathlib,secretary\n"
+                    "import json,os,sys,pathlib,ummanu\n"
                     "pathlib.Path(sys.argv[1]).write_text(json.dumps({"
                     "'environment':dict(os.environ), 'argv':sys.argv[2:],"
-                    "'python':sys.executable, 'source':secretary.__file__,"
+                    "'python':sys.executable, 'source':ummanu.__file__,"
                     "'stdin':sys.stdin.read()}))\n"
                 )
                 executable.chmod(0o700)
@@ -190,7 +190,7 @@ class ScopedEnvironmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             child = subprocess.run([
                 sys.executable, "-P", "-c",
-                "import os; from secretary.runtime.head.local_pty.scope_environment import environment_descriptor; "
+                "import os; from ummanu.runtime.head.local_pty.scope_environment import environment_descriptor; "
                 "environment_descriptor({'SAFE':'sentinel'}); os._exit(7)",
             ], cwd=temp, env=_supervisor_environment(None), capture_output=True, timeout=10)
             self.assertEqual(child.returncode, 7, child.stderr.decode())
@@ -201,12 +201,12 @@ class ScopedEnvironmentTests(unittest.TestCase):
             with self.subTest(role=role), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)
                 def refused(argv, **kwargs):
-                    self.assertIn("secretary.runtime.head.local_pty.scope_launcher", argv)
+                    self.assertIn("ummanu.runtime.head.local_pty.scope_launcher", argv)
                     self.assertEqual(kwargs["env"]["SAFE"], "explicit override")
                     kwargs["stderr"].write(b"scoped environment launch refused\n")
                     return SimpleNamespace(wait=lambda: 1)
-                with (mock.patch("secretary.runtime.head.local_pty.client.subprocess.Popen", side_effect=refused) as launch,
-                      mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root / "cgroups"),
+                with (mock.patch("ummanu.runtime.head.local_pty.client.subprocess.Popen", side_effect=refused) as launch,
+                      mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", root / "cgroups"),
                       mock.patch.dict(os.environ, {"SAFE": "inherited"})):
                     with self.assertRaises(LocalPtySpawnError) as failure:
                         spawn_head(root=root, run_id="refused", role=role, task="disposable",

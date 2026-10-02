@@ -12,8 +12,8 @@ import time
 import unittest
 from pathlib import Path
 
-from secretary.runtime import state as state_module
-from secretary.runtime.state import AgentState
+from ummanu.runtime import state as state_module
+from ummanu.runtime.state import AgentState
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -21,7 +21,7 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 HOLDER = """
 import sys, time
 from pathlib import Path
-from secretary.runtime.state import AgentState
+from ummanu.runtime.state import AgentState
 state_dir, ready, go, hold = sys.argv[1], Path(sys.argv[2]), Path(sys.argv[3]), float(sys.argv[4])
 while go.name != "-" and not go.exists():
     time.sleep(0.01)

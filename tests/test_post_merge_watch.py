@@ -2,7 +2,7 @@
 
 Unit level, no Docker and no network: `gh` is a scripted host, the board is a recording writer
 whose request ids are idempotent the way the audit's are, and the observer significance predicate
-(`secretary.tasks.is_significant_observer_event`) is the judge of what wakes the observer.
+(`ummanu.tasks.is_significant_observer_event`) is the judge of what wakes the observer.
 """
 
 from __future__ import annotations
@@ -18,27 +18,27 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from secretary.board.models import Actor, CardState, EntityKind, Event
-from secretary.board.transitions import transition_for
-from secretary.dispatch import post_merge, release_lifecycle
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.observer import render_observer_wake_context
-from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatch.types import HostError, MergeLanding
-from secretary.tasks import (
+from tests.production_runtime_fixtures import registered_production_runtime
+from ummanu.board.models import Actor, CardState, EntityKind, Event
+from ummanu.board.transitions import transition_for
+from ummanu.dispatch import post_merge, release_lifecycle
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.observer import render_observer_wake_context
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.types import HostError, MergeLanding
+from ummanu.tasks import (
     RELEASE_MERGE_KEY,
     TaskError,
     is_significant_card_event,
     is_significant_observer_event,
 )
-from tests.production_runtime_fixtures import registered_production_runtime
 
-REF = "secretary-9001"
+REF = "ummanu-9001"
 SPRINT = "sprint:77"
 SHA = "a" * 40
 OTHER_SHA = "b" * 40
 REPO = "example-org/sample"
-BRANCH = "pipeline/secretary-9001"
+BRANCH = "pipeline/ummanu-9001"
 
 
 def _done(*, actor: str = "dispatcher", release_merge: dict | None = None, source=CardState.ASSESSMENT) -> dict:
@@ -224,7 +224,7 @@ def _runtime(host: Any) -> SimpleNamespace:
     runtime = SimpleNamespace(
         host=host,
         catalog=host.catalog,
-        owner="secretary-dispatcher",
+        owner="ummanu-dispatcher",
         writer=_Writer(),
         sprint_writer=_SprintWriter(),
         saved=[],
@@ -305,7 +305,7 @@ class ReleaseOpensTheWatchTests(unittest.TestCase):
         self.records = {REF: self.record}
         self.payload: dict = {}
         self.runtime = mock.Mock()
-        self.runtime.owner = "secretary-dispatcher"
+        self.runtime.owner = "ummanu-dispatcher"
         self.order: list[str] = []
         self.runtime.save_records.side_effect = lambda payload, records: self.order.append(
             "save:" + ",".join(sorted(payload.get(post_merge.WATCHES_KEY) or {}))
@@ -755,7 +755,7 @@ class MergePathLandingTests(unittest.TestCase):
 
     def test_automerge_off_lands_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
-            os.environ, {"SECRETARY_DISPATCHER_AUTOMERGE": "off"}
+            os.environ, {"UMMANU_DISPATCHER_AUTOMERGE": "off"}
         ):
             host = _MergeHost(Path(tmp), ci="github")
             record = SimpleNamespace(workspace=str(Path(tmp) / "ws"))

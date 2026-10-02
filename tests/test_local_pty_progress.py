@@ -11,9 +11,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.runtime.head.local_pty import protocol
-from secretary.runtime.head.local_pty import supervisor as module
-from secretary.runtime.redact import scrub_secrets
+from ummanu.runtime.head.local_pty import protocol
+from ummanu.runtime.head.local_pty import supervisor as module
+from ummanu.runtime.redact import scrub_secrets
 
 FIXTURES = Path(__file__).parent / "fixtures" / "local_pty_recorded"
 # Small clips taken inside the longest spinner-only frame runs in five production PTY tails.
@@ -156,7 +156,7 @@ class RecordedSpinnerReplayTests(unittest.TestCase):
                 self.assertEqual(scrub_secrets(text), text)
                 self.assertIsNone(
                     re.search(
-                        r"/home/|/tmp/|/etc/|SECRETARY_|Bearer\s|sk-[A-Za-z0-9]|ghp_", text, re.IGNORECASE
+                        r"/home/|/tmp/|/etc/|UMMANU_|Bearer\s|sk-[A-Za-z0-9]|ghp_", text, re.IGNORECASE
                     )
                 )
                 self.assertIsNone(

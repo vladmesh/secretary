@@ -6,7 +6,7 @@ import json
 import os
 import subprocess
 
-from secretary.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
+from ummanu.runtime.container_labels import PRODUCTION_BOARD_LABEL, TEST_BOARD_LABEL
 
 
 def _docker(*args: str) -> str:

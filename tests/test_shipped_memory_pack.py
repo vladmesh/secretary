@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from secretary.memory.pack import load_product_pack
+from ummanu.memory.pack import load_product_pack
 
 
 class ShippedMemoryPackTests(unittest.TestCase):

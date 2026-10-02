@@ -1,0 +1,19 @@
+# Portable spec for the curator triggered-agent.
+#
+# The canon for HOW the agent is dispatched. Its schedule is the packaged systemd timer
+# (ummanu-curator.timer), the only schedule owner; Ummanu manages no Orca automation.
+
+name = "curator"
+skill = "/curate"         # prompt = skill invocation (skill lives in .claude/skills/curate)
+# Last resort only. The head this agent launches on is `role_defaults.curator` in the selected
+# head registry (the installation's own snapshot when it has one); this line answers for a
+# registry that routes the curator nowhere at all.
+head = "codex-sol-medium"
+# Skip the run when no session has new turns since the watermark. Gated in the systemd unit.
+precheck = "python3 -P -m ummanu automations curator precheck"
+
+[systemd]
+# The only scheduler; packaged as ummanu-<name>.timer.
+calendar = "hourly"
+randomized_delay_sec = 90   # jitter so the sweep never lands exactly on :00 with the rest of the hourly crowd
+legacy_unit = "curator-sweep"  # one-time: remove the pre-provisioning hand-written unit of this name

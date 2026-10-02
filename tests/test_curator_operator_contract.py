@@ -21,7 +21,7 @@ class CuratorOperatorContractTests(unittest.TestCase):
             '`model = "gpt-5.6-terra"` and `effort = "high"`',
             "declared `fallback` sequence",
             'curator = "codex-terra-high"',
-            "`secretary-curator.timer` is the sole scheduler owner",
+            "`ummanu-curator.timer` is the sole scheduler owner",
             "Orca curator\nautomation must remain disabled",
             "`DISABLED curator`",
             "Do not change `host.components.curator`",
@@ -38,7 +38,7 @@ class CuratorOperatorContractTests(unittest.TestCase):
                 self.assertIn(required, operations)
 
     def test_the_shipped_registry_keeps_installation_policy_out(self) -> None:
-        shipped = ROOT / "src" / "secretary" / "runtime" / "heads.toml"
+        shipped = ROOT / "src" / "ummanu" / "runtime" / "heads.toml"
         canon = tomllib.loads(shipped.read_text(encoding="utf-8"))
 
         # secretary-1697: the curator is routed by role_defaults onto one of the five pipeline

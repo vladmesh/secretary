@@ -23,7 +23,7 @@ cost the whole history, on the dispatcher tick and on web requests alike.
    that matter.
 2. **`requests` is what recovery replays.** It is the audit canon on PostgreSQL
    (`docs/BOARD_STORE.md` §7.3): the checkpoint exports it whole as `audit.json`/`audit.ndjson`
-   (`secretary/data.py`), `restore` reads it back, and request-id replay answers, budget and usage
+   (`ummanu/data.py`), `restore` reads it back, and request-id replay answers, budget and usage
    accounting and observer cursors all resolve against it. Rotating it would add a data-loss risk
    to recovery — a replay, a restore or a cursor resolving against rows that are no longer there —
    in exchange for disk that is not scarce.

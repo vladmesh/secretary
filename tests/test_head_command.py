@@ -28,7 +28,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.runtime.head import (
+from ummanu.runtime.head import (
     CLAUDE_EFFORTS,
     CODEX_EFFORTS,
     HEAD_BINDING,
@@ -44,14 +44,14 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # One installation, written out, so a wrapper assertion is about the wrapper rather than about
 # whatever the developer's shell happens to export.
 LAUNCH_ENV = {
-    "SECRETARY_RUNTIME_ENV_FILE": "/opt/inst/runtime.env",
-    "SECRETARY_INSTANCE": "/opt/inst",
-    "TA_SECRETARY_REPO": "/opt/checkout",
+    "UMMANU_RUNTIME_ENV_FILE": "/opt/inst/runtime.env",
+    "UMMANU_INSTANCE": "/opt/inst",
+    "UMMANU_REPO": "/opt/checkout",
     "HOME": "/home/nobody",
 }
 BINDING = (
-    "SECRETARY_RUNTIME_ENV_FILE=/opt/inst/runtime.env SECRETARY_INSTANCE=/opt/inst "
-    "TA_SECRETARY_REPO=/opt/checkout"
+    "UMMANU_RUNTIME_ENV_FILE=/opt/inst/runtime.env UMMANU_INSTANCE=/opt/inst "
+    "UMMANU_REPO=/opt/checkout"
 )
 CLAUDE_MEMORY_CONFIG = json.dumps(
     {
@@ -59,7 +59,7 @@ CLAUDE_MEMORY_CONFIG = json.dumps(
             "memory": {
                 "type": "http",
                 "url": "http://127.0.0.1:8077/mcp",
-                "headers": {"Authorization": "Bearer ${SECRETARY_MEMORY_ACCESS_TOKEN}"},
+                "headers": {"Authorization": "Bearer ${UMMANU_MEMORY_ACCESS_TOKEN}"},
             }
         }
     },
@@ -113,8 +113,8 @@ class ClaudeShapeTests(unittest.TestCase):
 
     def test_a_prompt_is_carried_on_the_command_line_when_one_is_given(self) -> None:
         self.assertEqual(
-            self.render({"adapter": "claude"}, prompt="/steward --card secretary-1"),
-            f"{CLAUDE_BASE} '/steward --card secretary-1'",
+            self.render({"adapter": "claude"}, prompt="/steward --card ummanu-1"),
+            f"{CLAUDE_BASE} '/steward --card ummanu-1'",
         )
 
     def test_no_prompt_means_the_interactive_shape(self) -> None:
@@ -153,7 +153,7 @@ class CodexShapeTests(unittest.TestCase):
             "--enable multi_agent_v2 -c features.multi_agent_v2.wait_agent_enabled=false "
             "-c mcp_servers.po_memory.enabled=false "
             "-c 'mcp_servers.memory.url=\"http://127.0.0.1:8077/mcp\"' "
-            "-c 'mcp_servers.memory.bearer_token_env_var=\"SECRETARY_MEMORY_ACCESS_TOKEN\"' "
+            "-c 'mcp_servers.memory.bearer_token_env_var=\"UMMANU_MEMORY_ACCESS_TOKEN\"' "
             "-m gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' "
             f'-c \'projects."{self.workspace}".trust_level="trusted"\'',
         )
@@ -231,7 +231,7 @@ class RoleEnvWrapperTests(unittest.TestCase):
                 "observer",
                 HEAD_BINDING,
                 "",
-                {"SECRETARY_OBSERVER_SPRINT": "sprint:9", "SECRETARY_OBSERVER_GENERATION": "3"},
+                {"UMMANU_OBSERVER_SPRINT": "sprint:9", "UMMANU_OBSERVER_GENERATION": "3"},
             ),
             ("curator", STANDING_BINDING, "", None),
         )
@@ -242,7 +242,7 @@ class RoleEnvWrapperTests(unittest.TestCase):
                 )
                 workspace_arg = f" --workspace {workspace}" if workspace else ""
                 self.assertIn(
-                    " python3 -P -m secretary.runtime.role_env exec "
+                    " python3 -P -m ummanu.runtime.role_env exec "
                     f"--role {role}{workspace_arg} -- /bin/sh -lc ",
                     command,
                 )
@@ -258,12 +258,12 @@ class RoleEnvWrapperTests(unittest.TestCase):
                     workspace="/worktree",
                 ).command,
                 f'{BINDING} PYTHONPATH=/opt/checkout/src"${{PYTHONPATH:+:$PYTHONPATH}}" '
-                "python3 -P -m secretary.runtime.role_env exec --role worker --workspace /worktree -- "
+                "python3 -P -m ummanu.runtime.role_env exec --role worker --workspace /worktree -- "
                 "/bin/sh -lc "
                 + shlex.quote(
-                    "test -x /opt/checkout/src/secretary/runtime/docker-bin/docker || "
+                    "test -x /opt/checkout/src/ummanu/runtime/docker-bin/docker || "
                     "{ printf '%s\\n' 'docker-guard: executable unavailable; repair the role launch' >&2; exit 125; }; "
-                    "PATH=/opt/checkout/src/secretary/runtime/docker-bin:/worktree/.secretary-task-env/venv/bin"
+                    "PATH=/opt/checkout/src/ummanu/runtime/docker-bin:/worktree/.ummanu-task-env/venv/bin"
                     "${PATH:+:$PATH}; export PATH; " + CLAUDE_BASE
                 ),
             )
@@ -272,7 +272,7 @@ class RoleEnvWrapperTests(unittest.TestCase):
         with mock.patch.dict(os.environ, LAUNCH_ENV, clear=True):
             expected = (
                 f"{BINDING} PYTHONPATH=/opt/checkout/src python3 -P -m "
-                "secretary.runtime.role_env exec --role steward -- /bin/sh -lc "
+                "ummanu.runtime.role_env exec --role steward -- /bin/sh -lc "
                 + shlex.quote(
                     f"PATH=/opt/checkout/.venv/bin${{PATH:+:$PATH}}; export PATH; {CLAUDE_BASE} '/steward'"
                 )
@@ -293,12 +293,12 @@ class RoleEnvWrapperTests(unittest.TestCase):
                 {"adapter": "claude"},
                 role="observer",
                 identity={
-                    "SECRETARY_OBSERVER_SPRINT": "sprint:9",
-                    "SECRETARY_OBSERVER_GENERATION": "3",
+                    "UMMANU_OBSERVER_SPRINT": "sprint:9",
+                    "UMMANU_OBSERVER_GENERATION": "3",
                 },
             ).command
         self.assertIn(
-            f"{BINDING} SECRETARY_OBSERVER_GENERATION=3 SECRETARY_OBSERVER_SPRINT=sprint:9 ",
+            f"{BINDING} UMMANU_OBSERVER_GENERATION=3 UMMANU_OBSERVER_SPRINT=sprint:9 ",
             command,
         )
 
@@ -306,8 +306,8 @@ class RoleEnvWrapperTests(unittest.TestCase):
         """Anything outside the role's allowlist would be dropped by `runtime_env` on the way in;
         refusing here is the difference between a head that will not start and one that starts
         without the binding its caller believed it had."""
-        with self.assertRaisesRegex(HeadCommandError, "SECRETARY_OBSERVER_SPRINT"):
-            wrap_role_command("worker", "true", identity={"SECRETARY_OBSERVER_SPRINT": "s"})
+        with self.assertRaisesRegex(HeadCommandError, "UMMANU_OBSERVER_SPRINT"):
+            wrap_role_command("worker", "true", identity={"UMMANU_OBSERVER_SPRINT": "s"})
 
     def test_the_standing_binding_renders_no_identity_and_says_so(self) -> None:
         with self.assertRaisesRegex(HeadCommandError, "renders no identity"):
@@ -315,22 +315,22 @@ class RoleEnvWrapperTests(unittest.TestCase):
                 "observer",
                 "true",
                 binding=STANDING_BINDING,
-                identity={"SECRETARY_OBSERVER_SPRINT": "s"},
+                identity={"UMMANU_OBSERVER_SPRINT": "s"},
             )
 
     def test_an_unwrapped_command_is_what_the_operator_shell_execs(self) -> None:
-        """`secretary shell` runs in a terminal the operator already owns, so there is no role to
+        """`ummanu shell` runs in a terminal the operator already owns, so there is no role to
         bind — and no identity to render into a command nothing launched."""
         self.assertEqual(
             render_head_command({"adapter": "claude"}).command,
             CLAUDE_BASE,
         )
         with self.assertRaisesRegex(HeadCommandError, "carries no identity"):
-            render_head_command({"adapter": "claude"}, identity={"SECRETARY_OBSERVER_SPRINT": "s"})
+            render_head_command({"adapter": "claude"}, identity={"UMMANU_OBSERVER_SPRINT": "s"})
 
     def test_an_unknown_binding_is_refused_rather_than_defaulted(self) -> None:
         with self.assertRaisesRegex(HeadCommandError, "unknown role env binding"):
-            wrap_role_command("worker", "true", binding="secretary.runtime.role_env")
+            wrap_role_command("worker", "true", binding="ummanu.runtime.role_env")
 
     def test_local_run_policy_is_an_explicit_argument_only_for_card_heads(self) -> None:
         policy = json.dumps({"argv": ["docker", "run", "owner's two words", ""]})
@@ -370,7 +370,7 @@ class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):
     def test_the_dispatcher_brings_a_head_up_on_exactly_the_rendered_command(self) -> None:
         """`CommandHostRuntime.head_launch` is a lookup, a workspace preflight and this renderer —
         asked for the interactive shape, whatever prompt inputs its caller resolved."""
-        from secretary.dispatch.host import InstanceCatalog
+        from ummanu.dispatch.host import InstanceCatalog
 
         profile = {"adapter": "claude", "model": "opus", "effort": "high"}
         with tempfile.TemporaryDirectory() as tmp:
@@ -394,8 +394,8 @@ class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):
         self.assertNotIn("TASK.md", launch.command)
 
     def test_the_operator_shell_renders_the_same_command_the_registry_would(self) -> None:
-        from secretary import session
-        from secretary.runtime import heads
+        from ummanu import session
+        from ummanu.runtime import heads
 
         registry = heads.load_registry()
         for pid in registry.known():
@@ -409,7 +409,7 @@ class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):
         """secretary-1720: an agent a registry routes nowhere is refused, not launched on a bare
         default-model `claude` invocation. A supervisor raises a head from its profile's spec, and
         such a launch has none, so the tick fails closed rather than improvising a command."""
-        from secretary.automations.runtime import dispatch
+        from ummanu.automations.runtime import dispatch
 
         with (
             mock.patch.dict(os.environ, LAUNCH_ENV, clear=True),
@@ -426,9 +426,9 @@ def _module_paths() -> list[Path]:
     The Orca pane host that used to be excused here as the seam was deleted in secretary-1725, so
     no module outside the head package is excused from any check below.
     """
-    head_package = REPO_ROOT / "src" / "secretary" / "runtime" / "head"
+    head_package = REPO_ROOT / "src" / "ummanu" / "runtime" / "head"
     paths = []
-    for path in sorted((REPO_ROOT / "src" / "secretary").rglob("*.py")):
+    for path in sorted((REPO_ROOT / "src" / "ummanu").rglob("*.py")):
         if head_package in path.parents:
             continue
         paths.append(path)
@@ -552,7 +552,7 @@ class SeamGrepTests(unittest.TestCase):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for lineno, sub in _terminal_vectors(tree):
                 offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno} (terminal {sub})")
-        self.assertEqual(offenders, [], f"orca terminal argument vectors in src/secretary: {offenders}")
+        self.assertEqual(offenders, [], f"orca terminal argument vectors in src/ummanu: {offenders}")
 
     def test_the_check_sees_a_vector_whose_binary_came_from_a_variable(self) -> None:
         """The check is not vacuous, in both of the forms a live call is written in.
@@ -583,7 +583,7 @@ class SeamGrepTests(unittest.TestCase):
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for lineno in _pane_screen_reads(tree):
                 offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}")
-        self.assertEqual(offenders, [], f"pane screen reads in src/secretary: {offenders}")
+        self.assertEqual(offenders, [], f"pane screen reads in src/ummanu: {offenders}")
 
     def test_the_pane_read_rule_catches_a_read_however_the_vector_was_built(self) -> None:
         """Named, so a screen read is caught even when the vector around it is assembled
@@ -608,7 +608,7 @@ class SeamGrepTests(unittest.TestCase):
         exception dict would be saying nothing (secretary-1416).
         """
         self.assertEqual(_SEAM_EXCEPTIONS, {})
-        scheduler = REPO_ROOT / "src" / "secretary" / "automations" / "runtime" / "dispatch.py"
+        scheduler = REPO_ROOT / "src" / "ummanu" / "automations" / "runtime" / "dispatch.py"
         self.assertIn(scheduler, _module_paths())
         source = scheduler.read_text(encoding="utf-8")
         self.assertEqual(_terminal_vectors(ast.parse(source)), [])

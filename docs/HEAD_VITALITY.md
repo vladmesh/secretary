@@ -3,10 +3,10 @@
 Head vitality answers "is the head working?" as three independent observation axes, fused over time
 with hysteresis, then turned into a recovery intent. Modules:
 
-- `src/secretary/dispatch/head_vitality.py`: observation vocabulary and snapshots;
-- `src/secretary/dispatch/head_vitality_episode.py`: the episode reducer;
-- `src/secretary/dispatch/head_vitality_guard.py`: the destructive-step guard;
-- `src/secretary/dispatch/head_vitality_policy.py`: the recovery policy.
+- `src/ummanu/dispatch/head_vitality.py`: observation vocabulary and snapshots;
+- `src/ummanu/dispatch/head_vitality_episode.py`: the episode reducer;
+- `src/ummanu/dispatch/head_vitality_guard.py`: the destructive-step guard;
+- `src/ummanu/dispatch/head_vitality_policy.py`: the recovery policy.
 
 `HeadRuntime` owns the lifecycle boundary. The local-pty backend, the one head runtime, owns
 delivery, turn lease, drain and stop atomically.
@@ -269,11 +269,11 @@ provider dark it waits for the outer ceiling like any other one-channel confirma
 | Journal turn **open**, journal and provider quiet | 5 min (`suspect_after`) | 15 min (`suspect_after + confirm_after`) | last progress (`_quiet_reference`) |
 | Open turn held by moving children | ceiling + 5 min | ceiling + 15 min | last accepted child progress, ceiling 45 min |
 
-Secretary-1727 round 2 (run `9c6b884b…`): its turn ended at 23:43:09Z; the episode reached
+Ummanu-1727 round 2 (run `9c6b884b…`): its turn ended at 23:43:09Z; the episode reached
 `suspected_stall` at 00:42:12Z. Replayed with the journal source and children moving on every tick, the
 episode stamps suspicion from 23:48:09Z and confirmation from 23:53:09Z; at that night's 65 s tick
 cadence the verdicts appear at 23:48:37Z and 23:54:02Z (`tests/test_local_pty_journal_turn.py`,
-`Secretary1727ReplayTests`).
+`Ummanu1727ReplayTests`).
 
 ### Pid-only evidence
 
@@ -334,7 +334,7 @@ active retention follows the `Suspended` ladder.
 | `child_activity_ceiling` | `CHILD_ACTIVITY_CEILING_DEFAULT` (45 min) |
 | `idle_turn_suspect_after` | `IDLE_TURN_SUSPECT_DEFAULT` (5 min), from the idle turn's start |
 | `idle_turn_confirm_after` | `IDLE_TURN_CONFIRM_DEFAULT` (10 min), from the idle turn's start |
-| suspension response window | 5 min (`SECRETARY_HEAD_SUSPENSION_RESPONSE_SECONDS`, `SUSPENSION_RESPONSE_WINDOW_DEFAULT`) |
+| suspension response window | 5 min (`UMMANU_HEAD_SUSPENSION_RESPONSE_SECONDS`, `SUSPENSION_RESPONSE_WINDOW_DEFAULT`) |
 | deterministic refusal limit | 3 |
 | worker report outer ceiling | `WORKER_REPORT_STALL_DEFAULT` (6 h) |
 | gate pending outer ceiling | `GATE_PENDING_STALL_SECONDS` (6 h) |
@@ -353,7 +353,7 @@ foreground (two `timeout 580` integration shards, or one broad suite: about 20 m
 a slow host) and still catch a hung child that spins within the hour. Forty-five minutes puts a
 spinning child's confirmation at about an hour of head silence.
 
-**`SECRETARY_HEAD_IDLE_STALL_SECONDS` governs no production path.** It is read only by
+**`UMMANU_HEAD_IDLE_STALL_SECONDS` governs no production path.** It is read only by
 `watchdog.idle_stall_seconds()`, whose last production caller (the idle fence and clock-only wait
 ladder) was removed in cadc5c7 when the wait tick moved onto the vitality verdict; today only tests call
 it. The vitality thresholds are built from the constant `IDLE_STALL_DEFAULT` and ignore the variable,
@@ -408,7 +408,7 @@ respawned into the same provider (the 2026-09-25 case). The details are in
 ### The guard
 
 Every watchdog-driven destructive step passes
-`secretary.dispatch.head_vitality_guard.assert_destructive_allowed` before anything is stopped, killed,
+`ummanu.dispatch.head_vitality_guard.assert_destructive_allowed` before anything is stopped, killed,
 respawned or replaced. It allows only `ConfirmedStall` and `Dead`. Refusal classes: `missing-episode`,
 `foreign-run` (episode names another HeadRun), `healthy-active`, `healthy-quiet`, `unverifiable`,
 `suspended`, `retained`, `suspected-stall`, `pid-only-ceiling-unelapsed`.
@@ -421,7 +421,7 @@ plus one comment.
 
 A refusal produces a degraded `{kind}-guard-refused` outcome and one idempotent durable comment keyed
 on the wait cycle and refusal class. The body says only what that key names; live measurements (quiet,
-dark sources, next deadline) stay on the episode and are read with `secretary head-status`.
+dark sources, next deadline) stay on the episode and are read with `ummanu head-status`.
 
 Guarded entry point: `DispatcherRuntime._trigger_wait_watchdog`, which fences both arms
 (`dispatch.wait_vitality._respawn_wait`, `dispatch.wait_vitality._escalate_wait`) through `dispatch.wait_vitality._guard_or_wait`. The no-episode fallback's evidence
@@ -434,7 +434,7 @@ Not guarded, because they do not act on vitality:
 - operator-initiated stops (`CommandHostRuntime.stop_head` from an explicit operator command);
 - card-lifecycle stops: Done/Blocked transitions, drain, the review bring-up's confirmed worker freeze
   (`_adopt_launch_intent`);
-- launch-recovery stops in `secretary.dispatch.launch.resolve_launch_intent`, which act on durable launch
+- launch-recovery stops in `ummanu.dispatch.launch.resolve_launch_intent`, which act on durable launch
   intents and heartbeat identity;
 - the provider-failure stop (`dispatch.provider_failure`), which acts on the run's own provider error
   record, not on vitality, and runs ahead of it.
@@ -525,11 +525,11 @@ live round, so a verdict that can stop a head needs strong admitted evidence.
 | `/proc` state `T` ⇒ `Suspended` within one tick; stall clocks frozen; never `ConfirmedStall` or `Dead`; the gate-pending tick SIGCONTs a non-retained suspended worker within one tick. | `IssueFe04011bStoppedWorkerSixHourCeilingTests`, `IssueFe04011bLegacyGatePendingTests` |
 | A repeated deterministic reason with a live terminal keeps `Unverifiable` and escalates after 3 identical sightings; a repeated heuristic reason earns only observation. | `CodegenOrchestrator1194DeterministicSplitFailureTests`; `ReviewPaneTests.test_reviewer_falls_back_when_connected_anchor_is_not_split_capable` |
 | A confirmed retention ⇒ `Retained`: no SIGCONT or other rung, so a red gate reuses the suspended session; `Dead` still outranks it. | `Issue02fe04d7RetainedWorkerTests` |
-| A dark progress source freezes only for `dark_ceiling`, then `SuspectedStall` (spending the nudge) and `ConfirmedStall`; the reason names the dark source; nothing is stopped before the outer ceiling. | `Secretary1517Tests`, `Secretary1517WaitTickTests` |
+| A dark progress source freezes only for `dark_ceiling`, then `SuspectedStall` (spending the nudge) and `ConfirmedStall`; the reason names the dark source; nothing is stopped before the outer ceiling. | `Ummanu1517Tests`, `Ummanu1517WaitTickTests` |
 | A status with no provider channel (`reason: "pid"`, `"disconnected"`) after the provider answered once is stamped `absent@provider_cursor`, takes the `dark_ceiling` window, and a confirmation is held behind the outer ceiling. | `ProviderLessStatusShapesTests` |
 | Pid-only `Running` with no progress evidence ages to `SuspectedStall` then `ConfirmedStall`. | `Issue06dcf6cbUmbrellaLivenessContractTests` |
 | A first turn that ended on a provider error falls back on the tick that sees it: no `SuspectedStall` action, no respawn, no Blocked; the resource is recorded `unavailable` and the role moves down its chain (or waits for a provider on an empty chain). | `ProviderFailureFallbackTests` (`tests/test_dispatcher_provider_failure.py`), `tests/test_provider_failure.py` |
-| Journal `Turn=Idle` on a claude/codex run with an owed answer ⇒ `SuspectedStall` at +5 min and `ConfirmedStall` at +10 min from the idle start, child activity notwithstanding; the same silent-child journal on another adapter stays healthy under the child hold; an open turn keeps the ladder and the child hold; a continued worker that works is never suspected; every hostile journal value makes the reading unavailable. | `Secretary1727ReplayTests`, `IdleTurnStallRuleTests`, `IdleTurnAdapterPremiseTests`, `ResumedWorkerThatWorksTests`, `HostileJournalValueTests` |
+| Journal `Turn=Idle` on a claude/codex run with an owed answer ⇒ `SuspectedStall` at +5 min and `ConfirmedStall` at +10 min from the idle start, child activity notwithstanding; the same silent-child journal on another adapter stays healthy under the child hold; an open turn keeps the ladder and the child hold; a continued worker that works is never suspected; every hostile journal value makes the reading unavailable. | `Ummanu1727ReplayTests`, `IdleTurnStallRuleTests`, `IdleTurnAdapterPremiseTests`, `ResumedWorkerThatWorksTests`, `HostileJournalValueTests` |
 
 Reducer timelines live in `tests/test_head_vitality_regression.py` and
 `tests/test_head_vitality_episode.py`; wait-tick and gate behaviour in

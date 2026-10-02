@@ -10,9 +10,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.memory import access as memory_access
-from secretary.memory import grant_env
-from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
+from ummanu.memory import access as memory_access
+from ummanu.memory import grant_env
+from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef
 
 
 class MemoryAccessTests(unittest.TestCase):
@@ -37,7 +37,7 @@ class MemoryAccessTests(unittest.TestCase):
         with mock.patch.object(memory_access, "head_process_status", return_value={"state": "live-match"}):
             return memory_access.resolve_token(grant.token, data_dir=self.data_dir, now=now)
 
-    def test_execution_heads_receive_only_their_card_project_and_product_secretary(self) -> None:
+    def test_execution_heads_receive_only_their_card_project_and_product_ummanu(self) -> None:
         grant = memory_access.issue_grant(
             self.head_run("worker", TaskRef.card("card-1")),
             memory_access.card_subject("card-1", "other-product"),
@@ -48,24 +48,24 @@ class MemoryAccessTests(unittest.TestCase):
 
         self.assertIsInstance(resolved, memory_access.MemoryReadIdentity)
         assert isinstance(resolved, memory_access.MemoryReadIdentity)
-        self.assertEqual(resolved.scopes, frozenset({"project:other-product", "product:secretary"}))
+        self.assertEqual(resolved.scopes, frozenset({"project:other-product", "product:ummanu"}))
         self.assertIsInstance(memory_access.narrow(resolved, "project:foreign"), memory_access.MemoryAccessDenial)
         self.assertEqual(memory_access.narrow(resolved, "project:other-product").scopes, frozenset({"project:other-product"}))
 
-    def test_secretary_execution_gets_its_project_scope_but_not_installation_wide_read(self) -> None:
+    def test_ummanu_execution_gets_its_project_scope_but_not_installation_wide_read(self) -> None:
         grant = memory_access.issue_grant(
             self.head_run("reviewer", TaskRef.card("card-2")),
-            memory_access.card_subject("card-2", "secretary"),
+            memory_access.card_subject("card-2", "ummanu"),
             data_dir=self.data_dir,
             now=100,
         )
         resolved = self.resolve(grant)
 
         assert isinstance(resolved, memory_access.MemoryReadIdentity)
-        self.assertEqual(resolved.scopes, frozenset({"project:secretary", "product:secretary"}))
+        self.assertEqual(resolved.scopes, frozenset({"project:ummanu", "product:ummanu"}))
         self.assertIsInstance(memory_access.narrow(resolved, "global"), memory_access.MemoryAccessDenial)
 
-    def test_observer_receives_sprint_reservations_and_product_secretary(self) -> None:
+    def test_observer_receives_sprint_reservations_and_product_ummanu(self) -> None:
         grant = memory_access.issue_grant(
             self.head_run("observer", TaskRef.sprint("sprint:7")),
             memory_access.sprint_subject("sprint:7", ["alpha", "beta"]),
@@ -75,7 +75,7 @@ class MemoryAccessTests(unittest.TestCase):
         resolved = self.resolve(grant)
 
         assert isinstance(resolved, memory_access.MemoryReadIdentity)
-        self.assertEqual(resolved.scopes, frozenset({"project:alpha", "project:beta", "product:secretary"}))
+        self.assertEqual(resolved.scopes, frozenset({"project:alpha", "project:beta", "product:ummanu"}))
 
     def test_interactive_po_is_installation_wide_but_that_capability_does_not_flow_to_worker(self) -> None:
         po = memory_access.issue_grant(
@@ -174,7 +174,7 @@ class MemoryAccessTests(unittest.TestCase):
             self.assertIsNone(resolved.scopes)
         resolved = self.resolve(steward)
         assert isinstance(resolved, memory_access.MemoryReadIdentity)
-        self.assertEqual(resolved.scopes, frozenset({"project:secretary", "product:secretary"}))
+        self.assertEqual(resolved.scopes, frozenset({"project:ummanu", "product:ummanu"}))
 
     def test_malformed_requested_scope_is_a_typed_denial_with_resolved_identity(self) -> None:
         grant = memory_access.issue_grant(

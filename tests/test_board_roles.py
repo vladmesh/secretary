@@ -2,23 +2,23 @@ from __future__ import annotations
 
 import unittest
 
-import secretary.tasks as task_protocol
-from secretary.board import Role as ExportedRole
-from secretary.board.card_transitions import (
+import ummanu.tasks as task_protocol
+from ummanu.board import Role as ExportedRole
+from ummanu.board.card_transitions import (
     CARD_TRANSITIONS,
     CardTransitionForbidden,
     card_transition,
 )
-from secretary.board.models import Actor, CardState
-from secretary.board.roles import (
+from ummanu.board.models import Actor, CardState
+from ummanu.board.roles import (
     BOARD_ROLES,
     CREATE_ROLES,
     EDIT_ROLES,
     PROPOSAL_CREATE_ROLES,
     Role,
 )
-from secretary.task_commands import _role_choices
-from secretary.tasks import TaskError, TaskWriter
+from ummanu.task_commands import _role_choices
+from ummanu.tasks import TaskError, TaskWriter
 
 
 class RoleVocabularyTests(unittest.TestCase):

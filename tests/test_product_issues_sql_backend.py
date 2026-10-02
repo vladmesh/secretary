@@ -10,10 +10,10 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from secretary.board import backend
-from secretary.tasks import TaskError
 from tests import test_product_issues as shared
 from tests.product_issue_fixtures import ProductIssueFixture
+from ummanu.board import backend
+from ummanu.tasks import TaskError
 
 
 class SqlProductIssueTransactionTests(ProductIssueFixture, unittest.TestCase):
@@ -32,9 +32,9 @@ class SqlProductIssueTransactionTests(ProductIssueFixture, unittest.TestCase):
 
     def _create_product(self, request_id: str = "product") -> dict:
         return self.store.create_product(
-            product_id="secretary",
-            projects=["secretary"],
-            title="Secretary",
+            product_id="ummanu",
+            projects=["ummanu"],
+            title="Ummanu",
             description="",
             actor="po",
             request_id=request_id,
@@ -53,9 +53,9 @@ class SqlProductIssueTransactionTests(ProductIssueFixture, unittest.TestCase):
         ):
             self._create_product("claim-failure")
         self.assertNotEqual(raised.exception.code, "audit_pending")
-        self.assertEqual(self._counts("claim-failure", reference="product:secretary"), (0, 0, 0, 0))
+        self.assertEqual(self._counts("claim-failure", reference="product:ummanu"), (0, 0, 0, 0))
         self._create_product("claim-failure")
-        self.assertEqual(self._counts("claim-failure", reference="product:secretary"), (1, 1, 1, 0))
+        self.assertEqual(self._counts("claim-failure", reference="product:ummanu"), (1, 1, 1, 0))
 
     def test_failure_after_entity_and_relationship_rolls_back(self) -> None:
         original = self.client.records.save_metadata
@@ -70,15 +70,15 @@ class SqlProductIssueTransactionTests(ProductIssueFixture, unittest.TestCase):
         ):
             self._create_product("entity-failure")
         self.assertNotEqual(raised.exception.code, "audit_pending")
-        self.assertEqual(self._counts("entity-failure", reference="product:secretary"), (0, 0, 0, 0))
+        self.assertEqual(self._counts("entity-failure", reference="product:ummanu"), (0, 0, 0, 0))
         self.assertEqual(self.client._query("SELECT count(*) FROM product_projects"), [(0,)])
         self._create_product("entity-failure")
-        self.assertEqual(self._counts("entity-failure", reference="product:secretary"), (1, 1, 1, 0))
+        self.assertEqual(self._counts("entity-failure", reference="product:ummanu"), (1, 1, 1, 0))
 
     def test_failure_after_comment_rolls_back_comment_effect_and_claim(self) -> None:
         self._create_product("seed-product")
         issue = self.store.create_issue(
-            product="secretary", issue_kind="bug", priority="P2", title="Crash",
+            product="ummanu", issue_kind="bug", priority="P2", title="Crash",
             description="", actor="po", request_id="seed-issue",
         )
         original = self.client.records.create_comment
@@ -121,20 +121,20 @@ class SqlProductIssueTransactionTests(ProductIssueFixture, unittest.TestCase):
         ):
             self._create_product("event-failure")
         self.assertNotEqual(raised.exception.code, "audit_pending")
-        self.assertEqual(self._counts("event-failure", reference="product:secretary"), (0, 0, 0, 0))
+        self.assertEqual(self._counts("event-failure", reference="product:ummanu"), (0, 0, 0, 0))
         self._create_product("event-failure")
-        self.assertEqual(self._counts("event-failure", reference="product:secretary"), (1, 1, 1, 0))
+        self.assertEqual(self._counts("event-failure", reference="product:ummanu"), (1, 1, 1, 0))
 
     def test_unknown_product_and_issue_metadata_round_trips_without_overriding_known_fields(self) -> None:
         with self.client.transaction():
             product_key = self.client.call(
-                "createTask", project_id=1, title="Secretary", description="", column_id=1,
-                swimlane_id=0, reference="product:secretary",
+                "createTask", project_id=1, title="Ummanu", description="", column_id=1,
+                swimlane_id=0, reference="product:ummanu",
             )
             self.client.call(
                 "saveTaskMetadata", task_id=product_key,
-                values={"record_type": "product", "product_id": "secretary",
-                        "product_projects": '["secretary"]', "future_product": "kept",
+                values={"record_type": "product", "product_id": "ummanu",
+                        "product_projects": '["ummanu"]', "future_product": "kept",
                         "created_empty": "", "swimlane": "observed-product-lane"},
             )
             issue_key = self.client.call(
@@ -143,7 +143,7 @@ class SqlProductIssueTransactionTests(ProductIssueFixture, unittest.TestCase):
             )
             self.client.call(
                 "saveTaskMetadata", task_id=issue_key,
-                values={"record_type": "issue", "issue_product": "secretary",
+                values={"record_type": "issue", "issue_product": "ummanu",
                         "issue_kind": "bug", "issue_priority": "P2", "future_issue": "kept",
                         "created_empty": "", "swimlane": "observed-issue-lane"},
             )
@@ -161,7 +161,7 @@ class SqlProductIssueTransactionTests(ProductIssueFixture, unittest.TestCase):
             self.client.call(
                 "saveTaskMetadata",
                 task_id=product_key,
-                values={"product_id": "secretary", "future_product": "", "swimlane": ""},
+                values={"product_id": "ummanu", "future_product": "", "swimlane": ""},
             )
             self.client.call(
                 "saveTaskMetadata",
@@ -172,7 +172,7 @@ class SqlProductIssueTransactionTests(ProductIssueFixture, unittest.TestCase):
         issue_meta = self.client.call("getTaskMetadata", task_id=issue_key)
         self.assertEqual(product_meta["future_product"], "")
         self.assertEqual(product_meta["swimlane"], "")
-        self.assertEqual(product_meta["product_id"], "secretary")
+        self.assertEqual(product_meta["product_id"], "ummanu")
         self.assertEqual(issue_meta["future_issue"], "")
         self.assertEqual(issue_meta["swimlane"], "")
         self.assertEqual(issue_meta["issue_priority"], "P1")
@@ -180,10 +180,10 @@ class SqlProductIssueTransactionTests(ProductIssueFixture, unittest.TestCase):
     def test_stamped_comments_claim_requests_and_refuse_foreign_entities(self) -> None:
         self._create_product("product-create")
         issue = self.store.create_issue(
-            product="secretary", issue_kind="bug", priority="P2", title="Crash",
+            product="ummanu", issue_kind="bug", priority="P2", title="Crash",
             description="", actor="po", request_id="issue-create",
         )
-        product_key = backend.record_key("product", "secretary")
+        product_key = backend.record_key("product", "ummanu")
         issue_key = backend.record_key("issue", issue["ref"].removeprefix("issue:"))
 
         ordinary = self.client.call(
@@ -242,7 +242,7 @@ class SqlProductIssueTransactionTests(ProductIssueFixture, unittest.TestCase):
     def test_reconcile_lanes_is_a_structural_no_op_on_sql(self) -> None:
         self._create_product("lane-product")
         self.store.create_issue(
-            product="secretary", issue_kind="bug", priority="P2", title="Crash",
+            product="ummanu", issue_kind="bug", priority="P2", title="Crash",
             description="", actor="po", request_id="lane-issue",
         )
 
@@ -256,7 +256,7 @@ class SqlProductIssueTransactionTests(ProductIssueFixture, unittest.TestCase):
 
     def test_board_key_lookup_is_indexed_and_collision_refuses(self) -> None:
         self._create_product("first")
-        first_key = backend.record_key("product", "secretary")
+        first_key = backend.record_key("product", "ummanu")
         statements: list[str] = []
         query = self.client._query
 
@@ -272,11 +272,11 @@ class SqlProductIssueTransactionTests(ProductIssueFixture, unittest.TestCase):
         self.assertFalse(any(sql.strip() == "SELECT product_id FROM products" for sql in statements))
 
         with (
-            mock.patch("secretary.board.sql_product_issues.record_key", return_value=first_key),
+            mock.patch("ummanu.board.sql_product_issues.record_key", return_value=first_key),
             self.assertRaises(TaskError),
         ):
             self.store.create_product(
-                product_id="other", projects=["secretary"], title="Other", description="",
+                product_id="other", projects=["ummanu"], title="Other", description="",
                 actor="po", request_id="collision",
             )
         self.assertEqual(self.record_count("product:other"), 0)
@@ -284,17 +284,17 @@ class SqlProductIssueTransactionTests(ProductIssueFixture, unittest.TestCase):
     def test_record_observation_includes_archived_product_and_closed_issue(self) -> None:
         self._create_product("visible-product")
         issue = self.store.create_issue(
-            product="secretary", issue_kind="bug", priority="P2", title="Crash",
+            product="ummanu", issue_kind="bug", priority="P2", title="Crash",
             description="", actor="po", request_id="visible-issue",
         )
         self.store.close_issue(
             reference=issue["ref"], reason="resolved", actor="po", request_id="closed-issue"
         )
-        self.client.call("closeTask", task_id=backend.record_key("product", "secretary"))
+        self.client.call("closeTask", task_id=backend.record_key("product", "ummanu"))
 
-        self.assertEqual(self.record_count("product:secretary"), 1)
+        self.assertEqual(self.record_count("product:ummanu"), 1)
         self.assertEqual(self.record_count(issue["ref"]), 1)
-        self.assertTrue(self.store.show_product("secretary")["closed"])
+        self.assertTrue(self.store.show_product("ummanu")["closed"])
         self.assertTrue(self.store.show_issue(issue["ref"])["closed"])
 
 
@@ -343,9 +343,9 @@ class SqlBackendProductIssueKeyTests(unittest.TestCase):
     def test_record_keys_are_stable_disjoint_and_not_card_numbers(self) -> None:
         numbered_sprint = backend.record_key("sprint", "sprint:1596")
         custom_sprint = backend.record_key("sprint", "sprint:canary")
-        product = backend.record_key("product", "secretary")
-        issue = backend.record_key("issue", "secretary")
-        self.assertEqual(product, backend.record_key("product", "secretary"))
+        product = backend.record_key("product", "ummanu")
+        issue = backend.record_key("issue", "ummanu")
+        self.assertEqual(product, backend.record_key("product", "ummanu"))
         self.assertEqual(backend.record_key_kind(product), "product")
         self.assertEqual(backend.record_key_kind(issue), "issue")
         self.assertEqual(backend.record_key_kind(numbered_sprint), "sprint")

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from secretary.host_apply import HostCommandError, UnitProcessIdentity
+from ummanu.host_apply import HostCommandError, UnitProcessIdentity
 
 
 class FakeUnitInstaller:

@@ -15,11 +15,13 @@ from types import SimpleNamespace
 from typing import ClassVar
 from unittest import mock
 
-from secretary import state_repo, status, upgrade
-from secretary.board import provision as board_provision
-from secretary.config import DataDirError
-from secretary.head_health import HeadReadiness, resolve_head_chain
-from secretary.head_registry import (
+from tests.fakes.upgrade import FakeUnitInstaller
+from tests.retired_board import STALE_FILE, legacy_runtime_lines, write_stale_leftovers
+from ummanu import state_repo, status, upgrade
+from ummanu.board import provision as board_provision
+from ummanu.config import DataDirError
+from ummanu.head_health import HeadReadiness, resolve_head_chain
+from ummanu.head_registry import (
     INSTANCE_ORIGIN,
     PRODUCT_ORIGIN,
     HeadRegistryConfigError,
@@ -32,7 +34,7 @@ from secretary.head_registry import (
     read_source,
     snapshot_path,
 )
-from secretary.host import (
+from ummanu.host import (
     CollectResult,
     HostInventory,
     PlannedResource,
@@ -45,20 +47,18 @@ from secretary.host import (
     plan_changes,
     strict_manifest,
 )
-from secretary.host_apply import ApplyInputs, apply_host
-from secretary.projects.availability import ProjectAvailability
-from secretary.runtime import heads
-from tests.fakes.upgrade import FakeUnitInstaller
-from tests.retired_board import STALE_FILE, legacy_runtime_lines, write_stale_leftovers
+from ummanu.host_apply import ApplyInputs, apply_host
+from ummanu.projects.availability import ProjectAvailability
+from ummanu.runtime import heads
 
-UNIT_PREFIX = "secretary-"
+UNIT_PREFIX = "ummanu-"
 
 TIMER = """[Unit]
 Description=Example timer
 
 [Timer]
 OnCalendar=hourly
-Unit=secretary-example.service
+Unit=ummanu-example.service
 
 [Install]
 WantedBy=timers.target
@@ -92,13 +92,13 @@ def _resolve_with_red(preferred, red, registry):
 def write_packaging(root: Path) -> Path:
     packaging = root / "packaging" / "systemd"
     packaging.mkdir(parents=True)
-    (packaging / "secretary-example.service").write_text(SERVICE, encoding="utf-8")
-    (packaging / "secretary-example.timer").write_text(TIMER, encoding="utf-8")
-    (packaging / "secretary-memory.service").write_text(SERVICE, encoding="utf-8")
+    (packaging / "ummanu-example.service").write_text(SERVICE, encoding="utf-8")
+    (packaging / "ummanu-example.timer").write_text(TIMER, encoding="utf-8")
+    (packaging / "ummanu-memory.service").write_text(SERVICE, encoding="utf-8")
     # The dispatcher pair is always in the desired plan, so a fixture that omits
     # it would be testing an installation the product cannot actually ship.
-    (packaging / "secretary-dispatcher-production.service").write_text(SERVICE, encoding="utf-8")
-    (packaging / "secretary-dispatcher-production.timer").write_text(TIMER, encoding="utf-8")
+    (packaging / "ummanu-dispatcher-production.service").write_text(SERVICE, encoding="utf-8")
+    (packaging / "ummanu-dispatcher-production.timer").write_text(TIMER, encoding="utf-8")
     (packaging / "README.md").write_text("not a unit\n", encoding="utf-8")
     return packaging
 
@@ -122,7 +122,7 @@ class PackagedUnitTests(unittest.TestCase):
             legacy.write_text("#!/bin/sh\n", encoding="utf-8")
             legacy.chmod(0o755)
             account = SimpleNamespace(pw_dir=str(root / "operator"))
-            with mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account):
+            with mock.patch("ummanu.host_apply.pwd.getpwnam", return_value=account):
                 units = upgrade.resolve_packaged(
                     instance_config(root / "data"),
                     instance_path=root / "instance",
@@ -130,13 +130,13 @@ class PackagedUnitTests(unittest.TestCase):
                     runtime_user="operator",
                 )
 
-        self.assertNotIn("secretary-orca.service", {unit.name for unit in units})
+        self.assertNotIn("ummanu-orca.service", {unit.name for unit in units})
 
     def test_render_is_stable_and_uses_the_installation_layout(self):
         layout = SystemdLayout(
-            Path("/opt/secretary"),
+            Path("/opt/ummanu"),
             Path("/srv/secretary-instance"),
-            Path("/srv/secretary-data"),
+            Path("/srv/ummanu-data"),
             "operator",
             Path("/home/operator"),
         )
@@ -153,9 +153,9 @@ class PackagedUnitTests(unittest.TestCase):
         )
         rendered = b"\n".join(unit.content for unit in first)
         self.assertIn(b"User=operator", rendered)
-        self.assertIn(b"/opt/secretary", rendered)
+        self.assertIn(b"/opt/ummanu", rendered)
         self.assertIn(b"/srv/secretary-instance", rendered)
-        self.assertIn(b"/srv/secretary-data", rendered)
+        self.assertIn(b"/srv/ummanu-data", rendered)
         self.assertNotIn(b"/home/dev", rendered)
 
     def test_catalogue_reads_component_digest_and_installability(self):
@@ -166,19 +166,19 @@ class PackagedUnitTests(unittest.TestCase):
         self.assertEqual(
             sorted(units),
             [
-                "secretary-dispatcher-production.service",
-                "secretary-dispatcher-production.timer",
-                "secretary-example.service",
-                "secretary-example.timer",
-                "secretary-memory.service",
+                "ummanu-dispatcher-production.service",
+                "ummanu-dispatcher-production.timer",
+                "ummanu-example.service",
+                "ummanu-example.timer",
+                "ummanu-memory.service",
             ],
         )
-        self.assertEqual(units["secretary-example.timer"].component, "example")
-        self.assertTrue(units["secretary-example.timer"].installable)
+        self.assertEqual(units["ummanu-example.timer"].component, "example")
+        self.assertTrue(units["ummanu-example.timer"].installable)
         # No [Install] section, so enabling it would fail: it is pulled in by the timer.
-        self.assertFalse(units["secretary-example.service"].installable)
+        self.assertFalse(units["ummanu-example.service"].installable)
         self.assertNotEqual(
-            units["secretary-example.timer"].digest, units["secretary-example.service"].digest
+            units["ummanu-example.timer"].digest, units["ummanu-example.service"].digest
         )
 
     def test_a_unit_outside_our_prefix_is_not_ours(self):
@@ -198,23 +198,23 @@ class PackagedUnitTests(unittest.TestCase):
             packaged = load_packaged_units(write_packaging(Path(tmp)), UNIT_PREFIX)
             instance = instance_config(Path(tmp), components={"example": {"enabled": False}})
             names = {r.name for r in build_plan(instance, [], packaged=packaged)}
-        self.assertNotIn("secretary-example.timer", names)
-        self.assertIn("secretary-memory.service", names)
+        self.assertNotIn("ummanu-example.timer", names)
+        self.assertIn("ummanu-memory.service", names)
 
     def test_editing_a_shipped_unit_makes_the_resource_an_update(self):
         with tempfile.TemporaryDirectory() as tmp:
             packaging = write_packaging(Path(tmp))
             instance = instance_config(Path(tmp))
             before = build_plan(instance, [], packaged=load_packaged_units(packaging, UNIT_PREFIX))
-            (packaging / "secretary-example.timer").write_text(
+            (packaging / "ummanu-example.timer").write_text(
                 TIMER.replace("hourly", "daily"), encoding="utf-8"
             )
             after = build_plan(instance, [], packaged=load_packaged_units(packaging, UNIT_PREFIX))
             actual = HostInventory(units={r.name for r in before})
             changes = {c.name: c.action for c in plan_changes(after, actual, before, UNIT_PREFIX)}
 
-        self.assertEqual(changes["secretary-example.timer"], "update")
-        self.assertEqual(changes["secretary-example.service"], "unchanged")
+        self.assertEqual(changes["ummanu-example.timer"], "update")
+        self.assertEqual(changes["ummanu-example.service"], "unchanged")
 
     def test_dispatcher_units_carry_the_shipped_file_digest(self):
         packaged = load_packaged_units(upgrade.running_product_root() / "packaging" / "systemd", UNIT_PREFIX)
@@ -224,11 +224,11 @@ class PackagedUnitTests(unittest.TestCase):
         self.assertIn("production-tick", spec["runtime"])
 
     def test_declared_foreign_unit_is_not_a_conflict(self):
-        actual = HostInventory(units={"secretary-supervisor.timer"})
+        actual = HostInventory(units={"ummanu-supervisor.timer"})
         conflicts = [c for c in plan_changes([], actual, [], UNIT_PREFIX) if c.action == "conflict"]
-        self.assertEqual([c.name for c in conflicts], ["secretary-supervisor.timer"])
+        self.assertEqual([c.name for c in conflicts], ["ummanu-supervisor.timer"])
 
-        declared = plan_changes([], actual, [], UNIT_PREFIX, {"secretary-supervisor.timer"})
+        declared = plan_changes([], actual, [], UNIT_PREFIX, {"ummanu-supervisor.timer"})
         self.assertEqual([c for c in declared if c.action == "conflict"], [])
 
 
@@ -269,19 +269,19 @@ class ApplyHostTests(unittest.TestCase):
         result = apply_host(self.inputs(HostInventory()), units=units)
 
         self.assertTrue(result.ok, result.errors)
-        self.assertIn(("install", "secretary-example.timer"), units.calls)
-        self.assertIn(("enable", "secretary-example.timer"), units.calls)
+        self.assertIn(("install", "ummanu-example.timer"), units.calls)
+        self.assertIn(("enable", "ummanu-example.timer"), units.calls)
         # The service has no [Install]; enabling it would fail, so we never try.
-        self.assertNotIn(("enable", "secretary-example.service"), units.calls)
+        self.assertNotIn(("enable", "ummanu-example.service"), units.calls)
         self.assertIn(("daemon-reload", ""), units.calls)
         recorded = {r.name for r in strict_manifest(self.manifest)[0]}
-        self.assertIn("secretary-example.timer", recorded)
+        self.assertIn("ummanu-example.timer", recorded)
 
     def test_root_published_manifest_is_private_to_the_installation_user(self):
         account = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
         with (
-            mock.patch("secretary.host_apply.os.geteuid", return_value=0),
-            mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
+            mock.patch("ummanu.host_apply.os.geteuid", return_value=0),
+            mock.patch("ummanu.host_apply.pwd.getpwnam", return_value=account),
         ):
             result = apply_host(
                 self.inputs(HostInventory(), runtime_user="operator"),
@@ -298,10 +298,10 @@ class ApplyHostTests(unittest.TestCase):
 
     def test_unprivileged_reconcile_never_attempts_manifest_ownership_repair(self):
         with (
-            mock.patch("secretary.host_apply.os.geteuid", return_value=1000),
-            mock.patch("secretary.host_apply.pwd.getpwnam") as account,
-            mock.patch("secretary.host_apply.os.chown") as chown,
-            mock.patch("secretary.host_apply.os.chmod") as chmod,
+            mock.patch("ummanu.host_apply.os.geteuid", return_value=1000),
+            mock.patch("ummanu.host_apply.pwd.getpwnam") as account,
+            mock.patch("ummanu.host_apply.os.chown") as chown,
+            mock.patch("ummanu.host_apply.os.chmod") as chmod,
         ):
             result = apply_host(
                 self.inputs(HostInventory(), runtime_user="operator"),
@@ -322,10 +322,10 @@ class ApplyHostTests(unittest.TestCase):
             unit_states={unit.name: ("enabled", "active") for unit in self.packaged if unit.installable},
         )
         with (
-            mock.patch("secretary.host_apply.os.geteuid", return_value=0),
-            mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
-            mock.patch("secretary.host_apply.os.chown") as chown,
-            mock.patch("secretary.host_apply.os.chmod") as chmod,
+            mock.patch("ummanu.host_apply.os.geteuid", return_value=0),
+            mock.patch("ummanu.host_apply.pwd.getpwnam", return_value=account),
+            mock.patch("ummanu.host_apply.os.chown") as chown,
+            mock.patch("ummanu.host_apply.os.chmod") as chmod,
         ):
             result = apply_host(
                 self.inputs(inventory, managed=desired, runtime_user="operator"),
@@ -363,20 +363,20 @@ class ApplyHostTests(unittest.TestCase):
         self.assertEqual({c.action for c in result.changes}, {"unchanged"})
 
     def test_an_unowned_name_in_our_namespace_aborts_before_any_write(self):
-        units = FakeUnitInstaller(present={"secretary-example.timer": b"hand written"})
-        inventory = HostInventory(units={"secretary-example.timer"})
+        units = FakeUnitInstaller(present={"ummanu-example.timer": b"hand written"})
+        inventory = HostInventory(units={"ummanu-example.timer"})
 
         result = apply_host(self.inputs(inventory), units=units)
 
         self.assertFalse(result.ok)
-        self.assertEqual([c.name for c in result.conflicts], ["secretary-example.timer"])
+        self.assertEqual([c.name for c in result.conflicts], ["ummanu-example.timer"])
         self.assertEqual(units.calls, [])
         self.assertFalse(self.manifest.exists())
-        self.assertEqual(units.files["secretary-example.timer"], b"hand written")
+        self.assertEqual(units.files["ummanu-example.timer"], b"hand written")
 
     def test_a_conflict_anywhere_stops_the_units_that_would_have_been_fine(self):
         units = FakeUnitInstaller()
-        inventory = HostInventory(units={"secretary-legacy.timer"})
+        inventory = HostInventory(units={"ummanu-legacy.timer"})
 
         result = apply_host(self.inputs(inventory), units=units)
 
@@ -404,29 +404,29 @@ class ApplyHostTests(unittest.TestCase):
         result = apply_host(self.inputs(installed, managed, instance=shed), units=units)
 
         self.assertTrue(result.ok, result.errors)
-        self.assertIn(("disable", "secretary-example.timer"), units.calls)
-        self.assertIn(("remove", "secretary-example.timer"), units.calls)
+        self.assertIn(("disable", "ummanu-example.timer"), units.calls)
+        self.assertIn(("remove", "ummanu-example.timer"), units.calls)
         # The service was never enabled (no [Install]), so disabling it would fail.
-        self.assertNotIn(("disable", "secretary-example.service"), units.calls)
-        self.assertIn(("remove", "secretary-example.service"), units.calls)
+        self.assertNotIn(("disable", "ummanu-example.service"), units.calls)
+        self.assertIn(("remove", "ummanu-example.service"), units.calls)
         recorded = {r.name for r in strict_manifest(self.manifest)[0]}
-        self.assertNotIn("secretary-example.timer", recorded)
+        self.assertNotIn("ummanu-example.timer", recorded)
 
     def test_a_failed_install_is_never_recorded_as_managed(self):
         units = FakeUnitInstaller()
-        units.fail_on = {"secretary-example.timer"}
+        units.fail_on = {"ummanu-example.timer"}
 
         result = apply_host(self.inputs(HostInventory()), units=units)
 
         self.assertFalse(result.ok)
         recorded = {r.name for r in strict_manifest(self.manifest)[0]}
-        self.assertNotIn("secretary-example.timer", recorded)
+        self.assertNotIn("ummanu-example.timer", recorded)
 
     def test_a_binding_with_a_legacy_orca_binding_registers_nothing(self):
         units = FakeUnitInstaller()
         binding = {"id": "demo", "repo": "/srv/demo", "orca_binding": "demo", "enabled": True}
 
-        with mock.patch("secretary._proc.run") as run:
+        with mock.patch("ummanu._proc.run") as run:
             result = apply_host(self.inputs(HostInventory(), bindings=[binding]), units=units)
 
         self.assertTrue(result.ok, result.errors)
@@ -464,11 +464,11 @@ class ApplyHostTests(unittest.TestCase):
 
 class AgentSpecsTests(unittest.TestCase):
     def test_the_product_manifest_locates_the_shipped_role_worktrees_unchanged(self):
-        # secretary-1689: the specs are found through `[tool.secretary] agent-specs` instead of a
-        # package name written into `secretary`. What they materialize must not move by a byte.
+        # secretary-1689: the specs are found through `[tool.ummanu] agent-specs` instead of a
+        # package name written into `ummanu`. What they materialize must not move by a byte.
         product = upgrade.running_product_root()
         home = Path("/home/owner")
-        workspaces = home / "orca" / "workspaces" / "secretary"
+        workspaces = home / "orca" / "workspaces" / "ummanu"
         with mock.patch.dict(os.environ):
             os.environ.pop("TA_WORKSPACES_ROOT", None)
             worktrees = upgrade.desired_role_worktrees(product, home)
@@ -489,14 +489,14 @@ class AgentSpecsTests(unittest.TestCase):
             manifest.write_text("[project]\nname = 'x'\n", encoding="utf-8")
             self.assertIsNone(upgrade.agents_root(product))
 
-            manifest.write_text('[tool.secretary]\nagent-specs = "agents"\n', encoding="utf-8")
+            manifest.write_text('[tool.ummanu]\nagent-specs = "agents"\n', encoding="utf-8")
             self.assertEqual(upgrade.agents_root(product), product / "agents")
 
             for broken in (
-                "[tool.secretary\n",
-                '[tool.secretary]\nagent-specs = "../x"\n',
-                '[tool.secretary]\nagent-specs = "/abs"\n',
-                "[tool.secretary]\nagent-specs = 3\n",
+                "[tool.ummanu\n",
+                '[tool.ummanu]\nagent-specs = "../x"\n',
+                '[tool.ummanu]\nagent-specs = "/abs"\n',
+                "[tool.ummanu]\nagent-specs = 3\n",
             ):
                 with self.subTest(broken=broken):
                     manifest.write_text(broken, encoding="utf-8")
@@ -515,7 +515,7 @@ class AgentSpecsTests(unittest.TestCase):
 
 class UpgradeStepTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.memory_probe = mock.patch("secretary.upgrade.probe_memory").start()
+        self.memory_probe = mock.patch("ummanu.upgrade.probe_memory").start()
         data = tempfile.TemporaryDirectory()
         self.addCleanup(data.cleanup)
         # The dependency and memory steps write their receipts under the data dir.
@@ -545,28 +545,28 @@ class UpgradeStepTests(unittest.TestCase):
                 FakeUnitInstaller(),
                 product_root=product_root,
                 runtime_home=Path("/home/operator"),
-                report=SimpleNamespace(data_dir=Path("/srv/secretary-data")),
+                report=SimpleNamespace(data_dir=Path("/srv/ummanu-data")),
             )
             outcome = SimpleNamespace(changed=3)
-            with mock.patch("secretary.upgrade.reconcile_clients", return_value=outcome) as reconcile:
+            with mock.patch("ummanu.upgrade.reconcile_clients", return_value=outcome) as reconcile:
                 result = upgrade.step_memory_clients(context)
 
         self.assertEqual(result.status, "changed")
         reconcile.assert_called_once_with(
             context.product_root,
             Path("/home/operator"),
-            Path("/srv/secretary-data"),
+            Path("/srv/ummanu-data"),
             dry_run=False,
         )
 
     def test_memory_restarts_when_only_the_code_moved(self):
-        units = FakeUnitInstaller(active={"secretary-memory.service"})
+        units = FakeUnitInstaller(active={"ummanu-memory.service"})
 
         result = upgrade.step_memory(self.context(units, code_changed=True, runtime_user="memory-runtime"))
 
         self.assertEqual(result.status, "changed")
         self.assertIn("code or dependencies changed", result.detail)
-        self.assertIn(("restart", "secretary-memory.service"), units.calls)
+        self.assertIn(("restart", "ummanu-memory.service"), units.calls)
         self.memory_probe.assert_called_once()
         self.assertEqual(self.memory_probe.call_args.kwargs["runtime_user"], "memory-runtime")
 
@@ -578,7 +578,7 @@ class UpgradeStepTests(unittest.TestCase):
             host={"unit_prefix": UNIT_PREFIX},
         )
         with mock.patch(
-            "secretary.upgrade.resolve_packaged",
+            "ummanu.upgrade.resolve_packaged",
             side_effect=DataDirError("invalid instance data_dir"),
         ):
             result = upgrade.step_host(self.context(FakeUnitInstaller(), report=report))
@@ -622,9 +622,9 @@ class UpgradeStepTests(unittest.TestCase):
             )
 
             with (
-                mock.patch("secretary.upgrade.resolve_packaged", return_value=[]),
-                mock.patch("secretary.upgrade.LiveHostSource", return_value=source),
-                mock.patch("secretary._proc.run") as run,
+                mock.patch("ummanu.upgrade.resolve_packaged", return_value=[]),
+                mock.patch("ummanu.upgrade.LiveHostSource", return_value=source),
+                mock.patch("ummanu._proc.run") as run,
             ):
                 result = upgrade.step_host(context)
 
@@ -679,9 +679,9 @@ class UpgradeStepTests(unittest.TestCase):
             account = SimpleNamespace(pw_uid=123, pw_gid=456)
 
             with (
-                mock.patch("secretary.upgrade.os.geteuid", return_value=0),
-                mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
-                mock.patch("secretary.upgrade.os.chown") as chown,
+                mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
+                mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=account),
+                mock.patch("ummanu.upgrade.os.chown") as chown,
             ):
                 result = upgrade.step_runtime_owner(context)
 
@@ -704,16 +704,16 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertIn("permissions are too broad", insecure.detail)
 
     def test_memory_restarts_when_its_unit_file_changed(self):
-        units = FakeUnitInstaller(active={"secretary-memory.service"})
+        units = FakeUnitInstaller(active={"ummanu-memory.service"})
 
         result = upgrade.step_memory(self.context(units, unit_changed=True))
 
         self.assertEqual(result.status, "changed")
-        self.assertIn(("restart", "secretary-memory.service"), units.calls)
+        self.assertIn(("restart", "ummanu-memory.service"), units.calls)
         self.memory_probe.assert_called_once()
 
     def test_memory_is_left_alone_when_nothing_moved(self):
-        units = FakeUnitInstaller(active={"secretary-memory.service"})
+        units = FakeUnitInstaller(active={"ummanu-memory.service"})
         # Nothing moved since the restart that wrote the memory process receipt.
         self.assertEqual(upgrade.step_memory(self.context(units, code_changed=True)).status, "changed")
         units.calls.clear()
@@ -734,17 +734,17 @@ class UpgradeStepTests(unittest.TestCase):
         self.memory_probe.assert_called_once()
 
     def test_memory_restart_is_failed_when_the_authenticated_probe_fails(self):
-        units = FakeUnitInstaller(active={"secretary-memory.service"})
+        units = FakeUnitInstaller(active={"ummanu-memory.service"})
         self.memory_probe.side_effect = upgrade.MemoryProbeError("MCP did not return an allowed read")
 
         result = upgrade.step_memory(self.context(units, code_changed=True))
 
         self.assertEqual(result.status, "failed")
         self.assertIn("authenticated probe failed", result.detail)
-        self.assertIn(("restart", "secretary-memory.service"), units.calls)
+        self.assertIn(("restart", "ummanu-memory.service"), units.calls)
 
     def test_dry_run_decides_the_restart_without_performing_it(self):
-        units = FakeUnitInstaller(active={"secretary-memory.service"})
+        units = FakeUnitInstaller(active={"ummanu-memory.service"})
 
         result = upgrade.step_memory(self.context(units, code_changed=True, dry_run=True))
 
@@ -752,9 +752,9 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertEqual(units.calls, [])
 
     # secretary-756: the two scenarios formerly here (materializing a foreign
-    # `secretary-orca.service` before the ownership migration, and `step_host` failing over
+    # `ummanu-orca.service` before the ownership migration, and `step_host` failing over
     # an unavailable Orca executable before writing ownership) both depended on the product
-    # shipping a `secretary-orca.*` systemd unit. Orca is host-owned and external
+    # shipping a `ummanu-orca.*` systemd unit. Orca is host-owned and external
     # (secretary-739/755): packaging/systemd ships no such unit, `resolve_packaged` no longer
     # raises over a missing Orca executable, and `step_host` can no longer materialize or
     # gate on one. Deleted rather than rewritten.
@@ -801,7 +801,7 @@ class UpgradeStepTests(unittest.TestCase):
             compose.write_text(board_provision.LEGACY_COMPOSE_TEXT, encoding="utf-8")
             compose.chmod(0o600)
             with mock.patch(
-                "secretary._fsutil._proc.run",
+                "ummanu._fsutil._proc.run",
                 side_effect=[subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 0)],
             ) as run:
                 with self.assertRaises(board_provision.BoardStoreError) as raised:
@@ -814,7 +814,7 @@ class UpgradeStepTests(unittest.TestCase):
             self.assertEqual(list(compose.parent.iterdir()), [compose])
 
     def test_compose_failed_rename_removes_staged_file_and_preserves_old_definition(self):
-        from secretary import _proc
+        from ummanu import _proc
 
         with tempfile.TemporaryDirectory() as temporary:
             compose = Path(temporary) / "postgres-compose.yml"
@@ -827,7 +827,7 @@ class UpgradeStepTests(unittest.TestCase):
                     return subprocess.CompletedProcess(argv, 1)
                 return real_run(argv, **kwargs)
 
-            with mock.patch("secretary._fsutil._proc.run", side_effect=fail_rename):
+            with mock.patch("ummanu._fsutil._proc.run", side_effect=fail_rename):
                 with self.assertRaises(board_provision.BoardStoreError) as raised:
                     board_provision._write_compose(
                         compose, dry_run=False, privileged_argv=lambda argv: argv
@@ -861,12 +861,12 @@ class UpgradeStepTests(unittest.TestCase):
 
             output = io.StringIO()
             with (
-                mock.patch("secretary.upgrade.validate_instance", return_value=report),
-                mock.patch("secretary.upgrade.resolve_runtime_owner", return_value=("operator", instance)),
-                mock.patch("secretary.upgrade.provision_board_store", side_effect=RuntimeError(
+                mock.patch("ummanu.upgrade.validate_instance", return_value=report),
+                mock.patch("ummanu.upgrade.resolve_runtime_owner", return_value=("operator", instance)),
+                mock.patch("ummanu.upgrade.provision_board_store", side_effect=RuntimeError(
                     "could not write export file: Permission denied"
                 )),
-                mock.patch("secretary.upgrade.run_steps", side_effect=lambda context: original_run_steps(
+                mock.patch("ummanu.upgrade.run_steps", side_effect=lambda context: original_run_steps(
                     context, steps=(completed, upgrade.step_board_store_provision, restart)
                 )),
                 contextlib.redirect_stdout(output),
@@ -896,7 +896,7 @@ class UpgradeStepTests(unittest.TestCase):
                 host_fixture="/tmp/host-fixture",
                 json=True,
             )
-            with mock.patch("secretary.upgrade.os.execve") as execute:
+            with mock.patch("ummanu.upgrade.os.execve") as execute:
                 upgrade._exec_pulled_upgrade(
                     args,
                     root,
@@ -907,7 +907,7 @@ class UpgradeStepTests(unittest.TestCase):
 
         executable, argv, environment = execute.call_args.args
         self.assertEqual(executable, python)
-        self.assertEqual(argv[:5], [str(python), "-P", "-m", "secretary", "upgrade"])
+        self.assertEqual(argv[:5], [str(python), "-P", "-m", "ummanu", "upgrade"])
         self.assertIn("--no-pull", argv)
         self.assertIn("/srv/instance/instance.yaml", argv)
         self.assertIn("stable", argv)
@@ -915,7 +915,7 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertIn("/tmp/host-fixture", argv)
         self.assertIn("--json", argv)
         self.assertEqual(
-            json.loads(environment["SECRETARY_UPGRADE_HANDOFF"]),
+            json.loads(environment["UMMANU_UPGRADE_HANDOFF"]),
             {
                 "before": "a" * 40,
                 "after": "b" * 40,
@@ -930,7 +930,7 @@ class UpgradeStepTests(unittest.TestCase):
             handoff_before="a" * 40,
             handoff_after="b" * 40,
         )
-        with mock.patch("secretary.upgrade.fast_forward") as pull:
+        with mock.patch("ummanu.upgrade.fast_forward") as pull:
             result = upgrade.step_pull(context)
 
         pull.assert_not_called()
@@ -979,10 +979,10 @@ class UpgradeStepTests(unittest.TestCase):
 
             marker = json.dumps({"before": "a" * 40, "after": revision, "changed_paths": ["pyproject.toml"]})
             with (
-                mock.patch.dict(os.environ, {"SECRETARY_UPGRADE_HANDOFF": marker}),
-                mock.patch("secretary.upgrade.validate_instance", return_value=report),
-                mock.patch("secretary.upgrade.resolve_runtime_owner", return_value=("operator", root)),
-                mock.patch("secretary.upgrade.run_steps", side_effect=run_once) as steps,
+                mock.patch.dict(os.environ, {"UMMANU_UPGRADE_HANDOFF": marker}),
+                mock.patch("ummanu.upgrade.validate_instance", return_value=report),
+                mock.patch("ummanu.upgrade.resolve_runtime_owner", return_value=("operator", root)),
+                mock.patch("ummanu.upgrade.run_steps", side_effect=run_once) as steps,
             ):
                 self.assertEqual(upgrade.run_upgrade(args), 0)
 
@@ -1000,7 +1000,7 @@ class UpgradeStepTests(unittest.TestCase):
             evidence = {
                 "prefix": str(root / ".venv"),
                 "origins": {
-                    "secretary": "/another/checkout/secretary/__init__.py",
+                    "ummanu": "/another/checkout/ummanu/__init__.py",
                     "psycopg": str(root / ".venv/lib/python/site-packages/psycopg/__init__.py"),
                     "sqlalchemy": str(root / ".venv/lib/python/site-packages/sqlalchemy/__init__.py"),
                     "alembic": str(root / ".venv/lib/python/site-packages/alembic/__init__.py"),
@@ -1008,7 +1008,7 @@ class UpgradeStepTests(unittest.TestCase):
             }
             context = self.context(FakeUnitInstaller(), product_root=root)
             with mock.patch(
-                "secretary.upgrade._proc.run",
+                "ummanu.upgrade._proc.run",
                 return_value=subprocess.CompletedProcess([], 0, json.dumps(evidence), ""),
             ):
                 result = upgrade.step_dependency_provenance(context)
@@ -1039,16 +1039,16 @@ class UpgradeStepTests(unittest.TestCase):
         def pulled(context):
             context.pulled_before = "a" * 40
             context.pulled_after = "b" * 40
-            context.changed_paths = ("src/secretary/new_step.py", "pyproject.toml")
+            context.changed_paths = ("src/ummanu/new_step.py", "pyproject.toml")
             return upgrade.StepResult("pull", "changed", "aaaaaaaaaaaa -> bbbbbbbbbbbb")
 
         with (
-            mock.patch.dict(os.environ, {"SECRETARY_UPGRADE_HANDOFF": ""}),
-            mock.patch("secretary.upgrade.validate_instance", return_value=report),
-            mock.patch("secretary.upgrade.resolve_runtime_owner", return_value=("operator", Path("/srv"))),
-            mock.patch("secretary.upgrade.step_pull", side_effect=pulled),
-            mock.patch("secretary.upgrade._exec_pulled_upgrade", side_effect=HandedOff) as execute,
-            mock.patch("secretary.upgrade.run_steps") as steps,
+            mock.patch.dict(os.environ, {"UMMANU_UPGRADE_HANDOFF": ""}),
+            mock.patch("ummanu.upgrade.validate_instance", return_value=report),
+            mock.patch("ummanu.upgrade.resolve_runtime_owner", return_value=("operator", Path("/srv"))),
+            mock.patch("ummanu.upgrade.step_pull", side_effect=pulled),
+            mock.patch("ummanu.upgrade._exec_pulled_upgrade", side_effect=HandedOff) as execute,
+            mock.patch("ummanu.upgrade.run_steps") as steps,
             self.assertRaises(HandedOff),
         ):
             upgrade.run_upgrade(args)
@@ -1056,7 +1056,7 @@ class UpgradeStepTests(unittest.TestCase):
         steps.assert_not_called()
         self.assertEqual(
             execute.call_args.kwargs["changed_paths"],
-            ("src/secretary/new_step.py", "pyproject.toml"),
+            ("src/ummanu/new_step.py", "pyproject.toml"),
         )
 
     def test_a_dependency_manifest_move_triggers_a_reinstall_decision(self):
@@ -1070,7 +1070,7 @@ class UpgradeStepTests(unittest.TestCase):
             self.assertIn("reinstall", result.detail)
 
     def test_a_code_only_move_leaves_dependencies_alone(self):
-        context = self.context(FakeUnitInstaller(), changed_paths=("secretary/cli.py",), dry_run=True)
+        context = self.context(FakeUnitInstaller(), changed_paths=("ummanu/cli.py",), dry_run=True)
 
         result = upgrade.step_dependencies(context)
 
@@ -1089,7 +1089,7 @@ class UpgradeStepTests(unittest.TestCase):
             ruff = root / ".venv" / "bin" / "ruff"
             ruff.write_text(f"#!/bin/sh\necho 'ruff {ruff_version}'\n", encoding="utf-8")
             ruff.chmod(0o755)
-        dist_info = root / ".venv" / "lib" / "python3.12" / "site-packages" / "secretary-0.1.0.dist-info"
+        dist_info = root / ".venv" / "lib" / "python3.12" / "site-packages" / "ummanu-0.1.0.dist-info"
         dist_info.mkdir(parents=True)
         if direct_url is not None:
             (dist_info / "direct_url.json").write_text(json.dumps(direct_url), encoding="utf-8")
@@ -1151,7 +1151,7 @@ class UpgradeStepTests(unittest.TestCase):
             root = self._venv(Path(tmp), {"url": "file:///product", "dir_info": {"editable": True}}, None)
             context = self.context(FakeUnitInstaller(), product_root=root)
             with mock.patch(
-                "secretary.upgrade._proc.run", return_value=subprocess.CompletedProcess([], 0)
+                "ummanu.upgrade._proc.run", return_value=subprocess.CompletedProcess([], 0)
             ) as run:
                 result = upgrade.step_dependencies(context)
 
@@ -1237,9 +1237,9 @@ class UpgradeStepTests(unittest.TestCase):
             account = SimpleNamespace(pw_uid=123, pw_gid=456)
 
             with (
-                mock.patch("secretary.upgrade.os.geteuid", return_value=0),
-                mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
-                mock.patch("secretary.upgrade.os.chown") as chown,
+                mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
+                mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=account),
+                mock.patch("ummanu.upgrade.os.chown") as chown,
             ):
                 result = upgrade.step_head_registry(context)
 
@@ -1277,7 +1277,7 @@ class UpgradeStepTests(unittest.TestCase):
             config.write_text(
                 "version: 1\nname: upgrade\ndata_dir: "
                 + str(data_dir)
-                + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: secretary-\n",
+                + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: ummanu-\n",
                 encoding="utf-8",
             )
             account = SimpleNamespace(pw_dir="/srv/operator")
@@ -1297,7 +1297,7 @@ class UpgradeStepTests(unittest.TestCase):
 
             with (
                 mock.patch.object(upgrade, "run_steps", side_effect=capture),
-                mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
+                mock.patch("ummanu.host_apply.pwd.getpwnam", return_value=account),
             ):
                 for value in (instance, config):
                     code = upgrade.run_upgrade(
@@ -1317,8 +1317,8 @@ class UpgradeStepTests(unittest.TestCase):
                     self.assertEqual(code, 0)
 
             self.assertEqual(rendered[0], rendered[1])
-            self.assertIn(str(instance).encode(), rendered[1]["secretary-memory.service"])
-            self.assertNotIn(str(config).encode(), rendered[1]["secretary-memory.service"])
+            self.assertIn(str(instance).encode(), rendered[1]["ummanu-memory.service"])
+            self.assertNotIn(str(config).encode(), rendered[1]["ummanu-memory.service"])
 
     def test_stale_head_snapshot_fails_the_upgrade_verify(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1399,11 +1399,11 @@ class UpgradeStepTests(unittest.TestCase):
             root = Path(tmpdir)
             product = root / "product"
             product.mkdir()
-            agent = product / "src" / "secretary" / "automations" / "agents" / "curator"
+            agent = product / "src" / "ummanu" / "automations" / "agents" / "curator"
             agent.mkdir(parents=True)
             (agent / "automation.toml").write_text("name = 'curator'\n", encoding="utf-8")
             (product / "pyproject.toml").write_text(
-                '[tool.secretary]\nagent-specs = "src/secretary/automations/agents"\n', encoding="utf-8"
+                '[tool.ummanu]\nagent-specs = "src/ummanu/automations/agents"\n', encoding="utf-8"
             )
             subprocess.run(["git", "init", "-b", "main", str(product)], check=True, capture_output=True)
             subprocess.run(["git", "-C", str(product), "config", "user.name", "Test"], check=True)
@@ -1421,7 +1421,7 @@ class UpgradeStepTests(unittest.TestCase):
                 result = upgrade.step_worktrees(self.context(FakeUnitInstaller(), product_root=product))
                 again = upgrade.step_worktrees(self.context(FakeUnitInstaller(), product_root=product))
 
-            worktree = root / "workspaces" / "secretary" / "curator"
+            worktree = root / "workspaces" / "ummanu" / "curator"
             self.assertEqual(result.status, "changed")
             self.assertTrue((worktree / ".git").is_file())
             self.assertEqual(again.status, "unchanged")
@@ -1431,11 +1431,11 @@ class UpgradeStepTests(unittest.TestCase):
             root = Path(tmpdir)
             product = root / "product"
             product.mkdir()
-            agent = product / "src" / "secretary" / "automations" / "agents" / "curator"
+            agent = product / "src" / "ummanu" / "automations" / "agents" / "curator"
             agent.mkdir(parents=True)
             (agent / "automation.toml").write_text("name = 'curator'\n", encoding="utf-8")
             (product / "pyproject.toml").write_text(
-                '[tool.secretary]\nagent-specs = "src/secretary/automations/agents"\n', encoding="utf-8"
+                '[tool.ummanu]\nagent-specs = "src/ummanu/automations/agents"\n', encoding="utf-8"
             )
             subprocess.run(["git", "init", "-b", "main", str(product)], check=True, capture_output=True)
             subprocess.run(["git", "-C", str(product), "config", "user.name", "Test"], check=True)
@@ -1453,16 +1453,16 @@ class UpgradeStepTests(unittest.TestCase):
                 mock.patch.dict(
                     os.environ, {"TA_WORKSPACES_ROOT": str(root / "home" / "orca" / "workspaces")}
                 ),
-                mock.patch("secretary.upgrade.os.geteuid", return_value=0),
-                mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
-                mock.patch("secretary.upgrade.os.chown") as chown,
+                mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
+                mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=account),
+                mock.patch("ummanu.upgrade.os.chown") as chown,
             ):
                 result = upgrade.step_worktrees(
                     self.context(FakeUnitInstaller(), product_root=product, runtime_user="operator")
                 )
 
             workspace_root = root / "home" / "orca" / "workspaces"
-            worktree = workspace_root / "secretary" / "curator"
+            worktree = workspace_root / "ummanu" / "curator"
             admin = upgrade._worktree_git_dir(worktree)
             owned = {Path(call.args[0]) for call in chown.call_args_list}
             self.assertEqual(result.status, "changed")
@@ -1484,9 +1484,9 @@ class UpgradeStepTests(unittest.TestCase):
             account = SimpleNamespace(pw_uid=123, pw_gid=456)
 
             with (
-                mock.patch("secretary.upgrade.os.geteuid", return_value=0),
-                mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
-                mock.patch("secretary.upgrade.os.chown") as chown,
+                mock.patch("ummanu.upgrade.os.geteuid", return_value=0),
+                mock.patch("ummanu.upgrade.pwd.getpwnam", return_value=account),
+                mock.patch("ummanu.upgrade.os.chown") as chown,
             ):
                 upgrade._set_runtime_owner(root, "operator")
 
@@ -1616,8 +1616,8 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
         tracked.write_text("id: operator\nname: changed locally\n", encoding="utf-8")
 
         with (
-            mock.patch("secretary.upgrade.step_host", return_value=upgrade.StepResult("host", "unchanged")),
-            mock.patch("secretary.upgrade.role_skills.audit", return_value={"ok": True}),
+            mock.patch("ummanu.upgrade.step_host", return_value=upgrade.StepResult("host", "unchanged")),
+            mock.patch("ummanu.upgrade.role_skills.audit", return_value={"ok": True}),
         ):
             verified = upgrade.step_verify(self.context)
 
@@ -1631,7 +1631,7 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
         generated = upgrade.step_head_registry(self.context)
         self.assertEqual(generated.status, "changed")
         with mock.patch(
-            "secretary.upgrade.state_repo.commit",
+            "ummanu.upgrade.state_repo.commit",
             side_effect=upgrade.state_repo.StateRepoError("index locked"),
         ):
             failed_commit = upgrade.step_publish_head_registry(self.context)
@@ -1642,7 +1642,7 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
         self.assertEqual(failed_push.status, "changed", failed_push.detail)
         self._git(self.instance, "remote", "set-url", "origin", str(self.root / "missing.git"))
         (self.instance / "heads" / "heads.toml").write_text(
-            (self.context.product_root / "src" / "secretary" / "runtime" / "heads.toml").read_text(
+            (self.context.product_root / "src" / "ummanu" / "runtime" / "heads.toml").read_text(
                 encoding="utf-8"
             ),
             encoding="utf-8",
@@ -1659,7 +1659,7 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
         self.context.publication_policy = "recovery-degraded"
         self._git(self.instance, "push", "--quiet", "origin", "main")
         self._git(self.instance, "remote", "set-url", "origin", str(self.root / "disabled.git"))
-        with mock.patch("secretary.upgrade.desired_role_worktrees", return_value=[]):
+        with mock.patch("ummanu.upgrade.desired_role_worktrees", return_value=[]):
             first = upgrade.run_steps(
                 self.context,
                 steps=(
@@ -1676,7 +1676,7 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
         self.assertNotEqual(retained, self._git(self.remote, "rev-parse", "main"))
 
         self._git(self.instance, "remote", "set-url", "origin", str(self.remote))
-        with mock.patch("secretary.upgrade.desired_role_worktrees", return_value=[]):
+        with mock.patch("ummanu.upgrade.desired_role_worktrees", return_value=[]):
             second = upgrade.run_steps(
                 self.context,
                 steps=(
@@ -1724,7 +1724,7 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
 
     def test_ordinary_publication_failure_still_stops_the_materializer(self):
         self._git(self.instance, "remote", "set-url", "origin", str(self.root / "disabled.git"))
-        with mock.patch("secretary.upgrade.desired_role_worktrees") as worktrees:
+        with mock.patch("ummanu.upgrade.desired_role_worktrees") as worktrees:
             result = upgrade.run_steps(
                 self.context,
                 steps=(
@@ -1765,7 +1765,7 @@ class CommandSurfaceTests(unittest.TestCase):
             "version: 1\nname: apply\ndata_dir: "
             + str(self.root / "data")
             + "\noffsite:\n  instance_remote: git@example.invalid:x/y\n"
-            + "host:\n  unit_prefix: secretary-\n  foreign_units:\n    - secretary-supervisor.timer\n",
+            + "host:\n  unit_prefix: ummanu-\n  foreign_units:\n    - ummanu-supervisor.timer\n",
             encoding="utf-8",
         )
         (self.root / "data").mkdir()
@@ -1774,7 +1774,7 @@ class CommandSurfaceTests(unittest.TestCase):
         # A host runs a checkout, and these fixtures run this one. Reconcile and the role-skill
         # audit read the configured product, so an installation that names none has no units and
         # no manifest to compare against.
-        env = mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(upgrade.running_product_root())})
+        env = mock.patch.dict(os.environ, {"UMMANU_REPO": str(upgrade.running_product_root())})
         env.start()
         self.addCleanup(env.stop)
 
@@ -1785,7 +1785,7 @@ class CommandSurfaceTests(unittest.TestCase):
         import contextlib
         import io
 
-        from secretary.cli import main
+        from ummanu.cli import main
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -1809,11 +1809,11 @@ class CommandSurfaceTests(unittest.TestCase):
         )
 
         self.assertEqual(code, 0, output)
-        self.assertIn("create systemd:unit:secretary-curator.timer", output)
+        self.assertIn("create systemd:unit:ummanu-curator.timer", output)
         self.assertFalse(manifest.exists())
 
     def test_apply_refuses_an_unowned_name_and_names_the_way_out(self):
-        (self.fixture / "units.txt").write_text("secretary-curator.timer\n", encoding="utf-8")
+        (self.fixture / "units.txt").write_text("ummanu-curator.timer\n", encoding="utf-8")
 
         code, output = self.run_cli(
             [
@@ -1828,11 +1828,11 @@ class CommandSurfaceTests(unittest.TestCase):
         )
 
         self.assertEqual(code, 1, output)
-        self.assertIn("secretary reconcile adopt", output)
+        self.assertIn("ummanu reconcile adopt", output)
         self.assertIn("host.foreign_units", output)
 
     def test_a_declared_foreign_unit_does_not_block_apply(self):
-        (self.fixture / "units.txt").write_text("secretary-supervisor.timer\n", encoding="utf-8")
+        (self.fixture / "units.txt").write_text("ummanu-supervisor.timer\n", encoding="utf-8")
 
         code, output = self.run_cli(
             [
@@ -1851,24 +1851,24 @@ class CommandSurfaceTests(unittest.TestCase):
     def test_a_unit_is_adopted_only_when_it_matches_the_shipped_file(self):
         unit_dir = self.root / "units"
         unit_dir.mkdir()
-        shipped = upgrade.running_product_root() / "packaging" / "systemd" / "secretary-curator.timer"
-        (unit_dir / "secretary-curator.timer").write_bytes(shipped.read_bytes())
+        shipped = upgrade.running_product_root() / "packaging" / "systemd" / "ummanu-curator.timer"
+        (unit_dir / "ummanu-curator.timer").write_bytes(shipped.read_bytes())
         argv = [
             "reconcile",
             "adopt",
             "--instance",
             str(self.instance),
             "--logical-id",
-            "systemd:unit:secretary-curator.timer",
+            "systemd:unit:ummanu-curator.timer",
             "--unit-dir",
             str(unit_dir),
         ]
 
         code, output = self.run_cli(argv)
         self.assertEqual(code, 0, output)
-        self.assertIn("adopt systemd:unit:secretary-curator.timer", output)
+        self.assertIn("adopt systemd:unit:ummanu-curator.timer", output)
 
-        (unit_dir / "secretary-curator.timer").write_text("hand written\n", encoding="utf-8")
+        (unit_dir / "ummanu-curator.timer").write_text("hand written\n", encoding="utf-8")
         code, output = self.run_cli(argv)
         self.assertEqual(code, 2, output)
         self.assertIn("does not match the shipped file", output)
@@ -1881,16 +1881,16 @@ class CommandSurfaceTests(unittest.TestCase):
 
 class HealthUnitNameTests(unittest.TestCase):
     def test_agents_map_to_the_packaged_units_not_the_retired_ta_names(self):
-        from secretary.automations.runtime import health
+        from ummanu.automations.runtime import health
 
-        self.assertEqual(health.timer_unit("curator"), "secretary-curator.timer")
-        self.assertEqual(health.timer_unit("steward"), "secretary-steward.timer")
+        self.assertEqual(health.timer_unit("curator"), "ummanu-curator.timer")
+        self.assertEqual(health.timer_unit("steward"), "ummanu-steward.timer")
         # The pipeline's clock is the production dispatcher's timer.
-        self.assertEqual(health.timer_unit("pipeline"), "secretary-dispatcher-production.timer")
+        self.assertEqual(health.timer_unit("pipeline"), "ummanu-dispatcher-production.timer")
 
     def test_every_checked_unit_is_one_the_product_ships(self):
-        from secretary.automations.__main__ import HEALTH_COMPONENTS
-        from secretary.automations.runtime import health
+        from ummanu.automations.__main__ import HEALTH_COMPONENTS
+        from ummanu.automations.runtime import health
 
         shipped = {
             unit.name
@@ -1948,7 +1948,7 @@ class InstanceHeadCanonTests(unittest.TestCase):
 
             self.assertEqual(
                 path,
-                product / "src" / "secretary" / "runtime" / "heads.toml",
+                product / "src" / "ummanu" / "runtime" / "heads.toml",
             )
             self.assertEqual(origin, PRODUCT_ORIGIN)
             self.assertEqual(canonical_heads(product, instance), canonical_heads(product))
@@ -1985,7 +1985,7 @@ class InstanceHeadCanonTests(unittest.TestCase):
         """The probe that decides which canon wins can itself fail on the filesystem.
 
         `Path.is_file()` does not swallow EACCES, so a `heads/` directory with no search bit used
-        to hand `secretary upgrade` a raw PermissionError. The step catches the bounded config
+        to hand `ummanu upgrade` a raw PermissionError. The step catches the bounded config
         error and nothing else, so that crashed the upgrade instead of failing one step by path.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2041,7 +2041,7 @@ class InstanceHeadCanonTests(unittest.TestCase):
                 self.assertFalse(snapshot_path(instance).exists())
 
     def test_status_reports_a_malformed_installed_snapshot_instead_of_crashing(self):
-        """`secretary status` validates the snapshot on its own, so it meets the same shapes."""
+        """`ummanu status` validates the snapshot on its own, so it meets the same shapes."""
         with tempfile.TemporaryDirectory() as tmpdir:
             instance = self.instance(Path(tmpdir))
             snapshot_path(instance).write_text(

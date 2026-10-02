@@ -18,15 +18,19 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary._fsutil import file_lock
-from secretary.dispatch.heartbeat import heartbeat_identity
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.runtime import DispatcherRuntime
-from secretary.dispatch.state import attempt_request_id, new_attempt_id, now_rfc3339, record_attempt
-from secretary.dispatch.types import HostError
-from secretary.dispatch.watchdog import idle_stall_seconds
-from secretary.dispatch.worker_lifecycle import head_run_binding
-from secretary.runtime.head import (
+from tests.fakes.dispatcher import FakeCatalog, FakeHost, FakeSprints, dispatcher_seed
+from tests.fanout_fixtures import accepted_transport_run
+from tests.observer_identity import bind_observer
+from tests.sql_backend_fixtures import card_store
+from ummanu._fsutil import file_lock
+from ummanu.dispatch.heartbeat import heartbeat_identity
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.dispatch.state import attempt_request_id, new_attempt_id, now_rfc3339, record_attempt
+from ummanu.dispatch.types import HostError
+from ummanu.dispatch.watchdog import idle_stall_seconds
+from ummanu.dispatch.worker_lifecycle import head_run_binding
+from ummanu.runtime.head import (
     HEAD_ALIVE,
     HEAD_GONE,
     HEAD_OK,
@@ -34,15 +38,11 @@ from secretary.runtime.head import (
     StartReceipt,
     StopReceipt,
 )
-from secretary.runtime.head import operations as head_ops
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
-from secretary.tasks import TaskReader, TaskWriter
-from tests.fakes.dispatcher import FakeCatalog, FakeHost, FakeSprints, dispatcher_seed
-from tests.fanout_fixtures import accepted_transport_run
-from tests.observer_identity import bind_observer
-from tests.sql_backend_fixtures import card_store
+from ummanu.runtime.head import operations as head_ops
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from ummanu.tasks import TaskReader, TaskWriter
 
-CARD_REF = "secretary-510"
+CARD_REF = "ummanu-510"
 STOPPED_STATUS = {
     "known": True,
     "live": True,
@@ -69,7 +69,7 @@ def clear_env(test: unittest.TestCase, *names: str) -> None:
 def write_heartbeat(path: Path, pid: int, *, identity: dict[str, str] | None = None) -> None:
     """Write a pid heartbeat matching the runtime's identity-fence format."""
     stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-    record = dict(identity or heartbeat_identity(run_id="test-run", role="worker", task="card:secretary-751"))
+    record = dict(identity or heartbeat_identity(run_id="test-run", role="worker", task="card:ummanu-751"))
     record.update(
         {
             "version": 1,
@@ -94,13 +94,13 @@ def ensure_attempt(payload: dict[str, Any], reference: str, actor: str, owner: s
 
 def card_audit(test: unittest.TestCase):
     """The card audit of a store of this test's own, for a host that renders TASK.md."""
-    from secretary.tasks import task_audit_for
+    from ummanu.tasks import task_audit_for
 
     return task_audit_for(card_store(test, dispatcher_seed()))
 
 
 # The one card these tests drive through the tick.
-CARD_REF = "secretary-510"
+CARD_REF = "ummanu-510"
 
 
 class DispatcherRuntimeFixture:
@@ -118,7 +118,7 @@ class DispatcherRuntimeFixture:
         self.data_dir = Path(self.tmpdir.name)
         # Head heartbeats are keyed on the card reference alone, so without this every test in the
         # process would read and overwrite the same /tmp pid files.
-        env = mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies")})
+        env = mock.patch.dict(os.environ, {"UMMANU_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies")})
         env.start()
         self.addCleanup(env.stop)
         self.board = card_store(self, dispatcher_seed(), instance_dir=self.data_dir)
@@ -153,7 +153,7 @@ class DispatcherRuntimeFixture:
             self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
-            owner="secretary-pilot",
+            owner="ummanu-pilot",
             sprints=self.sprints,
         )
 
@@ -214,7 +214,7 @@ class DispatcherRuntimeFixture:
         self.writer.decide(
             role="observer",
             actor="observer",
-            reference="secretary-510",
+            reference="ummanu-510",
             kind=kind,
             body=reason,
             protocol_prerequisites=protocol_prerequisites,
@@ -235,7 +235,7 @@ class DispatcherRuntimeFixture:
         self.assertEqual(len(set(request_ids)), 3, "the two classifications share an id")
         for request_id in request_ids:
             self.assertTrue(request_id.endswith(f"-{expected}"), request_id)
-        self.assertIn(f"secretary-report-secretary-510-{expected}.md", document)
+        self.assertIn(f"ummanu-report-ummanu-510-{expected}.md", document)
 
     def _park_and_decide(
         self,
@@ -248,7 +248,7 @@ class DispatcherRuntimeFixture:
         """Tick the parked verdict through the seam and hand back the tick that acted on it."""
         parked = self.tick()
         self.assertEqual(parked["to"], "assessment")
-        self.assertEqual(self.reader.show("secretary-510")["state"], "assessment")
+        self.assertEqual(self.reader.show("ummanu-510")["state"], "assessment")
         self._decide(kind, reason, protocol_prerequisites=protocol_prerequisites, request_id=request_id)
         return self.tick()
 
@@ -257,7 +257,7 @@ class DispatcherRuntimeFixture:
         self.writer.report(
             role="worker",
             actor="worker",
-            reference="secretary-510",
+            reference="ummanu-510",
             kind="done",
             body=body,
             request_id=self._worker_report_request_id(),
@@ -267,7 +267,7 @@ class DispatcherRuntimeFixture:
         self.writer.verdict(
             role="reviewer",
             actor="reviewer",
-            reference="secretary-510",
+            reference="ummanu-510",
             kind="red",
             body=body,
             request_id=request_id or self._review_verdict_request_id("red"),
@@ -291,8 +291,8 @@ class DispatcherRuntimeFixture:
         The record may be gone (a dispatcher restart), which changes nothing about what the live
         worker is holding: the document is in the checkout either way.
         """
-        record = self.runtime.production_state.load()["records"].get("secretary-510") or {}
-        workspace = record.get("workspace") or (self.data_dir / "workspaces" / "secretary-510-pilot")
+        record = self.runtime.production_state.load()["records"].get("ummanu-510") or {}
+        workspace = record.get("workspace") or (self.data_dir / "workspaces" / "ummanu-510-pilot")
         document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
         wanted = f"--kind {kind}"
         if classification:
@@ -318,7 +318,7 @@ class DispatcherRuntimeFixture:
             "status": status,
             "observer": {"kind": "head", "profile": profile},
         }
-        self.board.add_sprint("sprint:1031", status=status, sprint_reservations='["secretary"]')
+        self.board.add_sprint("sprint:1031", status=status, sprint_reservations='["ummanu"]')
         self.board.save_metadata(12, sprint_ref="sprint:1031")
 
     def start_dispatcher(self) -> None:
@@ -362,7 +362,7 @@ class DispatcherRuntimeFixture:
         self.writer.report(
             role="worker",
             actor="worker",
-            reference="secretary-510",
+            reference="ummanu-510",
             kind="done",
             body="done",
             request_id=self._worker_report_request_id(),
@@ -371,7 +371,7 @@ class DispatcherRuntimeFixture:
         self.assertEqual(advanced["to"], "validate")
 
     def _pilot_record(self) -> dict:
-        return self.runtime.production_state.load()["records"]["secretary-510"]
+        return self.runtime.production_state.load()["records"]["ummanu-510"]
 
     def _head_at_its_prompt(self, kind: str = "worker", *, idle: bool = True) -> None:
         """The live incident's head: its process is alive and it is not working on anything.
@@ -439,7 +439,7 @@ class DispatcherRuntimeFixture:
         no-episode tests drive, and aging is simply skipped.
         """
         payload = self.runtime.production_state.load()
-        record = payload["records"]["secretary-510"]
+        record = payload["records"]["ummanu-510"]
         episode = record.get(f"{kind}_vitality_episode")
         if episode is None:
             return
@@ -486,7 +486,7 @@ class ReviewCatalog(FakeCatalog):
         identity: dict[str, str] | None = None,
         local_run_policy: str | None = None,
     ):
-        from secretary.runtime.head import HeadCommand
+        from ummanu.runtime.head import HeadCommand
 
         return HeadCommand(f"run-{role}", prompt_after_start=False)
 
@@ -577,7 +577,7 @@ def supervised_run(
     **fields: Any,
 ) -> dict[str, Any]:
     """A durable `local-pty` run as a previous tick wrote it down."""
-    task_ref = fields.pop("task_ref", head_ops.TaskRef.card("secretary-1"))
+    task_ref = fields.pop("task_ref", head_ops.TaskRef.card("ummanu-1"))
     return head_ops.HeadRun(
         run_id=run_id,
         spec=head_ops.HeadSpec(profile_id=profile, adapter=adapter, runtime=LOCAL_PTY_RUNTIME),
@@ -696,6 +696,6 @@ class PromptAfterStartCatalog(ReviewCatalog):
         identity: dict[str, str] | None = None,
         local_run_policy: str | None = None,
     ):
-        from secretary.runtime.head import HeadCommand
+        from ummanu.runtime.head import HeadCommand
 
         return HeadCommand(f"run-{role}", prompt_after_start=True)

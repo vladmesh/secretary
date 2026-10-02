@@ -5,7 +5,7 @@ from __future__ import annotations
 import random
 import unittest
 
-from secretary.runtime.head.local_pty.screen import MAX_COLS, MAX_ROWS, ScreenModel
+from ummanu.runtime.head.local_pty.screen import MAX_COLS, MAX_ROWS, ScreenModel
 
 
 class ScreenModelTests(unittest.TestCase):

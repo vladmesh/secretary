@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
-from secretary.board import (
+from ummanu.board import (
     TRANSITIONS,
     Actor,
     BoardEventCanon,
@@ -37,12 +37,12 @@ from secretary.board import (
     SqlBoardHost,
     TransitionRequest,
 )
-from secretary.board.card_transitions import (
+from ummanu.board.card_transitions import (
     CARD_TRANSITIONS,
     CardTransitionForbidden,
     card_transition,
 )
-from secretary.board.fake import MemoryAudit
+from ummanu.board.fake import MemoryAudit
 
 
 class BoardHostContractTests(unittest.TestCase):
@@ -53,7 +53,7 @@ class BoardHostContractTests(unittest.TestCase):
     def test_create_read_and_transition_return_normalized_event_result(self) -> None:
         created = self.host.create(
             Create(
-                Card("secretary-1417", "Protocol seam", CardState.READY, sprint_ref="sprint:943"),
+                Card("ummanu-1417", "Protocol seam", CardState.READY, sprint_ref="sprint:943"),
                 self.actor,
                 "accepted into the sprint",
                 RelatedRefs(("sprint:943",)),
@@ -63,7 +63,7 @@ class BoardHostContractTests(unittest.TestCase):
         result = self.host.transition(
             TransitionRequest(
                 EntityKind.CARD,
-                "secretary-1417",
+                "ummanu-1417",
                 CardState.IN_PROGRESS,
                 self.actor,
                 "worker started",
@@ -72,21 +72,21 @@ class BoardHostContractTests(unittest.TestCase):
         )
 
         self.assertEqual(created.event.actor.head_run_ref, "head-run:1417")
-        self.assertEqual(result.entity, self.host.read(EntityKind.CARD, "secretary-1417"))
+        self.assertEqual(result.entity, self.host.read(EntityKind.CARD, "ummanu-1417"))
         self.assertEqual(result.entity.state, CardState.IN_PROGRESS)
         self.assertEqual(result.event.kind, EventKind.CARD_STARTED)
         self.assertEqual(result.event.related_refs.refs, ("sprint:943", "head-run:1417"))
 
     def test_same_state_card_transition_is_rejected_by_the_registry(self) -> None:
         self.host.create(
-            Create(Card("secretary-1417", "Protocol seam", CardState.READY), self.actor, "create")
+            Create(Card("ummanu-1417", "Protocol seam", CardState.READY), self.actor, "create")
         )
 
         with self.assertRaises(InvalidTransition):
             self.host.transition(
                 TransitionRequest(
                     EntityKind.CARD,
-                    "secretary-1417",
+                    "ummanu-1417",
                     CardState.READY,
                     self.actor,
                     "no lifecycle change",
@@ -94,7 +94,7 @@ class BoardHostContractTests(unittest.TestCase):
             )
 
     def test_fake_sprint_replay_preserves_lifecycle_evidence(self) -> None:
-        sprint = Sprint("sprint:943", "Host lifecycle", SprintState.OPEN, "product:secretary", ("issue:1",))
+        sprint = Sprint("sprint:943", "Host lifecycle", SprintState.OPEN, "product:ummanu", ("issue:1",))
         host = FakeBoardHost([sprint])
         operation = TransitionRequest(
             EntityKind.SPRINT,
@@ -102,7 +102,7 @@ class BoardHostContractTests(unittest.TestCase):
             SprintState.CLOSED,
             self.actor,
             "Sprint closed",
-            RelatedRefs(("product:secretary", "issue:1")),
+            RelatedRefs(("product:ummanu", "issue:1")),
             "close-943",
         )
 
@@ -120,7 +120,7 @@ class BoardHostContractTests(unittest.TestCase):
                     SprintState.CLOSED,
                     self.actor,
                     "Sprint closed",
-                    RelatedRefs(("product:secretary", "issue:1")),
+                    RelatedRefs(("product:ummanu", "issue:1")),
                     "close-943",
                     SprintSupplement(observer="different"),
                 )
@@ -133,7 +133,7 @@ class BoardHostContractTests(unittest.TestCase):
                     SprintState.CLOSED,
                     self.actor,
                     "Sprint closed",
-                    RelatedRefs(("product:secretary", "head-run:changed")),
+                    RelatedRefs(("product:ummanu", "head-run:changed")),
                     "close-943",
                 )
             )
@@ -215,19 +215,19 @@ class BoardHostContractTests(unittest.TestCase):
 
     def test_replace_cannot_bypass_the_lifecycle_registry(self) -> None:
         self.host.create(
-            Create(Card("secretary-1417", "Protocol seam", CardState.READY), self.actor, "create")
+            Create(Card("ummanu-1417", "Protocol seam", CardState.READY), self.actor, "create")
         )
 
         with self.assertRaises(InvalidTransition):
             self.host.replace(
                 Replace(
-                    Card("secretary-1417", "Protocol seam", CardState.DONE),
+                    Card("ummanu-1417", "Protocol seam", CardState.DONE),
                     self.actor,
                     "skip review",
                 )
             )
 
-        self.assertEqual(self.host.read(EntityKind.CARD, "secretary-1417").state, CardState.READY)
+        self.assertEqual(self.host.read(EntityKind.CARD, "ummanu-1417").state, CardState.READY)
 
     def test_every_declared_edge_names_a_semantic_event_kind(self) -> None:
         declared = {event.value for event in EventKind}
@@ -270,7 +270,7 @@ class BoardHostContractTests(unittest.TestCase):
                 sys.executable,
                 "-P",
                 "-c",
-                "import secretary.tasks, sys; assert 'secretary.board.sql_host' not in sys.modules",
+                "import ummanu.tasks, sys; assert 'ummanu.board.sql_host' not in sys.modules",
             ],
             cwd=source_root,
             env=env,
@@ -286,7 +286,7 @@ class BoardHostContractTests(unittest.TestCase):
             "event-1",
             EventKind.CARD_STARTED,
             EntityKind.CARD,
-            "secretary-1419",
+            "ummanu-1419",
             self.actor,
             "worker started",
             datetime(2026, 8, 11, 18, 0, 0, tzinfo=UTC),
@@ -296,7 +296,7 @@ class BoardHostContractTests(unittest.TestCase):
         record = event.to_record("start-1")
 
         self.assertEqual(record["schema_version"], 2)
-        self.assertEqual(record["subject"], {"kind": "card", "ref": "secretary-1419"})
+        self.assertEqual(record["subject"], {"kind": "card", "ref": "ummanu-1419"})
         self.assertEqual(record["related_refs"], ["sprint:943", "head-run:1417"])
         self.assertEqual(Event.from_record(record), event)
         with self.assertRaisesRegex(ValueError, "EventKind"):
@@ -304,7 +304,7 @@ class BoardHostContractTests(unittest.TestCase):
                 "event-2",
                 "card.started",
                 EntityKind.CARD,
-                "secretary-1419",
+                "ummanu-1419",
                 self.actor,
                 "reason",
                 event.occurred_at,
@@ -315,7 +315,7 @@ class BoardHostContractTests(unittest.TestCase):
             "event-precise",
             EventKind.CARD_STARTED,
             EntityKind.CARD,
-            "secretary-1419",
+            "ummanu-1419",
             self.actor,
             "worker started",
             datetime(2026, 8, 11, 20, 0, 0, 123456, tzinfo=UTC),
@@ -334,7 +334,7 @@ class BoardHostContractTests(unittest.TestCase):
             "legacy-decision",
             EventKind.CARD_DECIDED,
             EntityKind.CARD,
-            "secretary-1419",
+            "ummanu-1419",
             self.actor,
             "keep the repair local",
             datetime(2026, 9, 3, 22, 0, 0, tzinfo=UTC),
@@ -357,7 +357,7 @@ class BoardHostContractTests(unittest.TestCase):
         self.assertNotIn("protocol_prerequisites", restored.data)
         audit = MemoryAudit()
         audit.append("legacy-decision-request", record)
-        self.assertEqual(BoardEventCanon(audit).events(ref="secretary-1419"), (restored,))
+        self.assertEqual(BoardEventCanon(audit).events(ref="ummanu-1419"), (restored,))
         malformed = dict(record)
         malformed["data"] = {**record["data"], "protocol_prerequisites": "not-a-list"}
         with self.assertRaisesRegex(ValueError, "invalid protocol prerequisites"):
@@ -368,7 +368,7 @@ class BoardHostContractTests(unittest.TestCase):
         host = FakeBoardHost(audit=audit)
         result = host.create(
             Create(
-                Card("secretary-1419", "Typed canon", CardState.READY),
+                Card("ummanu-1419", "Typed canon", CardState.READY),
                 self.actor,
                 "accepted",
                 RelatedRefs(("sprint:943",)),
@@ -377,14 +377,14 @@ class BoardHostContractTests(unittest.TestCase):
         )
         replacement = host.replace(
             Replace(
-                Card("secretary-1419", "Typed canon v2", CardState.READY),
+                Card("ummanu-1419", "Typed canon v2", CardState.READY),
                 self.actor,
                 "correct title",
                 request_id="replace-1",
             )
         )
 
-        events = BoardEventCanon(audit).events(ref="secretary-1419")
+        events = BoardEventCanon(audit).events(ref="ummanu-1419")
         self.assertEqual(events, (result.event, replacement.event))
         self.assertEqual(events[0].kind, EventKind.ENTITY_CREATED)
         self.assertEqual(events[1].kind, EventKind.ENTITY_UPDATED)
@@ -396,7 +396,7 @@ class BoardHostContractTests(unittest.TestCase):
         host = FakeBoardHost(audit=audit)
         product = host.create(
             Create(
-                Product("product:secretary", "Secretary", projects=("secretary",)),
+                Product("product:ummanu", "Ummanu", projects=("ummanu",)),
                 Actor("po", "po"),
                 "Product created",
                 request_id="product",
@@ -448,7 +448,7 @@ class BoardHostContractTests(unittest.TestCase):
         # The concrete lifecycle values differ by entity type, but this test's
         # contract is intentionally registry-driven: every declared edge gets a
         # completed fake mutation and exactly its declared kind in the canon.
-        from secretary.board import (
+        from ummanu.board import (
             Issue,
             Product,
             Sprint,
@@ -565,7 +565,7 @@ class BoardMutationTransactionTests(unittest.TestCase):
             "event-transaction",
             EventKind.CARD_STARTED,
             EntityKind.CARD,
-            "secretary-1419",
+            "ummanu-1419",
             Actor("worker", "worker-1419"),
             "start work",
             datetime(2026, 8, 11, 18, 0, 0, tzinfo=UTC),
@@ -729,7 +729,7 @@ class BoardMutationTransactionTests(unittest.TestCase):
                 f"event-race-{index}",
                 EventKind.CARD_STARTED,
                 EntityKind.CARD,
-                "secretary-1419",
+                "ummanu-1419",
                 Actor("worker", f"worker-{index}"),
                 "start work",
                 datetime(2026, 8, 11, 18, 0, 0, tzinfo=UTC),
@@ -771,7 +771,7 @@ class BoardMutationTransactionTests(unittest.TestCase):
             "event-conflicting",
             EventKind.CARD_BLOCKED,
             EntityKind.CARD,
-            "secretary-1419",
+            "ummanu-1419",
             Actor("steward", "steward-1419"),
             "blocked",
             self.event.occurred_at,
@@ -792,7 +792,7 @@ class BoardMutationTransactionTests(unittest.TestCase):
             self.event.event_id,
             EventKind.CARD_BLOCKED,
             EntityKind.CARD,
-            "secretary-1419",
+            "ummanu-1419",
             Actor("steward", "steward-1419"),
             "blocked",
             self.event.occurred_at,
@@ -878,7 +878,7 @@ class BoardMutationTransactionTests(unittest.TestCase):
 class SqlBoardHostTests(unittest.TestCase):
     def test_cards_exclude_typed_rows_and_read_refuses_them(self) -> None:
         execution = {
-            "ref": "secretary-1417",
+            "ref": "ummanu-1417",
             "title": "Protocol seam",
             "state": "ready",
             "record_type": "task",
@@ -890,26 +890,26 @@ class SqlBoardHostTests(unittest.TestCase):
             "record_type": "issue",
         }
         product = {
-            "ref": "product:secretary",
+            "ref": "product:ummanu",
             "title": "Typed product",
             "state": "issues",
             "record_type": "product",
         }
-        with mock.patch("secretary.board.sql_host.TaskReader") as reader_class:
+        with mock.patch("ummanu.board.sql_host.TaskReader") as reader_class:
             reader = reader_class.return_value
             reader.list.return_value = [execution, issue, product]
             reader.show.return_value = issue
             host = SqlBoardHost(mock.sentinel.client)
 
             cards = host.list(EntityKind.CARD)
-            self.assertEqual([card.ref for card in cards], ["secretary-1417"])
+            self.assertEqual([card.ref for card in cards], ["ummanu-1417"])
             with self.assertRaises(BoardProtocolError):
                 host.read(EntityKind.CARD, "issue:1417")
 
     def test_sprint_lifecycle_edges_are_declared_for_host_migration(self) -> None:
         """Sprint close, reopen and hard-stop have explicit typed declarations."""
         host = SqlBoardHost(mock.sentinel.client, data_dir="/data", instance="/instance")
-        card = Card("secretary-1420", "Card host transitions", CardState.READY)
+        card = Card("ummanu-1420", "Card host transitions", CardState.READY)
 
         with self.assertRaisesRegex(BoardProtocolError, "create for card is not migrated"):
             host.create(Create(card, Actor("po", "operator"), "accepted"))
@@ -952,26 +952,26 @@ class SqlBoardHostTests(unittest.TestCase):
             "ref": "sprint:943",
             "goal": "Board protocol",
             "status": "open",
-            "product": "secretary",
+            "product": "ummanu",
             "issues": ["issue:1417"],
             "cards": [],
         }
         product = {
-            "ref": "product:secretary",
-            "title": "Secretary",
+            "ref": "product:ummanu",
+            "title": "Ummanu",
             "closed": False,
-            "projects": ["secretary"],
+            "projects": ["ummanu"],
         }
         with (
-            mock.patch("secretary.board.sql_host.SprintReader") as sprint_reader_class,
-            mock.patch("secretary.board.sql_host.ProductIssueStore") as store_class,
+            mock.patch("ummanu.board.sql_host.SprintReader") as sprint_reader_class,
+            mock.patch("ummanu.board.sql_host.ProductIssueStore") as store_class,
         ):
             sprint_reader_class.return_value.show.return_value = sprint
             store_class.return_value.show_product.return_value = product
             host = SqlBoardHost(mock.sentinel.client, data_dir="/data", instance="/instance")
 
             normalized_sprint = host.read(EntityKind.SPRINT, "sprint:943")
-            self.assertEqual(normalized_sprint.product_ref, "product:secretary")
+            self.assertEqual(normalized_sprint.product_ref, "product:ummanu")
             linked_product = host.read(EntityKind.PRODUCT, normalized_sprint.product_ref)
             self.assertEqual(linked_product.ref, normalized_sprint.product_ref)
 

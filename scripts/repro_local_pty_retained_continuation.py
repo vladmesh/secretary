@@ -36,14 +36,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from secretary.dispatch.watchdog import head_process_status
-from secretary.runtime.claude_env import ensure_trust
-from secretary.runtime.head.local_pty import SupervisorClient, read_events
-from secretary.runtime.head.operations import NudgePointer
-from secretary.runtime.head.run import StopInitiator
-from secretary.runtime.head.spec import HeadSpec
-from secretary.runtime.head.task_ref import TaskRef
-from secretary.runtime.local_pty_head import LocalPtyHeadRuntime
+from ummanu.dispatch.watchdog import head_process_status
+from ummanu.runtime.claude_env import ensure_trust
+from ummanu.runtime.head.local_pty import SupervisorClient, read_events
+from ummanu.runtime.head.operations import NudgePointer
+from ummanu.runtime.head.run import StopInitiator
+from ummanu.runtime.head.spec import HeadSpec
+from ummanu.runtime.head.task_ref import TaskRef
+from ummanu.runtime.local_pty_head import LocalPtyHeadRuntime
 
 ROWS, COLS = 40, 120
 CLAUDE = HeadSpec(profile_id="claude-repro", adapter="claude", effort="default")

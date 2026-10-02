@@ -13,19 +13,19 @@ import unittest
 from typing import Any
 from unittest import mock
 
-from secretary.dispatch.production import _budget_event_type
-from secretary.dispatch.provider_failure import PROVIDER_UNAVAILABLE_READY_ACTION
-from secretary.dispatch.state import DispatcherRecord, attempt_request_id
-from secretary.dispatch.types import STOPPED_BY_PROVIDER_FAILURE
-from secretary.head_health import resource_health_path
-from secretary.runtime.provider_errors import (
+from tests.dispatcher_fixtures import DispatcherRuntimeFixture
+from ummanu.dispatch.production import _budget_event_type
+from ummanu.dispatch.provider_failure import PROVIDER_UNAVAILABLE_READY_ACTION
+from ummanu.dispatch.state import DispatcherRecord, attempt_request_id
+from ummanu.dispatch.types import STOPPED_BY_PROVIDER_FAILURE
+from ummanu.head_health import resource_health_path
+from ummanu.runtime.provider_errors import (
     ProviderError,
     claude_first_turn_failure,
     codex_first_turn_failure,
 )
-from tests.dispatcher_fixtures import DispatcherRuntimeFixture
 
-REF = "secretary-510"
+REF = "ummanu-510"
 
 # The 2026-09-25 reviewer's rollout tail, as Codex wrote it (codegen-orchestrator-1373): the turn
 # opened at 22:58:11 and closed at 22:58:41 on the backend's 401. The key Codex echoed back is

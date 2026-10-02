@@ -5,7 +5,7 @@ from __future__ import annotations
 import unittest
 from datetime import UTC, datetime
 
-from secretary.board.attempt_outcome import (
+from ummanu.board.attempt_outcome import (
     AttemptOutcomeCompleteness,
     AttemptOutcomeLineageRequired,
     AttemptOutcomePayload,
@@ -14,9 +14,9 @@ from secretary.board.attempt_outcome import (
     AttemptOutcomeUsageCompleteness,
     AttemptOutcomeVerdict,
 )
-from secretary.board.events import AttemptOutcomeOccurrence
-from secretary.board.models import Actor, EntityKind, Event, EventKind
-from secretary.board.roles import Role
+from ummanu.board.events import AttemptOutcomeOccurrence
+from ummanu.board.models import Actor, EntityKind, Event, EventKind
+from ummanu.board.roles import Role
 
 
 class AttemptOutcomePayloadTests(unittest.TestCase):

@@ -25,20 +25,20 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from secretary.board.events import BoardEventCanon
-from secretary.board.models import Actor, EntityKind, Event, EventKind
-from secretary.board.sql_audit import (
-    STALE_STAGED_GRACE_SECONDS,
-    SqlTaskAudit,
-)
-from secretary.board.sql_cards import SqlCardClient
-from secretary.checkpoint import CheckpointWriter, checkpoint_snapshot
-from secretary.dispatch.production import _write_checkpoint
-from secretary.sprints import SprintWriter
-from secretary.tasks import TaskError
 from tests import test_checkpoint as checkpoint_cases
 from tests.fakes.sprints import ProductSprintSeed, _write_project_registry
 from tests.sql_backend_fixtures import PostgresBoard, seed_client
+from ummanu.board.events import BoardEventCanon
+from ummanu.board.models import Actor, EntityKind, Event, EventKind
+from ummanu.board.sql_audit import (
+    STALE_STAGED_GRACE_SECONDS,
+    SqlTaskAudit,
+)
+from ummanu.board.sql_cards import SqlCardClient
+from ummanu.checkpoint import CheckpointWriter, checkpoint_snapshot
+from ummanu.dispatch.production import _write_checkpoint
+from ummanu.sprints import SprintWriter
+from ummanu.tasks import TaskError
 
 BOARD: PostgresBoard
 
@@ -61,7 +61,7 @@ STALE_MINUTES = STALE_STAGED_GRACE_SECONDS // 60 + 5
 class SettlementCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        instance = _write_project_registry(self.tmp, "secretary", "secretary-instance", "other")
+        instance = _write_project_registry(self.tmp, "ummanu", "secretary-instance", "other")
         config = BOARD.fresh_database()
         self.config = config
         self.client = seed_client(config, ProductSprintSeed(), self.tmp)
@@ -70,7 +70,7 @@ class SettlementCase(unittest.TestCase):
         self.audit = SqlTaskAudit(self.client)
         self.sprints = SprintWriter(self.client, data_dir=str(self.tmp), instance=instance)
         self.sprint = self.sprints.restore_create(
-            reference="sprint:41", goal="settle stale rows", repositories=["secretary"], request_id="seed-sprint"
+            reference="sprint:41", goal="settle stale rows", repositories=["ummanu"], request_id="seed-sprint"
         )["sprint"]["ref"]
 
     # -- the dead writer ------------------------------------------------------------------------
@@ -110,8 +110,8 @@ class SettlementCase(unittest.TestCase):
             event_id=event_id,
             kind=EventKind.CARD_STARTED,
             entity_kind=EntityKind.CARD,
-            ref="secretary-468",
-            actor=Actor("dispatcher", "secretary-production"),
+            ref="ummanu-468",
+            actor=Actor("dispatcher", "ummanu-production"),
             reason="claimed for the worker",
             occurred_at=datetime(2026, 9, 21, 12, 0, tzinfo=UTC),
             source_state="ready",
@@ -270,7 +270,7 @@ class StaleStagedSettlementTests(SettlementCase):
             "kind": "sprint_guard_denied",
             "outcome": "denied",
             "task_id": "",
-            "ref": "secretary-468",
+            "ref": "ummanu-468",
             "backend": {"kind": "postgres", "task_id": None, "revision": "not_written"},
             "request_id": "req-denied",
             "payload": {"code": "sprint_guard", "message": "denied"},
@@ -333,7 +333,7 @@ class StaleStagedCheckpointTests(SettlementCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.data_dir = self.tmp / "secretary-data"
+        self.data_dir = self.tmp / "ummanu-data"
         self.instance_dir = self.tmp / "secretary-instance"
         (self.data_dir / "board").mkdir(parents=True)
         (self.data_dir / "runs").mkdir(parents=True)

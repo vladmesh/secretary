@@ -1,6 +1,6 @@
 ---
 name: open-issue
-description: "File a product issue on the board as the PO: check the product and the open issues for a duplicate, choose kind, priority, title and description yourself, and create it with `secretary issue create` without asking the owner first. Use on requests like 'file an issue', 'add this to the backlog', 'open an issue', `$open-issue`."
+description: "File a product issue on the board as the PO: check the product and the open issues for a duplicate, choose kind, priority, title and description yourself, and create it with `ummanu issue create` without asking the owner first. Use on requests like 'file an issue', 'add this to the backlog', 'open an issue', `$open-issue`."
 ---
 
 # Open Issue
@@ -12,15 +12,15 @@ do not cut cards, promote it to a sprint or start work on it.
 ## 1. Find the product and check for a duplicate
 
 ```bash
-python3 -P -m secretary product list
-python3 -P -m secretary issue list --product <product>
-python3 -P -m secretary issue show --ref <issue-ref>
+python3 -P -m ummanu product list
+python3 -P -m ummanu issue list --product <product>
+python3 -P -m ummanu issue show --ref <issue-ref>
 ```
 
 If an open issue already covers the problem, do not file a second one. Add what is new to it instead:
 
 ```bash
-python3 -P -m secretary issue append --role po --ref <issue-ref> \
+python3 -P -m ummanu issue append --role po --ref <issue-ref> \
   --reason "<why this block is added>" --body-file <file>
 ```
 
@@ -38,7 +38,7 @@ You choose every field yourself; there is no owner confirmation before create.
 ## 3. Create it
 
 ```bash
-python3 -P -m secretary issue create --role po --product <product> \
+python3 -P -m ummanu issue create --role po --product <product> \
   --kind <kind> --priority <P0-P3> --title "<title>" --description "<description>" \
   --request-id <stable-id>
 ```

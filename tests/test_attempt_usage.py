@@ -17,8 +17,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
-from secretary.board.events import AttemptUsageOccurrence, BoardEventCanon
-from secretary.board.models import (
+from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
+from tests.fakes.dispatcher import dispatcher_seed
+from tests.sql_backend_fixtures import card_store
+from ummanu.board.events import AttemptUsageOccurrence, BoardEventCanon
+from ummanu.board.models import (
     TOKEN_DIMENSIONS,
     Actor,
     AttemptUsageOutcome,
@@ -26,8 +29,8 @@ from secretary.board.models import (
     Event,
     EventKind,
 )
-from secretary.dispatch import attempt_usage as attempt_usage_module
-from secretary.dispatch.attempt_usage import (
+from ummanu.dispatch import attempt_usage as attempt_usage_module
+from ummanu.dispatch.attempt_usage import (
     CLAUDE_SOURCE_KIND,
     CODEX_SOURCE_KIND,
     TokenTotals,
@@ -40,10 +43,7 @@ from secretary.dispatch.attempt_usage import (
     predecessor_boundary,
     provider_usage_source,
 )
-from secretary.tasks import TaskError, is_significant_card_event, task_audit_for
-from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
-from tests.fakes.dispatcher import dispatcher_seed
-from tests.sql_backend_fixtures import card_store
+from ummanu.tasks import TaskError, is_significant_card_event, task_audit_for
 
 DIGEST = "a" * 64
 USAGE_FIXTURES = Path(__file__).parent / "fixtures" / "attempt_usage"
@@ -899,7 +899,7 @@ def usage_event(**overrides) -> Event:
         kind=EventKind.ATTEMPT_USAGE,
         entity_kind=EntityKind.CARD,
         ref=CARD_REF,
-        actor=Actor("dispatcher", "secretary-dispatcher"),
+        actor=Actor("dispatcher", "ummanu-dispatcher"),
         reason="attempt.usage: worker phase of attempt 2",
         occurred_at=datetime(2026, 8, 31, 12, tzinfo=UTC),
         data=data,
@@ -1090,7 +1090,7 @@ class AttemptUsageEventTests(unittest.TestCase):
             kind=EventKind.CARD_MOVED,
             entity_kind=EntityKind.CARD,
             ref=CARD_REF,
-            actor=Actor("dispatcher", "secretary-dispatcher"),
+            actor=Actor("dispatcher", "ummanu-dispatcher"),
             reason="worker report:done",
             occurred_at=datetime(2026, 8, 31, 12, tzinfo=UTC),
             source_state="in_progress",
@@ -1872,7 +1872,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         with self.assertRaises(TaskError) as still_pending:
             self.writer.attempt_usage(
                 role="dispatcher",
-                actor="secretary-dispatcher",
+                actor="ummanu-dispatcher",
                 reference=CARD_REF,
                 data=staged[2].event.data,
                 reason=staged[2].event.reason,
@@ -1951,7 +1951,7 @@ class DispatcherAttemptUsageTests(DispatcherRuntimeFixture, unittest.TestCase):
         with self.assertRaises(TaskError) as still_pending:
             self.writer.attempt_usage(
                 role="dispatcher",
-                actor="secretary-dispatcher",
+                actor="ummanu-dispatcher",
                 reference=CARD_REF,
                 data=replay.event.data,
                 reason=replay.event.reason,

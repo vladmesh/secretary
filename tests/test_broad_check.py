@@ -23,8 +23,8 @@ from pathlib import Path
 from signal import NSIG
 from unittest import mock
 
-from secretary import broad_check
-from secretary.broad_check import (
+from ummanu import broad_check
+from ummanu.broad_check import (
     BroadCheckError,
     CheckSpec,
     RunResult,
@@ -35,8 +35,8 @@ from secretary.broad_check import (
     run_broad_check,
     usable_receipt,
 )
-from secretary.cli import main
-from secretary.runtime.role_env import workspace_tool_cache_env
+from ummanu.cli import main
+from ummanu.runtime.role_env import workspace_tool_cache_env
 
 
 def _git(root: Path, *args: str) -> None:
@@ -87,7 +87,7 @@ class BroadCheckTestCase(unittest.TestCase):
         self._init_workspace(self.root)
         self.stream = StringIO()
 
-    def _init_workspace(self, root: Path, *, project_package: str = "secretary") -> Path:
+    def _init_workspace(self, root: Path, *, project_package: str = "ummanu") -> Path:
         """A committed candidate checkout, optionally without any importable project package.
 
         `project_package=""` is not a curiosity: since issue:8b39e60e4df361c6138e the wrapper puts
@@ -312,7 +312,7 @@ class ReceiptIntegrityTests(BroadCheckTestCase):
             return real_replace(source, target, *args, **kwargs)
 
         with (
-            mock.patch("secretary._fsutil.os.replace", side_effect=refuse),
+            mock.patch("ummanu._fsutil.os.replace", side_effect=refuse),
             self.assertRaises(BroadCheckError) as caught,
         ):
             self._run("echo first; exit 0")
@@ -356,7 +356,7 @@ class DocumentedCommandTests(unittest.TestCase):
     def test_the_operator_reference_documents_reading_a_receipt_back(self) -> None:
         text = (Path(__file__).resolve().parents[1] / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
 
-        self.assertIn("python3 -m secretary check show --module", text)
+        self.assertIn("python3 -m ummanu check show --module", text)
         self.assertIn("state/checks/", text)
 
     def test_the_documented_shapes_say_which_one_attests_an_import(self) -> None:
@@ -435,7 +435,7 @@ class ResultInvariantTests(BroadCheckTestCase):
         # At the shell, through a real process: the check runs again and its own 2 comes back,
         # rather than the stored 256 being masked to a successful 0.
         completed = subprocess.run(
-            [sys.executable, "-m", "secretary", *argv],
+            [sys.executable, "-m", "ummanu", *argv],
             cwd=Path(__file__).resolve().parents[1],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -455,7 +455,7 @@ class ResultInvariantTests(BroadCheckTestCase):
 
         self.assertTrue(usable_receipt(self.root, suite).usable)
         completed = subprocess.run(
-            [sys.executable, "-m", "secretary", *argv],
+            [sys.executable, "-m", "ummanu", *argv],
             cwd=Path(__file__).resolve().parents[1],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -768,8 +768,8 @@ class UnchangedContentReuseTests(BroadCheckTestCase):
         bare = Path(self.tmpdir.name) / "not-a-repo"
         bare.mkdir()
         (bare / "baresuite.py").write_text("print('suite ran')\n", encoding="utf-8")
-        (bare / "secretary").mkdir()
-        (bare / "secretary" / "__init__.py").write_text("", encoding="utf-8")
+        (bare / "ummanu").mkdir()
+        (bare / "ummanu" / "__init__.py").write_text("", encoding="utf-8")
         spec = CheckSpec.for_module("baresuite")
         exit_code, receipt = run_broad_check(spec, root=bare, stream=self.stream)
 
@@ -792,14 +792,14 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
 
     def _outside_project(self) -> Path:
         outside = Path(self.tmpdir.name) / "elsewhere"
-        (outside / "secretary").mkdir(parents=True)
-        (outside / "secretary" / "__init__.py").write_text("", encoding="utf-8")
+        (outside / "ummanu").mkdir(parents=True)
+        (outside / "ummanu" / "__init__.py").write_text("", encoding="utf-8")
         return outside
 
     def test_a_shell_check_that_changes_directory_cannot_claim_the_candidate_checkout(self) -> None:
         outside = self._outside_project()
         command = (
-            f'cd {outside}; {sys.executable} -c "import secretary, sys; sys.stdout.write(secretary.__file__)"'
+            f'cd {outside}; {sys.executable} -c "import ummanu, sys; sys.stdout.write(ummanu.__file__)"'
         )
 
         exit_code, receipt = self._run(command)
@@ -840,7 +840,7 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
         """
         outside = self._outside_project()
         elsewhere = self._init_workspace(Path(self.tmpdir.name) / "no-package", project_package="")
-        suite = self._suite("outsidesuite", "import secretary\nprint(secretary.__file__)\n", root=elsewhere)
+        suite = self._suite("outsidesuite", "import ummanu\nprint(ummanu.__file__)\n", root=elsewhere)
         env = dict(
             os.environ,
             PYTHONSAFEPATH="1",
@@ -867,7 +867,7 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
 
         # The ordinary candidate-inside run of the same standard shape stays reusable -- and stays
         # reusable in the very same import environment, because the candidate's roots come first.
-        inside_suite = self._suite("outsidesuite", "import secretary\nprint(secretary.__file__)\n")
+        inside_suite = self._suite("outsidesuite", "import ummanu\nprint(ummanu.__file__)\n")
         _, inside_receipt = self._run(inside_suite, env=env)
         self.assertTrue(inside_receipt["project_provenance"]["inside_workspace"])
         self.assertTrue(usable_receipt(self.root, inside_suite).usable)
@@ -913,13 +913,13 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
             "an import from outside the candidate": {
                 "project_provenance": {
                     "origin": "check-process",
-                    "imported_project": str(self.scripts / "secretary" / "__init__.py"),
+                    "imported_project": str(self.scripts / "ummanu" / "__init__.py"),
                 }
             },
             "missing interpreter environment provenance": {
                 "project_provenance": {
                     "origin": "check-process",
-                    "imported_project": str(self.root / "secretary" / "__init__.py"),
+                    "imported_project": str(self.root / "ummanu" / "__init__.py"),
                 }
             },
             "an unresolvable import path": {
@@ -933,7 +933,7 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
         trusted = {
             "project_provenance": {
                 "origin": "check-process",
-                "imported_project": str(self.root / "secretary" / "__init__.py"),
+                "imported_project": str(self.root / "ummanu" / "__init__.py"),
                 "environment_prefix": str(self.scripts),
             }
         }
@@ -943,7 +943,7 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
             broad_check.candidate_import_refusal(
                 {"project_provenance": {**trusted["project_provenance"], "imported_package": "other"}},
                 self.root,
-                expected_package="secretary",
+                expected_package="ummanu",
             ),
         )
 
@@ -959,7 +959,7 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
             "inside": (self.root, self._suite("insidesuite", "print('in')\n"), None),
             "outside": (
                 elsewhere,
-                self._suite("outsidecase", "import secretary\nprint('out')\n", root=elsewhere),
+                self._suite("outsidecase", "import ummanu\nprint('out')\n", root=elsewhere),
                 dict(
                     os.environ,
                     PYTHONSAFEPATH="1",
@@ -990,7 +990,7 @@ class CandidateImportPrecedenceTests(BroadCheckTestCase):
     """issue:8b39e60e4df361c6138e: the standard shape must import the candidate, by construction.
 
     This reproduces the live shape exactly, because nothing weaker reproduced the defect. A head's
-    shell carries `PYTHONPATH=$TA_SECRETARY_REPO/src` (`secretary/runtime/launch_prefix.py`)
+    shell carries `PYTHONPATH=$UMMANU_REPO/src` (`ummanu/runtime/launch_prefix.py`)
     and every worktree runs on one shared venv that holds an editable install of the production
     checkout, so a src-layout candidate -- which has nothing importable at its own root -- was
     checked by a process that imported *production* sources and ran the candidate's test files
@@ -1006,8 +1006,8 @@ class CandidateImportPrecedenceTests(BroadCheckTestCase):
 
     def _src_layout_checkout(self, path: Path, name: str) -> Path:
         """A src-layout checkout of "the project": nothing importable at its root."""
-        (path / "src" / "secretary").mkdir(parents=True)
-        (path / "src" / "secretary" / "__init__.py").write_text(f"NAME = {name!r}\n", encoding="utf-8")
+        (path / "src" / "ummanu").mkdir(parents=True)
+        (path / "src" / "ummanu" / "__init__.py").write_text(f"NAME = {name!r}\n", encoding="utf-8")
         return path
 
     def test_the_live_head_shape_checks_the_candidate_and_not_the_production_checkout(self) -> None:
@@ -1019,9 +1019,9 @@ class CandidateImportPrecedenceTests(BroadCheckTestCase):
         log = self.scripts / "runs.log"
         suite = self._suite(
             "livesuite",
-            "import secretary\n"
-            f"open({str(log)!r}, 'a', encoding='utf-8').write(secretary.__file__ + '\\n')\n"
-            "print(secretary.NAME)\n",
+            "import ummanu\n"
+            f"open({str(log)!r}, 'a', encoding='utf-8').write(ummanu.__file__ + '\\n')\n"
+            "print(ummanu.NAME)\n",
             root=candidate,
         )
         _git(candidate, "add", "-A")
@@ -1036,7 +1036,7 @@ class CandidateImportPrecedenceTests(BroadCheckTestCase):
         self.assertEqual(receipt["tail"].strip(), "candidate")
         self.assertEqual(
             provenance["imported_project"],
-            str((candidate / "src" / "secretary" / "__init__.py").resolve()),
+            str((candidate / "src" / "ummanu" / "__init__.py").resolve()),
         )
         self.assertTrue(provenance["inside_workspace"])
         self.assertEqual(
@@ -1052,7 +1052,7 @@ class CandidateImportPrecedenceTests(BroadCheckTestCase):
         self.assertTrue(reused["reused"])
         self.assertEqual(
             log.read_text(encoding="utf-8").splitlines(),
-            [str((candidate / "src" / "secretary" / "__init__.py").resolve())],
+            [str((candidate / "src" / "ummanu" / "__init__.py").resolve())],
             "the suite must have run exactly once: the second call reused the receipt",
         )
 
@@ -1063,9 +1063,9 @@ class CandidateImportPrecedenceTests(BroadCheckTestCase):
         log = self.scripts / "normalized-path.json"
         suite = self._suite(
             "pathsuite",
-            "import json, os, secretary, sys\n"
+            "import json, os, ummanu, sys\n"
             f"open({str(log)!r}, 'w', encoding='utf-8').write(json.dumps({{\n"
-            "    'imported': secretary.__file__,\n"
+            "    'imported': ummanu.__file__,\n"
             "    'pythonpath': os.environ.get('PYTHONPATH'),\n"
             "    'sys_path': sys.path,\n"
             "}))\n",
@@ -1096,7 +1096,7 @@ class CandidateImportPrecedenceTests(BroadCheckTestCase):
         self.assertIn(production_src, observed["sys_path"][2:])
         self.assertEqual(
             observed["imported"],
-            str((candidate / "src" / "secretary" / "__init__.py").resolve()),
+            str((candidate / "src" / "ummanu" / "__init__.py").resolve()),
         )
         self.assertEqual(receipt["project_provenance"]["imported_project"], observed["imported"])
         self.assertTrue(receipt["project_provenance"]["inside_workspace"])
@@ -1130,7 +1130,7 @@ class CandidateImportPrecedenceTests(BroadCheckTestCase):
 
 
 class RegisteredProjectContractTests(BroadCheckTestCase):
-    """A non-Secretary project owns both sides of reusable module provenance."""
+    """A non-Ummanu project owns both sides of reusable module provenance."""
 
     def _register(self, *, interpreter: str, import_package: str, module: str = "project_suite") -> Path:
         instance = Path(self.tmpdir.name) / "instance"
@@ -1153,12 +1153,12 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         )
         return instance
 
-    def test_registered_non_secretary_project_reuses_its_green_module_receipt(self) -> None:
-        # The legacy fixture has a Secretary package only for the old default contract. This
+    def test_registered_non_ummanu_project_reuses_its_green_module_receipt(self) -> None:
+        # The legacy fixture has a Ummanu package only for the old default contract. This
         # candidate deliberately has none: its adapter names the project package instead.
-        shutil.rmtree(self.root / "secretary")
+        shutil.rmtree(self.root / "ummanu")
         _git(self.root, "add", "-A")
-        _git(self.root, "commit", "-q", "-m", "remove Secretary package")
+        _git(self.root, "commit", "-q", "-m", "remove Ummanu package")
         (self.root / "codegen_orchestrator").mkdir()
         (self.root / "codegen_orchestrator" / "__init__.py").write_text(
             "NAME = 'candidate'\n", encoding="utf-8"
@@ -1217,7 +1217,7 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
             [
                 sys.executable,
                 "-m",
-                "secretary",
+                "ummanu",
                 "check",
                 "broad",
                 "--root",
@@ -1262,7 +1262,7 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         stderr = StringIO()
         with (
             mock.patch(
-                "secretary.broad_check.subprocess.Popen", side_effect=OSError(ENOEXEC, "Exec format error")
+                "ummanu.broad_check.subprocess.Popen", side_effect=OSError(ENOEXEC, "Exec format error")
             ),
             mock.patch("sys.stdout", stdout),
             mock.patch("sys.stderr", stderr),
@@ -1277,9 +1277,9 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         """The path this issue deliberately left working, pinned so it cannot fall out by accident.
 
         A workspace that matches NO registered project has no adapter to have declared anything:
-        it is somebody running `secretary check broad --module ...` in a plain clone by hand, with
+        it is somebody running `ummanu check broad --module ...` in a plain clone by hand, with
         no card, no workspace and no round at stake. That keeps the CLI's own default
-        (`sys.executable` importing `secretary`), and the response names the fallback rather than
+        (`sys.executable` importing `ummanu`), and the response names the fallback rather than
         letting it pass for a project contract - `source: cli_default`, not `adapter`. The third
         case this test used to carry, a REGISTERED project whose adapter declared no `broad_check`,
         is no longer a fallback at all; it is the `broad_check_not_declared` refusal below.
@@ -1334,7 +1334,7 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         """The new shape on the CLI's own error path, which behaves like every other refusal.
 
         This supersedes the test that asserted `cannot_attest_project` here. That refusal was
-        reached through Secretary's default lent to a project that never declared it, and its
+        reached through Ummanu's default lent to a project that never declared it, and its
         message named the substituted package instead of the real cause. The refusal is now
         `broad_check_not_declared`, read off the same enumeration the dispatcher's preflight reads,
         and the CLI contract around it is unchanged: exit 2, the structured
@@ -1461,7 +1461,7 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
 
     def _suite_file(self, name: str) -> None:
         (self.root / f"{name}.py").write_text(
-            "import sys\nimport secretary\nprint('ran ' + ' '.join(sys.argv[1:]))\n",
+            "import sys\nimport ummanu\nprint('ran ' + ' '.join(sys.argv[1:]))\n",
             encoding="utf-8",
         )
         _git(self.root, "add", "-A")
@@ -1471,7 +1471,7 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
         self._suite_file("project_suite")
         instance = self._register(
             "broad_check:\n"
-            "  import_package: secretary\n"
+            "  import_package: ummanu\n"
             "  module: project_suite\n"
             "  args: ['--only', 'fast lane']\n"
         )
@@ -1489,8 +1489,8 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
     ) -> None:
         """The production wrapper may select a workspace runtime for the inner project suite."""
         self._suite_file("project_suite")
-        instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
-        candidate = self.root / ".secretary-task-env" / "venv"
+        instance = self._register("broad_check:\n  import_package: ummanu\n  module: project_suite\n")
+        candidate = self.root / ".ummanu-task-env" / "venv"
         subprocess.run([sys.executable, "-m", "venv", str(candidate)], check=True)
 
         payload = _run_main(
@@ -1502,7 +1502,7 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
                 "--instance",
                 str(instance),
                 "--default-interpreter",
-                ".secretary-task-env/venv/bin/python3",
+                ".ummanu-task-env/venv/bin/python3",
             ]
         )
 
@@ -1518,7 +1518,7 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
 
     def test_a_direct_check_with_no_interpreter_still_uses_the_callers_runtime(self) -> None:
         self._suite_file("project_suite")
-        instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
+        instance = self._register("broad_check:\n  import_package: ummanu\n  module: project_suite\n")
 
         payload = _run_main(["check", "broad", "--root", str(self.root), "--instance", str(instance)])
 
@@ -1527,13 +1527,13 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
     def test_the_cli_refuses_a_subprocess_status_that_disagrees_with_its_receipt(self) -> None:
         spec = self._suite("project_suite", "print('OK')\n")
         _, receipt = self._run(spec)
-        instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
+        instance = self._register("broad_check:\n  import_package: ummanu\n  module: project_suite\n")
         stdout, stderr = StringIO(), StringIO()
 
         with (
             mock.patch("sys.stdout", stdout),
             mock.patch("sys.stderr", stderr),
-            mock.patch("secretary.check_commands.run_broad_check", return_value=(7, receipt)),
+            mock.patch("ummanu.check_commands.run_broad_check", return_value=(7, receipt)),
         ):
             status = main(["check", "broad", "--root", str(self.root), "--instance", str(instance)])
 
@@ -1545,7 +1545,7 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
 
     def test_check_show_reads_back_the_receipt_the_declared_suite_wrote(self) -> None:
         self._suite_file("project_suite")
-        instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
+        instance = self._register("broad_check:\n  import_package: ummanu\n  module: project_suite\n")
         common = ["--root", str(self.root), "--instance", str(instance)]
 
         _run_main(["check", "broad", *common])
@@ -1560,7 +1560,7 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
         self._suite_file("other_suite")
         instance = self._register(
             "broad_check:\n"
-            "  import_package: secretary\n"
+            "  import_package: ummanu\n"
             "  module: project_suite\n"
             "  args: ['--only', 'fast lane']\n"
         )
@@ -1586,7 +1586,7 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
         # A declared contract that names no suite - the shape every adapter was written in before
         # `module` existed. The fixture used to declare no `broad_check` at all, which is now a
         # refusal of its own (`broad_check_not_declared`) and would never reach this branch.
-        instance = self._register("broad_check:\n  import_package: secretary\n")
+        instance = self._register("broad_check:\n  import_package: ummanu\n")
 
         stderr = StringIO()
         with mock.patch("sys.stdout", StringIO()), mock.patch("sys.stderr", stderr):
@@ -1598,7 +1598,7 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
         self.assertIn("--module", error["message"])
 
     def test_module_and_command_are_still_two_different_promises(self) -> None:
-        instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
+        instance = self._register("broad_check:\n  import_package: ummanu\n  module: project_suite\n")
 
         stderr = StringIO()
         with mock.patch("sys.stdout", StringIO()), mock.patch("sys.stderr", stderr):
@@ -1626,7 +1626,7 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
         Silently appending a worker's ad-hoc argument to the contract's vector would run a check
         nobody declared while the receipt claimed the declared one.
         """
-        instance = self._register("broad_check:\n  import_package: secretary\n  module: project_suite\n")
+        instance = self._register("broad_check:\n  import_package: ummanu\n  module: project_suite\n")
 
         stderr = StringIO()
         with mock.patch("sys.stdout", StringIO()), mock.patch("sys.stderr", stderr):
@@ -1654,7 +1654,7 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
         so nothing is refused; what is missing is only the suite, and only this invocation needs
         it. The error therefore names itself and says both ways out.
         """
-        instance = self._register("broad_check:\n  import_package: secretary\n")
+        instance = self._register("broad_check:\n  import_package: ummanu\n")
 
         stderr = StringIO()
         with mock.patch("sys.stdout", StringIO()), mock.patch("sys.stderr", stderr):
@@ -1667,7 +1667,7 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
         self.assertIn("broad_check.module", error["message"])
 
     def test_check_show_without_a_module_says_the_same_thing(self) -> None:
-        instance = self._register("broad_check:\n  import_package: secretary\n")
+        instance = self._register("broad_check:\n  import_package: ummanu\n")
 
         stderr = StringIO()
         with mock.patch("sys.stdout", StringIO()), mock.patch("sys.stderr", stderr):
@@ -1679,7 +1679,7 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
     def test_a_module_flag_still_runs_a_contract_that_declares_no_suite(self) -> None:
         """And naming the suite is all it takes: the adapter's runtime is used, as it always was."""
         self._suite_file("project_suite")
-        instance = self._register("broad_check:\n  import_package: secretary\n")
+        instance = self._register("broad_check:\n  import_package: ummanu\n")
 
         payload = _run_main(
             [
@@ -1699,7 +1699,7 @@ class DeclaredBroadSuiteTests(BroadCheckTestCase):
 
     def test_a_declared_block_with_a_blank_interpreter_is_broad_check_incomplete(self) -> None:
         """Present but blank names nothing runnable — a typo, and a refusal since before #330."""
-        instance = self._register("broad_check:\n  interpreter: '   '\n  import_package: secretary\n")
+        instance = self._register("broad_check:\n  interpreter: '   '\n  import_package: ummanu\n")
 
         stderr = StringIO()
         with mock.patch("sys.stdout", StringIO()), mock.patch("sys.stderr", stderr):
@@ -2064,17 +2064,17 @@ class DispatcherWorkspaceReceiptTests(BroadCheckTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        self.namespace = self.root / ".secretary-task-env"
+        self.namespace = self.root / ".ummanu-task-env"
         self.namespace.mkdir()
         self._claim(str(self.root.resolve()))
         exclude = self.root / ".git" / "info" / "exclude"
-        exclude.write_text(".secretary-task-env/\n", encoding="utf-8")
+        exclude.write_text(".ummanu-task-env/\n", encoding="utf-8")
         self.suite = self._suite("ownedsuite", "print('ran')\n")
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-q", "-m", "suite")
 
     def _claim(self, workspace: str) -> None:
-        owner = {"owner": "secretary-dispatcher", "schema_version": 1, "workspace": workspace}
+        owner = {"owner": "ummanu-dispatcher", "schema_version": 1, "workspace": workspace}
         (self.namespace / "owner.json").write_text(json.dumps(owner) + "\n", encoding="utf-8")
 
     def _main(self, argv: list[str]) -> tuple[int, dict]:
@@ -2114,7 +2114,7 @@ class DispatcherWorkspaceReceiptTests(BroadCheckTestCase):
         # Nothing outside the owned namespace is left behind for cleanup to read as work.
         status = _git_out(self.root, "status", "--porcelain=v1", "--ignored", "--untracked-files=all")
         written = sorted({line[3:].split("/")[0] for line in status.splitlines()})
-        self.assertEqual(written, [".secretary-task-env"])
+        self.assertEqual(written, [".ummanu-task-env"])
 
     def test_a_namespace_the_dispatcher_does_not_own_keeps_the_ordinary_location(self) -> None:
         self._claim(str(self.root.resolve() / "elsewhere"))

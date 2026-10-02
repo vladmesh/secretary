@@ -9,9 +9,9 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatch import worker_continuation as continuation_module
-from secretary.dispatch.state import DispatcherRecord, PersistedGateReceipt
-from secretary.dispatch.worker_lifecycle import (
+from ummanu.dispatch import worker_continuation as continuation_module
+from ummanu.dispatch.state import DispatcherRecord, PersistedGateReceipt
+from ummanu.dispatch.worker_lifecycle import (
     BUSY_RETRY_INITIAL_SECONDS,
     CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
     ContinuationRecoveryRung,
@@ -342,7 +342,7 @@ class WorkerContinuationBoundaryTests(unittest.TestCase):
 class ContinuationOwnershipTests(unittest.TestCase):
     def test_implementation_is_owned_by_the_package_not_runtime_callbacks(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        runtime_source = (root / "src/secretary/dispatch/runtime.py").read_text(encoding="utf-8")
+        runtime_source = (root / "src/ummanu/dispatch/runtime.py").read_text(encoding="utf-8")
         runtime_tree = ast.parse(runtime_source)
         runtime = next(
             n for n in runtime_tree.body if isinstance(n, ast.ClassDef) and n.name == "DispatcherRuntime"
@@ -378,7 +378,7 @@ class ContinuationOwnershipTests(unittest.TestCase):
         self.assertTrue(
             {"begin_red_transition", "complete_red_transition", "recover_worker_continuation"} <= owned
         )
-        self.assertNotIn("secretary.dispatch.runtime", inspect.getsource(continuation_module))
+        self.assertNotIn("ummanu.dispatch.runtime", inspect.getsource(continuation_module))
         advance = next(
             n for n in runtime.body if isinstance(n, ast.FunctionDef) and n.name == "_advance_worker"
         )

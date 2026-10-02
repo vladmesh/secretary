@@ -22,11 +22,11 @@ import dataclasses
 import json
 import unittest
 
-from secretary.dispatch.head_vitality_episode import (
+from ummanu.dispatch.head_vitality_episode import (
     VitalityEpisode,
     VitalityVerdict,
 )
-from secretary.dispatch.head_vitality_policy import (
+from ummanu.dispatch.head_vitality_policy import (
     DEFAULT_DETERMINISTIC_REFUSAL_LIMIT,
     DEFAULT_RESPONSE_WINDOW_SECONDS,
     DETERMINISTIC_TERMINAL_REASONS,

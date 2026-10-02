@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import ClassVar
 from unittest import mock
 
-from secretary import head_health
-from secretary.head_health import HeadHealth, HeadReadiness, resolve_head_chain
+from ummanu import head_health
+from ummanu.head_health import HeadHealth, HeadReadiness, resolve_head_chain
 
 
 class Catalog:
@@ -34,7 +34,7 @@ class HeadHealthTests(unittest.TestCase):
 
     def test_auth_failure_is_cached_and_blocks_launch(self) -> None:
         failed = subprocess.CompletedProcess("probe", 1, "", "Login expired. Please run /login")
-        with mock.patch("secretary.head_health._proc.run_isolated", return_value=failed) as run:
+        with mock.patch("ummanu.head_health._proc.run_isolated", return_value=failed) as run:
             first = self.health.check("openai-sub")
             second = self.health.check("openai-sub")
 
@@ -45,7 +45,7 @@ class HeadHealthTests(unittest.TestCase):
 
     def test_provider_failure_is_unavailable(self) -> None:
         failed = subprocess.CompletedProcess("probe", 1, "", "503 biscuit_baker_service_me_circuit_open")
-        with mock.patch("secretary.head_health._proc.run_isolated", return_value=failed):
+        with mock.patch("ummanu.head_health._proc.run_isolated", return_value=failed):
             result = self.health.check("openai-sub")
 
         self.assertEqual(result.status, "unavailable")
@@ -62,7 +62,7 @@ class HeadHealthTests(unittest.TestCase):
             "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage "
             "to purchase more credits or try again at Aug 8th, 2026 9:13 PM.",
         )
-        with mock.patch("secretary.head_health._proc.run_isolated", return_value=spent):
+        with mock.patch("ummanu.head_health._proc.run_isolated", return_value=spent):
             result = self.health.check("openai-sub")
 
         self.assertEqual(result.status, "exhausted")
@@ -78,7 +78,7 @@ class HeadHealthTests(unittest.TestCase):
             "",
             "429 insufficient_quota: you exceeded your current quota",
         )
-        with mock.patch("secretary.head_health._proc.run_isolated", return_value=both):
+        with mock.patch("ummanu.head_health._proc.run_isolated", return_value=both):
             result = self.health.check("openai-sub")
 
         self.assertEqual(result.status, "exhausted")
@@ -88,7 +88,7 @@ class HeadHealthTests(unittest.TestCase):
         """secretary-1799 changed this contract: a timeout used to be `unknown` and launchable,
         which sent every 2026-09-25 review back into the dead Codex provider."""
         with mock.patch(
-            "secretary.head_health._proc.run_isolated", side_effect=subprocess.TimeoutExpired("probe", 20)
+            "ummanu.head_health._proc.run_isolated", side_effect=subprocess.TimeoutExpired("probe", 20)
         ):
             result = self.health.check("openai-sub")
 
@@ -194,7 +194,7 @@ class ResolveHeadChainTests(unittest.TestCase):
         self.assertEqual(choice.head, "mystery")
 
 
-# The PATH `packaging/systemd/secretary-dispatcher-production.service` pins for the dispatcher: the
+# The PATH `packaging/systemd/ummanu-dispatcher-production.service` pins for the dispatcher: the
 # ordinary system directories and nothing else. The unit starts the dispatcher from its venv but
 # never puts that venv on PATH, which is what this test environment reproduces.
 UNIT_PATH_DIRECTORIES = (
@@ -208,7 +208,7 @@ UNIT_PATH_DIRECTORIES = (
 SRC = Path(__file__).resolve().parents[1] / "src"
 # A probe that reaches no provider and answers exactly the question the real one dies on: can the
 # interpreter this command resolves to import the product at all.
-IMPORT_PROBE = 'python3 -P -c "import secretary.automations"'
+IMPORT_PROBE = 'python3 -P -c "import ummanu.automations"'
 
 
 def _interpreter(directory: Path, *, pythonpath: Path | None) -> Path:
@@ -217,7 +217,7 @@ def _interpreter(directory: Path, *, pythonpath: Path | None) -> Path:
     Both run this process's own interpreter, so the test says nothing about the developer's venv;
     what separates them is whether the product is on their import path. `-S` keeps site-packages
     out of both, and `-E` keeps the suite's own PYTHONPATH out of the system one, so "can it import
-    secretary.automations" has the same answer on every machine.
+    ummanu.automations" has the same answer on every machine.
     """
     directory.mkdir(parents=True, exist_ok=True)
     script = directory / "python3"
@@ -309,7 +309,7 @@ class BrokenProbeStatusTests(unittest.TestCase):
     def check(self, completed: subprocess.CompletedProcess) -> HeadReadiness:
         """One verdict per call: a fresh store, so the TTL cache never answers for the next case."""
         health = HeadHealth(Catalog(), Path(tempfile.mkdtemp(dir=self.tmpdir.name)))
-        with mock.patch("secretary.head_health._proc.run_isolated", return_value=completed):
+        with mock.patch("ummanu.head_health._proc.run_isolated", return_value=completed):
             return health.check("openai-sub")
 
     def test_a_missing_module_is_a_broken_probe(self) -> None:
@@ -335,7 +335,7 @@ class BrokenProbeStatusTests(unittest.TestCase):
     def test_a_probe_that_cannot_be_started_at_all_is_a_broken_probe(self) -> None:
         """No shell to run it with is the same defect as no interpreter to run it under."""
         with mock.patch(
-            "secretary.head_health._proc.run_isolated", side_effect=OSError(8, "Exec format error")
+            "ummanu.head_health._proc.run_isolated", side_effect=OSError(8, "Exec format error")
         ):
             result = self.health.check("openai-sub")
 
@@ -347,7 +347,7 @@ class BrokenProbeStatusTests(unittest.TestCase):
         it is not `unknown` either: `unknown` is kept for a probe that answered with something
         unclassifiable, and a provider that cannot answer a ping in time is not launched into."""
         with mock.patch(
-            "secretary.head_health._proc.run_isolated", side_effect=subprocess.TimeoutExpired("probe", 20)
+            "ummanu.head_health._proc.run_isolated", side_effect=subprocess.TimeoutExpired("probe", 20)
         ):
             result = self.health.check("openai-sub")
 
@@ -412,7 +412,7 @@ class _ChainCatalog:
         return self.PROFILES[head]
 
     def resource(self, resource: str):
-        return {"probe": f"python3 -P -m secretary.runtime.resource_probe --resource {resource}"}
+        return {"probe": f"python3 -P -m ummanu.runtime.resource_probe --resource {resource}"}
 
     def head_fallback(self, head: str):
         return self.PROFILES[head]["fallback"] if head in self.PROFILES else None
@@ -451,7 +451,7 @@ class ProbeTimeoutAndProviderTests(unittest.TestCase):
 
     def _inner(self, provider_answers_after: float, text: str) -> tuple[int, str]:
         """Run the real `openai-sub` probe against a Codex that answers after N seconds."""
-        from secretary.runtime import resource_probe
+        from ummanu.runtime import resource_probe
 
         def codex(cmd, *, capture_output, text: bool, timeout, env):
             if timeout < provider_answers_after:
@@ -475,13 +475,13 @@ class ProbeTimeoutAndProviderTests(unittest.TestCase):
 
         health = HeadHealth(_ChainCatalog(), self.root / "data")
         with mock.patch(
-            "secretary.head_health._proc.run_isolated",
+            "ummanu.head_health._proc.run_isolated",
             side_effect=_probe_by_resource({"openai-sub": openai_answer, "claude-sub": ready}),
         ):
             return resolve_head_chain("codex-reviewer", health.check, _ChainCatalog().head_fallback)
 
     def test_the_outer_timeout_is_always_greater_than_the_inner_one(self) -> None:
-        from secretary.runtime.resource_probe import probe_timeout_s
+        from ummanu.runtime.resource_probe import probe_timeout_s
 
         self.assertEqual(probe_timeout_s("openai-sub"), 75)
         for resource in ("claude-sub", "openrouter", "another"):
@@ -507,7 +507,7 @@ class ProbeTimeoutAndProviderTests(unittest.TestCase):
             seen.append(timeout)
             return subprocess.CompletedProcess("probe", 0, "", "")
 
-        with mock.patch("secretary.head_health._proc.run_isolated", side_effect=run_isolated):
+        with mock.patch("ummanu.head_health._proc.run_isolated", side_effect=run_isolated):
             head_health.run_probe("openai-sub", "probe", 1.0)
         self.assertEqual(seen, [head_health.probe_timeout_seconds("openai-sub")])
         self.assertGreater(seen[0], 75)
@@ -560,8 +560,8 @@ class ProbeTimeoutAndProviderTests(unittest.TestCase):
         self.assertEqual(choice.readiness.status, "unknown")
 
     def test_a_logged_out_account_is_still_unauthenticated(self) -> None:
-        from secretary.runtime import resource_probe
-        from secretary.runtime.codex_preflight import CodexHomeLoginMissing
+        from ummanu.runtime import resource_probe
+        from ummanu.runtime.codex_preflight import CodexHomeLoginMissing
 
         stderr = io.StringIO()
         with (
@@ -596,7 +596,7 @@ class ProbeTimeoutAndProviderTests(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 with mock.patch(
-                    "secretary.head_health._proc.run_isolated",
+                    "ummanu.head_health._proc.run_isolated",
                     return_value=subprocess.CompletedProcess("probe", 1, "", text),
                 ):
                     verdict = head_health.run_probe("openai-sub", "probe", 1.0)
@@ -606,7 +606,7 @@ class ProbeTimeoutAndProviderTests(unittest.TestCase):
     def test_a_recorded_verdict_replaces_the_cached_probe_and_holds_without_a_probe(self) -> None:
         health = HeadHealth(_ChainCatalog(), self.root / "data")
         with mock.patch(
-            "secretary.head_health._proc.run_isolated",
+            "ummanu.head_health._proc.run_isolated",
             return_value=subprocess.CompletedProcess("probe", 0, "", ""),
         ) as run:
             self.assertEqual(health.check("codex-reviewer").status, "ready")
@@ -617,7 +617,7 @@ class ProbeTimeoutAndProviderTests(unittest.TestCase):
         run.assert_called_once()
 
     def test_doctor_shows_timed_out_like_the_other_non_ready_statuses(self) -> None:
-        from secretary.cli import PROVIDER_RED_STATES, _recovery_findings
+        from ummanu.cli import PROVIDER_RED_STATES, _recovery_findings
 
         self.assertIn(head_health.PROBE_TIMED_OUT, PROVIDER_RED_STATES)
         findings = _recovery_findings(

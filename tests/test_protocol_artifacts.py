@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from secretary.board.protocol_artifacts import (
+from ummanu.board.protocol_artifacts import (
     ArtifactOwner,
     ArtifactOwnershipViolation,
     PROTOCOL_ARTIFACTS,

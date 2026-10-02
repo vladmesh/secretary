@@ -24,10 +24,12 @@ from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
-from secretary.board import wait_card
-from secretary.board.completion_evidence import has_candidate, is_headless, review_required
-from secretary.board.production_rights import WAIT_OUTCOME_INPUT, card_facts, facts_problem
-from secretary.board.wait_card import (
+from tests.po_card_fakes import DispatcherFixture, Forbidden, SprintView
+from tests.po_fake_store import FakePoStore
+from ummanu.board import wait_card
+from ummanu.board.completion_evidence import has_candidate, is_headless, review_required
+from ummanu.board.production_rights import WAIT_OUTCOME_INPUT, card_facts, facts_problem
+from ummanu.board.wait_card import (
     CANCELLED,
     DEADLINE_PASSED,
     DELIVERED,
@@ -40,29 +42,27 @@ from secretary.board.wait_card import (
     cancel_text,
     wait_view,
 )
-from secretary.cli import main
-from secretary.dispatch.claim import claim_ready_task
-from secretary.dispatch.production import (
+from ummanu.cli import main
+from ummanu.dispatch.claim import claim_ready_task
+from ummanu.dispatch.production import (
     ProbeAbort,
     _budget_event_type,
     _probe_runtime,
     _production_claim_ready,
 )
-from secretary.dispatch.runtime import DispatcherRuntime
-from secretary.dispatch.state import new_attempt_id
-from secretary.dispatch.types import HostError
-from secretary.dispatch.wait_cards import advance_wait_card, delivery_request_id, pending_wait_blockers
-from secretary.po import store as po_store
-from secretary.po.client import ServiceUnavailable
-from secretary.po.store import RequestConflict, SessionClosed, SessionNotFound
-from secretary.tasks import TaskError, TaskWriter
-from tests.po_card_fakes import DispatcherFixture, Forbidden, SprintView
-from tests.po_fake_store import FakePoStore
+from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.dispatch.state import new_attempt_id
+from ummanu.dispatch.types import HostError
+from ummanu.dispatch.wait_cards import advance_wait_card, delivery_request_id, pending_wait_blockers
+from ummanu.po import store as po_store
+from ummanu.po.client import ServiceUnavailable
+from ummanu.po.store import RequestConflict, SessionClosed, SessionNotFound
+from ummanu.tasks import TaskError, TaskWriter
 
 SPRINT = "sprint:1"
-WAIT = "secretary-1900"
-DEPENDENT = "secretary-1901"
-REPO = "vladmesh/secretary"
+WAIT = "ummanu-1900"
+DEPENDENT = "ummanu-1901"
+REPO = "vladmesh/ummanu"
 RUN_ID = 4242
 RUN_PATH = f"repos/{REPO}/actions/runs/{RUN_ID}"
 RUN_URL = f"https://github.com/{REPO}/actions/runs/{RUN_ID}"
@@ -87,7 +87,7 @@ def wait_doc(the_spec: wait_card.WaitSpec, *, state: str = "ready", ref: str = W
         "description": "",
         "type": "wait",
         "state": state,
-        "project": "secretary",
+        "project": "ummanu",
         "sprint": SPRINT,
         "review": "skipped",
         "blocked_by": None,
@@ -104,7 +104,7 @@ def plain_doc(
     state: str = "ready",
     blocked_by: str | None = None,
     kind: str = "code",
-    project: str = "secretary",
+    project: str = "ummanu",
 ) -> dict[str, Any]:
     return {
         "ref": ref,
@@ -299,7 +299,7 @@ class FakePo:
         self.submits.append(request_id)
         if self.down:
             self.down -= 1
-            raise ServiceUnavailable("the PO service is not running (secretary-po.service)")
+            raise ServiceUnavailable("the PO service is not running (ummanu-po.service)")
         known = self.inputs.get(request_id)
         if known is not None:
             if (known["session_id"], known["text"], known["card"]) != (session_id, text, card):
@@ -358,7 +358,7 @@ class DispatcherCase(unittest.TestCase):
 
     def setUp(self) -> None:
         self.clock = Clock()
-        self.enterContext(mock.patch("secretary.dispatch.wait_cards.utcnow", self.clock))
+        self.enterContext(mock.patch("ummanu.dispatch.wait_cards.utcnow", self.clock))
 
     def arrange(
         self, the_spec: wait_card.WaitSpec, *others: dict[str, Any], github: Any = None, po: Any = None
@@ -370,7 +370,7 @@ class DispatcherCase(unittest.TestCase):
     def runtime(self) -> SimpleNamespace:
         """A new dispatcher process: nothing but the board, the PO channel and the host in common."""
         return SimpleNamespace(
-            owner="secretary-dispatcher",
+            owner="ummanu-dispatcher",
             reader=self.board,
             writer=self.board,
             audit=self.board,
@@ -414,9 +414,9 @@ class SpecTests(unittest.TestCase):
             by_repo.target.to_json(), {"kind": "github_run", "repo": REPO, "run_id": RUN_ID, "url": RUN_URL}
         )
         self.assertEqual(by_repo.returns, ("observer", "dependents", "po-session:s-1"))
-        card = spec(card="secretary-12", states="done, blocked")
+        card = spec(card="ummanu-12", states="done, blocked")
         self.assertEqual(
-            card.target.to_json(), {"kind": "card", "ref": "secretary-12", "states": ["done", "blocked"]}
+            card.target.to_json(), {"kind": "card", "ref": "ummanu-12", "states": ["done", "blocked"]}
         )
         at = spec(until="2026-09-27T13:30:00+01:00")
         self.assertEqual(at.target.to_json(), {"kind": "time", "at": "2026-09-27T12:30:00Z"})
@@ -455,12 +455,12 @@ class SpecTests(unittest.TestCase):
                 "contradicts the run URL",
             ),
             (
-                {"card": "Secretary 12", "states": "done", "deadline": "2h", "returns": ["observer"]},
+                {"card": "Ummanu 12", "states": "done", "deadline": "2h", "returns": ["observer"]},
                 "not a card reference",
             ),
-            ({"card": "secretary-12", "deadline": "2h", "returns": ["observer"]}, "needs --wait-states"),
+            ({"card": "ummanu-12", "deadline": "2h", "returns": ["observer"]}, "needs --wait-states"),
             (
-                {"card": "secretary-12", "states": "finished", "deadline": "2h", "returns": ["observer"]},
+                {"card": "ummanu-12", "states": "finished", "deadline": "2h", "returns": ["observer"]},
                 "unknown state",
             ),
             ({"until": "2026-09-27T13:00:00", "deadline": "2h", "returns": ["observer"]}, "names no zone"),
@@ -501,10 +501,10 @@ class CreateValidationTests(unittest.TestCase):
         sprint = {
             "ref": SPRINT,
             "status": "open",
-            "repositories": ["secretary"],
-            "reservations": ["secretary"],
+            "repositories": ["ummanu"],
+            "reservations": ["ummanu"],
         }
-        self.enterContext(mock.patch("secretary.sprints.SprintReader.show", return_value=sprint))
+        self.enterContext(mock.patch("ummanu.sprints.SprintReader.show", return_value=sprint))
         self.sessions = {"s-open": "open", "s-closed": "closed"}
         self.enterContext(
             mock.patch.object(
@@ -517,7 +517,7 @@ class CreateValidationTests(unittest.TestCase):
     ) -> dict:
         wait = {"run": RUN_URL, "deadline": "2h", "returns": ["dependents"]} if wait is None else wait
         return self.writer.create(
-            role=role, actor=role, project="secretary", task_type=task_type, title="T", wait=wait, **fields
+            role=role, actor=role, project="ummanu", task_type=task_type, title="T", wait=wait, **fields
         )
 
     def assertNothingWritten(self) -> None:
@@ -558,7 +558,7 @@ class CreateValidationTests(unittest.TestCase):
             ({"sprint": SPRINT, "review_head": "claude-opus"}, "takes no --review-head"),
             ({"sprint": SPRINT, "review": "required"}, "takes no --review required"),
             ({"sprint": SPRINT, "live_impact": True}, "takes no --live-impact"),
-            ({"sprint": SPRINT, "seed_ref": "abc123", "supersedes": "secretary-1"}, "takes no --seed-ref"),
+            ({"sprint": SPRINT, "seed_ref": "abc123", "supersedes": "ummanu-1"}, "takes no --seed-ref"),
             ({"sprint": SPRINT, "base_branch": "main"}, "takes no --base-branch"),
         )
         for fields, message in cases:
@@ -590,7 +590,7 @@ class CreateValidationTests(unittest.TestCase):
         self.assertEqual(self.writer._po_session_state.side_effect("s-open"), "open")
         with (
             mock.patch.object(TaskWriter, "_po_session_state", PO_SESSION_STATE),
-            mock.patch("secretary.po.store.PoStore.for_instance") as store,
+            mock.patch("ummanu.po.store.PoStore.for_instance") as store,
         ):
             store.return_value.session.side_effect = po_store.SessionNotFound("there is no PO session s-x")
             with self.assertRaisesRegex(TaskError, "names no PO session"):
@@ -613,8 +613,8 @@ class CreateValidationTests(unittest.TestCase):
         writer.return_value.cancel.return_value = {"action": "wait_cancelled"}
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch("secretary.task_commands.TaskWriter", writer),
-            mock.patch("secretary.task_commands.card_client"),
+            mock.patch("ummanu.task_commands.TaskWriter", writer),
+            mock.patch("ummanu.task_commands.card_client"),
             contextlib.redirect_stdout(io.StringIO()),
         ):
             created = main(
@@ -628,7 +628,7 @@ class CreateValidationTests(unittest.TestCase):
                     "--data-dir",
                     tmp,
                     "--project",
-                    "secretary",
+                    "ummanu",
                     "--type",
                     "wait",
                     "--title",
@@ -723,7 +723,7 @@ class ClaimTests(DispatcherCase):
 
     def test_the_tick_hands_a_wait_card_to_its_own_lane_before_any_head_path(self) -> None:
         with mock.patch(
-            "secretary.dispatch.runtime._advance_wait_card", return_value={"action": "wait"}
+            "ummanu.dispatch.runtime._advance_wait_card", return_value={"action": "wait"}
         ) as lane:
             outcome = DispatcherRuntime._tick_task(
                 SimpleNamespace(), wait_doc(spec(), state="in_progress"), {}, {}, "a"
@@ -786,15 +786,15 @@ class TargetReachedTests(DispatcherCase):
 
     def test_a_card_event_and_a_time_are_targets_too(self) -> None:
         self.arrange(
-            spec(card="secretary-7", states="done,blocked"), plain_doc("secretary-7", state="validate")
+            spec(card="ummanu-7", states="done,blocked"), plain_doc("ummanu-7", state="validate")
         )
         self.claim()
-        self.assertEqual(self.board.wait_state().observation, "secretary-7 is validate")
-        self.board.transition("secretary-7", "blocked", "2026-09-27T12:10:00Z")
+        self.assertEqual(self.board.wait_state().observation, "ummanu-7 is validate")
+        self.board.transition("ummanu-7", "blocked", "2026-09-27T12:10:00Z")
         self.assertEqual(self.tick()["action"], "wait-target-reached")
         self.assertEqual(
             self.board.wait_state().result["fact"],
-            {"ref": "secretary-7", "state": "blocked", "entered_at": "2026-09-27T12:10:00Z"},
+            {"ref": "ummanu-7", "state": "blocked", "entered_at": "2026-09-27T12:10:00Z"},
         )
 
         self.arrange(spec(until="2026-09-27T12:30:00Z"))
@@ -917,8 +917,8 @@ class RealPoServiceDeliveryTests(DispatcherFixture):
         service = self.start()
         session = self.session(service)
         clock = Clock()
-        self.enterContext(mock.patch("secretary.dispatch.wait_cards.utcnow", clock))
-        from secretary.dispatch.po_cards import ServicePoChannel
+        self.enterContext(mock.patch("ummanu.dispatch.wait_cards.utcnow", clock))
+        from ummanu.dispatch.po_cards import ServicePoChannel
 
         channel = ServicePoChannel(self.data, None)
         channel._store = FakePoStore(self.board)
@@ -948,8 +948,8 @@ class RealPoServiceDeliveryTests(DispatcherFixture):
         service = self.start()
         closed = self.session(service)
         service.close_session(session_id=closed, actor="owner")
-        self.enterContext(mock.patch("secretary.dispatch.wait_cards.utcnow", Clock()))
-        from secretary.dispatch.po_cards import ServicePoChannel
+        self.enterContext(mock.patch("ummanu.dispatch.wait_cards.utcnow", Clock()))
+        from ummanu.dispatch.po_cards import ServicePoChannel
 
         channel = ServicePoChannel(self.data, None)
         channel._store = FakePoStore(self.board)
@@ -986,7 +986,7 @@ class OtherOutcomeTests(DispatcherCase):
         self.arrange(
             the_spec,
             plain_doc(DEPENDENT, blocked_by=WAIT),
-            plain_doc("secretary-1902", state="issues", blocked_by=f"secretary-3,{WAIT}"),
+            plain_doc("ummanu-1902", state="issues", blocked_by=f"ummanu-3,{WAIT}"),
             github=github,
         )
 
@@ -999,11 +999,11 @@ class OtherOutcomeTests(DispatcherCase):
         [held] = self.board.moves(DEPENDENT)
         self.assertEqual((held["from"], held["to"], held["wait_outcome"]), ("ready", "blocked", outcome))
         self.assertIn(outcome, held["reason"])
-        for ref in (DEPENDENT, "secretary-1902"):
+        for ref in (DEPENDENT, "ummanu-1902"):
             self.assertEqual(
                 len([body for body in self.board.comments(ref) if f"[wait:{outcome}]" in body]), 1
             )
-        self.assertEqual(self.board.cards["secretary-1902"]["state"], "issues")
+        self.assertEqual(self.board.cards["ummanu-1902"]["state"], "issues")
         self.assertEqual(wait_view(self.board.show(WAIT))["state"], outcome)
 
     def test_cancelled(self) -> None:
@@ -1052,11 +1052,11 @@ class OtherOutcomeTests(DispatcherCase):
         self.assertEqual(self.board.wait_state().result["outcome"], SOURCE_UNREACHABLE)
 
     def test_a_card_target_that_does_not_exist_is_source_unreachable(self) -> None:
-        self.arrange(spec(card="secretary-77", states="done"))
+        self.arrange(spec(card="ummanu-77", states="done"))
         self.claim()
         self.assertEqual(
             self.board.wait_state().result["summary"],
-            "the source is unreachable: card secretary-77 does not exist",
+            "the source is unreachable: card ummanu-77 does not exist",
         )
 
     def test_transient_errors_are_recorded_and_retried_until_their_window_ends_it(self) -> None:
@@ -1213,10 +1213,10 @@ class DeadlineTests(DispatcherCase):
             with self.subTest(entered=entered):
                 self.clock.at()
                 self.arrange(
-                    spec(card="secretary-7", states="done", deadline="30m"), plain_doc("secretary-7")
+                    spec(card="ummanu-7", states="done", deadline="30m"), plain_doc("ummanu-7")
                 )
                 self.claim()
-                self.board.transition("secretary-7", "done", entered)
+                self.board.transition("ummanu-7", "done", entered)
                 self.clock.at(hours=1)
                 self.tick()
                 self.assertEqual(self.board.wait_state().result["outcome"], outcome)
@@ -1228,13 +1228,13 @@ class DeadlineTests(DispatcherCase):
         self.assertEqual(self.board.wait_state().result["outcome"], TARGET_REACHED)
 
     def test_every_observation_goes_through_the_one_freezing_function(self) -> None:
-        from secretary.dispatch import wait_cards
+        from ummanu.dispatch import wait_cards
 
         cases = (
             (spec(), ReadOnlyGitHub(run("completed", "success"))),
             (spec(), ReadOnlyGitHub(("http", "gh: Not Found (HTTP 404)"))),
             (spec(until="2026-09-27T12:00:00Z"), None),
-            (spec(card="secretary-77", states="done"), None),
+            (spec(card="ummanu-77", states="done"), None),
         )
         for the_spec, github in cases:
             with self.subTest(target=the_spec.target.kind):
@@ -1348,7 +1348,7 @@ class DependentsTests(DispatcherCase):
         runtime = SimpleNamespace(
             reader=board, sprints=SimpleNamespace(show=lambda ref, **_: {"ref": ref, "status": "open"})
         )
-        with mock.patch("secretary.dispatch.production.claim_ready_task", side_effect=claim):
+        with mock.patch("ummanu.dispatch.production.claim_ready_task", side_effect=claim):
             outcome = _production_claim_ready(runtime, {}, {})
         return outcome, claimed
 
@@ -1409,7 +1409,7 @@ class BudgetTests(unittest.TestCase):
                 "data": {"terminal_taxonomy": taxonomy, **data},
             }
 
-        from secretary.board.models import Event
+        from ummanu.board.models import Event
 
         with mock.patch.object(Event, "RECORD_TYPE", "board_event"):
             self.assertEqual(_budget_event_type(event()), "blocked")
@@ -1455,7 +1455,7 @@ class ViewTests(unittest.TestCase):
             state.result["outcome"] = outcome
             card["extensions"]["extra"]["wait_state"] = state.text()
             self.assertEqual(wait_view(card)["state"], outcome)
-        self.assertIsNone(wait_view(plain_doc("secretary-3")))
+        self.assertIsNone(wait_view(plain_doc("ummanu-3")))
         self.assertEqual(wait_view({**card, "extensions": {}})["state"], "malformed")
 
 

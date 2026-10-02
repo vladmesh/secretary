@@ -18,13 +18,13 @@ from collections.abc import Iterator
 from typing import Any, ClassVar
 from unittest import mock
 
-from secretary.board.audit_contract import PROTOCOL_EVENT_RECORD_TYPE
-from secretary.board.sql_audit import SqlTaskAudit
-from secretary.sprints import SPRINT_BOARD_NAME
-from secretary.tasks import TaskError, task_audit_for
-from secretary.webproto import sprint_reads as sprint_reads_module
-from secretary.webproto.sprint_reads import SprintReadLayer
 from tests.webproto_sprint_fixtures import SprintProtocolFixture
+from ummanu.board.audit_contract import PROTOCOL_EVENT_RECORD_TYPE
+from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.sprints import SPRINT_BOARD_NAME
+from ummanu.tasks import TaskError, task_audit_for
+from ummanu.webproto import sprint_reads as sprint_reads_module
+from ummanu.webproto.sprint_reads import SprintReadLayer
 
 #: The fixture clock is 2026-09-06T00:00:00Z; every moment below is before it.
 BEFORE = "2026-09-05T08:00:00Z"
@@ -78,7 +78,7 @@ class SprintListJournalSliceTests(SprintProtocolFixture):
         super().setUp()
         self.cards: dict[str, list[str]] = {}
         for index, reference in enumerate((*self.OPEN, *self.ENDED)):
-            cards = [f"secretary-{7000 + index * 10 + offset}" for offset in range(3)]
+            cards = [f"ummanu-{7000 + index * 10 + offset}" for offset in range(3)]
             self.cards[reference] = cards
             self.add_sprint_row(
                 reference,
@@ -153,7 +153,7 @@ class SprintListJournalSliceTests(SprintProtocolFixture):
     def _unrelated_history(self, count: int, *, start: int = 0) -> None:
         """History of cards no listed sprint links, in every shape the journal holds."""
         for index in range(start, start + count):
-            card = f"secretary-{100000 + index}"
+            card = f"ummanu-{100000 + index}"
             self._move(card, BEFORE, "ready", "done")
             self._po_comment(f"sprint:{90000 + index}", AFTER)
 

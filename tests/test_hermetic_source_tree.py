@@ -6,13 +6,13 @@ host rather than on this checkout? They cover the host's board, the host's Codex
 host's pipeline state. Nothing covered the most
 basic dependency of all -- which *sources* the run imported.
 
-That gap was not theoretical. A head's shell carries `PYTHONPATH=$TA_SECRETARY_REPO/src`
-(`secretary/runtime/launch_prefix.py`), and every worktree on this host runs on one shared
+That gap was not theoretical. A head's shell carries `PYTHONPATH=$UMMANU_REPO/src`
+(`ummanu/runtime/launch_prefix.py`), and every worktree on this host runs on one shared
 venv whose editable install points at the production checkout's `src`. Both of those outrank a
 worktree's own sources for a src-layout project, which has nothing importable at its root. So a
 worker could run the broad suite inside a candidate worktree and watch it pass, while the code it
-exercised was production's: the candidate's test files against production's `secretary`. The
-receipt written by `secretary check broad` recorded the true import and refused itself
+exercised was production's: the candidate's test files against production's `ummanu`. The
+receipt written by `ummanu check broad` recorded the true import and refused itself
 (issue:8b39e60e4df361c6138e), which is how the defect was eventually found -- but a bare
 `python -m unittest` in the worktree said only "OK" and named no checkout at all.
 
@@ -33,8 +33,8 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-import secretary
-import secretary.automations
+import ummanu
+import ummanu.automations
 
 #: The checkout this test file belongs to: the parent of the `tests/` package.
 CHECKOUT = Path(__file__).resolve().parent.parent
@@ -68,11 +68,11 @@ class HermeticSourceTreeTests(unittest.TestCase):
             f"(issue:8b39e60e4df361c6138e)."
         )
 
-    def test_the_suite_imported_secretary_from_this_checkout(self) -> None:
-        self._assert_imported_from_this_checkout(secretary, "secretary")
+    def test_the_suite_imported_ummanu_from_this_checkout(self) -> None:
+        self._assert_imported_from_this_checkout(ummanu, "ummanu")
 
     def test_the_suite_imported_the_background_agents_from_this_checkout(self) -> None:
-        self._assert_imported_from_this_checkout(secretary.automations, "secretary/automations")
+        self._assert_imported_from_this_checkout(ummanu.automations, "ummanu/automations")
 
     def test_the_checkout_this_guard_measures_against_is_the_one_holding_the_tests(self) -> None:
         """Guard the guard: if `tests/` ever moves, the comparison above must not go dead.
@@ -81,8 +81,8 @@ class HermeticSourceTreeTests(unittest.TestCase):
         vacuously for anything under it, which is the failure mode a boundary check has.
         """
         self.assertTrue((CHECKOUT / "tests" / "__init__.py").is_file(), CHECKOUT)
-        self.assertTrue((CHECKOUT / "src" / "secretary").is_dir(), CHECKOUT)
-        self.assertTrue((CHECKOUT / "src" / "secretary" / "automations").is_dir(), CHECKOUT)
+        self.assertTrue((CHECKOUT / "src" / "ummanu").is_dir(), CHECKOUT)
+        self.assertTrue((CHECKOUT / "src" / "ummanu" / "automations").is_dir(), CHECKOUT)
 
 
 if __name__ == "__main__":

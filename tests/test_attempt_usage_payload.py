@@ -6,10 +6,10 @@ import unittest
 from dataclasses import replace
 from datetime import UTC, datetime
 
-from secretary.board.attempt_usage import AttemptUsagePayload, AttemptUsagePhase, TokenAccount
-from secretary.board.events import AttemptUsageOccurrence
-from secretary.board.models import Actor, AttemptUsageOutcome, EntityKind, Event, EventKind
-from secretary.board.roles import Role
+from ummanu.board.attempt_usage import AttemptUsagePayload, AttemptUsagePhase, TokenAccount
+from ummanu.board.events import AttemptUsageOccurrence
+from ummanu.board.models import Actor, AttemptUsageOutcome, EntityKind, Event, EventKind
+from ummanu.board.roles import Role
 
 
 class AttemptUsagePayloadTests(unittest.TestCase):

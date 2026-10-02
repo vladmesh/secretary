@@ -24,10 +24,10 @@ from pathlib import Path
 from typing import ClassVar
 from unittest import mock
 
-from secretary.automations.agents.retro import cli as retro_cli
-from secretary.automations.agents.steward import cli as steward_cli
-from secretary.automations.runtime import health
-from secretary.runtime.state import (
+from ummanu.automations.agents.retro import cli as retro_cli
+from ummanu.automations.agents.steward import cli as steward_cli
+from ummanu.automations.runtime import health
+from ummanu.runtime.state import (
     PRECHECK_BOARD_UNREACHABLE,
     PRECHECK_DEFERRED,
     AgentState,
@@ -35,7 +35,7 @@ from secretary.runtime.state import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-GATE = REPO_ROOT / "scripts" / "secretary-agent-gate.sh"
+GATE = REPO_ROOT / "scripts" / "ummanu-agent-gate.sh"
 UNITS = REPO_ROOT / "packaging" / "systemd"
 
 
@@ -132,7 +132,7 @@ class GateTests(unittest.TestCase):
     """The shipped gate, run for real against isolated product roots and venvs.
 
     The waiting has to live in this script: systemd refuses `RestartForceExitStatus=` on a
-    `Type=oneshot` service, and these units are oneshot (`secretary/host.py` also reads that Type to
+    `Type=oneshot` service, and these units are oneshot (`ummanu/host.py` also reads that Type to
     decide what a healthy inactive unit looks like), so there is no unit-level retry to lean on. A
     oneshot has no start timeout by default, so the gate is free to wait.
     """
@@ -155,19 +155,19 @@ class GateTests(unittest.TestCase):
     def make_product(self, root: Path) -> Path:
         """Build a fake checkout whose required dependency exists only in its venv."""
         source = root / "src"
-        for package in (source / "secretary" / "runtime",):
+        for package in (source / "ummanu" / "runtime",):
             package.mkdir(parents=True)
             current = package
             while current != source:
                 (current / "__init__.py").touch()
                 current = current.parent
 
-        (source / "secretary" / "config.py").write_text(
+        (source / "ummanu" / "config.py").write_text(
             "import referencing\nDEPENDENCY = referencing.MARKER\n",
             encoding="utf-8",
         )
-        (source / "secretary" / "runtime" / "role_env.py").write_text(
-            "from secretary.config import DEPENDENCY\n"
+        (source / "ummanu" / "runtime" / "role_env.py").write_text(
+            "from ummanu.config import DEPENDENCY\n"
             "import json\n"
             "import os\n"
             "import sys\n"
@@ -185,7 +185,7 @@ class GateTests(unittest.TestCase):
             encoding="utf-8",
         )
         target = (
-            "from secretary.config import DEPENDENCY\n"
+            "from ummanu.config import DEPENDENCY\n"
             "import json\n"
             "import os\n"
             "import sys\n"
@@ -209,14 +209,14 @@ class GateTests(unittest.TestCase):
             "    print('ran: -m ' + module + ' ' + ' '.join([agent, command, *rest]))\n"
             "\n"
         )
-        # `python3 -m secretary automations <agent> <cmd>`: the product CLI hands the rest over.
-        (source / "secretary" / "__main__.py").write_text(
+        # `python3 -m ummanu automations <agent> <cmd>`: the product CLI hands the rest over.
+        (source / "ummanu" / "__main__.py").write_text(
             target
             + "if __name__ == '__main__':\n"
             + "    if sys.argv[1:2] != ['automations']:\n"
             + "        raise SystemExit(2)\n"
             + "    del sys.argv[1]\n"
-            + "    main('secretary automations')\n",
+            + "    main('ummanu automations')\n",
             encoding="utf-8",
         )
 
@@ -260,7 +260,7 @@ class GateTests(unittest.TestCase):
             TA_GATE_BOARD_ATTEMPTS=str(attempts),
             TA_GATE_BOARD_WAIT="0",
             TA_RUNTIME_PYTHONPATH=str(self.product),
-            TA_SECRETARY_REPO=str(self.root / "configured-but-not-selected"),
+            UMMANU_REPO=str(self.root / "configured-but-not-selected"),
             VIRTUAL_ENV=str(self.root / "activated-candidate-venv"),
         )
         for name, value in (env_overrides or {}).items():
@@ -334,15 +334,15 @@ class GateTests(unittest.TestCase):
             with self.subTest(agent):
                 result = self.run_gate([0], agent=agent)
                 self.assertEqual(result.returncode, 0)
-                self.assertIn(f"-m secretary automations {agent} dispatch", result.stdout)
-                self.assertNotIn("secretary.dispatch", result.stdout)
+                self.assertIn(f"-m ummanu automations {agent} dispatch", result.stdout)
+                self.assertNotIn("ummanu.dispatch", result.stdout)
                 self.assert_selected_venv(result, self.product)
 
     def test_deep_sweep_keeps_its_ungated_variant_through_the_one_entry(self):
         result = self.run_gate([], agent="steward", variant="deep-sweep")
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.attempts, 0)
-        self.assertIn("-m secretary automations steward dispatch deep-sweep", result.stdout)
+        self.assertIn("-m ummanu automations steward dispatch deep-sweep", result.stdout)
         self.assert_selected_venv(result, self.product)
 
     def test_curator_enters_and_leaves_role_env_with_the_selected_venv_not_ambient_python(self):
@@ -353,7 +353,7 @@ class GateTests(unittest.TestCase):
                 "-S",
                 "-P",
                 "-m",
-                "secretary.runtime.role_env",
+                "ummanu.runtime.role_env",
                 "exec",
                 "--role",
                 "curator",
@@ -384,16 +384,16 @@ class GateTests(unittest.TestCase):
         runtime = self.make_product(self.root / "runtime-wins")
         configured = self.make_product(self.root / "configured")
         home = self.root / "home-default"
-        fallback = self.make_product(home / "secretary")
+        fallback = self.make_product(home / "ummanu")
 
         cases = (
             (
                 "runtime",
-                {"TA_RUNTIME_PYTHONPATH": str(runtime), "TA_SECRETARY_REPO": str(configured)},
+                {"TA_RUNTIME_PYTHONPATH": str(runtime), "UMMANU_REPO": str(configured)},
                 runtime,
             ),
-            ("configured", {"TA_RUNTIME_PYTHONPATH": None, "TA_SECRETARY_REPO": str(configured)}, configured),
-            ("home", {"TA_RUNTIME_PYTHONPATH": None, "TA_SECRETARY_REPO": None}, fallback),
+            ("configured", {"TA_RUNTIME_PYTHONPATH": None, "UMMANU_REPO": str(configured)}, configured),
+            ("home", {"TA_RUNTIME_PYTHONPATH": None, "UMMANU_REPO": None}, fallback),
         )
         for name, overrides, expected in cases:
             with self.subTest(name):
@@ -423,38 +423,38 @@ class GateTests(unittest.TestCase):
                 self.assertEqual(result.attempts, 0)
                 self.assertEqual(self.records(result), [])
                 self.assertIn(str(root), result.stderr)
-                self.assertIn("secretary upgrade --no-pull --product-root", result.stderr)
+                self.assertIn("ummanu upgrade --no-pull --product-root", result.stderr)
                 self.assertIn("Do not use system-wide pip", result.stderr)
 
 
 class UnitSpecTests(unittest.TestCase):
     """What the shipped units must keep for the gate's own waiting to work."""
 
-    BOARD_DEPENDENT = ("secretary-retro.service", "secretary-steward.service")
+    BOARD_DEPENDENT = ("ummanu-retro.service", "ummanu-steward.service")
     MECHANICAL_ROLE_UNITS = (
-        "secretary-curator.service",
-        "secretary-retro.service",
-        "secretary-steward.service",
-        "secretary-steward-deep-sweep.service",
+        "ummanu-curator.service",
+        "ummanu-retro.service",
+        "ummanu-steward.service",
+        "ummanu-steward-deep-sweep.service",
     )
     # A shipped oneshot service that starts no head, and why. Everything else of Type=oneshot is
     # treated as a head launcher and must carry KillMode=process.
     ONESHOT_UNITS_THAT_LAUNCH_NO_HEAD: ClassVar[dict[str, str]] = {
-        "secretary-instance-maintenance.service": (
+        "ummanu-instance-maintenance.service": (
             "runs `git gc` on the instance repository outside any tick; it dispatches no role and "
             "its bounded pack is exactly what the control-group kill should clean up"
         ),
-        "secretary-doctor.service": (
+        "ummanu-doctor.service": (
             "records a bounded doctor subprocess outside any tick; it dispatches no role and "
             "its probes must be killed with the collector's control group"
         ),
     }
     # What a unit's ExecStart runs to launch heads: the mechanical roles' gate and the tick.
-    HEAD_LAUNCHER_ENTRYPOINTS = ("secretary-agent-gate.sh", "production-tick")
+    HEAD_LAUNCHER_ENTRYPOINTS = ("ummanu-agent-gate.sh", "production-tick")
 
     def test_the_board_dependent_units_stay_oneshot_with_no_start_timeout(self):
         """A start timeout would kill the gate mid-wait; a non-oneshot Type would change what
-        `secretary/host.py` considers a healthy inactive unit."""
+        `ummanu/host.py` considers a healthy inactive unit."""
         for name in self.BOARD_DEPENDENT:
             with self.subTest(name):
                 body = (UNITS / name).read_text(encoding="utf-8")
@@ -463,7 +463,7 @@ class UnitSpecTests(unittest.TestCase):
                 self.assertNotIn("TimeoutSec=", body)
 
     def test_the_daily_unit_still_catches_its_missed_run_up(self):
-        timer = (UNITS / "secretary-retro.timer").read_text(encoding="utf-8")
+        timer = (UNITS / "ummanu-retro.timer").read_text(encoding="utf-8")
         self.assertIn("Persistent=true", timer)
 
     def test_a_tick_ending_does_not_kill_the_local_pty_head_it_started(self):
@@ -483,7 +483,7 @@ class UnitSpecTests(unittest.TestCase):
         launchers = [
             name for name in self.oneshot_services() if name not in self.ONESHOT_UNITS_THAT_LAUNCH_NO_HEAD
         ]
-        self.assertIn("secretary-dispatcher-production.service", launchers)
+        self.assertIn("ummanu-dispatcher-production.service", launchers)
         self.assertLessEqual(set(self.MECHANICAL_ROLE_UNITS), set(launchers))
         for name in launchers:
             with self.subTest(name):

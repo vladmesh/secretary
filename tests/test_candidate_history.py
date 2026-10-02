@@ -11,8 +11,8 @@ import subprocess
 import unittest
 from pathlib import Path
 
-import secretary
-from secretary.candidate_history import (
+import ummanu
+from ummanu.candidate_history import (
     Commit,
     ai_attributions,
     parse_shas,
@@ -201,7 +201,7 @@ class GeneratedPacketInvariantTests(unittest.TestCase):
     ignores them, so a worker that runs `git add -A` cannot commit the round's own TASK.md."""
 
     def test_the_product_repository_ignores_the_generated_handoff_packets(self) -> None:
-        repo = Path(secretary.__file__).resolve().parent.parent
+        repo = Path(ummanu.__file__).resolve().parent.parent
         if not (repo / ".git").exists():
             self.skipTest("not running from a git checkout of the product repository")
 

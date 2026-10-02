@@ -11,18 +11,18 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.checkpoint import CheckpointResult
-from secretary.dispatch import host as dispatcher_host_module
-from secretary.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.review import (
+from ummanu.checkpoint import CheckpointResult
+from ummanu.dispatch import host as dispatcher_host_module
+from ummanu.dispatch.heartbeat import heartbeat_identity, run_heartbeat_identity
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.review import (
     recover_review_launch,
 )
-from secretary.dispatch.runtime import DispatcherRuntime
-from secretary.dispatch.state import (
+from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.dispatch.state import (
     DispatcherRecord,
 )
-from secretary.dispatch.types import (
+from ummanu.dispatch.types import (
     STOPPED_BY_REPLACEMENT,
     STOPPED_BY_REVIEW_FREEZE,
     STOPPED_BY_REVIEW_VERDICT,
@@ -32,26 +32,26 @@ from secretary.dispatch.types import (
 )
 
 GITHUB_FAILED_LOG_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "github_actions_failed_logs"
-from secretary.dispatch.types import (
+from ummanu.dispatch.types import (
     HeadLaunchAborted,
     review_pane_label,
 )
-from secretary.dispatch.watchdog import (
+from ummanu.dispatch.watchdog import (
     WORKER_REPORT_STALL_DEFAULT,
     bind_head_heartbeat,
     head_process_status,
     initial_output_stall_seconds,
     pid_file_path,
 )
-from secretary.dispatch.worker_lifecycle import (
+from ummanu.dispatch.worker_lifecycle import (
     WorkerContinuation,
     WorkerContinuationStage,
 )
-from secretary.runtime.prompt_document import (
+from ummanu.runtime.prompt_document import (
     NUDGE_MAX_BYTES,
     PromptDocumentError,
 )
-from secretary.tasks import TaskReader, TaskWriter, task_audit_for
+from ummanu.tasks import TaskReader, TaskWriter, task_audit_for
 from tests.dispatcher_fixtures import (
     PromptAfterStartCatalog,
     RecordingReviewHost,
@@ -71,9 +71,9 @@ from tests.fakes.dispatcher import (
 )
 from tests.integration_setup import require_disposable_board_fixture
 from tests.sql_backend_fixtures import PostgresBoard, card_store
-from secretary.runtime.head import HEAD_BUSY, DeliverReceipt
-from secretary.runtime.head import operations as head_ops
-from secretary.runtime.head import (
+from ummanu.runtime.head import HEAD_BUSY, DeliverReceipt
+from ummanu.runtime.head import operations as head_ops
+from ummanu.runtime.head import (
     with_pid_heartbeat,
 )
 
@@ -95,7 +95,7 @@ class PidHeartbeatTests(unittest.TestCase):
         wrapped = with_pid_heartbeat(
             "codex exec --dangerously-bypass-approvals-and-sandbox",
             "/tmp/x.pid",
-            identity=heartbeat_identity(run_id="run-1", role="worker", task="card:secretary-751"),
+            identity=heartbeat_identity(run_id="run-1", role="worker", task="card:ummanu-751"),
         )
 
         self.assertIn("python3 -P -c", wrapped)
@@ -112,7 +112,7 @@ class PidHeartbeatTests(unittest.TestCase):
             wrapped = with_pid_heartbeat(
                 'FOO=bar python3 -c "import os; print(os.getpid())"',
                 pid_file,
-                identity=heartbeat_identity(run_id="run-1", role="worker", task="card:secretary-751"),
+                identity=heartbeat_identity(run_id="run-1", role="worker", task="card:ummanu-751"),
             )
 
             result = subprocess.run(
@@ -134,7 +134,7 @@ class PidHeartbeatTests(unittest.TestCase):
         wrapped = with_pid_heartbeat(
             "codex exec",
             "/tmp/weird dir/x.pid",
-            identity=heartbeat_identity(run_id="run-1", role="worker", task="card:secretary-751"),
+            identity=heartbeat_identity(run_id="run-1", role="worker", task="card:ummanu-751"),
         )
 
         self.assertIn(shlex.quote("/tmp/weird dir/x.pid"), wrapped)
@@ -143,20 +143,20 @@ class PidHeartbeatTests(unittest.TestCase):
         """A respawn in the same workspace must land on the same path as the launch before it, so
         clearing the file before a fresh launch actually removes the predecessor's pid."""
         self.assertEqual(
-            pid_file_path("worker", "secretary-751"),
-            pid_file_path("worker", "secretary-751"),
+            pid_file_path("worker", "ummanu-751"),
+            pid_file_path("worker", "ummanu-751"),
         )
         self.assertNotEqual(
-            pid_file_path("worker", "secretary-751"),
-            pid_file_path("review", "secretary-751"),
+            pid_file_path("worker", "ummanu-751"),
+            pid_file_path("review", "ummanu-751"),
         )
 
     def test_pid_file_path_honours_the_body_dir_override(self) -> None:
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": tmp}),
+            mock.patch.dict(os.environ, {"UMMANU_DISPATCHER_BODY_DIR": tmp}),
         ):
-            self.assertTrue(pid_file_path("worker", "secretary-751").startswith(tmp))
+            self.assertTrue(pid_file_path("worker", "ummanu-751").startswith(tmp))
 
     def test_a_process_that_has_exited_is_not_alive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -188,7 +188,7 @@ class PidHeartbeatTests(unittest.TestCase):
             proc = subprocess.Popen(["sleep", "5"])
             self.addCleanup(proc.wait)
             self.addCleanup(proc.terminate)
-            identity = heartbeat_identity(run_id="stopped-run", role="worker", task="card:secretary-751")
+            identity = heartbeat_identity(run_id="stopped-run", role="worker", task="card:ummanu-751")
             self.write_heartbeat(pid_file, proc.pid, identity=identity)
             os.kill(proc.pid, signal.SIGSTOP)
             try:
@@ -213,7 +213,7 @@ class PidHeartbeatTests(unittest.TestCase):
             self.addCleanup(proc.wait)
             self.addCleanup(proc.terminate)
             identity = heartbeat_identity(
-                run_id="run-a", role="worker", task="card:secretary-751", leaf="leaf-a"
+                run_id="run-a", role="worker", task="card:ummanu-751", leaf="leaf-a"
             )
             self.write_heartbeat(pid_file, proc.pid, identity=identity)
             raw = json.loads(pid_file.read_text(encoding="utf-8"))
@@ -225,7 +225,7 @@ class PidHeartbeatTests(unittest.TestCase):
             foreign_run = head_process_status(
                 str(pid_file),
                 expected=heartbeat_identity(
-                    run_id="run-b", role="worker", task="card:secretary-751", leaf="leaf-a"
+                    run_id="run-b", role="worker", task="card:ummanu-751", leaf="leaf-a"
                 ),
             )
 
@@ -238,7 +238,7 @@ class PidHeartbeatTests(unittest.TestCase):
             proc = subprocess.Popen(["sleep", "5"])
             self.addCleanup(proc.wait)
             self.addCleanup(proc.terminate)
-            identity = heartbeat_identity(run_id="bind-run", role="worker", task="card:secretary-751")
+            identity = heartbeat_identity(run_id="bind-run", role="worker", task="card:ummanu-751")
             self.write_heartbeat(pid_file, proc.pid, identity=identity)
 
             self.assertTrue(bind_head_heartbeat(str(pid_file), expected=identity, leaf="leaf-a"))
@@ -254,9 +254,9 @@ class PidHeartbeatTests(unittest.TestCase):
         handoff must make the first durable base record carry the returned leaf for all three.
         """
         roles = (
-            ("worker", "card:secretary-1424", "leaf-worker"),
-            ("reviewer", "card:secretary-1424", "leaf-reviewer"),
-            ("observer", "sprint:secretary-1424", "leaf-observer"),
+            ("worker", "card:ummanu-1424", "leaf-worker"),
+            ("reviewer", "card:ummanu-1424", "leaf-reviewer"),
+            ("observer", "sprint:ummanu-1424", "leaf-observer"),
         )
         with tempfile.TemporaryDirectory() as tmp:
             for role, task, leaf in roles:
@@ -288,7 +288,7 @@ class PidHeartbeatTests(unittest.TestCase):
 
     def test_a_pid_file_that_has_not_been_written_yet_is_not_known(self) -> None:
         """A fresh launch has not run its `echo $$` yet, and a raw
-        `SECRETARY_DISPATCHER_*_COMMAND` override never will. Neither is evidence of death."""
+        `UMMANU_DISPATCHER_*_COMMAND` override never will. Neither is evidence of death."""
         with tempfile.TemporaryDirectory() as tmp:
             status = head_process_status(str(Path(tmp) / "never-written.pid"))
 
@@ -334,16 +334,16 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         self.root = Path(self.tmpdir.name)
         self.workspace = self.root / "ws"
         self.workspace.mkdir()
-        _clear_env(self, "SECRETARY_DISPATCHER_REVIEW_COMMAND")
-        _clear_env(self, "SECRETARY_DISPATCHER_PROMPT_DIR")
-        os.environ["SECRETARY_DISPATCHER_BODY_DIR"] = str(self.root)
+        _clear_env(self, "UMMANU_DISPATCHER_REVIEW_COMMAND")
+        _clear_env(self, "UMMANU_DISPATCHER_PROMPT_DIR")
+        os.environ["UMMANU_DISPATCHER_BODY_DIR"] = str(self.root)
         # No provider session file may name this workspace, so the confirmation falls back to the
         # screen the host paints rather than reading the developer's own codex sessions.
-        os.environ["SECRETARY_CODEX_SESSIONS"] = str(self.root / "sessions")
-        self.addCleanup(os.environ.pop, "SECRETARY_CODEX_SESSIONS", None)
+        os.environ["UMMANU_CODEX_SESSIONS"] = str(self.root / "sessions")
+        self.addCleanup(os.environ.pop, "UMMANU_CODEX_SESSIONS", None)
         self.task = {
-            "ref": "secretary-1409",
-            "project": "secretary",
+            "ref": "ummanu-1409",
+            "project": "ummanu",
             "description": self.HOSTILE_DESCRIPTION,
             "workspace": {"base_branch": "main"},
             "routing": {},
@@ -351,7 +351,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
 
     def _record(self) -> DispatcherRecord:
         return DispatcherRecord(
-            worker="secretary-1409-w",
+            worker="ummanu-1409-w",
             workspace=str(self.workspace),
             handle="run:worker-1409",
             head="codex",
@@ -362,7 +362,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
             state="review_starting",
             claimed_at=0.0,
             worker_head_run=supervised_run(
-                "worker-1409", workspace=str(self.workspace), task_ref=head_ops.TaskRef.card("secretary-1409")
+                "worker-1409", workspace=str(self.workspace), task_ref=head_ops.TaskRef.card("ummanu-1409")
             ),
         )
 
@@ -373,7 +373,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         return {
             str(path.relative_to(self.workspace)): path.read_bytes()
             for path in sorted(self.workspace.rglob("*"))
-            if path.is_file() and not path.relative_to(self.workspace).is_relative_to(".secretary-task-env")
+            if path.is_file() and not path.relative_to(self.workspace).is_relative_to(".ummanu-task-env")
         }
 
     def test_the_head_receives_a_bounded_pointer_and_never_the_review(self) -> None:
@@ -400,7 +400,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
 
         document = self._document_of(host)
         body = document.read_text(encoding="utf-8")
-        self.assertIn("# Review secretary-1409", body)
+        self.assertIn("# Review ummanu-1409", body)
         self.assertIn("\x1b[201~ terminator", body, "the description reaches the head unmodified")
         self.assertNotIn(
             str(self.workspace.resolve()),
@@ -429,7 +429,7 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         host.start_review(self.task, self._record())
 
         self.assertEqual(self._checkout_contents(), before)
-        self.assertTrue((self.workspace / ".secretary-task-env" / "owner.json").is_file())
+        self.assertTrue((self.workspace / ".ummanu-task-env" / "owner.json").is_file())
 
     def test_a_retry_rewrites_the_same_document_and_sends_a_fresh_nudge(self) -> None:
         """The pointer always names the round's current task, so a retry cannot review a stale one."""
@@ -525,17 +525,17 @@ class WorkerNudgeDeliveryTests(unittest.TestCase):
         self.root = Path(self.tmpdir.name)
         self.workspace = self.root / "ws"
         self.workspace.mkdir()
-        _clear_env(self, "SECRETARY_DISPATCHER_WORKER_COMMAND")
-        os.environ["SECRETARY_DISPATCHER_BODY_DIR"] = str(self.root)
+        _clear_env(self, "UMMANU_DISPATCHER_WORKER_COMMAND")
+        os.environ["UMMANU_DISPATCHER_BODY_DIR"] = str(self.root)
         # Neither provider may have a session file naming this workspace, so the delivery falls
         # back to the screen the host paints instead of the developer's own transcripts.
-        os.environ["SECRETARY_CODEX_SESSIONS"] = str(self.root / "sessions")
-        os.environ["SECRETARY_CLAUDE_PROJECTS"] = str(self.root / "claude-projects")
-        self.addCleanup(os.environ.pop, "SECRETARY_CODEX_SESSIONS", None)
-        self.addCleanup(os.environ.pop, "SECRETARY_CLAUDE_PROJECTS", None)
+        os.environ["UMMANU_CODEX_SESSIONS"] = str(self.root / "sessions")
+        os.environ["UMMANU_CLAUDE_PROJECTS"] = str(self.root / "claude-projects")
+        self.addCleanup(os.environ.pop, "UMMANU_CODEX_SESSIONS", None)
+        self.addCleanup(os.environ.pop, "UMMANU_CLAUDE_PROJECTS", None)
         self.task = {
-            "ref": "secretary-1410",
-            "project": "secretary",
+            "ref": "ummanu-1410",
+            "project": "ummanu",
             "description": "a card with an \x1b[201~ terminator in it",
             "workspace": {"base_branch": "main"},
             "routing": {},
@@ -543,7 +543,7 @@ class WorkerNudgeDeliveryTests(unittest.TestCase):
 
     def _record(self) -> DispatcherRecord:
         return DispatcherRecord(
-            worker="secretary-1410-w",
+            worker="ummanu-1410-w",
             workspace=str(self.workspace),
             handle="term-worker",
             head="claude-opus",
@@ -573,7 +573,7 @@ class WorkerNudgeDeliveryTests(unittest.TestCase):
         self.assertEqual(caught.exception.workspace, str(self.workspace))
         self.assertEqual(host.backend.stops, [], "the worker survives an unconfirmed nudge")
         body = (self.workspace / "TASK.md").read_text(encoding="utf-8")
-        self.assertIn("secretary-1410", body)
+        self.assertIn("ummanu-1410", body)
         self.assertIn("\x1b[201~ terminator", body, "the card reaches the head unmodified")
         [start] = host.backend.starts
         self.assertNotIn("terminator", start["pointer"].text, "the head got the pointer, not the card")
@@ -596,15 +596,15 @@ class WorkerLifecycleTests(unittest.TestCase):
         self.root = Path(self.tmpdir.name)
         self.workspace = self.root / "ws"
         self.workspace.mkdir()
-        _clear_env(self, "SECRETARY_DISPATCHER_WORKER_COMMAND")
-        os.environ["SECRETARY_DISPATCHER_BODY_DIR"] = str(self.root)
-        os.environ["SECRETARY_CODEX_SESSIONS"] = str(self.root / "sessions")
-        os.environ["SECRETARY_CLAUDE_PROJECTS"] = str(self.root / "claude-projects")
-        self.addCleanup(os.environ.pop, "SECRETARY_CODEX_SESSIONS", None)
-        self.addCleanup(os.environ.pop, "SECRETARY_CLAUDE_PROJECTS", None)
+        _clear_env(self, "UMMANU_DISPATCHER_WORKER_COMMAND")
+        os.environ["UMMANU_DISPATCHER_BODY_DIR"] = str(self.root)
+        os.environ["UMMANU_CODEX_SESSIONS"] = str(self.root / "sessions")
+        os.environ["UMMANU_CLAUDE_PROJECTS"] = str(self.root / "claude-projects")
+        self.addCleanup(os.environ.pop, "UMMANU_CODEX_SESSIONS", None)
+        self.addCleanup(os.environ.pop, "UMMANU_CLAUDE_PROJECTS", None)
         self.task = {
-            "ref": "secretary-1412",
-            "project": "secretary",
+            "ref": "ummanu-1412",
+            "project": "ummanu",
             "description": "a card",
             "workspace": {"base_branch": "main"},
             "routing": {},
@@ -612,7 +612,7 @@ class WorkerLifecycleTests(unittest.TestCase):
 
     def _record(self, **kwargs) -> DispatcherRecord:
         record = DispatcherRecord(
-            worker="secretary-1412-w",
+            worker="ummanu-1412-w",
             workspace=str(self.workspace),
             handle="term-worker",
             head="codex",
@@ -642,7 +642,7 @@ class WorkerLifecycleTests(unittest.TestCase):
             run["task_ref"],
             {
                 "kind": "card",
-                "ref": "secretary-1412",
+                "ref": "ummanu-1412",
                 "document": str(self.workspace / "TASK.md"),
             },
         )
@@ -771,14 +771,14 @@ class ReviewerLifecycleTests(unittest.TestCase):
         self.root = Path(self.tmpdir.name)
         self.workspace = self.root / "ws"
         self.workspace.mkdir()
-        _clear_env(self, "SECRETARY_DISPATCHER_REVIEW_COMMAND")
-        _clear_env(self, "SECRETARY_DISPATCHER_PROMPT_DIR")
-        os.environ["SECRETARY_DISPATCHER_BODY_DIR"] = str(self.root)
-        os.environ["SECRETARY_CODEX_SESSIONS"] = str(self.root / "sessions")
-        self.addCleanup(os.environ.pop, "SECRETARY_CODEX_SESSIONS", None)
+        _clear_env(self, "UMMANU_DISPATCHER_REVIEW_COMMAND")
+        _clear_env(self, "UMMANU_DISPATCHER_PROMPT_DIR")
+        os.environ["UMMANU_DISPATCHER_BODY_DIR"] = str(self.root)
+        os.environ["UMMANU_CODEX_SESSIONS"] = str(self.root / "sessions")
+        self.addCleanup(os.environ.pop, "UMMANU_CODEX_SESSIONS", None)
         self.task = {
-            "ref": "secretary-1414",
-            "project": "secretary",
+            "ref": "ummanu-1414",
+            "project": "ummanu",
             "description": "a card",
             "workspace": {"base_branch": "main"},
             "routing": {},
@@ -786,7 +786,7 @@ class ReviewerLifecycleTests(unittest.TestCase):
 
     def _record(self, **fields) -> DispatcherRecord:
         record = DispatcherRecord(
-            worker="secretary-1414-w",
+            worker="ummanu-1414-w",
             workspace=str(self.workspace),
             handle="run:worker-1414",
             head="codex",
@@ -797,7 +797,7 @@ class ReviewerLifecycleTests(unittest.TestCase):
             state="reviewing",
             claimed_at=0.0,
             worker_head_run=supervised_run(
-                "worker-1414", workspace=str(self.workspace), task_ref=head_ops.TaskRef.card("secretary-1414")
+                "worker-1414", workspace=str(self.workspace), task_ref=head_ops.TaskRef.card("ummanu-1414")
             ),
         )
         for name, value in fields.items():
@@ -811,7 +811,7 @@ class ReviewerLifecycleTests(unittest.TestCase):
             "spec": {"profile_id": "codex-reviewer", "adapter": "codex"},
             "head_runtime": "local-pty",
             "workspace": str(self.workspace),
-            "task_ref": {"kind": "card", "ref": "secretary-1414", "document": ""},
+            "task_ref": {"kind": "card", "ref": "ummanu-1414", "document": ""},
             "handle": "run:run-reviewer-1",
             "leaf": "",
             "pid_file": "",
@@ -833,11 +833,11 @@ class ReviewerLifecycleTests(unittest.TestCase):
         self.assertEqual(run["handle"], launch.handle)
         self.assertEqual(run["leaf"], launch.leaf)
         self.assertEqual(run["spec"]["profile_id"], "codex-reviewer")
-        self.assertEqual(run["task_ref"]["ref"], "secretary-1414")
+        self.assertEqual(run["task_ref"]["ref"], "ummanu-1414")
         # A second head in the worker's own checkout, never a workspace of its own.
         [start] = host.backend.starts
         self.assertEqual(start["workspace"], str(self.workspace))
-        self.assertEqual(start["title"], review_pane_label("secretary-1414"))
+        self.assertEqual(start["title"], review_pane_label("ummanu-1414"))
         self.assertFalse([call for call in host.calls if "worktree" in call and "add" in call])
 
     def test_a_stopped_reviewer_records_who_stopped_it_and_that_survives_a_restart(self) -> None:
@@ -870,7 +870,7 @@ class ReviewerLifecycleTests(unittest.TestCase):
         reached for the workspace would take the worker the card is about to resume with it."""
         host = RecordingReviewHost(self.root)
         worker_run = supervised_run(
-            "run-worker-1", workspace=str(self.workspace), task_ref=head_ops.TaskRef.card("secretary-1414")
+            "run-worker-1", workspace=str(self.workspace), task_ref=head_ops.TaskRef.card("ummanu-1414")
         )
         record = self._record(
             handle="run:run-worker-1",
@@ -895,9 +895,9 @@ class ReviewLivenessTests(unittest.TestCase):
         self.root = Path(self.tmpdir.name)
         self.workspace = self.root / "ws"
         self.workspace.mkdir()
-        self.task = {"ref": "secretary-651", "project": "secretary", "routing": {}}
-        _clear_env(self, "SECRETARY_DISPATCHER_BODY_DIR")
-        os.environ["SECRETARY_DISPATCHER_BODY_DIR"] = str(self.root)
+        self.task = {"ref": "ummanu-651", "project": "ummanu", "routing": {}}
+        _clear_env(self, "UMMANU_DISPATCHER_BODY_DIR")
+        os.environ["UMMANU_DISPATCHER_BODY_DIR"] = str(self.root)
 
     def _dead_pid(self) -> int:
         proc = subprocess.Popen(["true"])
@@ -915,7 +915,7 @@ class ReviewLivenessTests(unittest.TestCase):
 
     def _record(self, **fields) -> DispatcherRecord:
         record = DispatcherRecord(
-            worker="secretary-651-w",
+            worker="ummanu-651-w",
             workspace=str(self.workspace),
             handle="term-worker",
             head="codex",
@@ -1079,7 +1079,7 @@ class ReviewLivenessTests(unittest.TestCase):
         runtime.host = host
 
         status = host.review_status(self.task, record)
-        with mock.patch("secretary.dispatch.review.start_review") as start_review:
+        with mock.patch("ummanu.dispatch.review.start_review") as start_review:
             outcome = recover_review_launch(
                 runtime,
                 self.task,
@@ -1286,8 +1286,8 @@ class ProductionPauseTests(unittest.TestCase):
         env = mock.patch.dict(
             os.environ,
             {
-                "SECRETARY_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
-                "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
+                "UMMANU_LEGACY_PAUSE_FILE": str(self.data_dir / "legacy-pause.json"),
+                "UMMANU_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies"),
             },
         )
         env.start()
@@ -1306,9 +1306,9 @@ class ProductionPauseTests(unittest.TestCase):
             self.data_dir,
             self.catalog,  # type: ignore[arg-type]
             self.host,  # type: ignore[arg-type]
-            owner="secretary-pilot",
+            owner="ummanu-pilot",
         )
-        self.ref = "secretary-510"
+        self.ref = "ummanu-510"
 
     def pause(self, mode: str, **kwargs) -> dict:
         return self.runtime.pause_pipeline(mode=mode, actor="operator", reason="host maintenance", **kwargs)
@@ -1364,7 +1364,7 @@ class ProductionPauseTests(unittest.TestCase):
                 self.pause(mode)
                 self.runtime.production_tick()
                 self.assertEqual(self.reader.show(self.ref)["state"], "ready")
-                self.assertEqual(self.reader.show("secretary-511")["state"], "ready")
+                self.assertEqual(self.reader.show("ummanu-511")["state"], "ready")
                 self.runtime.resume_pipeline(actor="operator")
 
     def test_drain_keeps_driving_the_card_already_in_flight(self) -> None:
@@ -1377,7 +1377,7 @@ class ProductionPauseTests(unittest.TestCase):
         self.assertEqual(result["actions"][0]["to"], "validate")
         self.assertEqual(self.reader.show(self.ref)["state"], "validate")
         # ...and the Ready neighbour is still not claimed while the drain holds.
-        self.assertEqual(self.reader.show("secretary-511")["state"], "ready")
+        self.assertEqual(self.reader.show("ummanu-511")["state"], "ready")
 
     def test_freeze_stops_the_worker_head_without_touching_the_workspace(self) -> None:
         self.runtime.production_tick()
@@ -1545,7 +1545,7 @@ class ProductionPauseTests(unittest.TestCase):
         self.assertEqual(
             status["dispatcher"]["state_file"], str(self.data_dir / "dispatcher" / "production-state.json")
         )
-        self.assertEqual(status["dispatcher"]["owner"], "secretary-pilot")
+        self.assertEqual(status["dispatcher"]["owner"], "ummanu-pilot")
         head = next(entry for entry in status["heads"] if entry["ref"] == self.ref)
         self.assertEqual(head["worker"], "stopped-by-pause")
 
@@ -1650,7 +1650,7 @@ class ProductionPauseTests(unittest.TestCase):
         """A backup killed before its `finally` must not freeze the dispatcher forever."""
         self.runtime.production_tick()
         workspace = self.record().workspace
-        self.runtime.pause_pipeline(mode="freeze", actor="secretary-backup", reason="backup snapshot")
+        self.runtime.pause_pipeline(mode="freeze", actor="ummanu-backup", reason="backup snapshot")
         self.age_the_pause(3600)
 
         result = self.runtime.production_tick()
@@ -1666,7 +1666,7 @@ class ProductionPauseTests(unittest.TestCase):
 
     def test_a_fresh_automation_freeze_is_left_alone(self) -> None:
         self.runtime.production_tick()
-        self.runtime.pause_pipeline(mode="freeze", actor="secretary-backup", reason="backup snapshot")
+        self.runtime.pause_pipeline(mode="freeze", actor="ummanu-backup", reason="backup snapshot")
 
         result = self.runtime.production_tick()
 
@@ -1688,7 +1688,7 @@ class ProductionPauseTests(unittest.TestCase):
         self.assertTrue(self.runtime.pause.path.exists())
 
     def test_auto_resume_honours_the_ttl_override(self) -> None:
-        self.runtime.pause_pipeline(mode="freeze", actor="secretary-backup", reason="backup")
+        self.runtime.pause_pipeline(mode="freeze", actor="ummanu-backup", reason="backup")
         self.age_the_pause(3600)
 
         with mock.patch.dict(os.environ, {"TA_HARD_PAUSE_AUTO_RESUME_TTL_S": "0"}):
@@ -1698,7 +1698,7 @@ class ProductionPauseTests(unittest.TestCase):
 
     def test_a_failed_auto_resume_holds_the_freeze_and_says_why(self) -> None:
         self.runtime.production_tick()
-        self.runtime.pause_pipeline(mode="freeze", actor="secretary-backup", reason="backup")
+        self.runtime.pause_pipeline(mode="freeze", actor="ummanu-backup", reason="backup")
         self.age_the_pause(3600)
 
         with mock.patch.object(self.runtime.pause, "clear", side_effect=OSError("read-only fs")):
@@ -1746,7 +1746,7 @@ class ProductionPauseTests(unittest.TestCase):
         """resolve_pipeline_state_dir's own order: a mirror written elsewhere sheds nothing."""
         state_dir = self.data_dir / "ta-state"
         with mock.patch.dict(os.environ, {"TA_PIPELINE_STATE_DIR": str(state_dir)}):
-            os.environ.pop("SECRETARY_LEGACY_PAUSE_FILE", None)
+            os.environ.pop("UMMANU_LEGACY_PAUSE_FILE", None)
             self.pause("drain")
 
         self.assertTrue((state_dir / "pause.json").is_file())
@@ -1760,8 +1760,8 @@ class CommandHostStopWorkspaceTests(unittest.TestCase):
         self.host = CommandHostRuntime(FakeCatalog(), self.root, mode="real")  # type: ignore[arg-type]
         self.backend = SupervisedBackend().install(self.host)
         self.record = DispatcherRecord(
-            worker="secretary-997-w1",
-            workspace=str(self.root / "workspaces" / "secretary" / "secretary-997-w1"),
+            worker="ummanu-997-w1",
+            workspace=str(self.root / "workspaces" / "ummanu" / "ummanu-997-w1"),
             handle="",
             head="head",
             review_head="review-head",
@@ -1781,7 +1781,7 @@ class CommandHostStopWorkspaceTests(unittest.TestCase):
             profile="head",
             adapter="unknown",
             workspace=self.record.workspace,
-            task_ref=head_ops.TaskRef.card("secretary-997"),
+            task_ref=head_ops.TaskRef.card("ummanu-997"),
             leaf=self.record.worker_leaf,
             pid_file=str(pid_file),
         )
@@ -1799,7 +1799,7 @@ class CommandHostStopWorkspaceTests(unittest.TestCase):
             identity=heartbeat_identity(
                 run_id="foreign-workspace-run",
                 role="worker",
-                task="card:secretary-997",
+                task="card:ummanu-997",
                 leaf=self.record.worker_leaf,
             ),
         )
@@ -1824,11 +1824,11 @@ class ReviewPaneTests(unittest.TestCase):
         self.root = Path(self.tmpdir.name)
         self.workspace = self.root / "ws"
         self.workspace.mkdir()
-        _clear_env(self, "SECRETARY_DISPATCHER_REVIEW_COMMAND")
-        os.environ["SECRETARY_DISPATCHER_BODY_DIR"] = str(self.root)
+        _clear_env(self, "UMMANU_DISPATCHER_REVIEW_COMMAND")
+        os.environ["UMMANU_DISPATCHER_BODY_DIR"] = str(self.root)
         self.task = {
-            "ref": "secretary-651",
-            "project": "secretary",
+            "ref": "ummanu-651",
+            "project": "ummanu",
             "description": "spec",
             "workspace": {"base_branch": "main"},
             "routing": {},
@@ -1836,7 +1836,7 @@ class ReviewPaneTests(unittest.TestCase):
 
     def _record(self) -> DispatcherRecord:
         record = DispatcherRecord(
-            worker="secretary-651-w",
+            worker="ummanu-651-w",
             workspace=str(self.workspace),
             handle="run:worker-651",
             head="codex",
@@ -1848,7 +1848,7 @@ class ReviewPaneTests(unittest.TestCase):
             claimed_at=0.0,
         )
         record.worker_head_run = supervised_run(
-            "worker-651", workspace=str(self.workspace), task_ref=head_ops.TaskRef.card("secretary-651")
+            "worker-651", workspace=str(self.workspace), task_ref=head_ops.TaskRef.card("ummanu-651")
         )
         return record
 

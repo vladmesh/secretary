@@ -2,7 +2,7 @@
 
 Direction and open work. Milestones describe useful product states, not release dates. Current
 behaviour is in [Architecture](ARCHITECTURE.md), [Protocols](PROTOCOLS.md) and
-[Operations](OPERATIONS.md); known defects are prioritised issues on the board under the `secretary`
+[Operations](OPERATIONS.md); known defects are prioritised issues on the board under the `ummanu`
 product.
 
 ## Sprint programme
@@ -48,7 +48,7 @@ separate operator choice.
 ### User path
 
 ```text
-install secretary
+install ummanu
   -> bootstrap host with installation user and private remote
   -> install a new instance or recover an existing one
   -> connect agent heads
@@ -88,7 +88,7 @@ and an account without a neural model in the loop.
 ### User path
 
 ```text
-secretary head add
+ummanu head add
   -> discover or install runtime
   -> authenticate account
   -> create account pool and profile
@@ -139,7 +139,7 @@ add project
 ### Done when
 
 - A high-level project workflow folds add, provision and gate into one resumable flow.
-- `secretary status` combines services, schedules, heads, quota state, projects, cards, memory and
+- `ummanu status` combines services, schedules, heads, quota state, projects, cards, memory and
   checkpoint freshness; `doctor` stays the strict invariant check.
 - Install, start, stop, logs, upgrade and uninstall are available through the product CLI.
 - Schedules and their single owner are configured centrally and applied idempotently.

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run ummanu instance repository maintenance daily
+
+[Timer]
+OnCalendar=04:17:00
+RandomizedDelaySec=600
+Persistent=true
+Unit=ummanu-instance-maintenance.service
+
+[Install]
+WantedBy=timers.target

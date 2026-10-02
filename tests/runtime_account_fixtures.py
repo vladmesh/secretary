@@ -13,7 +13,7 @@ def fixture_runtime_account(root: Path):
     home.mkdir(parents=True, exist_ok=True)
     account = SimpleNamespace(pw_name="operator", pw_dir=str(home))
     with (
-        mock.patch("secretary.host_apply.pwd.getpwuid", return_value=account),
-        mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
+        mock.patch("ummanu.host_apply.pwd.getpwuid", return_value=account),
+        mock.patch("ummanu.host_apply.pwd.getpwnam", return_value=account),
     ):
         yield home

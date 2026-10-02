@@ -1,10 +1,10 @@
-"""Recording layers and a minimal system snapshot for tests of `secretary.web.app.WebApp`."""
+"""Recording layers and a minimal system snapshot for tests of `ummanu.web.app.WebApp`."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from secretary.webproto.reads import health_summary
+from ummanu.webproto.reads import health_summary
 
 
 class Recording:

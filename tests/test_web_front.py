@@ -5,7 +5,7 @@ the two questions this card has to answer forever -- "is every route the transpo
 authentication" and "does the front proxy anywhere but loopback" -- are questions about a text, and
 a test that needed a running front would be a test nobody runs on the branch that breaks it.
 
-The route list is never written out here. `secretary.web.app.ROUTES` is the same table
+The route list is never written out here. `ummanu.web.app.ROUTES` is the same table
 `docs/PROTOCOLS.md` documents and the same one `tests/test_web_transport.py` pins, so a route added
 there enters these assertions with it, and forgetting one is not a thing anybody can do. What is
 written out here instead are the *counter*-examples: configurations that leave a route open, so the
@@ -17,16 +17,16 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from secretary.host import (
+from ummanu.host import (
     SHIPPED_PACKAGING_ROOT,
     SystemdLayout,
     build_plan,
     load_packaged_units,
     render_systemd_unit,
 )
-from secretary.web.app import ROUTES
-from secretary.web.server import DEFAULT_HOST, DEFAULT_PORT
-from secretary.webfront.caddyfile import (
+from ummanu.web.app import ROUTES
+from ummanu.web.server import DEFAULT_HOST, DEFAULT_PORT
+from ummanu.webfront.caddyfile import (
     HASH_SECRET_ID,
     PASSWORD_SECRET_ID,
     SESSION_COOKIE_MAX_AGE,
@@ -37,7 +37,7 @@ from secretary.webfront.caddyfile import (
     render,
     session_cookie_value,
 )
-from secretary.webfront.guard import CaddyfileSyntaxError, parse, unguarded_routes, upstreams
+from ummanu.webfront.guard import CaddyfileSyntaxError, parse, unguarded_routes, upstreams
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -76,9 +76,9 @@ class GuardCoverageTests(unittest.TestCase):
         text = rendered()
         classes = {
             "dashboard page": "/",
-            "card page, which carries worker and reviewer output": "/tasks/secretary-1",
+            "card page, which carries worker and reviewer output": "/tasks/ummanu-1",
             "json": "/api/system",
-            "events": "/api/tasks/secretary-1/events",
+            "events": "/api/tasks/ummanu-1/events",
             "run state": "/api/runs/pr-1",
             "start": "/api/runs/start",
         }
@@ -244,7 +244,7 @@ class RenderedConfigTests(unittest.TestCase):
 
     def test_the_repository_holds_no_password_and_no_hash(self) -> None:
         """Criterion 6: auth values reach the file at render time and live in the store."""
-        for path in sorted((REPO_ROOT / "src" / "secretary" / "webfront").rglob("*.py")):
+        for path in sorted((REPO_ROOT / "src" / "ummanu" / "webfront").rglob("*.py")):
             body = path.read_text(encoding="utf-8")
             with self.subTest(path=path.name):
                 self.assertNotIn("$2a$", body)
@@ -269,62 +269,62 @@ class ShippedUnitTests(unittest.TestCase):
         return render_systemd_unit((SHIPPED_PACKAGING_ROOT / name).read_bytes(), self.LAYOUT).decode()
 
     def test_the_transport_unit_binds_loopback_and_the_documented_port(self) -> None:
-        text = self.unit("secretary-web.service")
+        text = self.unit("ummanu-web.service")
         self.assertIn(f"--host {DEFAULT_HOST} --port {DEFAULT_PORT}", text)
         self.assertIn("[Install]", text)
         self.assertIn("Restart=always", text)
 
     def test_the_front_unit_runs_the_packaged_caddy_against_the_rendered_file(self) -> None:
-        text = self.unit("secretary-web-front.service")
+        text = self.unit("ummanu-web-front.service")
         self.assertIn("ExecStart=/usr/bin/caddy run --adapter caddyfile", text)
         self.assertIn("/opt/data/webfront/Caddyfile", text)
         self.assertIn("Restart=always", text)
         self.assertIn("[Install]", text)
 
     def test_the_front_gets_the_one_capability_it_needs_and_no_more(self) -> None:
-        text = self.unit("secretary-web-front.service")
+        text = self.unit("ummanu-web-front.service")
         self.assertIn("AmbientCapabilities=CAP_NET_BIND_SERVICE", text)
         self.assertIn("CapabilityBoundingSet=CAP_NET_BIND_SERVICE", text)
         self.assertIn("NoNewPrivileges=true", text)
         self.assertNotIn("User=root", text)
 
     def test_both_halves_are_planned_for_an_installation_that_does_not_opt_out(self) -> None:
-        """What makes `secretary status` list them: they are components of the shipped catalogue."""
+        """What makes `ummanu status` list them: they are components of the shipped catalogue."""
         instance = {
-            "host": {"unit_prefix": "secretary-", "components": {"curator": {"enabled": False}}},
+            "host": {"unit_prefix": "ummanu-", "components": {"curator": {"enabled": False}}},
         }
-        packaged = load_packaged_units(SHIPPED_PACKAGING_ROOT, "secretary-", self.LAYOUT)
+        packaged = load_packaged_units(SHIPPED_PACKAGING_ROOT, "ummanu-", self.LAYOUT)
         planned = {
             resource.name
             for resource in build_plan(instance, [], packaged=packaged)
             if resource.kind == "unit"
         }
-        self.assertIn("secretary-web.service", planned)
-        self.assertIn("secretary-web-front.service", planned)
+        self.assertIn("ummanu-web.service", planned)
+        self.assertIn("ummanu-web-front.service", planned)
 
     def test_an_installation_can_opt_out_of_the_front_and_keep_the_rest(self) -> None:
         """The documented rollback: the components leave the desired state and reconcile removes them."""
         instance = {
             "host": {
-                "unit_prefix": "secretary-",
+                "unit_prefix": "ummanu-",
                 "components": {"web": {"enabled": False}, "web-front": {"enabled": False}},
             },
         }
-        packaged = load_packaged_units(SHIPPED_PACKAGING_ROOT, "secretary-", self.LAYOUT)
+        packaged = load_packaged_units(SHIPPED_PACKAGING_ROOT, "ummanu-", self.LAYOUT)
         planned = {
             resource.name
             for resource in build_plan(instance, [], packaged=packaged)
             if resource.kind == "unit"
         }
-        self.assertNotIn("secretary-web.service", planned)
-        self.assertNotIn("secretary-web-front.service", planned)
-        self.assertIn("secretary-memory.service", planned)
+        self.assertNotIn("ummanu-web.service", planned)
+        self.assertNotIn("ummanu-web-front.service", planned)
+        self.assertIn("ummanu-memory.service", planned)
 
     def test_the_two_halves_start_and_stop_as_one(self) -> None:
-        text = self.unit("secretary-web-front.service")
-        self.assertIn("Requires=secretary-web.service", text)
-        self.assertIn("PartOf=secretary-web.service", text)
-        self.assertIn("After=network-online.target secretary-web.service", text)
+        text = self.unit("ummanu-web-front.service")
+        self.assertIn("Requires=ummanu-web.service", text)
+        self.assertIn("PartOf=ummanu-web.service", text)
+        self.assertIn("After=network-online.target ummanu-web.service", text)
 
 
 def _documented_routes() -> set[tuple[str, str]]:

@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import call, patch
 
-from secretary.webfront import commands
-from secretary.webfront.caddyfile import (
+from ummanu.webfront import commands
+from ummanu.webfront.caddyfile import (
     HASH_SECRET_ID,
     PASSWORD_SECRET_ID,
     SESSION_SECRET_ID,

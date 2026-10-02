@@ -1,6 +1,6 @@
 # Vision
 
-`secretary` turns a remote VPS into a personal command centre for working with several AI agents
+`ummanu` turns a remote VPS into a personal command centre for working with several AI agents
 across many projects. The owner sets goals, architectural decisions and quality bars. The system
 keeps context, picks executors, launches work, organises review and recovers after losing the
 machine.
@@ -73,7 +73,7 @@ How this works today is in [Protocols](PROTOCOLS.md#sprints).
 - An opinionated default beats early support for many backends.
 - Replaceable parts are separated by protocols; a public plugin API appears only after a real need
   for a second implementation.
-- `secretary task` owns the normalised task model, transitions, audit and portable export, whatever
+- `ummanu task` owns the normalised task model, transitions, audit and portable export, whatever
   backend holds live state.
 - Product intent and execution are different planes: issues are durable and prioritised, tasks are cut
   just in time inside a sprint.
@@ -81,7 +81,7 @@ How this works today is in [Protocols](PROTOCOLS.md#sprints).
   process-tree termination and recovery. A pretty live UI is a frontend capability.
 - LLMs do and review the work. Routing, lifecycle, recovery and ownership are ordinary checkable
   protocols.
-- The owner keeps product authority. The secretary is the interactive PO interface; an observer is an
+- The owner keeps product authority. The ummanu is the interactive PO interface; an observer is an
   autonomous sprint controller with bounded authority, not a substitute product owner.
 - Observability and recovery are part of the main user path.
 

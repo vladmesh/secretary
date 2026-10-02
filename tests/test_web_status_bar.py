@@ -1,11 +1,11 @@
 """The shared bottom bar: every page carries it, it costs no provider read, and it never invents a number.
 
 Hermetic. Every layer is a recording fake and the one real object is
-:class:`~secretary.web.provider_usage.ProviderUsageLayer`, driven over a temporary home with a
+:class:`~ummanu.web.provider_usage.ProviderUsageLayer`, driven over a temporary home with a
 counting `fetch_json` and a clock this test moves — which is the only way to ask the question
 criterion 4 asks: does *rendering* cost a provider read. It does not; the cache decides.
 
-The route list is never written out here. :data:`secretary.web.app.ROUTES` is walked, so a page
+The route list is never written out here. :data:`ummanu.web.app.ROUTES` is walked, so a page
 route added tomorrow enters these assertions with it and a shell that stopped rendering the bar
 fails on every one of them at once.
 """
@@ -20,22 +20,22 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from secretary.web import pages
-from secretary.web.app import ROUTES, WebApp
-from secretary.web.provider_usage import (
+from tests.web_fakes import Recording, system_snapshot
+from ummanu.web import pages
+from ummanu.web.app import ROUTES, WebApp
+from ummanu.web.provider_usage import (
     CACHE_SECONDS,
     CLAUDE_USAGE_URL,
     CODEX_RESET_CREDITS_URL,
     CODEX_USAGE_URL,
     ProviderUsageLayer,
 )
-from secretary.webproto.errors import InstallationUnavailable
-from tests.web_fakes import Recording, system_snapshot
+from ummanu.webproto.errors import InstallationUnavailable
 
 #: What a path placeholder is filled with when this test drives the route it belongs to. A route
 #: added with a placeholder nobody listed here fails :meth:`RouteFixture.concrete` rather than being
 #: quietly skipped: an untested page route is exactly what this suite exists to prevent.
-PLACEHOLDERS = {"ref": "secretary-9", "project": "secretary", "session": "s-1", "run_id": "r-1"}
+PLACEHOLDERS = {"ref": "ummanu-9", "project": "ummanu", "session": "s-1", "run_id": "r-1"}
 
 NOW = 1_800_000_000.0
 
@@ -60,9 +60,9 @@ def snapshot_with_a_project() -> dict[str, Any]:
     document = system_snapshot()
     document["projects"]["items"] = [
         {
-            "id": "secretary",
-            "repo": "/srv/secretary",
-            "adapter": "secretary",
+            "id": "ummanu",
+            "repo": "/srv/ummanu",
+            "adapter": "ummanu",
             "default_branch": "main",
             "enabled": True,
         }
@@ -120,13 +120,13 @@ class RouteFixture(unittest.TestCase):
         self.reads = Recording(
             system_snapshot=snapshot_with_a_project(),
             task_snapshot={
-                "ref": "secretary-9",
+                "ref": "ummanu-9",
                 "observed_at": "2026-09-20T12:00:00Z",
                 "card": {
                     "source": available(),
-                    "value": {"title": "a card", "state": "validate", "project": "secretary"},
+                    "value": {"title": "a card", "state": "validate", "project": "ummanu"},
                 },
-                "project": {"id": "secretary", "registered": True},
+                "project": {"id": "ummanu", "registered": True},
                 "attempt": {},
                 "agents": {"source": available(), "items": []},
                 "work": {},
@@ -136,7 +136,7 @@ class RouteFixture(unittest.TestCase):
         self.sprint_reads = Recording(
             sprint_list={"kind": "sprint_list", "sprints": {"source": available(), "items": []}},
             sprint_state={
-                "ref": "secretary-9",
+                "ref": "ummanu-9",
                 "sprint": {
                     "source": available(),
                     "value": {"ref": "sprint:7", "status": "open", "goal": "a goal"},
@@ -259,13 +259,13 @@ class EveryPageCarriesTheBarTests(RouteFixture):
             walked,
             {
                 "/",
-                "/tasks/secretary-9",
-                "/tasks/secretary-9/heads/r-1",
+                "/tasks/ummanu-9",
+                "/tasks/ummanu-9/heads/r-1",
                 "/sprints",
                 "/sprints/new",
-                "/sprints/secretary-9",
+                "/sprints/ummanu-9",
                 "/projects",
-                "/projects/secretary",
+                "/projects/ummanu",
                 "/history",
                 "/doctor",
                 "/po",

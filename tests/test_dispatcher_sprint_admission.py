@@ -11,20 +11,20 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from secretary.board.sql_cards import SPRINT_BOARD_ID
-from secretary.dispatch.claim import (
+from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
+from tests.integration_setup import require_disposable_board_fixture
+from tests.sql_backend_fixtures import PostgresBoard
+from ummanu.board.sql_cards import SPRINT_BOARD_ID
+from ummanu.dispatch.claim import (
     SPRINT_RESERVATION_BLOCKED_ACTION,
     SPRINT_RESERVATION_RESERVED,
     SPRINT_RESERVATION_UNVERIFIABLE,
 )
-from secretary.dispatch.launch import FAILURE_CLASS_INFRASTRUCTURE, infrastructure_action
-from secretary.dispatch.production import _budget_event_type, _reconcile_sprint_budget
-from secretary.dispatch.state import CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE, is_claim_skip
-from secretary.sprints import BUDGET_UNCHARGED_INFRASTRUCTURE, SprintReader
-from secretary.tasks import TaskError, task_audit_for
-from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
-from tests.integration_setup import require_disposable_board_fixture
-from tests.sql_backend_fixtures import PostgresBoard
+from ummanu.dispatch.launch import FAILURE_CLASS_INFRASTRUCTURE, infrastructure_action
+from ummanu.dispatch.production import _budget_event_type, _reconcile_sprint_budget
+from ummanu.dispatch.state import CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE, is_claim_skip
+from ummanu.sprints import BUDGET_UNCHARGED_INFRASTRUCTURE, SprintReader
+from ummanu.tasks import TaskError, task_audit_for
 
 SPRINT = "sprint:1031"
 SPRINT_BOARD = SPRINT_BOARD_ID
@@ -87,14 +87,14 @@ class OutOfSprintAdmissionTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(blocked["step"], "sprint-reservation-refused")
         self.assertEqual(blocked["failure_class"], FAILURE_CLASS_INFRASTRUCTURE)
         self.assertEqual(blocked["sprint_reservation"]["refusal"], SPRINT_RESERVATION_RESERVED)
-        self.assertEqual(blocked["sprint_reservation"]["project"], "secretary")
+        self.assertEqual(blocked["sprint_reservation"]["project"], "ummanu")
         self.assertEqual(blocked["sprint_reservation"]["sprints"], [SPRINT])
         task = self.reader.show(CARD_REF)
         self.assertEqual(task["state"], "blocked")
         reason = task["comments"][-1]["body"]
         self.assertTrue(reason.endswith(blocked["failure_reason"]), "the card and the tick say the same")
         self.assertIn(f"refusal={SPRINT_RESERVATION_RESERVED}", reason)
-        self.assertIn("project=secretary", reason)
+        self.assertIn("project=ummanu", reason)
         self.assertIn(SPRINT, reason)
         self.assertIn("after that sprint closes", reason)
         # The typed action is in the transition the block wrote.
@@ -186,7 +186,7 @@ class OutOfSprintAdmissionTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(refused["action"], CLAIM_SKIP_SPRINT_RESERVATION_UNVERIFIABLE)
         self.assertTrue(is_claim_skip(refused), "the production pass moves on to the next Ready card")
         self.assertEqual(refused["sprint_reservation"]["refusal"], SPRINT_RESERVATION_UNVERIFIABLE)
-        self.assertEqual(refused["sprint_reservation"]["project"], "secretary")
+        self.assertEqual(refused["sprint_reservation"]["project"], "ummanu")
         self.assertIn("could not be verified", refused["reason"])
         self.assertEqual(self.reader.show(CARD_REF)["state"], "ready", "not claimed")
         self.assertEqual(self._blocked_transitions(), [])

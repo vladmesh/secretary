@@ -1,4 +1,4 @@
-"""The PO service (`secretary.po.service`): the durable queue, one turn per session, restarts, the socket.
+"""The PO service (`ummanu.po.service`): the durable queue, one turn per session, restarts, the socket.
 
 Unit-level: the fake `claude`/`codex` of `tests.po_cli_fakes` run as real processes, the board store is
 the in-memory `tests.po_fake_store`, and a "restart" is a new `PoService` over the same board and data
@@ -28,9 +28,9 @@ from typing import ClassVar
 from unittest import mock
 from urllib.parse import urlencode
 
-from secretary import upgrade
-from secretary.backup_policy import FULL_POLICY, should_skip_data_entry
-from secretary.host import (
+from ummanu import upgrade
+from ummanu.backup_policy import FULL_POLICY, should_skip_data_entry
+from ummanu.host import (
     SHIPPED_PACKAGING_ROOT,
     SystemdLayout,
     build_doctor_expectations,
@@ -38,15 +38,15 @@ from secretary.host import (
     load_packaged_units,
     render_systemd_unit,
 )
-from secretary.host_apply import UnitProcessIdentity
-from secretary.po import client as po_client
-from secretary.po import runner as po_runner
-from secretary.po import service as po_service
-from secretary.po import store as po_store
-from secretary.po import token as po_token
-from secretary.po.client import PoServiceClient, ServiceUnavailable
-from secretary.po.queue import PoQueue, QueueError, queue_dir
-from secretary.po.runner import (
+from ummanu.host_apply import UnitProcessIdentity
+from ummanu.po import client as po_client
+from ummanu.po import runner as po_runner
+from ummanu.po import service as po_service
+from ummanu.po import store as po_store
+from ummanu.po import token as po_token
+from ummanu.po.client import PoServiceClient, ServiceUnavailable
+from ummanu.po.queue import PoQueue, QueueError, queue_dir
+from ummanu.po.runner import (
     RERUN_INTERRUPTED_REASON,
     RERUN_REASON,
     STOPPED_REASON,
@@ -54,10 +54,10 @@ from secretary.po.runner import (
     RunnerError,
     still_running,
 )
-from secretary.po.service import PoService, ServiceStartError, listening
-from secretary.po.sprints import SprintRecord, WhyDocument, find_why_documents, why_document_label
-from secretary.web.app import WebApp
-from secretary.webproto.errors import (
+from ummanu.po.service import PoService, ServiceStartError, listening
+from ummanu.po.sprints import SprintRecord, WhyDocument, find_why_documents, why_document_label
+from ummanu.web.app import WebApp
+from ummanu.webproto.errors import (
     NOTHING_WRITTEN,
     PoOutcomeUnknown,
     PoRequestConflict,
@@ -67,15 +67,15 @@ from secretary.webproto.errors import (
     RuntimeUnavailable,
     ValidationRefused,
 )
-from secretary.webproto.po_auth import PoTokenLayer
-from secretary.webproto.po_ops import PoLayer
+from ummanu.webproto.po_auth import PoTokenLayer
+from ummanu.webproto.po_ops import PoLayer
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.po_cli_fakes import FAKE_CLAUDE, FAKE_CODEX, eventually, unscoped_test_launch
 from tests.po_fake_store import FakeBoard, FakePoStore, FakeSprints
 from tests.web_fakes import Recording
-from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
-from secretary.runtime.head.local_pty.client import LocalPtySpawnError
-from secretary.runtime.head.memory import MemoryScopeError
+from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+from ummanu.runtime.head.local_pty.client import LocalPtySpawnError
+from ummanu.runtime.head.memory import MemoryScopeError
 
 ROOT = Path(__file__).resolve().parents[1]
 MODELS = {"claude": ("opus",), "codex": ("gpt-5.6-sol",)}
@@ -631,7 +631,7 @@ class RequestIdReservationTests(ServiceFixture):
         self.assertIsNone(self.store().request("aside"))
 
     def test_every_operation_that_takes_a_request_id_goes_through_the_one_reservation(self) -> None:
-        from secretary.po import service as service_module
+        from ummanu.po import service as service_module
 
         takers = sorted(
             name
@@ -656,7 +656,7 @@ class OutcomeUnknownTests(EndpointTests):
 
     def lose_the_reply(self):
         """The service does the operation, then the connection drops before any answer."""
-        from secretary.po import service as service_module
+        from ummanu.po import service as service_module
 
         def no_reply(handler) -> None:
             request = json.loads(handler.rfile.readline())
@@ -1053,7 +1053,7 @@ class RecoveryProgressTests(ServiceFixture):
             _record["launch_allowed"] = False
             _owner._record_empty(_record)
         with mock.patch.object(ScopedHeadLifecycle, "stop_owned", cleanup):
-            with mock.patch("secretary.po.runner.threading.Thread.start", side_effect=RuntimeError("waiter refused")):
+            with mock.patch("ummanu.po.runner.threading.Thread.start", side_effect=RuntimeError("waiter refused")):
                 service.submit(session_id=session_id, text="GATE waiter", request_id="waiter")
             self.assertFalse(service._recovered)
             self.assertEqual(self.turns(session_id)[0].state, po_store.RUNNING)
@@ -1198,7 +1198,7 @@ class RecoveryProgressTests(ServiceFixture):
         self.assertEqual(runner.orphaned_turns(), [])
 
 
-PO_UNIT = "secretary-po.service"
+PO_UNIT = "ummanu-po.service"
 
 
 class PoUpgradeFixture(ServiceFixture):
@@ -1208,10 +1208,10 @@ class PoUpgradeFixture(ServiceFixture):
         super().setUp()
         self.product = self.root / "product"
         for relative, text in (
-            ("pyproject.toml", '[project]\nname = "secretary"\n'),
-            ("src/secretary/__init__.py", ""),
-            ("src/secretary/app.py", "VERSION = 'A'\n"),
-            ("src/secretary/schemas/card.json", "{}\n"),
+            ("pyproject.toml", '[project]\nname = "ummanu"\n'),
+            ("src/ummanu/__init__.py", ""),
+            ("src/ummanu/app.py", "VERSION = 'A'\n"),
+            ("src/ummanu/schemas/card.json", "{}\n"),
         ):
             path = self.product / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1232,7 +1232,7 @@ class PoUpgradeFixture(ServiceFixture):
 
     def move_checkout(self) -> None:
         """A commit this upgrade did not pull: the dispatcher's release fast-forwarded the checkout."""
-        (self.product / "src/secretary/app.py").write_text("VERSION = 'B'\n", encoding="utf-8")
+        (self.product / "src/ummanu/app.py").write_text("VERSION = 'B'\n", encoding="utf-8")
         self.commit("B")
 
     def bind(self, identity: UnitProcessIdentity) -> str:
@@ -1250,8 +1250,8 @@ class PoUpgradeFixture(ServiceFixture):
 
     def context(self, units: FakeUnitInstaller, **flags) -> upgrade.UpgradeContext:
         report = SimpleNamespace(
-            host={"unit_prefix": "secretary-"},
-            instance={"host": {"unit_prefix": "secretary-"}},
+            host={"unit_prefix": "ummanu-"},
+            instance={"host": {"unit_prefix": "ummanu-"}},
             data_dir=self.data,
             bindings=[],
         )
@@ -1301,7 +1301,7 @@ class UpgradeStepTests(PoUpgradeFixture):
     def test_busy_the_restart_is_deferred_and_applied_by_the_service_at_idle(self) -> None:
         service = self.service()
         session_id = self.session(service)
-        service.submit(session_id=session_id, text="GATE secretary upgrade", request_id="m-1")
+        service.submit(session_id=session_id, text="GATE ummanu upgrade", request_id="m-1")
         self.reached_gate(session_id, 1)
         units = self.units()
 
@@ -1430,7 +1430,7 @@ class ProcessReceiptTests(PoUpgradeFixture):
     def test_busy_a_stale_receipt_defers_the_restart(self) -> None:
         service = self.service()
         session_id = self.session(service)
-        service.submit(session_id=session_id, text="GATE secretary upgrade", request_id="m-1")
+        service.submit(session_id=session_id, text="GATE ummanu upgrade", request_id="m-1")
         self.reached_gate(session_id, 1)
         units = self.units()
         self.bind(units.identities[PO_UNIT])
@@ -1545,9 +1545,9 @@ class ProcessReceiptTests(PoUpgradeFixture):
         source = inspect.getsource(po_service.run_po_serve)
         self.assertLess(source.index("_write_process_receipt(data_dir)"), source.index("service.start()"))
         with mock.patch.object(upgrade, "write_po_process_receipt", return_value="wrote it") as write:
-            self.assertEqual(po_service._write_process_receipt(self.data), "secretary po: wrote it")
+            self.assertEqual(po_service._write_process_receipt(self.data), "ummanu po: wrote it")
         root = write.call_args.args[1]
-        self.assertTrue((root / "src" / "secretary" / "po" / "service.py").is_file(), root)
+        self.assertTrue((root / "src" / "ummanu" / "po" / "service.py").is_file(), root)
 
     def test_the_receipt_is_excluded_from_backup(self) -> None:
         relative = self.receipt().relative_to(self.data)
@@ -2068,20 +2068,20 @@ class UnitTemplateTests(unittest.TestCase):
         self.assertIn("Type=simple", text)
         self.assertIn("Restart=always", text)
         self.assertIn("[Install]", text)
-        self.assertIn("ExecStart=/opt/product/.venv/bin/secretary po-serve --instance /opt/instance", text)
+        self.assertIn("ExecStart=/opt/product/.venv/bin/ummanu po-serve --instance /opt/instance", text)
         directives = "\n".join(line for line in text.splitlines() if not line.startswith("#"))
-        for coupling in ("PartOf=", "BindsTo=", "Requires=", "secretary-web"):
+        for coupling in ("PartOf=", "BindsTo=", "Requires=", "ummanu-web"):
             self.assertNotIn(coupling, directives)
 
         def shared(unit: str) -> list[str]:
             keys = ("User=", "Group=", "WorkingDirectory=", "EnvironmentFile=", "Environment=")
             return [line for line in self.unit(unit).splitlines() if line.startswith(keys)]
 
-        self.assertEqual(shared(PO_UNIT), shared("secretary-web.service"))
+        self.assertEqual(shared(PO_UNIT), shared("ummanu-web.service"))
 
     def test_it_is_planned_listed_by_doctor_and_can_be_opted_out(self) -> None:
-        packaged = load_packaged_units(SHIPPED_PACKAGING_ROOT, "secretary-", self.LAYOUT)
-        instance = {"host": {"unit_prefix": "secretary-"}}
+        packaged = load_packaged_units(SHIPPED_PACKAGING_ROOT, "ummanu-", self.LAYOUT)
+        instance = {"host": {"unit_prefix": "ummanu-"}}
         planned = {r.name: r for r in build_plan(instance, [], packaged=packaged) if r.kind == "unit"}
         self.assertIn(PO_UNIT, planned)
         self.assertEqual(json.loads(planned[PO_UNIT].spec)["installable"], "yes")
@@ -2089,15 +2089,15 @@ class UnitTemplateTests(unittest.TestCase):
         self.assertIn(PO_UNIT, expected.units)
         self.assertEqual(expected.unit_runtime[PO_UNIT], (True, True))
 
-        opted_out = {"host": {"unit_prefix": "secretary-", "components": {"po": {"enabled": False}}}}
+        opted_out = {"host": {"unit_prefix": "ummanu-", "components": {"po": {"enabled": False}}}}
         names = {r.name for r in build_plan(opted_out, [], packaged=packaged)}
         self.assertNotIn(PO_UNIT, names)
-        self.assertIn("secretary-web.service", names)
+        self.assertIn("ummanu-web.service", names)
 
     @unittest.skipUnless(shutil.which("systemd-analyze"), "systemd-analyze is not installed")
     def test_the_rendered_unit_passes_systemd_analyze_verify(self) -> None:
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        executable = root / "product" / ".venv" / "bin" / "secretary"
+        executable = root / "product" / ".venv" / "bin" / "ummanu"
         executable.parent.mkdir(parents=True)
         executable.write_text("#!/bin/sh\n", encoding="utf-8")
         executable.chmod(0o755)
@@ -2128,7 +2128,7 @@ class ThinWebTests(unittest.TestCase):
     def test_no_web_module_imports_the_runner_or_the_service(self) -> None:
         offenders = []
         for package in ("web", "webproto"):
-            for path in sorted((ROOT / "src" / "secretary" / package).rglob("*.py")):
+            for path in sorted((ROOT / "src" / "ummanu" / package).rglob("*.py")):
                 tree = ast.parse(path.read_text(encoding="utf-8"))
                 for node in ast.walk(tree):
                     names = []
@@ -2137,12 +2137,12 @@ class ThinWebTests(unittest.TestCase):
                     elif isinstance(node, ast.ImportFrom) and node.module:
                         names = [node.module, *(f"{node.module}.{alias.name}" for alias in node.names)]
                     for name in names:
-                        if name in ("secretary.po.runner", "secretary.po.service"):
+                        if name in ("ummanu.po.runner", "ummanu.po.service"):
                             offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}: {name}")
         self.assertEqual(offenders, [])
 
     def test_the_web_recovery_module_is_gone(self) -> None:
-        self.assertFalse((ROOT / "src" / "secretary" / "webproto" / "po_recovery.py").exists())
+        self.assertFalse((ROOT / "src" / "ummanu" / "webproto" / "po_recovery.py").exists())
 
 
 if __name__ == "__main__":

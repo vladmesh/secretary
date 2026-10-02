@@ -11,10 +11,10 @@ from unittest import mock
 
 import yaml
 
-from secretary.cli import main
-from secretary.config import load_config, load_schema, validate, validate_instance
-from secretary.onboarding import IDENTITY_FIELDS, ScannerError, project_add
 from tests.support.git import git, make_repo
+from ummanu.cli import main
+from ummanu.config import load_config, load_schema, validate, validate_instance
+from ummanu.onboarding import IDENTITY_FIELDS, ScannerError, project_add
 
 
 def _schema_sample(spec: dict) -> object:
@@ -270,7 +270,7 @@ class OnboardingTests(unittest.TestCase):
                 raise OSError(5, "injected")
             return real_replace(source, target)
 
-        with mock.patch("secretary._fsutil.os.replace", side_effect=fail_second):
+        with mock.patch("ummanu._fsutil.os.replace", side_effect=fail_second):
             code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
 
         self.assertEqual(code, 1)
@@ -282,7 +282,7 @@ class OnboardingTests(unittest.TestCase):
     def test_schema_failure_writes_nothing(self):
         problem = mock.Mock()
         problem.__str__ = mock.Mock(return_value="injected schema failure")
-        with mock.patch("secretary.onboarding.validate", return_value=[problem]):
+        with mock.patch("ummanu.onboarding.validate", return_value=[problem]):
             code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
 
         self.assertEqual(code, 1)
@@ -343,7 +343,7 @@ class OnboardingTests(unittest.TestCase):
         self.binding.write_text(yaml.safe_dump(binding), encoding="utf-8")
 
         with mock.patch(
-            "secretary.config.load_schema",
+            "ummanu.config.load_schema",
             side_effect=lambda name: extended if name == "project-binding" else load_schema(name),
         ):
             code, _ = project_add(str(self.repo), str(self.instance), dry_run=False)
@@ -429,7 +429,7 @@ class OnboardingTests(unittest.TestCase):
         adapter = self.legacy_enabled_project()
         before = self.binding.read_bytes(), adapter.read_bytes()
 
-        with mock.patch("secretary.onboarding.scan_repo", side_effect=ScannerError("injected")):
+        with mock.patch("ummanu.onboarding.scan_repo", side_effect=ScannerError("injected")):
             code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
         self.assertEqual(code, 1)
@@ -450,7 +450,7 @@ class OnboardingTests(unittest.TestCase):
                 raise OSError(5, "injected")
             return real_replace(source, target)
 
-        with mock.patch("secretary._fsutil.os.replace", side_effect=fail_second):
+        with mock.patch("ummanu._fsutil.os.replace", side_effect=fail_second):
             code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
         self.assertEqual(code, 1)
@@ -475,7 +475,7 @@ class OnboardingTests(unittest.TestCase):
             return result
 
         with (
-            mock.patch("secretary._fsutil.os.replace", side_effect=crash_after_first),
+            mock.patch("ummanu._fsutil.os.replace", side_effect=crash_after_first),
             self.assertRaises(KeyboardInterrupt),
         ):
             project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
@@ -642,7 +642,7 @@ class OnboardingTests(unittest.TestCase):
             return result
 
         with (
-            mock.patch("secretary._fsutil.os.replace", side_effect=crash_after_first),
+            mock.patch("ummanu._fsutil.os.replace", side_effect=crash_after_first),
             self.assertRaises(KeyboardInterrupt),
         ):
             project_add(str(self.repo), str(self.instance), dry_run=False)
@@ -681,14 +681,14 @@ class ProjectWithoutOrcaTests(unittest.TestCase):
         (self.instance / "instance.yaml").write_text(
             "version: 1\nname: fresh\ndata_dir: "
             + str(self.root / "data")
-            + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: secretary-\n",
+            + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: ummanu-\n",
             encoding="utf-8",
         )
         self.fixture = self.root / "host"
         self.fixture.mkdir()
         # The host runs this checkout, so reconcile has this checkout's units to install.
         product = Path(__file__).resolve().parents[1]
-        env = mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(product)})
+        env = mock.patch.dict(os.environ, {"UMMANU_REPO": str(product)})
         env.start()
         self.addCleanup(env.stop)
 
@@ -714,9 +714,9 @@ class ProjectWithoutOrcaTests(unittest.TestCase):
         units = FakeUnitInstaller()
         with (
             mock.patch("subprocess.Popen", RecordingPopen),
-            mock.patch("secretary.host_apply.SystemdUnitInstaller", return_value=units),
+            mock.patch("ummanu.host_apply.SystemdUnitInstaller", return_value=units),
             mock.patch(
-                "secretary.host_commands.resolve_runtime_owner", return_value=(None, self.root / "home")
+                "ummanu.host_commands.resolve_runtime_owner", return_value=(None, self.root / "home")
             ),
         ):
             add_code, add_output = self.run_cli(

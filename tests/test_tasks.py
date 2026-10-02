@@ -17,31 +17,35 @@ from pathlib import Path
 from typing import ClassVar
 from unittest import mock
 
-from secretary import tasks
-from secretary.board.card_transitions import CARD_TRANSITIONS
-from secretary.board.completion_evidence import po_completion_record
-from secretary.board.done_retention import close_old_done
-from secretary.board.host import TransitionRequest
-from secretary.board.models import Actor, CardState, EntityKind, Event, RelatedRefs
-from secretary.board.sql_audit import SqlTaskAudit
-from secretary.board.sql_host import SqlBoardHost
-from secretary.board.steward_reports import StewardReportBoard
-from secretary.board.transitions import TRANSITIONS, transition_for
-from secretary.cli import main
-from secretary.data import export_board, init_layout
-from secretary.dispatch.state import claim_mismatch
-from secretary.restore import import_normalized_board
-from secretary.routing_journal import (
+from tests.fakes.tasks import empty_seed, reader_seed, writer_seed
+from tests.observer_identity import as_observer, bind_observer, unbound_observer
+from tests.retired_board import LEGACY_ENV, LEGACY_VALUES, RETIRED_STORE, write_stale_leftovers
+from tests.sql_backend_fixtures import CardStoreCase, ensure_sprint_row
+from ummanu import tasks
+from ummanu.board.card_transitions import CARD_TRANSITIONS
+from ummanu.board.completion_evidence import po_completion_record
+from ummanu.board.done_retention import close_old_done
+from ummanu.board.host import TransitionRequest
+from ummanu.board.models import Actor, CardState, EntityKind, Event, RelatedRefs
+from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.board.sql_host import SqlBoardHost
+from ummanu.board.steward_reports import StewardReportBoard
+from ummanu.board.transitions import TRANSITIONS, transition_for
+from ummanu.cli import main
+from ummanu.data import export_board, init_layout
+from ummanu.dispatch.state import claim_mismatch
+from ummanu.restore import import_normalized_board
+from ummanu.routing_journal import (
     HeadRun,
     attempts,
     head_run_from_profile,
     routing_head_snapshot_from_launch,
     routing_payload,
 )
-from secretary.runtime.head import HeadRun as LifecycleHeadRun
-from secretary.runtime.head import HeadSpec, TaskRef
-from secretary.sprints import refresh_active_sprint_projects
-from secretary.tasks import (
+from ummanu.runtime.head import HeadRun as LifecycleHeadRun
+from ummanu.runtime.head import HeadSpec, TaskRef
+from ummanu.sprints import refresh_active_sprint_projects
+from ummanu.tasks import (
     _STATE_BY_COLUMN,
     ArtifactOwnershipTaskError,
     TaskError,
@@ -52,16 +56,12 @@ from secretary.tasks import (
     specification_revision,
     standing_decision,
 )
-from tests.fakes.tasks import empty_seed, reader_seed, writer_seed
-from tests.observer_identity import as_observer, bind_observer, unbound_observer
-from tests.retired_board import LEGACY_ENV, LEGACY_VALUES, RETIRED_STORE, write_stale_leftovers
-from tests.sql_backend_fixtures import CardStoreCase, ensure_sprint_row
 
 CARD_STATES = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
 
 
 @contextlib.contextmanager
-def open_sprint(ref: str = "sprint:test", project: str = "secretary"):
+def open_sprint(ref: str = "sprint:test", project: str = "ummanu"):
     """Stand in for the open sprint every Ready card needs.
 
     These tests are about the create and audit path; the sprint link is a precondition of a
@@ -71,7 +71,7 @@ def open_sprint(ref: str = "sprint:test", project: str = "secretary"):
     that sprint's own head; an unbound caller is refused before the create path is reached.
     """
     sprint = {"ref": ref, "status": "open", "repositories": [project], "reservations": [project]}
-    with mock.patch("secretary.sprints.SprintReader.show", return_value=sprint), as_observer(ref):
+    with mock.patch("ummanu.sprints.SprintReader.show", return_value=sprint), as_observer(ref):
         yield ref
 
 
@@ -284,7 +284,7 @@ class BoardFixture:
         title: str,
         state: str = "issues",
         description: str = "",
-        lane: str | None = "Secretary",
+        lane: str | None = "Ummanu",
         archived: bool = False,
         metadata: dict[str, object] | None = None,
     ) -> int:
@@ -309,7 +309,7 @@ class BoardFixture:
         self._board("closeTask", task_id=self.backend_id(reference))
 
     @contextlib.contextmanager
-    def open_sprint(self, ref: str = "sprint:test", project: str = "secretary"):
+    def open_sprint(self, ref: str = "sprint:test", project: str = "ummanu"):
         """The open sprint every Ready card needs, and the row `tasks.sprint_ref` refers to (§3.3).
 
         The guard reads `SprintReader`, which the module-level helper mocks; the store makes
@@ -317,7 +317,7 @@ class BoardFixture:
         """
         self.client.ensure_sprint(ref)
         with (
-            mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),
+            mock.patch("ummanu.sprints.sprint_guard_index_initialized", return_value=True),
             open_sprint(ref, project) as sprint,
         ):
             yield sprint
@@ -444,9 +444,9 @@ class TaskReaderTests(BoardFixture, CardStoreCase):
         return self.reader
 
     def test_list_normalizes_and_filters_deterministically(self) -> None:
-        result = self.reader.list(states={"ready"}, project="secretary")
+        result = self.reader.list(states={"ready"}, project="ummanu")
 
-        self.assertEqual([task["ref"] for task in result], ["secretary-468"])
+        self.assertEqual([task["ref"] for task in result], ["ummanu-468"])
         task = result[0]
         self.assertEqual(task["claim"], {"worker": "codex-terra", "claimed_at": None})
         self.assertEqual(task["retry"], {"same": 2, "switched": 0, "heads": ["codex-terra", "claude-opus"]})
@@ -455,13 +455,13 @@ class TaskReaderTests(BoardFixture, CardStoreCase):
         # secretary-1678: the tasks table states the row's kind even where the bag never did.
         self.assertEqual(
             task["extensions"]["extra"],
-            {"record_type": "task", "steward_report": "1", "swimlane": "Secretary"},
+            {"record_type": "task", "steward_report": "1", "swimlane": "Ummanu"},
         )
         self.assertNotIn("comments", task)
 
     def test_list_names_the_card_identity_of_its_backend(self) -> None:
         """§9 of docs/BOARD_STORE.md: the identity is `tasks.board_key` (`task_postgres_<key>`)."""
-        task = self.reader.list(states={"ready"}, project="secretary")[0]
+        task = self.reader.list(states={"ready"}, project="ummanu")[0]
         self.assertEqual(task["id"], "task_postgres_12")
         self.assertEqual(task["audit"]["backend"]["kind"], "postgres")
 
@@ -522,7 +522,7 @@ class TaskCliTests(CardStoreCase):
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
-            code = main(["task", "show", "--ref", "secretary-468", "--instance", tmp])
+            code = main(["task", "show", "--ref", "ummanu-468", "--instance", tmp])
 
         self.assertEqual(code, 1)
         self.assertEqual(output.getvalue(), "")
@@ -540,7 +540,7 @@ class TaskCliTests(CardStoreCase):
             with mock.patch.dict("os.environ", {}, clear=True):
                 for argv in (
                     ["task", "list", "--instance", tmp],
-                    ["task", "show", "--ref", "secretary-468", "--instance", tmp],
+                    ["task", "show", "--ref", "ummanu-468", "--instance", tmp],
                 ):
                     errors = io.StringIO()
                     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors):
@@ -549,7 +549,7 @@ class TaskCliTests(CardStoreCase):
                     self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "backend_unavailable")
 
             # The variable is the same source the write commands already honour.
-            with mock.patch.dict("os.environ", {"SECRETARY_INSTANCE": tmp}, clear=True):
+            with mock.patch.dict("os.environ", {"UMMANU_INSTANCE": tmp}, clear=True):
                 errors = io.StringIO()
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors):
                     code = main(["task", "list"])
@@ -567,14 +567,14 @@ class TaskCliTests(CardStoreCase):
             writer.return_value.create.return_value = {"action": "created"}
             with (
                 tempfile.TemporaryDirectory() as tmp,
-                mock.patch("secretary.task_commands.TaskWriter", writer),
-                mock.patch("secretary.task_commands.card_client"),
+                mock.patch("ummanu.task_commands.TaskWriter", writer),
+                mock.patch("ummanu.task_commands.card_client"),
                 mock.patch.dict("os.environ", {}, clear=True),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 code = main(
                     ["task", "create", "--role", "po", "--instance", tmp, "--data-dir", tmp,
-                     "--project", "secretary", "--type", "infra", "--title", "T", *extra]
+                     "--project", "ummanu", "--type", "infra", "--title", "T", *extra]
                 )
             self.assertEqual(code, 0)
             kwargs = writer.return_value.create.call_args.kwargs
@@ -588,11 +588,11 @@ class TaskCliTests(CardStoreCase):
         output = io.StringIO()
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch("secretary.task_commands.card_client", return_value=client),
+            mock.patch("ummanu.task_commands.card_client", return_value=client),
             mock.patch.dict("os.environ", {}, clear=True),
             contextlib.redirect_stdout(output),
         ):
-            code = main(["task", "show", "--ref", "secretary-468", "--instance", tmp])
+            code = main(["task", "show", "--ref", "ummanu-468", "--instance", tmp])
         self.assertEqual(code, 0)
         card = json.loads(output.getvalue())
         self.assertEqual((card["type"], card["review"], card["live_impact"]), ("research", "skipped", True))
@@ -624,7 +624,7 @@ class TaskCliTests(CardStoreCase):
                         "--instance",
                         str(root),
                         "--project",
-                        "secretary",
+                        "ummanu",
                         "--type",
                         "code",
                         "--title",
@@ -665,7 +665,7 @@ class TaskCliTests(CardStoreCase):
                     "--instance",
                     "/nonexistent-instance",
                     "--project",
-                    "secretary",
+                    "ummanu",
                     "--type",
                     "code",
                     "--title",
@@ -691,7 +691,7 @@ class TaskCliTests(CardStoreCase):
             client.save_metadata(12, claim="")
             output, errors = io.StringIO(), io.StringIO()
             with (
-                mock.patch("secretary.task_commands.card_client", return_value=client),
+                mock.patch("ummanu.task_commands.card_client", return_value=client),
                 contextlib.redirect_stdout(output),
                 contextlib.redirect_stderr(errors),
             ):
@@ -702,7 +702,7 @@ class TaskCliTests(CardStoreCase):
                         "--role",
                         "po",
                         "--ref",
-                        "secretary-468",
+                        "ummanu-468",
                         "--data-dir",
                         str(data_dir),
                         "--reason-file",
@@ -739,7 +739,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
     def test_forbidden_role_does_not_write(self) -> None:
         before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "not permitted") as raised:
-            self.writer.report(role="reviewer", actor="r", reference="secretary-468", kind="done", body="")
+            self.writer.report(role="reviewer", actor="r", reference="ummanu-468", kind="done", body="")
         self.assertEqual(raised.exception.code, "role_forbidden")
         self.assertBoardUnchanged(before)
         # The claim the effect cannot carry: the guard refused before the board was touched at
@@ -750,7 +750,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
     def test_stale_transition_does_not_write(self) -> None:
         before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "may not move") as raised:
-            self.writer.move(role="po", actor="p", reference="secretary-468", target="ready", reason="")
+            self.writer.move(role="po", actor="p", reference="ummanu-468", target="ready", reason="")
         self.assertEqual(raised.exception.code, "transition_forbidden")
         self.assertBoardUnchanged(before)
 
@@ -761,7 +761,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.writer.create(
                 role="steward",
                 actor="dispatch",
-                project="secretary",
+                project="ummanu",
                 task_type="research",
                 title="not an accounting artifact",
                 target="in_progress",
@@ -772,18 +772,18 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
     def test_steward_report_create_is_audited_directly_in_progress_and_replays(self) -> None:
         self.add_card(
-            reference="secretary-700", title="Archived high-water mark", state="done", archived=True
+            reference="ummanu-700", title="Archived high-water mark", state="done", archived=True
         )
 
         result = self.writer.create_steward_report(
             actor="dispatch",
-            project="secretary",
+            project="ummanu",
             title="steward: hourly sweep",
             slug="steward-sweep-20260830-120000",
             request_id="steward-report-create",
         )
 
-        self.assertEqual(result["task"]["ref"], "secretary-701")
+        self.assertEqual(result["task"]["ref"], "ummanu-701")
         self.assertEqual(result["task"]["state"], "in_progress")
         # The whole card, compared exactly, and not a list of fields that happen to match: the
         # released case compared the complete metadata map, so an extra key the create starts
@@ -791,18 +791,18 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         # as named fields, everything else in `extensions.extra` — so the exhaustive claim
         # survives the move intact.  Three keys are dropped by name because they are the board's
         # identity and placement rather than anything the create stamped.
-        report = self.card("secretary-701")
+        report = self.card("ummanu-701")
         for backend_owned in ("id", "audit", "position"):
             report.pop(backend_owned)
         self.assertEqual(
             report,
             {
-                "ref": "secretary-701",
+                "ref": "ummanu-701",
                 "title": "steward: hourly sweep",
                 "description": "",
                 "state": "in_progress",
                 "closed": False,
-                "project": "secretary",
+                "project": "ummanu",
                 "type": "research",
                 "blocked_by": None,
                 "claim": {"worker": "steward-sweep-20260830-120000", "claimed_at": None},
@@ -835,7 +835,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
                     "extra": {
                         "record_type": "task",
                         "steward_report": "1",
-                        "swimlane": "Secretary",
+                        "swimlane": "Ummanu",
                     }
                 },
                 "comments": [],
@@ -851,7 +851,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
         replay = self.writer.create_steward_report(
             actor="dispatch",
-            project="secretary",
+            project="ummanu",
             title="steward: hourly sweep",
             slug="steward-sweep-20260830-120000",
             request_id="steward-report-create",
@@ -860,14 +860,14 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertBoardUnchanged(after_create)
 
     def test_steward_cannot_close_an_ordinary_in_progress_card(self) -> None:
-        self.place_card("secretary-468", "in_progress")
-        self.clear_card_metadata("secretary-468", "steward_report")
+        self.place_card("ummanu-468", "in_progress")
+        self.clear_card_metadata("ummanu-468", "steward_report")
         before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "only for its own report") as raised:
             self.writer.move(
                 role="steward",
                 actor="dispatch",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="done",
                 reason="close",
                 request_id="ordinary-steward-close",
@@ -876,11 +876,11 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertBoardUnchanged(before)
 
     def test_steward_can_close_its_in_progress_report(self) -> None:
-        self.place_card("secretary-468", "in_progress")
+        self.place_card("ummanu-468", "in_progress")
         result = self.writer.move(
             role="steward",
             actor="dispatch",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="done",
             reason="sweep complete",
             request_id="report-steward-close",
@@ -890,23 +890,23 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
     def test_steward_report_adapter_is_structural_task_reader_writer_composition(self) -> None:
         board = StewardReportBoard(self.writer.reader, self.writer, actor="dispatch")
         reference = board.create_report(
-            project="secretary",
+            project="ummanu",
             title="steward: hourly sweep",
             slug="steward-sweep-20260830-120002",
         )
 
-        self.assertEqual(board.in_progress_reports(project="secretary")[0]["reference"], reference)
+        self.assertEqual(board.in_progress_reports(project="ummanu")[0]["reference"], reference)
         board.move_report(reference=reference, target="done", reason="sweep complete")
         self.assertEqual(self.writer.reader.show(reference)["state"], "done")
 
     def test_board_host_executes_every_declared_card_edge_through_the_typed_canon(self) -> None:
         host = self.writer.board_host
         for index, declaration in enumerate(TRANSITIONS[EntityKind.CARD].values()):
-            self.place_card("secretary-468", declaration.source.value)
+            self.place_card("ummanu-468", declaration.source.value)
             result = host.transition(
                 TransitionRequest(
                     EntityKind.CARD,
-                    "secretary-468",
+                    "ummanu-468",
                     declaration.target,
                     Actor("po", "operator"),
                     "registry contract",
@@ -920,11 +920,11 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
                 (result.event.source_state, result.event.target_state),
                 (declaration.source.value, declaration.target.value),
             )
-        self.assertEqual(len(host.canon.events(ref="secretary-468")), len(TRANSITIONS[EntityKind.CARD]))
+        self.assertEqual(len(host.canon.events(ref="ummanu-468")), len(TRANSITIONS[EntityKind.CARD]))
 
     def test_the_typed_event_is_staged_exactly_once_before_the_column_effect(self) -> None:
         """Staging is a precondition of the effect, and the committed event is that same record."""
-        self.place_card("secretary-468", "in_progress")
+        self.place_card("ummanu-468", "in_progress")
         staged: list[dict | None] = []
         real_call = self.client.call
 
@@ -937,7 +937,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.writer.move(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="validate",
                 reason="submit",
                 request_id="staged-once",
@@ -954,21 +954,21 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
     def _pending_typed_move(self, request_id: str, target: str = "ready") -> int:
         """Leave the supported post-effect failure: the column moved, its event did not commit."""
-        self.place_card("secretary-468", "in_progress")
+        self.place_card("ummanu-468", "in_progress")
         with mock.patch.object(self.writer.audit, "append", side_effect=OSError("disk full")):
             with self.assertRaisesRegex(TaskError, "audit repair"):
                 self.writer.move(
                     role="dispatcher",
                     actor="d",
-                    reference="secretary-468",
+                    reference="ummanu-468",
                     target=target,
                     reason="",
                     request_id=request_id,
                 )
-        self.assertEqual(self.writer.reader.show("secretary-468")["state"], target)
+        self.assertEqual(self.writer.reader.show("ummanu-468")["state"], target)
         # The cleanup this edge owes the board runs inside the transition, so it is already
         # complete when only the commit fails.
-        self.assertIsNone(self.card("secretary-468")["claim"]["worker"])
+        self.assertIsNone(self.card("ummanu-468")["claim"]["worker"])
         return self.board_call_count("moveTaskPosition")
 
     def test_a_refused_card_edge_stages_no_typed_event(self) -> None:
@@ -977,7 +977,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.writer.move(
                 role="po",
                 actor="p",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="ready",
                 reason="",
                 request_id="refused-edge",
@@ -998,8 +998,8 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             "actor": {"role": "dispatcher", "id": "d"},
             "kind": "moved",
             "outcome": "success",
-            "task_id": self.writer.reader.show("secretary-468")["id"],
-            "ref": "secretary-468",
+            "task_id": self.writer.reader.show("ummanu-468")["id"],
+            "ref": "ummanu-468",
             "backend": {"kind": RETIRED_STORE, "task_id": 12, "revision": "r1"},
             "request_id": request_id,
             "payload": dict(payload),
@@ -1007,7 +1007,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
     def test_generic_pending_contender_cannot_be_published_as_a_typed_transition(self) -> None:
         """A released record owns its request id, and the typed request may not borrow it."""
-        self.place_card("secretary-468", "in_progress")
+        self.place_card("ummanu-468", "in_progress")
         contender = self._released_move_record("contended-transition", to="validate")
         contender["event_id"] = "legacy-contender"
         self.writer.audit.stage("contended-transition", contender)
@@ -1017,7 +1017,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.writer.move(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="validate",
                 reason="submit",
                 request_id="contended-transition",
@@ -1035,7 +1035,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         Dispatcher move ids are deterministic per attempt, so an attempt spanning the upgrade
         re-issues one. It has to answer as the released replay it is, not as a typed request.
         """
-        self.place_card("secretary-468", "validate")
+        self.place_card("ummanu-468", "validate")
         released = self._released_move_record(
             "released-move",
             **{
@@ -1051,7 +1051,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         replayed = self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="validate",
             reason="submit",
             request_id="released-move",
@@ -1066,7 +1066,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
     def test_a_released_pending_generic_move_is_finished_by_its_released_cleanup(self) -> None:
         """The other released half: a pending generic move still completes its Ready reset."""
-        self.place_card("secretary-468", "ready")
+        self.place_card("ummanu-468", "ready")
         released = self._released_move_record(
             "released-pending-move",
             **{"from": "in_progress", "to": "ready", "reason_sha256": None},
@@ -1076,7 +1076,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         replayed = self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="ready",
             reason="",
             request_id="released-pending-move",
@@ -1084,7 +1084,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
         self.assertIs(replayed["replayed"], True)
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
-        task = self.writer.reader.show("secretary-468")
+        task = self.writer.reader.show("ummanu-468")
         # Recovery finished the Ready reset and moved nothing: the card is where the released
         # half-move already left it.
         self.assertEqual(task["state"], "ready")
@@ -1093,13 +1093,13 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
     def test_retry_does_not_repeat_backend_write_or_event(self) -> None:
         result = self.writer.comment(
-            role="worker", actor="w", reference="secretary-468", body="safe", request_id="same"
+            role="worker", actor="w", reference="ummanu-468", body="safe", request_id="same"
         )
         second = self.writer.comment(
-            role="worker", actor="w", reference="secretary-468", body="safe", request_id="same"
+            role="worker", actor="w", reference="ummanu-468", body="safe", request_id="same"
         )
         self.assertEqual(result["event_id"], second["event_id"])
-        self.assertEqual(sum("safe" in body for body in self.card_comments("secretary-468")), 1)
+        self.assertEqual(sum("safe" in body for body in self.card_comments("ummanu-468")), 1)
         self.assertEqual(len(self.writer.audit.events()), 1)
 
     def test_comment_scrubs_runtime_secret_before_board_and_audit(self) -> None:
@@ -1108,16 +1108,16 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         url = "https://board.example.invalid/rpc"
         runtime.parent.mkdir()
         runtime.write_text(f"EXAMPLE_URL={url}\nEXAMPLE_API_TOKEN={secret}\n", encoding="utf-8")
-        with mock.patch.dict(os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(runtime)}):
+        with mock.patch.dict(os.environ, {"UMMANU_RUNTIME_ENV_FILE": str(runtime)}):
             self.writer.comment(
                 role="worker",
                 actor="w",
-                reference="secretary-468",
+                reference="ummanu-468",
                 body=f"Check {url}; token {secret}",
                 request_id="scrubbed-comment",
             )
 
-        content = self.card_comments("secretary-468")[-1]
+        content = self.card_comments("ummanu-468")[-1]
         self.assertIn(url, content)
         self.assertNotIn(secret, content)
         self.assertIn("«REDACTED»:env-value", content)
@@ -1129,14 +1129,14 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.writer.comment(
             role="worker",
             actor="w",
-            reference="secretary-468",
+            reference="ummanu-468",
             body=ordinary,
             request_id="ordinary-long-comment",
         )
         self.writer.report(
             role="worker",
             actor="w",
-            reference="secretary-468",
+            reference="ummanu-468",
             kind="blocked",
             classification="external_fact",
             body=ordinary,
@@ -1145,27 +1145,27 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.writer.verdict(
             role="reviewer",
             actor="r",
-            reference="secretary-468",
+            reference="ummanu-468",
             kind="red",
             body=ordinary,
             request_id="ordinary-long-verdict",
         )
 
-        comments = self.card_comments("secretary-468")
+        comments = self.card_comments("ummanu-468")
         self.assertTrue(all(ordinary in content for content in comments[-3:]))
 
     def test_custom_catalog_value_is_scrubbed_before_a_board_comment(self) -> None:
         secret = "custom-catalogued-credential"
-        with mock.patch("secretary.secret_store.redaction_values", return_value=(secret,)):
+        with mock.patch("ummanu.secret_store.redaction_values", return_value=(secret,)):
             self.writer.comment(
                 role="worker",
                 actor="w",
-                reference="secretary-468",
+                reference="ummanu-468",
                 body=secret,
                 request_id="custom-catalog-scrub",
             )
 
-        content = self.card_comments("secretary-468")[-1]
+        content = self.card_comments("ummanu-468")[-1]
         self.assertNotIn(secret, content)
         self.assertIn("«REDACTED»:env-value", content)
 
@@ -1174,13 +1174,13 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.board_refuses("createComment"),
             self.assertRaisesRegex(TaskError, "refused"),
         ):
-            self.writer.comment(role="worker", actor="w", reference="secretary-468", body="safe")
+            self.writer.comment(role="worker", actor="w", reference="ummanu-468", body="safe")
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
     def test_edit_is_po_only_and_requires_a_change(self) -> None:
         before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "not permitted") as raised:
-            self.writer.edit(role="worker", actor="w", reference="secretary-468", description="new spec")
+            self.writer.edit(role="worker", actor="w", reference="ummanu-468", description="new spec")
         self.assertEqual(raised.exception.code, "role_forbidden")
         self.assertBoardUnchanged(before)
         # As in test_forbidden_role_does_not_write: both guards refuse before the board is
@@ -1188,28 +1188,28 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertEqual(self.rpc, [])
 
         with self.assertRaisesRegex(TaskError, "requires a new") as raised:
-            self.writer.edit(role="po", actor="operator", reference="secretary-468")
+            self.writer.edit(role="po", actor="operator", reference="ummanu-468")
         self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
         self.assertEqual(self.rpc, [])
 
     def test_edit_refuses_active_states(self) -> None:
-        self.place_card("secretary-468", "in_progress")
+        self.place_card("ummanu-468", "in_progress")
         before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "Ready or Blocked") as raised:
-            self.writer.edit(role="po", actor="operator", reference="secretary-468", description="new spec")
+            self.writer.edit(role="po", actor="operator", reference="ummanu-468", description="new spec")
         self.assertEqual(raised.exception.code, "edit_forbidden")
         self.assertBoardUnchanged(before)
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
     def test_edit_updates_spec_and_routing_and_writes_audit(self) -> None:
-        before = self.card("secretary-468")
+        before = self.card("ummanu-468")
         old_description = str(before["description"])
 
         result = self.writer.edit(
             role="po",
             actor="operator",
-            reference="secretary-468",
+            reference="ummanu-468",
             description="revised spec",
             head="codex-terra",
             review_head="claude-opus",
@@ -1222,7 +1222,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         # two routing overrides changed, and the card is otherwise the card it was.  Reading it
         # back proves more than the calls did — a field written and then overwritten by another
         # write would still be caught here.
-        after = self.card("secretary-468")
+        after = self.card("ummanu-468")
         self.assertEqual(
             {key: value for key, value in after.items() if key != "audit"},
             {
@@ -1246,19 +1246,19 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertEqual(payload["head"], "codex-terra")
         self.assertEqual(payload["review_head"], "claude-opus")
         self.assertEqual(
-            specification_revision(self.writer.audit.events("secretary-468"), "revised spec"),
+            specification_revision(self.writer.audit.events("ummanu-468"), "revised spec"),
             event["event_id"],
         )
 
     def test_edit_retry_does_not_repeat_backend_write(self) -> None:
         first = self.writer.edit(
-            role="po", actor="operator", reference="secretary-468", description="v2", request_id="same-edit"
+            role="po", actor="operator", reference="ummanu-468", description="v2", request_id="same-edit"
         )
         second = self.writer.edit(
-            role="po", actor="operator", reference="secretary-468", description="v2", request_id="same-edit"
+            role="po", actor="operator", reference="ummanu-468", description="v2", request_id="same-edit"
         )
         self.assertEqual(first["event_id"], second["event_id"])
-        self.assertEqual(self.card("secretary-468")["description"], "v2")
+        self.assertEqual(self.card("ummanu-468")["description"], "v2")
         # A repeated write of the same description leaves the same card, so the only observation
         # of "it did not write twice" is the count of the product's own calls.
         self.assertEqual(self.board_call_count("updateTask"), 1)
@@ -1266,61 +1266,61 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
     def test_archive_is_po_only_and_requires_reason(self) -> None:
         before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "not permitted") as raised:
-            self.writer.archive(role="worker", actor="w", reference="secretary-468", reason="cleanup")
+            self.writer.archive(role="worker", actor="w", reference="ummanu-468", reason="cleanup")
         self.assertEqual(raised.exception.code, "role_forbidden")
         self.assertBoardUnchanged(before)
 
         with self.assertRaisesRegex(TaskError, "non-empty reason") as raised:
-            self.writer.archive(role="po", actor="operator", reference="secretary-468", reason=" ")
+            self.writer.archive(role="po", actor="operator", reference="ummanu-468", reason=" ")
         self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
     def test_archive_refuses_live_work_or_active_claim(self) -> None:
         before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "active claim") as raised:
-            self.writer.archive(role="po", actor="operator", reference="secretary-468", reason="cleanup")
+            self.writer.archive(role="po", actor="operator", reference="ummanu-468", reason="cleanup")
         self.assertEqual(raised.exception.code, "live_work")
         self.assertBoardUnchanged(before)
 
-        self.clear_card_metadata("secretary-468", "claim")
-        self.place_card("secretary-468", "validate")
+        self.clear_card_metadata("ummanu-468", "claim")
+        self.place_card("ummanu-468", "validate")
         parked = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "live worker or reviewer") as raised:
-            self.writer.archive(role="po", actor="operator", reference="secretary-468", reason="cleanup")
+            self.writer.archive(role="po", actor="operator", reference="ummanu-468", reason="cleanup")
         self.assertEqual(raised.exception.code, "live_work")
         self.assertBoardUnchanged(parked)
 
     def test_archive_closes_card_and_writes_audit(self) -> None:
-        self.clear_card_metadata("secretary-468", "claim")
+        self.clear_card_metadata("ummanu-468", "claim")
 
         result = self.writer.archive(
             role="po",
             actor="operator",
-            reference="secretary-468",
+            reference="ummanu-468",
             reason="backlog cleanup",
             request_id="archive-once",
         )
 
         self.assertEqual(result["action"], "archived")
-        self.assertTrue(self.card("secretary-468")["closed"])
+        self.assertTrue(self.card("ummanu-468")["closed"])
         # One reason comment, stored, and no second one.  The order in which the two board
         # writes were issued is a wire observation, not asserted here.
         self.assertEqual(
-            [body for body in self.card_comments("secretary-468") if body.startswith("[archive]")],
+            [body for body in self.card_comments("ummanu-468") if body.startswith("[archive]")],
             ["[archive]\nbacklog cleanup"],
         )
         event = self.writer.audit.events()[0]
         self.assertEqual(event["kind"], "archived")
         self.assertEqual(event["payload"].keys(), {"reason_sha256"})
-        self.assertNotIn("secretary-468", [task["ref"] for task in self.writer.reader.list()])
-        from secretary.dispatch.cleanup import CleanupJournal
+        self.assertNotIn("ummanu-468", [task["ref"] for task in self.writer.reader.list()])
+        from ummanu.dispatch.cleanup import CleanupJournal
         retained = CleanupJournal(self.writer.data_dir).summary()
-        self.assertEqual(retained[0]["ref"], "secretary-468")
+        self.assertEqual(retained[0]["ref"], "ummanu-468")
         self.assertEqual(retained[0]["disposition"], "archive")
         self.assertEqual(retained[0]["status"], "pending")
 
     def test_archive_refuses_dispatcher_record_after_claim_was_cleared(self) -> None:
-        self.clear_card_metadata("secretary-468", "claim")
+        self.clear_card_metadata("ummanu-468", "claim")
         state_dir = Path(self.tmpdir.name) / "dispatcher"
         state_dir.mkdir()
         (state_dir / "production-state.json").write_text(
@@ -1329,9 +1329,9 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
                     "version": 1,
                     "phase": "production",
                     "records": {
-                        "secretary-468": {
-                            "worker": "worker-secretary-468",
-                            "workspace": "/home/dev/orca/workspaces/secretary/468-archive",
+                        "ummanu-468": {
+                            "worker": "worker-ummanu-468",
+                            "workspace": "/home/dev/orca/workspaces/ummanu/468-archive",
                             "handle": "terminal-1",
                             "review_handle": "review-1",
                         }
@@ -1346,7 +1346,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.writer.archive(
                 role="po",
                 actor="operator",
-                reference="secretary-468",
+                reference="ummanu-468",
                 reason="cleanup",
                 request_id="archive-live-dispatcher-record",
             )
@@ -1355,46 +1355,46 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertBoardUnchanged(before)
 
     def test_restore_comment_retry_uses_digest_occurrence_not_history_index(self) -> None:
-        self.add_comment("secretary-468", "first")
+        self.add_comment("ummanu-468", "first")
         with self.board_loses_reply("createComment"):
             with self.assertRaisesRegex(TaskError, "audit repair"):
                 self.writer.restore_comment(
-                    reference="secretary-468",
+                    reference="ummanu-468",
                     body="second",
                     occurrence=0,
                     request_id="restore-second-lost-reply",
                 )
         self.writer.restore_comment(
-            reference="secretary-468",
+            reference="ummanu-468",
             body="second",
             occurrence=0,
             request_id="restore-second-lost-reply",
         )
-        self.assertEqual(self.card_comments("secretary-468"), ["first", "second"])
+        self.assertEqual(self.card_comments("ummanu-468"), ["first", "second"])
 
         with self.board_loses_reply("createComment"):
             with self.assertRaisesRegex(TaskError, "audit repair"):
                 self.writer.restore_comment(
-                    reference="secretary-468",
+                    reference="ummanu-468",
                     body="second",
                     occurrence=1,
                     request_id="restore-duplicate-lost-reply",
                 )
         self.writer.restore_comment(
-            reference="secretary-468",
+            reference="ummanu-468",
             body="second",
             occurrence=1,
             request_id="restore-duplicate-lost-reply",
         )
-        self.assertEqual(self.card_comments("secretary-468"), ["first", "second", "second"])
+        self.assertEqual(self.card_comments("ummanu-468"), ["first", "second", "second"])
 
     def test_dispatcher_claim_stamps_metadata_moves_and_audits(self) -> None:
-        self.clear_card_metadata("secretary-468", "claim")
+        self.clear_card_metadata("ummanu-468", "claim")
         result = self.writer.claim(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
-            worker="secretary-468-runtime",
+            reference="ummanu-468",
+            worker="ummanu-468-runtime",
             resolved_head="codex",
             resolved_review_head="codex-reviewer",
             request_id="claim-once",
@@ -1402,8 +1402,8 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
         self.assertEqual(result["action"], "claimed")
         self.assertEqual(result["task"]["state"], "in_progress")
-        claimed = self.card("secretary-468")
-        self.assertEqual(claimed["claim"]["worker"], "secretary-468-runtime")
+        claimed = self.card("ummanu-468")
+        self.assertEqual(claimed["claim"]["worker"], "ummanu-468-runtime")
         self.assertEqual(claimed["routing"]["resolved_worker_head"], "codex")
         self.assertEqual(claimed["routing"]["resolved_review_head"], "codex-reviewer")
         event = self.writer.audit.events()[0]
@@ -1415,12 +1415,12 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             result = self.writer.create(
                 role="observer",
                 actor="observer",
-                project="secretary",
+                project="ummanu",
                 task_type="code",
                 title="Launch mode",
                 description="body",
                 target="ready",
-                reference="secretary-522",
+                reference="ummanu-522",
                 head="codex-extra",
                 codex_launch_mode="tui",
                 request_id="create-tui",
@@ -1428,11 +1428,11 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             )
 
         self.assertEqual(result["action"], "created")
-        self.assertEqual(result["task"]["ref"], "secretary-522")
+        self.assertEqual(result["task"]["ref"], "ummanu-522")
         self.assertEqual(result["task"]["state"], "ready")
         self.assertEqual(result["task"]["routing"]["head_override"], "codex-extra")
         self.assertEqual(result["task"]["routing"]["codex_launch_mode"], "tui")
-        self.assertEqual(self.card("secretary-522")["routing"]["codex_launch_mode"], "tui")
+        self.assertEqual(self.card("ummanu-522")["routing"]["codex_launch_mode"], "tui")
         event = self.writer.audit.events()[0]
         self.assertEqual(event["kind"], "created")
         self.assertEqual(event["payload"]["codex_launch_mode"], "tui")
@@ -1452,7 +1452,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             return self.writer.create(
                 role="observer",
                 actor="observer",
-                project="secretary",
+                project="ummanu",
                 task_type=task_type,
                 title=f"{task_type} card",
                 reference=reference,
@@ -1467,37 +1467,37 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             (("code", "required"), ("research", "skipped"), ("infra", "skipped")), start=530
         ):
             with self.subTest(task_type=task_type):
-                result = self.create_kind(f"secretary-{number}", task_type)
-                card = self.card(f"secretary-{number}")
+                result = self.create_kind(f"ummanu-{number}", task_type)
+                card = self.card(f"ummanu-{number}")
                 self.assertEqual(
                     (card["type"], card["review"], card["live_impact"]), (task_type, review, False)
                 )
                 self.assertEqual(result["task"]["review"], review)
-                self.assertEqual(self.writer.audit.events(f"secretary-{number}")[0]["payload"]["review"], review)
+                self.assertEqual(self.writer.audit.events(f"ummanu-{number}")[0]["payload"]["review"], review)
         # The stored value is a board fact: clearing it is what makes a card legacy again.
-        self.assertEqual(self.stored_metadata("secretary-531")["review"], "skipped")
+        self.assertEqual(self.stored_metadata("ummanu-531")["review"], "skipped")
 
     def test_a_legacy_card_with_no_stored_review_reads_as_required(self) -> None:
-        card = self.card("secretary-468")
-        self.assertNotIn("review", self.stored_metadata("secretary-468"))
+        card = self.card("ummanu-468")
+        self.assertNotIn("review", self.stored_metadata("ummanu-468"))
         self.assertEqual((card["review"], card["live_impact"]), ("required", False))
 
     def test_create_accepts_a_review_override_in_both_directions(self) -> None:
-        self.create_kind("secretary-540", "code", review="skipped")
-        self.create_kind("secretary-541", "research", review="required")
-        self.create_kind("secretary-542", "infra", review="required")
+        self.create_kind("ummanu-540", "code", review="skipped")
+        self.create_kind("ummanu-541", "research", review="required")
+        self.create_kind("ummanu-542", "infra", review="required")
         self.assertEqual(
-            [self.card(f"secretary-{number}")["review"] for number in (540, 541, 542)],
+            [self.card(f"ummanu-{number}")["review"] for number in (540, 541, 542)],
             ["skipped", "required", "required"],
         )
 
     def test_an_explicit_reviewer_head_does_not_decide_the_review(self) -> None:
         """Whether review runs is `--review` or the kind default; a reviewer head never changes it."""
-        self.create_kind("secretary-543", "code", review_head="claude-opus")
-        card = self.card("secretary-543")
+        self.create_kind("ummanu-543", "code", review_head="claude-opus")
+        card = self.card("ummanu-543")
         self.assertEqual((card["review"], card["routing"]["review_head_override"]), ("required", "claude-opus"))
-        self.create_kind("secretary-544", "research", review="required", review_head="claude-opus")
-        self.assertEqual(self.card("secretary-544")["review"], "required")
+        self.create_kind("ummanu-544", "research", review="required", review_head="claude-opus")
+        self.assertEqual(self.card("ummanu-544")["review"], "required")
 
         before = self.board_snapshot()
         for task_type, fields in (
@@ -1506,12 +1506,12 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             ("research", {}),
         ):
             with self.subTest(task_type=task_type), self.assertRaisesRegex(TaskError, "review is skipped") as raised:
-                self.create_kind("secretary-545", task_type, review_head="claude-opus", **fields)
+                self.create_kind("ummanu-545", task_type, review_head="claude-opus", **fields)
             self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
         with self.assertRaisesRegex(TaskError, "review must be one of") as raised:
-            self.create_kind("secretary-545", "code", review="sometimes")
+            self.create_kind("ummanu-545", "code", review="sometimes")
         self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
@@ -1519,7 +1519,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         before = self.board_snapshot()
         for task_type in ("code", "infra"):
             with self.subTest(task_type=task_type), self.assertRaisesRegex(TaskError, "research attribute") as raised:
-                self.create_kind("secretary-545", task_type, live_impact=True, description=self.BOUNDS)
+                self.create_kind("ummanu-545", task_type, live_impact=True, description=self.BOUNDS)
             self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
@@ -1538,35 +1538,35 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             ),
         ):
             with self.subTest(missing=missing), self.assertRaisesRegex(TaskError, re.escape(missing)) as raised:
-                self.create_kind("secretary-546", "research", live_impact=True, description=description)
+                self.create_kind("ummanu-546", "research", live_impact=True, description=description)
             self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
-        result = self.create_kind("secretary-546", "research", live_impact=True, description=self.BOUNDS)
+        result = self.create_kind("ummanu-546", "research", live_impact=True, description=self.BOUNDS)
         self.assertTrue(result["task"]["live_impact"])
-        card = self.card("secretary-546")
+        card = self.card("ummanu-546")
         self.assertEqual((card["type"], card["review"], card["live_impact"]), ("research", "skipped", True))
-        self.assertTrue(self.writer.audit.events("secretary-546")[0]["payload"]["live_impact"])
+        self.assertTrue(self.writer.audit.events("ummanu-546")[0]["payload"]["live_impact"])
         # Without the flag a research card's description is its own business.
-        self.create_kind("secretary-547", "research", description="no bounds needed")
-        self.assertFalse(self.card("secretary-547")["live_impact"])
+        self.create_kind("ummanu-547", "research", description="no bounds needed")
+        self.assertFalse(self.card("ummanu-547")["live_impact"])
 
     def test_edit_cannot_strip_the_impact_bounds_of_a_live_impact_card(self) -> None:
-        self.create_kind("secretary-548", "research", live_impact=True, description=self.BOUNDS)
+        self.create_kind("ummanu-548", "research", live_impact=True, description=self.BOUNDS)
         before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "needs a '## Impact bounds' section") as raised:
-            self.writer.edit(role="po", actor="operator", reference="secretary-548", description="bounds gone")
+            self.writer.edit(role="po", actor="operator", reference="ummanu-548", description="bounds gone")
         self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
         revised = self.BOUNDS.replace("Read the staging queue.", "Read the staging queue twice.")
-        self.create_kind("secretary-547", "research", description=self.BOUNDS)
+        self.create_kind("ummanu-547", "research", description=self.BOUNDS)
         with self.open_sprint():
-            self.writer.edit(role="observer", actor="observer", reference="secretary-548", description=revised)
+            self.writer.edit(role="observer", actor="observer", reference="ummanu-548", description=revised)
             # A card without the flag keeps its free-form description.
-            self.writer.edit(role="observer", actor="observer", reference="secretary-547", description="anything")
-        self.assertEqual(self.card("secretary-548")["description"], revised)
-        self.assertEqual(self.card("secretary-547")["description"], "anything")
+            self.writer.edit(role="observer", actor="observer", reference="ummanu-547", description="anything")
+        self.assertEqual(self.card("ummanu-548")["description"], revised)
+        self.assertEqual(self.card("ummanu-547")["description"], "anything")
 
     def test_the_audit_that_follows_the_client_sees_the_report_the_journal_never_gets(self) -> None:
         """What the dispatcher must read on this backend, and what it read on 2026-09-10.
@@ -1590,14 +1590,14 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.writer.report(
             role="worker",
             actor="w",
-            reference="secretary-468",
+            reference="ummanu-468",
             kind="done",
             body="ready",
             request_id="audit-follows-the-client",
         )
         audit = tasks.task_audit_for(self.client, self.tmpdir.name)
         self.assertIsInstance(audit, SqlTaskAudit)
-        reported = audit.events("secretary-468", kind="reported")
+        reported = audit.events("ummanu-468", kind="reported")
         self.assertEqual([event["request_id"] for event in reported], ["audit-follows-the-client"])
         self.assertEqual(reported[0]["data"]["marker"], "report:done")
         self.assertFalse((Path(self.tmpdir.name) / "board" / "events.ndjson").exists())
@@ -1607,24 +1607,24 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         destination = self.card_store(empty_seed(), instance_dir=self.tmpdir.name)
         with destination.transaction():
             destination._execute(
-                "INSERT INTO projects (project_id, enabled, registry_present) VALUES ('secretary', true, true)"
+                "INSERT INTO projects (project_id, enabled, registry_present) VALUES ('ummanu', true, true)"
             )
             ensure_sprint_row(destination, "sprint:test")
         return destination
 
     def test_kind_review_and_live_impact_survive_export_and_restore(self) -> None:
-        self.create_kind("secretary-550", "research", live_impact=True, description=self.BOUNDS)
-        self.create_kind("secretary-551", "infra", review="required")
-        self.create_kind("secretary-552", "code", review="skipped")
+        self.create_kind("ummanu-550", "research", live_impact=True, description=self.BOUNDS)
+        self.create_kind("ummanu-551", "infra", review="required")
+        self.create_kind("ummanu-552", "code", review="skipped")
         # The fixture's two legacy rows predate `record_type`; the export requires one.
-        self.set_card_metadata("secretary-468", record_type="task")
-        self.set_card_metadata("old-1", record_type="task", project="secretary", task_type="research")
+        self.set_card_metadata("ummanu-468", record_type="task")
+        self.set_card_metadata("old-1", record_type="task", project="ummanu", task_type="research")
         expected = {
             "old-1": ("research", "required", False),
-            "secretary-468": ("code", "required", False),
-            "secretary-550": ("research", "skipped", True),
-            "secretary-551": ("infra", "required", False),
-            "secretary-552": ("code", "skipped", False),
+            "ummanu-468": ("code", "required", False),
+            "ummanu-550": ("research", "skipped", True),
+            "ummanu-551": ("infra", "required", False),
+            "ummanu-552": ("code", "skipped", False),
         }
         data_dir = Path(self.tmpdir.name) / "round-trip"
         init_layout(data_dir)
@@ -1639,9 +1639,9 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             card["reference"]: card
             for card in json.loads((data_dir / "board" / "cards.json").read_text(encoding="utf-8"))["cards"]
         }
-        self.assertEqual(exported["secretary-550"]["metadata"]["live_impact"], "1")
-        self.assertEqual(exported["secretary-551"]["metadata"]["review"], "required")
-        self.assertNotIn("review", exported["secretary-468"]["metadata"])
+        self.assertEqual(exported["ummanu-550"]["metadata"]["live_impact"], "1")
+        self.assertEqual(exported["ummanu-551"]["metadata"]["review"], "required")
+        self.assertNotIn("review", exported["ummanu-468"]["metadata"])
 
         destination = self.restore_destination()
         self.assertEqual(import_normalized_board(data_dir, client=destination), len(exported))
@@ -1656,28 +1656,28 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         )
 
     def test_edit_refuses_a_reviewer_head_on_a_skipped_card(self) -> None:
-        self.create_kind("secretary-549", "infra")
+        self.create_kind("ummanu-549", "infra")
         before = self.board_snapshot()
         # The sprint pins no reviewer, so any head the caller names contradicts `skipped`.
         with self.open_sprint(), self.assertRaisesRegex(TaskError, "review is skipped") as raised:
-            self.writer.edit(role="observer", actor="observer", reference="secretary-549", review_head="claude-opus")
+            self.writer.edit(role="observer", actor="observer", reference="ummanu-549", review_head="claude-opus")
         self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
     @contextlib.contextmanager
     def pinned_sprint(self):
         """The open sprint with both executors pinned, as `sprint:1446` itself is."""
-        from secretary.sprint_observer import executor_pinned
+        from ummanu.sprint_observer import executor_pinned
 
         with self.open_sprint() as ref:
             sprint = {
                 "ref": ref,
                 "status": "open",
-                "repositories": ["secretary"],
-                "reservations": ["secretary"],
+                "repositories": ["ummanu"],
+                "reservations": ["ummanu"],
                 "executors": {"worker": executor_pinned("codex-worker"), "reviewer": executor_pinned("claude-review")},
             }
-            with mock.patch("secretary.sprints.SprintReader.show", return_value=sprint):
+            with mock.patch("ummanu.sprints.SprintReader.show", return_value=sprint):
                 yield ref
 
     def create_in(self, sprint_context, reference: str, task_type: str, **fields: object) -> dict:
@@ -1686,7 +1686,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.writer.create(
                 role=role,
                 actor=role,
-                project="secretary",
+                project="ummanu",
                 task_type=task_type,
                 title=f"{task_type} card",
                 reference=reference,
@@ -1701,50 +1701,50 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         """secretary-1638 round 3: the pin is applied as on base; `skipped` refuses only an unpinned head."""
         pinned = ("codex-worker", "claude-review")
         for reference, task_type, fields, expected in (
-            ("secretary-560", "research", {}, ("skipped", *pinned)),
-            ("secretary-561", "infra", {}, ("skipped", *pinned)),
-            ("secretary-562", "code", {}, ("required", *pinned)),
-            ("secretary-563", "research", {"review": "required"}, ("required", *pinned)),
-            ("secretary-564", "research", {"review": "skipped", "review_head": "claude-review"}, ("skipped", *pinned)),
-            ("secretary-565", "research", {"review_head": "claude-review"}, ("skipped", *pinned)),
+            ("ummanu-560", "research", {}, ("skipped", *pinned)),
+            ("ummanu-561", "infra", {}, ("skipped", *pinned)),
+            ("ummanu-562", "code", {}, ("required", *pinned)),
+            ("ummanu-563", "research", {"review": "required"}, ("required", *pinned)),
+            ("ummanu-564", "research", {"review": "skipped", "review_head": "claude-review"}, ("skipped", *pinned)),
+            ("ummanu-565", "research", {"review_head": "claude-review"}, ("skipped", *pinned)),
         ):
             with self.subTest(reference=reference):
                 self.assertEqual(self.create_in(self.pinned_sprint(), reference, task_type, **fields), expected)
 
         before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "pins its reviewer") as raised:
-            self.create_in(self.pinned_sprint(), "secretary-566", "research", review="skipped", review_head="other")
+            self.create_in(self.pinned_sprint(), "ummanu-566", "research", review="skipped", review_head="other")
         self.assertEqual(raised.exception.code, "sprint_executor_pinned")
         self.assertBoardUnchanged(before)
 
     def test_without_a_sprint_skipped_refuses_any_explicit_reviewer_head(self) -> None:
         # A proposal in Issues is the create that names no sprint.
         no_sprint = contextlib.nullcontext(None)
-        self.assertEqual(self.create_in(no_sprint, "secretary-567", "research", target="issues", role="retro"), ("skipped", None, None))
-        self.assertEqual(self.create_in(no_sprint, "secretary-568", "code", target="issues", role="retro"), ("required", None, None))
+        self.assertEqual(self.create_in(no_sprint, "ummanu-567", "research", target="issues", role="retro"), ("skipped", None, None))
+        self.assertEqual(self.create_in(no_sprint, "ummanu-568", "code", target="issues", role="retro"), ("required", None, None))
         before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "review is skipped") as raised:
-            self.create_in(no_sprint, "secretary-569", "research", target="issues", role="retro", review_head="claude-review")
+            self.create_in(no_sprint, "ummanu-569", "research", target="issues", role="retro", review_head="claude-review")
         self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
     def test_edit_of_a_skipped_card_in_a_pinned_sprint_keeps_the_pin(self) -> None:
-        self.create_in(self.pinned_sprint(), "secretary-570", "infra")
-        self.create_in(self.pinned_sprint(), "secretary-571", "code")
-        self.set_card_metadata("secretary-570", review_head="")
+        self.create_in(self.pinned_sprint(), "ummanu-570", "infra")
+        self.create_in(self.pinned_sprint(), "ummanu-571", "code")
+        self.set_card_metadata("ummanu-570", review_head="")
         with self.pinned_sprint():
             # Empty head: the pin is written, exactly as on base.
-            self.writer.edit(role="observer", actor="observer", reference="secretary-570", review_head="")
-            self.assertEqual(self.card("secretary-570")["routing"]["review_head_override"], "claude-review")
-            self.writer.edit(role="observer", actor="observer", reference="secretary-570", review_head="claude-review")
-            self.assertEqual(self.card("secretary-570")["review"], "skipped")
+            self.writer.edit(role="observer", actor="observer", reference="ummanu-570", review_head="")
+            self.assertEqual(self.card("ummanu-570")["routing"]["review_head_override"], "claude-review")
+            self.writer.edit(role="observer", actor="observer", reference="ummanu-570", review_head="claude-review")
+            self.assertEqual(self.card("ummanu-570")["review"], "skipped")
             # A required card is untouched by the review choice.
-            self.writer.edit(role="observer", actor="observer", reference="secretary-571", review_head="")
-            self.assertEqual(self.card("secretary-571")["routing"]["review_head_override"], "claude-review")
+            self.writer.edit(role="observer", actor="observer", reference="ummanu-571", review_head="")
+            self.assertEqual(self.card("ummanu-571")["routing"]["review_head_override"], "claude-review")
 
         before = self.board_snapshot()
         with self.pinned_sprint(), self.assertRaisesRegex(TaskError, "pins its reviewer") as raised:
-            self.writer.edit(role="observer", actor="observer", reference="secretary-570", review_head="other")
+            self.writer.edit(role="observer", actor="observer", reference="ummanu-570", review_head="other")
         self.assertEqual(raised.exception.code, "sprint_executor_pinned")
         self.assertBoardUnchanged(before)
 
@@ -1759,14 +1759,14 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
         with (
             mock.patch.object(self.client, "call", side_effect=invalid_task_list),
-            mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),
+            mock.patch("ummanu.sprints.sprint_guard_index_initialized", return_value=True),
             self.open_sprint() as sprint,
             self.assertRaisesRegex(TaskError, "invalid task list") as raised,
         ):
             self.writer.create(
                 role="observer",
                 actor="observer",
-                project="secretary",
+                project="ummanu",
                 task_type="code",
                 title="No fallback",
                 request_id="auto-reference-failure",
@@ -1790,14 +1790,14 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
                         reply if method == "getAllTasks" else original_call(method, **params)
                     ),
                 ),
-                mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),
+                mock.patch("ummanu.sprints.sprint_guard_index_initialized", return_value=True),
                 self.open_sprint() as sprint,
                 self.assertRaisesRegex(TaskError, "invalid task list") as raised,
             ):
                 self.writer.create(
                     role="observer",
                     actor="observer",
-                    project="secretary",
+                    project="ummanu",
                     task_type="code",
                     title="No fallback",
                     request_id=f"null-reference-{reply}",
@@ -1809,13 +1809,13 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
     def test_create_passes_reference_to_atomic_backend_write(self) -> None:
         with (
-            mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),
+            mock.patch("ummanu.sprints.sprint_guard_index_initialized", return_value=True),
             self.open_sprint() as sprint,
         ):
             result = self.writer.create(
                 role="observer",
                 actor="observer",
-                project="secretary",
+                project="ummanu",
                 task_type="code",
                 title="Atomic reference",
                 request_id="atomic-reference",
@@ -1833,25 +1833,25 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
     def test_an_allocated_reference_clears_the_archived_rows_too(self) -> None:
         """An archived card keeps its reference for good, so the counter has to see it."""
         self.add_card(
-            reference="secretary-1404",
+            reference="ummanu-1404",
             title="Archived",
             state="done",
             archived=True,
-            metadata={"project": "secretary"},
+            metadata={"project": "ummanu"},
         )
 
         with self.open_sprint() as sprint:
             created = self.writer.create(
                 role="observer",
                 actor="observer",
-                project="secretary",
+                project="ummanu",
                 task_type="code",
                 title="Next in line",
                 request_id="allocate-above-archived",
                 sprint=sprint,
             )
 
-        self.assertEqual(created["task"]["ref"], "secretary-1405")
+        self.assertEqual(created["task"]["ref"], "ummanu-1405")
 
     def test_an_allocated_reference_that_is_claimed_is_refused_not_written(self) -> None:
         """The claim check is what proves a reference free; allocation only proposes one.
@@ -1860,13 +1860,13 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         holds: the card must not be created under someone else's reference.
         """
         before = self.board_snapshot()
-        with mock.patch.object(tasks, "next_project_reference", return_value="secretary-468"):
+        with mock.patch.object(tasks, "next_project_reference", return_value="ummanu-468"):
             with self.open_sprint() as sprint:
-                with self.assertRaisesRegex(TaskError, "secretary-468 is already claimed") as raised:
+                with self.assertRaisesRegex(TaskError, "ummanu-468 is already claimed") as raised:
                     self.writer.create(
                         role="observer",
                         actor="observer",
-                        project="secretary",
+                        project="ummanu",
                         task_type="code",
                         title="Collides",
                         request_id="allocated-collision",
@@ -1879,14 +1879,14 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
     def test_explicit_reference_collision_is_still_refused(self) -> None:
         before = self.board_snapshot()
         with self.open_sprint() as sprint:
-            with self.assertRaisesRegex(TaskError, "secretary-468 is already claimed") as raised:
+            with self.assertRaisesRegex(TaskError, "ummanu-468 is already claimed") as raised:
                 self.writer.create(
                     role="observer",
                     actor="observer",
-                    project="secretary",
+                    project="ummanu",
                     task_type="code",
                     title="Duplicate",
-                    reference="secretary-468",
+                    reference="ummanu-468",
                     request_id="explicit-collision",
                     sprint=sprint,
                 )
@@ -1895,20 +1895,20 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertBoardUnchanged(before)
 
     def test_ready_reset_preserves_codex_launch_mode(self) -> None:
-        self.place_card("secretary-468", "in_progress")
-        self.set_card_metadata("secretary-468", codex_launch_mode="tui")
+        self.place_card("ummanu-468", "in_progress")
+        self.set_card_metadata("ummanu-468", codex_launch_mode="tui")
 
         result = self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="ready",
             reason="retry",
             request_id="ready-preserves-mode",
         )
 
         self.assertEqual(result["task"]["routing"]["codex_launch_mode"], "tui")
-        self.assertEqual(self.card("secretary-468")["routing"]["codex_launch_mode"], "tui")
+        self.assertEqual(self.card("ummanu-468")["routing"]["codex_launch_mode"], "tui")
 
     def test_create_rejects_invalid_codex_launch_mode_without_write(self) -> None:
         before = self.board_snapshot()
@@ -1916,7 +1916,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.writer.create(
                 role="observer",
                 actor="observer",
-                project="secretary",
+                project="ummanu",
                 task_type="code",
                 title="Launch mode",
                 codex_launch_mode="shell",
@@ -1932,7 +1932,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.writer.create(
                 role="observer",
                 actor="observer",
-                project="secretary",
+                project="ummanu",
                 task_type="code",
                 title="Launch mode",
                 codex_launch_mode="exec",
@@ -1947,7 +1947,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.writer.create(
                 role="worker",
                 actor="w",
-                project="secretary",
+                project="ummanu",
                 task_type="code",
                 title="Continuation",
                 target="ready",
@@ -1961,7 +1961,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         created = self.writer.create(
             role="steward",
             actor="steward",
-            project="secretary",
+            project="ummanu",
             task_type="code",
             title="Finding from the sweep",
             description="non-urgent improvement",
@@ -1985,7 +1985,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
                     self.writer.create(
                         role=role,
                         actor=role,
-                        project="secretary",
+                        project="ummanu",
                         task_type="code",
                         title="Continuation",
                         target="ready",
@@ -1993,7 +1993,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
                 self.assertEqual(raised.exception.code, "role_forbidden")
                 self.assertBoardUnchanged(before)
 
-    def _failed_claim(self, request_id: str, worker: str = "secretary-468-runtime") -> None:
+    def _failed_claim(self, request_id: str, worker: str = "ummanu-468-runtime") -> None:
         """A claim whose column move is refused: the whole attempt leaves nothing behind."""
         with (
             self.board_refuses("moveTaskPosition"),
@@ -2002,7 +2002,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.writer.claim(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
+                reference="ummanu-468",
                 worker=worker,
                 resolved_head="codex",
                 request_id=request_id,
@@ -2017,12 +2017,12 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         claim is written only once the column effect is proven: a failed attempt has to be
         indistinguishable from one that never ran.
         """
-        self.clear_card_metadata("secretary-468", "claim")
+        self.clear_card_metadata("ummanu-468", "claim")
 
         self._failed_claim("claim-replay")
 
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
-        task = self.writer.reader.show("secretary-468")
+        task = self.writer.reader.show("ummanu-468")
         self.assertEqual(task["state"], "ready")
         self.assertIsNone(task["claim"]["worker"])
         self.assertIsNone(task["routing"]["resolved_worker_head"])
@@ -2030,23 +2030,23 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         replayed = self.writer.claim(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
-            worker="secretary-468-runtime",
+            reference="ummanu-468",
+            worker="ummanu-468-runtime",
             resolved_head="codex",
             request_id="claim-replay",
         )
 
         self.assertEqual(replayed["task"]["state"], "in_progress")
-        self.assertEqual(replayed["task"]["claim"]["worker"], "secretary-468-runtime")
+        self.assertEqual(replayed["task"]["claim"]["worker"], "ummanu-468-runtime")
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
         self.assertEqual(len(self.writer.audit.events()), 1)
 
     def test_reconcile_has_nothing_to_repeat_after_a_failed_claim_move(self) -> None:
-        self.clear_card_metadata("secretary-468", "claim")
+        self.clear_card_metadata("ummanu-468", "claim")
         self._failed_claim("claim-reconcile")
 
         self.assertEqual(self.writer.reconcile(), (0, 0))
-        task = self.writer.reader.show("secretary-468")
+        task = self.writer.reader.show("ummanu-468")
         self.assertEqual(task["state"], "ready")
         self.assertIsNone(task["claim"]["worker"])
 
@@ -2056,14 +2056,14 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         The claimant id is derived from the card, so a retrying dispatcher computes the same
         worker id as the attempt that failed. That must not read as "already mine".
         """
-        self.clear_card_metadata("secretary-468", "claim")
+        self.clear_card_metadata("ummanu-468", "claim")
         self._failed_claim("claim-attempt-1")
         # Another code card of the same project is claimed before the retry.
         self.add_card(
-            reference="secretary-999",
+            reference="ummanu-999",
             title="Other code",
             state="in_progress",
-            metadata={"project": "secretary", "task_type": "code", "claim": "other-worker"},
+            metadata={"project": "ummanu", "task_type": "code", "claim": "other-worker"},
         )
         before = self.board_snapshot()
 
@@ -2071,15 +2071,15 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.writer.claim(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
-                worker="secretary-468-runtime",
+                reference="ummanu-468",
+                worker="ummanu-468-runtime",
                 resolved_head="codex-b",
                 request_id="claim-attempt-2",
             )
 
         self.assertEqual(raised.exception.code, "capacity_reached")
         self.assertBoardUnchanged(before)
-        task = self.writer.reader.show("secretary-468")
+        task = self.writer.reader.show("ummanu-468")
         self.assertEqual(task["state"], "ready")
         self.assertIsNone(task["claim"]["worker"])
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
@@ -2090,7 +2090,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         A dropped head is the disagreement `claim_mismatch` exists to catch, so a partial claim
         must not leave the next attempt launching against a head the dispatcher no longer holds.
         """
-        self.clear_card_metadata("secretary-468", "claim")
+        self.clear_card_metadata("ummanu-468", "claim")
         with (
             self.board_refuses("moveTaskPosition"),
             self.assertRaisesRegex(TaskError, "refused the moveTaskPosition"),
@@ -2098,8 +2098,8 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.writer.claim(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
-                worker="secretary-468-runtime",
+                reference="ummanu-468",
+                worker="ummanu-468-runtime",
                 resolved_head="codex-a",
                 request_id="claim-head-1",
             )
@@ -2107,8 +2107,8 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         claimed = self.writer.claim(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
-            worker="secretary-468-runtime",
+            reference="ummanu-468",
+            worker="ummanu-468-runtime",
             resolved_head="codex-b",
             request_id="claim-head-2",
         )
@@ -2118,19 +2118,19 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertEqual(claimed["task"]["routing"]["resolved_worker_head"], "codex-b")
         self.assertNotIn(
             "resolved_head",
-            claim_mismatch(claimed["task"], "secretary-468-runtime", "codex-b", ""),
+            claim_mismatch(claimed["task"], "ummanu-468-runtime", "codex-b", ""),
         )
 
     def test_a_claim_on_a_held_card_is_refused_even_when_it_names_the_same_worker(self) -> None:
         """A live claim closes the door, and naming its holder is not a key to it."""
-        held = str(self.card("secretary-468")["claim"]["worker"])
+        held = str(self.card("ummanu-468")["claim"]["worker"])
         before = self.board_snapshot()
 
         with self.assertRaisesRegex(TaskError, "already claimed") as raised:
             self.writer.claim(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
+                reference="ummanu-468",
                 worker=held,
                 resolved_head="codex-b",
                 request_id="claim-contender",
@@ -2138,7 +2138,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
         self.assertEqual(raised.exception.code, "claim_conflict")
         self.assertBoardUnchanged(before)
-        self.assertEqual(self.card("secretary-468")["routing"]["head_override"], "codex-terra")
+        self.assertEqual(self.card("ummanu-468")["routing"]["head_override"], "codex-terra")
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
     def _released_claim_record(self, request_id: str, **payload: object) -> dict[str, object]:
@@ -2150,8 +2150,8 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             "actor": {"role": "dispatcher", "id": "d"},
             "kind": "claimed",
             "outcome": "success",
-            "task_id": self.writer.reader.show("secretary-468")["id"],
-            "ref": "secretary-468",
+            "task_id": self.writer.reader.show("ummanu-468")["id"],
+            "ref": "ummanu-468",
             "backend": {"kind": RETIRED_STORE, "task_id": 12, "revision": "r1"},
             "request_id": request_id,
             "payload": dict(payload),
@@ -2159,13 +2159,13 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
     def _released_pending_claim(self, request_id: str) -> None:
         """The released half-claim: metadata written, column move still owed."""
-        self.set_card_metadata("secretary-468", claim="secretary-468-runtime")
-        self.set_card_metadata("secretary-468", resolved_head="codex")
+        self.set_card_metadata("ummanu-468", claim="ummanu-468-runtime")
+        self.set_card_metadata("ummanu-468", resolved_head="codex")
         self.writer.audit.stage(
             request_id,
             self._released_claim_record(
                 request_id,
-                worker="secretary-468-runtime",
+                worker="ummanu-468-runtime",
                 resolved_head="codex",
                 resolved_review_head=None,
                 slug=None,
@@ -2185,9 +2185,9 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
         self.assertEqual(self.writer.reconcile(), (1, 0))
 
-        task = self.writer.reader.show("secretary-468")
+        task = self.writer.reader.show("ummanu-468")
         self.assertEqual(task["state"], "in_progress")
-        self.assertEqual(task["claim"]["worker"], "secretary-468-runtime")
+        self.assertEqual(task["claim"]["worker"], "ummanu-468-runtime")
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
         record = self.writer.audit.events()[0]
         self.assertNotIn("record_type", record)
@@ -2200,25 +2200,25 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         replayed = self.writer.claim(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
-            worker="secretary-468-runtime",
+            reference="ummanu-468",
+            worker="ummanu-468-runtime",
             resolved_head="codex",
             request_id="released-claim-replay",
         )
 
         self.assertIs(replayed["replayed"], True)
         self.assertEqual(replayed["task"]["state"], "in_progress")
-        self.assertEqual(replayed["task"]["claim"]["worker"], "secretary-468-runtime")
+        self.assertEqual(replayed["task"]["claim"]["worker"], "ummanu-468-runtime")
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
         self.assertEqual(len(self.writer.audit.events()), 1)
 
     def test_claim_rejects_project_code_capacity_without_write(self) -> None:
-        self.clear_card_metadata("secretary-468", "claim")
+        self.clear_card_metadata("ummanu-468", "claim")
         self.add_card(
-            reference="secretary-999",
+            reference="ummanu-999",
             title="Other code",
             state="in_progress",
-            metadata={"project": "secretary", "task_type": "code", "claim": "other-worker"},
+            metadata={"project": "ummanu", "task_type": "code", "claim": "other-worker"},
         )
         before = self.board_snapshot()
 
@@ -2226,8 +2226,8 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.writer.claim(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
-                worker="secretary-468-runtime",
+                reference="ummanu-468",
+                worker="ummanu-468-runtime",
             )
 
         self.assertEqual(raised.exception.code, "capacity_reached")
@@ -2236,12 +2236,12 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
     def test_claim_counts_a_parked_card_as_an_active_code_task(self) -> None:
         """A parked card holds a retained worker and its checkout: a second writer in the same
         project is as wrong there as it is in Validate."""
-        self.clear_card_metadata("secretary-468", "claim")
+        self.clear_card_metadata("ummanu-468", "claim")
         self.add_card(
-            reference="secretary-999",
+            reference="ummanu-999",
             title="Parked code",
             state="assessment",
-            metadata={"project": "secretary", "task_type": "code", "claim": "other-worker"},
+            metadata={"project": "ummanu", "task_type": "code", "claim": "other-worker"},
         )
         before = self.board_snapshot()
 
@@ -2249,8 +2249,8 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.writer.claim(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
-                worker="secretary-468-runtime",
+                reference="ummanu-468",
+                worker="ummanu-468-runtime",
             )
 
         self.assertEqual(raised.exception.code, "capacity_reached")
@@ -2258,12 +2258,12 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
     def test_archive_refuses_a_parked_card(self) -> None:
         """Assessment is a wait, not a resting place: the worker and workspace are still owned."""
-        self.clear_card_metadata("secretary-468", "claim")
-        self.place_card("secretary-468", "assessment")
+        self.clear_card_metadata("ummanu-468", "claim")
+        self.place_card("ummanu-468", "assessment")
         before = self.board_snapshot()
 
         with self.assertRaisesRegex(TaskError, "live worker or reviewer") as raised:
-            self.writer.archive(role="po", actor="operator", reference="secretary-468", reason="cleanup")
+            self.writer.archive(role="po", actor="operator", reference="ummanu-468", reason="cleanup")
 
         self.assertEqual(raised.exception.code, "live_work")
         self.assertBoardUnchanged(before)
@@ -2272,52 +2272,52 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         result = self.writer.verdict(
             role="reviewer",
             actor="r",
-            reference="secretary-468",
+            reference="ummanu-468",
             kind="green",
             body="ok",
             request_id="green",
         )
 
         self.assertEqual(result["action"], "verdict")
-        self.assertEqual(self.card_comments("secretary-468")[-1], "[review:green]\nok")
-        self.assertEqual(self.card("secretary-468")["comments"][-1]["marker"], "review:green")
+        self.assertEqual(self.card_comments("ummanu-468")[-1], "[review:green]\nok")
+        self.assertEqual(self.card("ummanu-468")["comments"][-1]["marker"], "review:green")
 
     def test_validate_to_in_progress_rework_is_dispatcher_only(self) -> None:
-        self.place_card("secretary-468", "validate")
-        self.set_card_metadata("secretary-468", resolved_review_head="codex-reviewer")
+        self.place_card("ummanu-468", "validate")
+        self.set_card_metadata("ummanu-468", resolved_review_head="codex-reviewer")
 
         result = self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="in_progress",
             reason="review:red",
             request_id="rework",
         )
 
         self.assertEqual(result["task"]["state"], "in_progress")
-        self.assertIsNone(self.card("secretary-468")["routing"]["resolved_review_head"])
+        self.assertIsNone(self.card("ummanu-468")["routing"]["resolved_review_head"])
 
     def test_completed_ready_replay_does_not_reset_metadata_again(self) -> None:
-        self.place_card("secretary-468", "in_progress")
+        self.place_card("ummanu-468", "in_progress")
         self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="ready",
             reason="",
             request_id="ready-done",
         )
-        self.place_card("secretary-468", "validate")
-        self.set_card_metadata("secretary-468", claim="codex-terra")
-        self.set_card_metadata("secretary-468", resolved_head="codex-terra")
-        self.set_card_metadata("secretary-468", resolved_review_head="codex-reviewer")
-        self.set_card_metadata("secretary-468", retry_same="1")
-        before = self.card("secretary-468")
+        self.place_card("ummanu-468", "validate")
+        self.set_card_metadata("ummanu-468", claim="codex-terra")
+        self.set_card_metadata("ummanu-468", resolved_head="codex-terra")
+        self.set_card_metadata("ummanu-468", resolved_review_head="codex-reviewer")
+        self.set_card_metadata("ummanu-468", retry_same="1")
+        before = self.card("ummanu-468")
         second = self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="ready",
             reason="",
             request_id="ready-done",
@@ -2326,13 +2326,13 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertEqual(second["task"]["state"], "validate")
         # Nothing was reset a second time: the whole card is what the fixture left, claim and
         # resolved heads and retry counters included.
-        self.assertEqual(self.card("secretary-468"), before)
-        self.assertEqual(self.card("secretary-468")["claim"]["worker"], "codex-terra")
+        self.assertEqual(self.card("ummanu-468"), before)
+        self.assertEqual(self.card("ummanu-468")["claim"]["worker"], "codex-terra")
         self.assertEqual(len(self.writer.audit.events()), 1)
 
     # --- decision and operation cards (secretary-1758) -------------------------------------
 
-    DECISION_BODY = "## Decision\nShip the narrow cut.\n\n## How to verify\n`secretary sprint show`\n"
+    DECISION_BODY = "## Decision\nShip the narrow cut.\n\n## How to verify\n`ummanu sprint show`\n"
 
     def test_the_observer_and_the_po_create_both_kinds_skipped_and_unpinned(self) -> None:
         """The PO needs no sprint override for them, and a sprint's executor pins do not apply."""
@@ -2341,7 +2341,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             start=580,
         ):
             with self.subTest(kind=kind, role=role):
-                reference = f"secretary-{number}"
+                reference = f"ummanu-{number}"
                 # An operation card names its production (secretary-1764).
                 production = {"touches_production": "none"} if kind == "operation" else {}
                 self.assertEqual(
@@ -2356,12 +2356,12 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         before = self.board_snapshot()
         with self.open_sprint() as sprint, self.assertRaisesRegex(TaskError, "takes no --head") as raised:
             self.writer.create(
-                role="po", actor="po", project="secretary", task_type="decision", title="T",
+                role="po", actor="po", project="ummanu", task_type="decision", title="T",
                 sprint=sprint, head="codex",
             )
         self.assertEqual(raised.exception.code, "validation")
         with self.assertRaisesRegex(TaskError, "needs --sprint"):
-            self.writer.create(role="po", actor="po", project="secretary", task_type="operation", title="T")
+            self.writer.create(role="po", actor="po", project="ummanu", task_type="operation", title="T")
         self.assertBoardUnchanged(before)
 
     def register_projects(self, *projects: str) -> None:
@@ -2373,7 +2373,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
     def test_an_operation_create_requires_a_registered_production_or_none_and_writes_nothing_otherwise(self) -> None:
         """secretary-1764: required on operation, refused on every other kind, an unknown project refused."""
-        self.register_projects("secretary", "relay")
+        self.register_projects("ummanu", "relay")
         before = self.board_snapshot()
         for number, (kind, fields, message) in enumerate(
             (
@@ -2385,34 +2385,34 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             start=596,
         ):
             with self.subTest(kind=kind, fields=fields), self.assertRaisesRegex(TaskError, message) as raised:
-                self.create_kind(f"secretary-{number}", kind, **fields)
+                self.create_kind(f"ummanu-{number}", kind, **fields)
             self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
     def test_an_operation_stores_its_production_and_show_and_list_carry_it(self) -> None:
-        self.register_projects("secretary", "relay")
-        created = self.create_kind("secretary-594", "operation", touches_production="relay")
-        self.create_kind("secretary-595", "operation", touches_production="none")
-        self.create_kind("secretary-593", "decision")
+        self.register_projects("ummanu", "relay")
+        created = self.create_kind("ummanu-594", "operation", touches_production="relay")
+        self.create_kind("ummanu-595", "operation", touches_production="none")
+        self.create_kind("ummanu-593", "decision")
 
         self.assertEqual(created["task"]["touches_production"], "relay")
-        card = self.card("secretary-594")
+        card = self.card("ummanu-594")
         self.assertEqual(card["touches_production"], "relay")
         self.assertEqual(card["extensions"]["extra"]["touches_production"], "relay")
-        self.assertEqual(self.card("secretary-595")["touches_production"], "none")
-        self.assertNotIn("touches_production", self.card("secretary-593"))
+        self.assertEqual(self.card("ummanu-595")["touches_production"], "none")
+        self.assertNotIn("touches_production", self.card("ummanu-593"))
         listed = {row["ref"]: row.get("touches_production") for row in self.writer.reader.list(states={"ready"})}
         self.assertEqual(
-            (listed["secretary-594"], listed["secretary-595"], listed["secretary-593"]), ("relay", "none", None)
+            (listed["ummanu-594"], listed["ummanu-595"], listed["ummanu-593"]), ("relay", "none", None)
         )
         # The production is part of the create's identity: the same request id with another one is refused.
-        self.assertEqual(self.writer.audit.events("secretary-594")[0]["payload"]["touches_production"], "relay")
+        self.assertEqual(self.writer.audit.events("ummanu-594")[0]["payload"]["touches_production"], "relay")
         after = self.board_snapshot()
         with self.assertRaises(TaskError):
-            self.create_kind("secretary-594", "operation", touches_production="secretary")
+            self.create_kind("ummanu-594", "operation", touches_production="ummanu")
         self.assertBoardUnchanged(after)
 
-    def in_progress_decision(self, reference: str = "secretary-590") -> str:
+    def in_progress_decision(self, reference: str = "ummanu-590") -> str:
         self.create_kind(reference, "decision")
         self.place_card(reference, "in_progress")
         return reference
@@ -2439,7 +2439,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertTrue(comment.startswith("[po]\n[completion:decision]\n"))
         self.assertEqual(
             po_completion_record(card),
-            {"Decision": "Ship the narrow cut.", "How to verify": "`secretary sprint show`"},
+            {"Decision": "Ship the narrow cut.", "How to verify": "`ummanu sprint show`"},
         )
         [done] = [event for event in self.writer.audit.events(reference) if event.get("transition", {}).get("target") == "done"]
         self.assertEqual((done["actor"]["role"], done["transition"]["source"]), ("po", "in_progress"))
@@ -2453,11 +2453,11 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertBoardUnchanged(after)
 
     def test_complete_refuses_a_card_not_in_progress_another_kind_or_a_body_without_its_sections(self) -> None:
-        reference = self.in_progress_decision("secretary-591")
-        self.create_kind("secretary-592", "decision")
+        reference = self.in_progress_decision("ummanu-591")
+        self.create_kind("ummanu-592", "decision")
         before = self.board_snapshot()
         for fields, code in (
-            ({"reference": "secretary-592"}, "transition_forbidden"),
+            ({"reference": "ummanu-592"}, "transition_forbidden"),
             ({"kind": "operation", "body": "## What was done\nx\n\n## How to verify\ny\n"}, "validation"),
             ({"body": "## Decision\nYes.\n"}, "validation"),
             ({"role": "observer"}, "role_forbidden"),
@@ -2473,22 +2473,22 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         """Three active cards fill the capacity for a head, not for a card the PO executes."""
         for number in (901, 902, 903):
             self.add_card(
-                reference=f"secretary-{number}",
+                reference=f"ummanu-{number}",
                 title="Other work",
                 state="in_progress",
-                metadata={"project": "secretary", "task_type": "research", "claim": f"w{number}"},
+                metadata={"project": "ummanu", "task_type": "research", "claim": f"w{number}"},
             )
-        reference = "secretary-593"
+        reference = "ummanu-593"
         self.create_kind(reference, "decision")
 
         claimed = self.writer.claim(role="dispatcher", actor="d", reference=reference, worker="po-card")
 
         self.assertEqual(claimed["task"]["state"], "in_progress")
-        self.clear_card_metadata("secretary-468", "claim")
-        self.place_card("secretary-903", "done")
+        self.clear_card_metadata("ummanu-468", "claim")
+        self.place_card("ummanu-903", "done")
         # The active decision card is not counted either: two headed cards and it leave room for one.
-        self.writer.claim(role="dispatcher", actor="d", reference="secretary-468", worker="secretary-468-runtime")
-        self.assertEqual(self.card_state("secretary-468"), "in_progress")
+        self.writer.claim(role="dispatcher", actor="d", reference="ummanu-468", worker="ummanu-468-runtime")
+        self.assertEqual(self.card_state("ummanu-468"), "in_progress")
 
     # --- handover to the owner (secretary-1761) -----------------------------------------------
 
@@ -2510,7 +2510,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         return mock.patch.object(self.client, "call", side_effect=refuse)
 
     def test_handover_marks_and_comments_in_one_write_and_repeats_as_a_replay(self) -> None:
-        reference = self.in_progress_decision("secretary-594")
+        reference = self.in_progress_decision("ummanu-594")
 
         first = self.hand_over(reference, "handover-594")
         after = self.board_snapshot()
@@ -2536,7 +2536,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertBoardUnchanged(after)
 
     def test_a_handover_that_fails_after_its_mark_leaves_nothing(self) -> None:
-        reference = self.in_progress_decision("secretary-595")
+        reference = self.in_progress_decision("ummanu-595")
         before = self.board_snapshot()
 
         with self.refusing_comments(), self.assertRaises(TaskError):
@@ -2548,7 +2548,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertIsNone(self.writer.audit.committed_event("handover-595"))
 
     def test_complete_clears_the_mark_with_the_done_and_a_failed_completion_keeps_both(self) -> None:
-        reference = self.in_progress_decision("secretary-596")
+        reference = self.in_progress_decision("ummanu-596")
         self.hand_over(reference, "handover-596")
         before = self.board_snapshot()
 
@@ -2572,16 +2572,16 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.assertIsNone(self.card_extension(reference, key), key)
 
     def test_the_owner_comments_on_any_card_as_the_owner(self) -> None:
-        self.writer.comment(role="owner", actor="po", reference="secretary-468", body="Yes.", request_id="owner-468")
+        self.writer.comment(role="owner", actor="po", reference="ummanu-468", body="Yes.", request_id="owner-468")
 
-        self.assertEqual(self.card_comments("secretary-468")[-1], "[owner]\nYes.")
-        self.assertEqual(self.card("secretary-468")["comments"][-1]["marker"], "owner")
+        self.assertEqual(self.card_comments("ummanu-468")[-1], "[owner]\nYes.")
+        self.assertEqual(self.card("ummanu-468")["comments"][-1]["marker"], "owner")
         event = self.writer.audit.committed_event("owner-468")
         self.assertEqual((event["kind"], event["actor"], event["payload"]["marker"]), ("commented", {"role": "owner", "id": "owner"}, "owner"))
 
     # --- wait cards (secretary-1790) ------------------------------------------------------------
 
-    RUN_URL = "https://github.com/vladmesh/secretary/actions/runs/4242"
+    RUN_URL = "https://github.com/vladmesh/ummanu/actions/runs/4242"
 
     def create_wait(self, reference: str, **wait: object) -> dict:
         request = {"run": self.RUN_URL, "deadline": "2h", "returns": ["observer", "dependents"], **wait}
@@ -2589,7 +2589,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
     def freeze(self, reference: str, outcome: str = "target_reached") -> None:
         """What the dispatcher writes when it freezes the wait's first terminal fact."""
-        from secretary.board.wait_card import WaitState, result_key
+        from ummanu.board.wait_card import WaitState, result_key
 
         result = {"outcome": outcome, "fact": {"conclusion": "failure"}, "summary": "s", "evidence": "", "frozen_at": "t"}
         result["key"] = result_key(result)
@@ -2597,139 +2597,139 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
     def test_a_wait_card_stores_its_spec_and_show_and_list_carry_its_wait_block(self) -> None:
         with mock.patch.object(TaskWriter, "_po_session_state", return_value="open"):
-            created = self.create_wait("secretary-610", returns=["observer", "dependents", "po-session:s-1"])
-        self.create_wait("secretary-611", run="", card="secretary-468", states="done,blocked", deadline="1d")
-        self.create_wait("secretary-612", run="", until="2099-01-01T00:00:00Z", deadline="2099-01-02T00:00:00Z")
+            created = self.create_wait("ummanu-610", returns=["observer", "dependents", "po-session:s-1"])
+        self.create_wait("ummanu-611", run="", card="ummanu-468", states="done,blocked", deadline="1d")
+        self.create_wait("ummanu-612", run="", until="2099-01-01T00:00:00Z", deadline="2099-01-02T00:00:00Z")
 
-        card = self.card("secretary-610")
+        card = self.card("ummanu-610")
         self.assertEqual((card["type"], card["review"], card["state"]), ("wait", "skipped", "ready"))
-        stored = json.loads(self.card_extension("secretary-610", "wait"))
-        self.assertEqual(stored["target"], {"kind": "github_run", "repo": "vladmesh/secretary", "run_id": 4242, "url": self.RUN_URL})
+        stored = json.loads(self.card_extension("ummanu-610", "wait"))
+        self.assertEqual(stored["target"], {"kind": "github_run", "repo": "vladmesh/ummanu", "run_id": 4242, "url": self.RUN_URL})
         self.assertEqual(stored["return"], ["observer", "dependents", "po-session:s-1"])
         block = card["wait"]
         self.assertEqual((block["state"], block["target"]["link"], block["deadline"]), ("waiting", self.RUN_URL, stored["deadline"]))
         self.assertEqual(created["task"]["wait"], block)
-        self.assertEqual(self.card("secretary-611")["wait"]["target"], {"kind": "card", "ref": "secretary-468", "states": ["done", "blocked"]})
-        self.assertEqual(self.card("secretary-612")["wait"]["target"], {"kind": "time", "at": "2099-01-01T00:00:00Z"})
-        [listed] = [row for row in self.writer.reader.list(states={"ready"}) if row["ref"] == "secretary-610"]
+        self.assertEqual(self.card("ummanu-611")["wait"]["target"], {"kind": "card", "ref": "ummanu-468", "states": ["done", "blocked"]})
+        self.assertEqual(self.card("ummanu-612")["wait"]["target"], {"kind": "time", "at": "2099-01-01T00:00:00Z"})
+        [listed] = [row for row in self.writer.reader.list(states={"ready"}) if row["ref"] == "ummanu-610"]
         self.assertEqual(listed["wait"], block)
-        self.assertNotIn("wait", self.card("secretary-468"))
+        self.assertNotIn("wait", self.card("ummanu-468"))
         # The request id binds the flags as given, so a retry is a replay whatever the clock says.
-        payload = self.writer.audit.events("secretary-610")[0]["payload"]
+        payload = self.writer.audit.events("ummanu-610")[0]["payload"]
         self.assertEqual(payload["wait_request"]["returns"], ["observer", "dependents", "po-session:s-1"])
         after = self.board_snapshot()
         with mock.patch.object(TaskWriter, "_po_session_state", return_value="open"):
-            again = self.create_wait("secretary-610", returns=["observer", "dependents", "po-session:s-1"])
+            again = self.create_wait("ummanu-610", returns=["observer", "dependents", "po-session:s-1"])
         self.assertTrue(again["replayed"])
         self.assertBoardUnchanged(after)
 
     def test_a_wait_card_needs_no_project_reservation_and_a_refused_one_writes_nothing(self) -> None:
         with self.open_sprint():
             self.writer.create(
-                role="po", actor="po", project="relay", task_type="wait", title="Wait", reference="secretary-614",
+                role="po", actor="po", project="relay", task_type="wait", title="Wait", reference="ummanu-614",
                 sprint="sprint:test", wait={"until": "2099-01-01T00:00:00Z", "deadline": "2099-01-02T00:00:00Z",
                                             "returns": ["observer"]},
             )
-        self.assertEqual((self.card("secretary-614")["project"], self.card("secretary-614")["sprint"]), ("relay", "sprint:test"))
+        self.assertEqual((self.card("ummanu-614")["project"], self.card("ummanu-614")["sprint"]), ("relay", "sprint:test"))
         before = self.board_snapshot()
         with (
             mock.patch.object(TaskWriter, "_po_session_state", return_value=""),
             self.assertRaisesRegex(TaskError, "names no PO session") as raised,
         ):
-            self.create_wait("secretary-615", returns=["po-session:ghost"])
+            self.create_wait("ummanu-615", returns=["po-session:ghost"])
         self.assertEqual(raised.exception.code, "validation")
         with self.assertRaisesRegex(TaskError, "has already passed"):
-            self.create_wait("secretary-615", deadline="2020-01-01T00:00:00Z")
+            self.create_wait("ummanu-615", deadline="2020-01-01T00:00:00Z")
         self.assertBoardUnchanged(before)
 
     def test_cancel_marks_and_comments_once_and_refuses_what_it_cannot_cancel(self) -> None:
-        self.create_wait("secretary-616")
-        self.place_card("secretary-616", "in_progress")
+        self.create_wait("ummanu-616")
+        self.place_card("ummanu-616", "in_progress")
 
         first = self.writer.cancel(
-            role="po", actor="po", reference="secretary-616", reason="The release was withdrawn.", request_id="cancel-616"
+            role="po", actor="po", reference="ummanu-616", reason="The release was withdrawn.", request_id="cancel-616"
         )
         after = self.board_snapshot()
         again = self.writer.cancel(
-            role="po", actor="po", reference="secretary-616", reason="The release was withdrawn.", request_id="cancel-616"
+            role="po", actor="po", reference="ummanu-616", reason="The release was withdrawn.", request_id="cancel-616"
         )
 
         self.assertEqual((first["replayed"], again["replayed"]), (False, True))
         self.assertBoardUnchanged(after)
-        card = self.card("secretary-616")
+        card = self.card("ummanu-616")
         self.assertEqual(card["state"], "in_progress")
         self.assertEqual((card["wait"]["cancel"]["reason"], card["wait"]["cancel"]["role"]), ("The release was withdrawn.", "po"))
-        [comment] = [body for body in self.card_comments("secretary-616") if "[wait:cancel]" in body]
+        [comment] = [body for body in self.card_comments("ummanu-616") if "[wait:cancel]" in body]
         self.assertTrue(comment.startswith("[po]\n[wait:cancel]\n"))
         self.assertEqual(self.writer.audit.committed_event("cancel-616")["kind"], "wait_cancelled")
         for reference, fields, code in (
-            ("secretary-616", {"reason": "Again."}, "already_cancelled"),
-            ("secretary-468", {"reason": "Not a wait."}, "validation"),
-            ("secretary-616", {"reason": "  "}, "validation"),
+            ("ummanu-616", {"reason": "Again."}, "already_cancelled"),
+            ("ummanu-468", {"reason": "Not a wait."}, "validation"),
+            ("ummanu-616", {"reason": "  "}, "validation"),
         ):
             with self.subTest(reference=reference, fields=fields), self.assertRaises(TaskError) as raised:
                 self.writer.cancel(role="po", actor="po", reference=reference, **fields)
             self.assertEqual(raised.exception.code, code)
         self.assertBoardUnchanged(after)
 
-        self.create_wait("secretary-617")
-        self.freeze("secretary-617", "deadline_passed")
+        self.create_wait("ummanu-617")
+        self.freeze("ummanu-617", "deadline_passed")
         with self.assertRaises(TaskError) as raised:
-            self.writer.cancel(role="po", actor="po", reference="secretary-617", reason="Too late.")
+            self.writer.cancel(role="po", actor="po", reference="ummanu-617", reason="Too late.")
         self.assertEqual(raised.exception.code, "already_settled")
         with as_observer("sprint:other"), self.assertRaises(TaskError):
-            self.writer.cancel(role="observer", actor="observer", reference="secretary-617", reason="Not mine.")
-        self.assertIsNone(self.card("secretary-617")["wait"]["cancel"])
+            self.writer.cancel(role="observer", actor="observer", reference="ummanu-617", reason="Not mine.")
+        self.assertIsNone(self.card("ummanu-617")["wait"]["cancel"])
 
-        self.create_wait("secretary-618")
+        self.create_wait("ummanu-618")
         with as_observer("sprint:test"):
-            self.writer.cancel(role="observer", actor="observer", reference="secretary-618", reason="Mine.")
-        self.assertEqual(self.card("secretary-618")["wait"]["cancel"]["role"], "observer")
+            self.writer.cancel(role="observer", actor="observer", reference="ummanu-618", reason="Mine.")
+        self.assertEqual(self.card("ummanu-618")["wait"]["cancel"]["role"], "observer")
 
     def test_the_dispatcher_takes_its_two_wait_edges_only_for_waits_and_neither_is_charged(self) -> None:
-        from secretary.dispatch.production import _budget_event_type
+        from ummanu.dispatch.production import _budget_event_type
 
-        self.create_kind("secretary-620", "research")
-        self.place_card("secretary-620", "in_progress")
-        self.create_wait("secretary-621")
-        self.place_card("secretary-621", "in_progress")
-        self.create_kind("secretary-622", "code", blocked_by="secretary-621")
-        self.create_kind("secretary-623", "code", blocked_by="secretary-620")
+        self.create_kind("ummanu-620", "research")
+        self.place_card("ummanu-620", "in_progress")
+        self.create_wait("ummanu-621")
+        self.place_card("ummanu-621", "in_progress")
+        self.create_kind("ummanu-622", "code", blocked_by="ummanu-621")
+        self.create_kind("ummanu-623", "code", blocked_by="ummanu-620")
         before = self.board_snapshot()
-        for reference, target in (("secretary-620", "done"), ("secretary-621", "done"), ("secretary-623", "blocked")):
+        for reference, target in (("ummanu-620", "done"), ("ummanu-621", "done"), ("ummanu-623", "blocked")):
             with self.subTest(reference=reference), self.assertRaises(TaskError) as raised:
                 self.writer.move(role="dispatcher", actor="d", reference=reference, target=target, reason="r")
             self.assertEqual(raised.exception.code, "transition_forbidden")
         self.assertBoardUnchanged(before)
 
-        self.freeze("secretary-621")
+        self.freeze("ummanu-621")
         self.writer.move(
-            role="dispatcher", actor="d", reference="secretary-621", target="done", reason="[wait:target_reached]",
+            role="dispatcher", actor="d", reference="ummanu-621", target="done", reason="[wait:target_reached]",
             request_id="wait-done-621", wait_outcome="target_reached",
         )
         self.writer.move(
-            role="dispatcher", actor="d", reference="secretary-622", target="blocked", reason="the wait ended",
+            role="dispatcher", actor="d", reference="ummanu-622", target="blocked", reason="the wait ended",
             request_id="wait-dependent-622", wait_outcome="cancelled",
             terminal_taxonomy={"version": 2, "disposition": "blocked", "blocked_reason": "other",
                                "source_evidence": "other", "budget_class": "blocked", "provenance": "forward"},
         )
-        self.writer.move(role="dispatcher", actor="d", reference="secretary-620", target="blocked", reason="other",
+        self.writer.move(role="dispatcher", actor="d", reference="ummanu-620", target="blocked", reason="other",
                          request_id="plain-blocked-620")
 
-        self.assertEqual((self.card_state("secretary-621"), self.card_state("secretary-622")), ("done", "blocked"))
-        self.assertIn("[dispatcher]\n[wait:target_reached]", self.card_comments("secretary-621"))
+        self.assertEqual((self.card_state("ummanu-621"), self.card_state("ummanu-622")), ("done", "blocked"))
+        self.assertIn("[dispatcher]\n[wait:target_reached]", self.card_comments("ummanu-621"))
         for request_id, charged in (("wait-done-621", None), ("wait-dependent-622", None), ("plain-blocked-620", "blocked")):
             event = self.writer.audit.committed_event(request_id)
             self.assertEqual(_budget_event_type(event), charged, request_id)
 
     def test_only_the_dispatcher_records_a_wait_state_and_only_on_a_wait_card(self) -> None:
-        self.create_wait("secretary-624")
-        self.writer.record_wait_state(role="dispatcher", actor="d", reference="secretary-624", state='{"since":"t"}')
-        self.assertEqual(self.card_extension("secretary-624", "wait_state"), '{"since":"t"}')
+        self.create_wait("ummanu-624")
+        self.writer.record_wait_state(role="dispatcher", actor="d", reference="ummanu-624", state='{"since":"t"}')
+        self.assertEqual(self.card_extension("ummanu-624", "wait_state"), '{"since":"t"}')
         with self.assertRaises(TaskError):
-            self.writer.record_wait_state(role="po", actor="po", reference="secretary-624", state="{}")
+            self.writer.record_wait_state(role="po", actor="po", reference="ummanu-624", state="{}")
         with self.assertRaisesRegex(TaskError, "not a wait card"):
-            self.writer.record_wait_state(role="dispatcher", actor="d", reference="secretary-468", state="{}")
+            self.writer.record_wait_state(role="dispatcher", actor="d", reference="ummanu-468", state="{}")
 
     # --- PO delegation: the PO turn a card came from (secretary-1792) -----------------------------
 
@@ -2739,37 +2739,37 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         """The PO's create outside every sprint, as `task create --role po` inside or outside a PO turn."""
         with self.open_sprint():
             return self.writer.create(
-                role="po", actor="po", project="secretary", task_type=task_type, title=f"{task_type} card",
+                role="po", actor="po", project="ummanu", task_type=task_type, title=f"{task_type} card",
                 reference=reference, request_id=f"create-{reference}", **fields,
             )
 
     def test_a_create_in_a_po_turn_records_its_origin_and_show_and_list_carry_it(self) -> None:
-        created = self.create_as_po("secretary-630", origin=self.ORIGIN)
+        created = self.create_as_po("ummanu-630", origin=self.ORIGIN)
 
-        card = self.card("secretary-630")
-        self.assertEqual(json.loads(self.card_extension("secretary-630", "po_origin")), self.ORIGIN)
+        card = self.card("ummanu-630")
+        self.assertEqual(json.loads(self.card_extension("ummanu-630", "po_origin")), self.ORIGIN)
         self.assertEqual(
             card["origin"],
             {"po_session": "po-s-1", "request_id": "web-msg-9", "current_session": "po-s-1", "executor": None,
              "returns": []},
         )
         self.assertEqual(created["task"]["origin"], card["origin"])
-        [listed] = [row for row in self.writer.reader.list(states={"ready"}) if row["ref"] == "secretary-630"]
+        [listed] = [row for row in self.writer.reader.list(states={"ready"}) if row["ref"] == "ummanu-630"]
         self.assertEqual(listed["origin"], card["origin"])
-        self.assertEqual(self.writer.audit.events("secretary-630")[0]["payload"]["po_origin"], self.ORIGIN)
+        self.assertEqual(self.writer.audit.events("ummanu-630")[0]["payload"]["po_origin"], self.ORIGIN)
 
         # Outside a PO turn there is no origin, on any role's card.
-        self.create_as_po("secretary-631")
-        self.create_kind("secretary-632", "research")
-        for reference in ("secretary-631", "secretary-632"):
+        self.create_as_po("ummanu-631")
+        self.create_kind("ummanu-632", "research")
+        for reference in ("ummanu-631", "ummanu-632"):
             self.assertNotIn("origin", self.card(reference))
             self.assertIsNone(self.card_extension(reference, "po_origin"))
 
         # The origin is part of the request identity: the same turn replays, another one conflicts.
         after = self.board_snapshot()
-        self.assertTrue(self.create_as_po("secretary-630", origin=self.ORIGIN)["replayed"])
+        self.assertTrue(self.create_as_po("ummanu-630", origin=self.ORIGIN)["replayed"])
         with self.assertRaises(TaskError):
-            self.create_as_po("secretary-630", origin={"session": "po-s-2", "request": "other"})
+            self.create_as_po("ummanu-630", origin={"session": "po-s-2", "request": "other"})
         self.assertBoardUnchanged(after)
 
     # --- the origin-return outbox (secretary-1792) ----------------------------------------------
@@ -2786,57 +2786,57 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
     def test_every_writer_of_a_terminal_transition_writes_its_outbox_row_in_the_same_commit(self) -> None:
         wait = {"until": "2099-01-01T00:00:00Z", "deadline": "2099-01-02T00:00:00Z"}
-        self.create_as_po("secretary-650", origin=self.ORIGIN)
-        self.create_as_po("secretary-651", origin=self.ORIGIN)
-        self.create_as_po("secretary-652", "decision", origin=self.ORIGIN)
+        self.create_as_po("ummanu-650", origin=self.ORIGIN)
+        self.create_as_po("ummanu-651", origin=self.ORIGIN)
+        self.create_as_po("ummanu-652", "decision", origin=self.ORIGIN)
         with mock.patch.object(TaskWriter, "_po_session_state", return_value="open"):
-            self.create_as_po("secretary-653", "wait", origin=self.ORIGIN, wait=wait)
-        self.create_as_po("secretary-654")
-        for reference in ("secretary-651", "secretary-652", "secretary-653", "secretary-654"):
+            self.create_as_po("ummanu-653", "wait", origin=self.ORIGIN, wait=wait)
+        self.create_as_po("ummanu-654")
+        for reference in ("ummanu-651", "ummanu-652", "ummanu-653", "ummanu-654"):
             self.place_card(reference, "in_progress")
 
         with self.open_sprint():
             # The PO's move, by hand.
-            self.writer.move(role="po", actor="po", reference="secretary-650", target="done", reason="done", request_id="m-650")
+            self.writer.move(role="po", actor="po", reference="ummanu-650", target="done", reason="done", request_id="m-650")
             # A dispatcher edge.
-            self.writer.move(role="dispatcher", actor="d", reference="secretary-651", target="blocked",
+            self.writer.move(role="dispatcher", actor="d", reference="ummanu-651", target="blocked",
                              reason="the worker stalled", request_id="m-651")
             # `task complete`.
-            self.writer.complete(role="po", actor="po", reference="secretary-652", kind="decision",
+            self.writer.complete(role="po", actor="po", reference="ummanu-652", kind="decision",
                                  body=self.DECISION_BODY, request_id="m-652", po_session="po-s-1")
             # The dispatcher's wait edge: a wait card owes no return; it has its own addresses.
-            self.freeze("secretary-653")
-            self.writer.move(role="dispatcher", actor="d", reference="secretary-653", target="done",
+            self.freeze("ummanu-653")
+            self.writer.move(role="dispatcher", actor="d", reference="ummanu-653", target="done",
                              reason="[wait:target_reached]", request_id="m-653", wait_outcome="target_reached")
             # A card with no origin owes nothing.
-            self.writer.move(role="po", actor="po", reference="secretary-654", target="blocked", reason="x",
+            self.writer.move(role="po", actor="po", reference="ummanu-654", target="blocked", reason="x",
                              request_id="m-654")
 
         expected = [
-            ("secretary-650", self.event_id_of("m-650"), "done", None, None),
-            ("secretary-651", self.event_id_of("m-651"), "blocked", None, None),
-            ("secretary-652", self.event_id_of("m-652"), "done", None, None),
+            ("ummanu-650", self.event_id_of("m-650"), "done", None, None),
+            ("ummanu-651", self.event_id_of("m-651"), "blocked", None, None),
+            ("ummanu-652", self.event_id_of("m-652"), "done", None, None),
         ]
         self.assertEqual(self.outbox(), expected)
         [(event_id, request_id)] = self.client._query(
-            "SELECT event_id, request_id FROM origin_returns WHERE task_ref = 'secretary-650'"
+            "SELECT event_id, request_id FROM origin_returns WHERE task_ref = 'ummanu-650'"
         )
         self.assertEqual((event_id, request_id), (self.event_id_of("m-650"), "m-650"))
 
         # Reopen, a later move and archive write no row and touch none; a replay writes nothing.
         with self.open_sprint():
-            self.writer.move(role="po", actor="po", reference="secretary-650", target="ready", reason="reopen",
+            self.writer.move(role="po", actor="po", reference="ummanu-650", target="ready", reason="reopen",
                              request_id="r-650")
-            self.writer.move(role="po", actor="po", reference="secretary-650", target="done", reason="done",
+            self.writer.move(role="po", actor="po", reference="ummanu-650", target="done", reason="done",
                              request_id="m-650")
-            self.writer.archive(role="po", actor="po", reference="secretary-651", reason="parked for good")
+            self.writer.archive(role="po", actor="po", reference="ummanu-651", reason="parked for good")
         self.assertEqual(self.outbox(), expected)
         # `task show` reads the card's rows for its origin block.
-        [shown] = self.card("secretary-652")["origin"]["returns"]
+        [shown] = self.card("ummanu-652")["origin"]["returns"]
         self.assertEqual((shown["event_id"], shown["state"], shown["status"]), (self.event_id_of("m-652"), "done", None))
 
     def test_a_transition_and_its_outbox_row_commit_together_or_not_at_all(self) -> None:
-        self.create_as_po("secretary-655", origin=self.ORIGIN)
+        self.create_as_po("ummanu-655", origin=self.ORIGIN)
         before = self.board_snapshot()
 
         with (
@@ -2844,12 +2844,12 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             mock.patch.object(SqlTaskAudit, "_write_board_event", side_effect=RuntimeError("injected before commit")),
             self.assertRaises((RuntimeError, TaskError)),
         ):
-            self.writer.move(role="po", actor="po", reference="secretary-655", target="done", reason="done",
+            self.writer.move(role="po", actor="po", reference="ummanu-655", target="done", reason="done",
                              request_id="m-655")
 
-        self.assertEqual(self.card_state("secretary-655"), "ready")
+        self.assertEqual(self.card_state("ummanu-655"), "ready")
         self.assertIsNone(self.writer.audit.committed_event("m-655"))
-        self.assertEqual(self.outbox("secretary-655"), [])
+        self.assertEqual(self.outbox("ummanu-655"), [])
         self.assertBoardUnchanged(before)
 
     def test_no_writer_bypasses_the_outbox_because_every_committed_record_goes_through_append(self) -> None:
@@ -2868,20 +2868,20 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
         # 2. The entry point: whatever writer commits a transition into Done or Blocked, of either
         # record shape, on a delegated card, the row is written; nothing else writes one.
-        self.create_as_po("secretary-656", origin=self.ORIGIN)
-        self.create_as_po("secretary-657")
+        self.create_as_po("ummanu-656", origin=self.ORIGIN)
+        self.create_as_po("ummanu-657")
         records = {
-            "typed-656": {"record_type": "board.protocol_event", "event_id": "evt_typed_656", "ref": "secretary-656",
+            "typed-656": {"record_type": "board.protocol_event", "event_id": "evt_typed_656", "ref": "ummanu-656",
                           "kind": "card.blocked", "transition": {"source": "ready", "target": "blocked"}},
-            "legacy-656": {"event_id": "evt_legacy_656", "ref": "secretary-656", "kind": "moved", "outcome": "success",
+            "legacy-656": {"event_id": "evt_legacy_656", "ref": "ummanu-656", "kind": "moved", "outcome": "success",
                            "payload": {"from": "blocked", "to": "done"}},
-            "out-656": {"record_type": "board.protocol_event", "event_id": "evt_out_656", "ref": "secretary-656",
+            "out-656": {"record_type": "board.protocol_event", "event_id": "evt_out_656", "ref": "ummanu-656",
                         "kind": "card.moved", "transition": {"source": "done", "target": "validate"}},
-            "plain-657": {"record_type": "board.protocol_event", "event_id": "evt_plain_657", "ref": "secretary-657",
+            "plain-657": {"record_type": "board.protocol_event", "event_id": "evt_plain_657", "ref": "ummanu-657",
                           "kind": "card.blocked", "transition": {"source": "ready", "target": "blocked"}},
         }
         # The normalized-board restore replays history: an old transition owes no new return.
-        restored = {"record_type": "board.protocol_event", "event_id": "evt_restored_656", "ref": "secretary-656",
+        restored = {"record_type": "board.protocol_event", "event_id": "evt_restored_656", "ref": "ummanu-656",
                     "kind": "card.moved", "transition": {"source": "in_progress", "target": "done"}}
         with mock.patch.object(SqlTaskAudit, "_write_board_event"):
             for request_id, record in records.items():
@@ -2889,19 +2889,19 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
             self.writer.audit.append("restored-656", restored, restoring=True)
         self.assertEqual(
             [(row[0], row[1], row[2]) for row in self.outbox()],
-            [("secretary-656", "evt_typed_656", "blocked"), ("secretary-656", "evt_legacy_656", "done")],
+            [("ummanu-656", "evt_typed_656", "blocked"), ("ummanu-656", "evt_legacy_656", "done")],
         )
 
     def test_a_card_archived_before_any_pass_returns_its_done_once_with_one_notice(self) -> None:
         """BLOCKER-ARCHIVED-ORIGIN-RETURN-LOSS, over PostgreSQL."""
-        from secretary.dispatch.origin_returns import reconcile_origin_returns, return_request_id
+        from ummanu.dispatch.origin_returns import reconcile_origin_returns, return_request_id
 
-        self.create_as_po("secretary-658", origin=self.ORIGIN)
+        self.create_as_po("ummanu-658", origin=self.ORIGIN)
         with self.open_sprint():
-            self.writer.move(role="po", actor="po", reference="secretary-658", target="done", reason="shipped",
+            self.writer.move(role="po", actor="po", reference="ummanu-658", target="done", reason="shipped",
                              request_id="m-658")
-            self.writer.archive(role="po", actor="po", reference="secretary-658", reason="archived at once")
-        self.assertNotIn("secretary-658", [card["ref"] for card in self.writer.reader.list()])
+            self.writer.archive(role="po", actor="po", reference="ummanu-658", reason="archived at once")
+        self.assertNotIn("ummanu-658", [card["ref"] for card in self.writer.reader.list()])
 
         class Po:
             def __init__(self) -> None:
@@ -2918,15 +2918,15 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
         event_id = self.event_id_of("m-658")
         self.assertEqual((outcome["action"], outcome["event_id"]), ("origin-returned", event_id))
-        self.assertEqual(list(po.inputs), [return_request_id("secretary-658", event_id)])
-        self.assertEqual(po.inputs[return_request_id("secretary-658", event_id)]["session_id"], "po-s-1")
-        self.assertIn("settled Done", po.inputs[return_request_id("secretary-658", event_id)]["text"])
+        self.assertEqual(list(po.inputs), [return_request_id("ummanu-658", event_id)])
+        self.assertEqual(po.inputs[return_request_id("ummanu-658", event_id)]["session_id"], "po-s-1")
+        self.assertIn("settled Done", po.inputs[return_request_id("ummanu-658", event_id)]["text"])
         notices = self.client._query(
             "SELECT subject_ref, dedup_key FROM owner_events WHERE kind = 'delegated_card_settled'"
         )
         self.assertEqual([tuple(row) for row in notices],
-                         [("secretary-658", f"delegated_card_settled:secretary-658:{event_id}")])
-        self.assertEqual(self.outbox("secretary-658"), [("secretary-658", event_id, "done", "delivered", "po-s-1")])
+                         [("ummanu-658", f"delegated_card_settled:ummanu-658:{event_id}")])
+        self.assertEqual(self.outbox("ummanu-658"), [("ummanu-658", event_id, "done", "delivered", "po-s-1")])
         # A delivered row is never selected again.
         self.assertEqual(reconcile_origin_returns(runtime), [])
         self.assertEqual(len(po.inputs), 1)
@@ -2935,41 +2935,41 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         before = self.board_snapshot()
         with self.open_sprint() as sprint, self.assertRaisesRegex(TaskError, "only the PO records") as raised:
             self.writer.create(
-                role="observer", actor="observer", project="secretary", task_type="research", title="T",
+                role="observer", actor="observer", project="ummanu", task_type="research", title="T",
                 sprint=sprint, origin=self.ORIGIN,
             )
         self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
-        self.create_as_po("secretary-633", origin=self.ORIGIN)
-        stored = self.card_extension("secretary-633", "po_origin")
+        self.create_as_po("ummanu-633", origin=self.ORIGIN)
+        stored = self.card_extension("ummanu-633", "po_origin")
         with self.open_sprint():
-            self.writer.edit(role="po", actor="po", reference="secretary-633", title="Renamed", description="New body")
+            self.writer.edit(role="po", actor="po", reference="ummanu-633", title="Renamed", description="New body")
         self.writer.record_po_return(
-            role="dispatcher", actor="d", reference="secretary-633", state='{"executor":"po-s-9"}'
+            role="dispatcher", actor="d", reference="ummanu-633", state='{"executor":"po-s-9"}'
         )
         with self.open_sprint():
-            self.writer.move(role="po", actor="po", reference="secretary-633", target="blocked", reason="parked")
+            self.writer.move(role="po", actor="po", reference="ummanu-633", target="blocked", reason="parked")
 
-        self.assertEqual(self.card_extension("secretary-633", "po_origin"), stored)
-        self.assertEqual(self.card("secretary-633")["origin"]["po_session"], "po-s-1")
-        self.assertEqual(self.card("secretary-633")["origin"]["executor"], "po-s-9")
+        self.assertEqual(self.card_extension("ummanu-633", "po_origin"), stored)
+        self.assertEqual(self.card("ummanu-633")["origin"]["po_session"], "po-s-1")
+        self.assertEqual(self.card("ummanu-633")["origin"]["executor"], "po-s-9")
         with self.assertRaises(TaskError):
-            self.writer.record_po_return(role="po", actor="po", reference="secretary-633", state="{}")
+            self.writer.record_po_return(role="po", actor="po", reference="ummanu-633", state="{}")
         with self.assertRaisesRegex(TaskError, "names no PO origin"):
-            self.writer.record_po_return(role="dispatcher", actor="d", reference="secretary-468", state="{}")
+            self.writer.record_po_return(role="dispatcher", actor="d", reference="ummanu-468", state="{}")
 
     def test_an_out_of_sprint_decision_or_operation_card_needs_a_po_turn(self) -> None:
         before = self.board_snapshot()
-        for reference, kind, production in (("secretary-634", "decision", ""), ("secretary-635", "operation", "none")):
+        for reference, kind, production in (("ummanu-634", "decision", ""), ("ummanu-635", "operation", "none")):
             with self.subTest(kind=kind), self.assertRaisesRegex(TaskError, "needs --sprint") as raised:
                 self.create_as_po(reference, kind, touches_production=production)
             self.assertEqual(raised.exception.code, "validation")
         self.assertBoardUnchanged(before)
 
-        self.create_as_po("secretary-634", "decision", origin=self.ORIGIN)
-        self.create_as_po("secretary-635", "operation", origin=self.ORIGIN, touches_production="none")
-        for reference, kind in (("secretary-634", "decision"), ("secretary-635", "operation")):
+        self.create_as_po("ummanu-634", "decision", origin=self.ORIGIN)
+        self.create_as_po("ummanu-635", "operation", origin=self.ORIGIN, touches_production="none")
+        for reference, kind in (("ummanu-634", "decision"), ("ummanu-635", "operation")):
             card = self.card(reference)
             self.assertEqual((card["type"], card["state"], card["review"]), (kind, "ready", "skipped"))
             self.assertFalse(card["sprint"])
@@ -2977,7 +2977,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
 
     def test_complete_and_handover_record_the_po_session_whose_turn_ran_them(self) -> None:
         """The proof a delegated card's return reads (secretary-1792); it permits nothing."""
-        reference = self.in_progress_decision("secretary-638")
+        reference = self.in_progress_decision("ummanu-638")
         self.hand_over_in(reference, "handover-638", "po-s-1")
         [handover] = [event for event in self.writer.audit.events(reference) if event.get("request_id") == "handover-638"]
         self.assertEqual(handover["payload"]["po_session"], "po-s-1")
@@ -2999,7 +2999,7 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
         self.assertEqual(self.writer.audit.committed_event("complete-638")["data"]["po_session"], "po-s-1")
 
         # Outside a PO turn nothing is recorded, and nothing is refused either.
-        other = self.in_progress_decision("secretary-639")
+        other = self.in_progress_decision("ummanu-639")
         self.writer.complete(
             role="po", actor="po", reference=other, kind="decision", body=self.DECISION_BODY,
             request_id="complete-639",
@@ -3015,16 +3015,16 @@ class TaskWriterTests(BoardFixture, CardStoreCase):
     def test_a_wait_cut_in_a_po_turn_returns_to_that_session_when_it_names_no_address(self) -> None:
         wait = {"until": "2099-01-01T00:00:00Z", "deadline": "2099-01-02T00:00:00Z"}
         with mock.patch.object(TaskWriter, "_po_session_state", side_effect=AssertionError("the turn's session")):
-            self.create_as_po("secretary-636", "wait", origin=self.ORIGIN, wait=wait)
-        card = self.card("secretary-636")
+            self.create_as_po("ummanu-636", "wait", origin=self.ORIGIN, wait=wait)
+        card = self.card("ummanu-636")
         self.assertEqual(card["wait"]["return_to"], ["po-session:po-s-1"])
         self.assertEqual(card["origin"]["po_session"], "po-s-1")
         # The flags as given are the identity: no --wait-return, so none is recorded as given.
-        self.assertNotIn("returns", self.writer.audit.events("secretary-636")[0]["payload"]["wait_request"])
+        self.assertNotIn("returns", self.writer.audit.events("ummanu-636")[0]["payload"]["wait_request"])
 
         before = self.board_snapshot()
         with self.assertRaisesRegex(TaskError, "at least one --wait-return"):
-            self.create_as_po("secretary-637", "wait", wait=wait)
+            self.create_as_po("ummanu-637", "wait", wait=wait)
         self.assertBoardUnchanged(before)
 
 
@@ -3053,7 +3053,7 @@ class DoneRetentionTests(CardStoreCase):
         )
         self.client.set_moved(15, None)
         result = self.cleanup()
-        self.assertEqual(result["closed"], ["a-old-1", "secretary-468"])
+        self.assertEqual(result["closed"], ["a-old-1", "ummanu-468"])
         self.assertEqual(result["closed_count"], 2)
         self.assertEqual(self.client.row(15)["is_active"], 1)
 
@@ -3067,7 +3067,7 @@ class DoneRetentionTests(CardStoreCase):
         self.client.add_record(
             "product:alpha",
             "Alpha",
-            {"record_type": "product", "product_id": "alpha", "product_projects": '["secretary"]'},
+            {"record_type": "product", "product_id": "alpha", "product_projects": '["ummanu"]'},
         )
         self.client.add_record(
             issue,
@@ -3087,7 +3087,7 @@ class DoneRetentionTests(CardStoreCase):
                 metadata={"record_type": "task"},
             )
             self.client.set_moved(key, 1)
-        self.assertEqual(self.reader.done_retention_candidates(), [{"reference": "secretary-468", "date_moved": 100}])
+        self.assertEqual(self.reader.done_retention_candidates(), [{"reference": "ummanu-468", "date_moved": 100}])
 
     def test_product_or_issue_is_refused_without_close(self) -> None:
         for reference in self._records():
@@ -3112,7 +3112,7 @@ class DoneRetentionTests(CardStoreCase):
 
         with mock.patch.object(self.client, "call", side_effect=race):
             result = self.writer.retire_done(
-                reference="secretary-468", expected_date_moved=100, cutoff=101, retention_days=14
+                reference="ummanu-468", expected_date_moved=100, cutoff=101, retention_days=14
             )
         self.assertTrue(result["skipped"])
         self.assertFalse(any(method == "closeTask" for method, _params in self.client.calls))
@@ -3131,23 +3131,23 @@ class DoneRetentionTests(CardStoreCase):
 
         with mock.patch.object(self.client, "call", side_effect=race):
             result = self.writer.retire_done(
-                reference="secretary-468", expected_date_moved=100, cutoff=101, retention_days=14
+                reference="ummanu-468", expected_date_moved=100, cutoff=101, retention_days=14
             )
         self.assertTrue(result["skipped"])
         self.assertFalse(any(method == "closeTask" for method, _params in self.client.calls))
 
     def test_replay_uses_episode_key_and_no_archive_comment(self) -> None:
         first = self.writer.retire_done(
-            reference="secretary-468", expected_date_moved=100, cutoff=101, retention_days=14
+            reference="ummanu-468", expected_date_moved=100, cutoff=101, retention_days=14
         )
         second = self.writer.retire_done(
-            reference="secretary-468", expected_date_moved=100, cutoff=101, retention_days=14
+            reference="ummanu-468", expected_date_moved=100, cutoff=101, retention_days=14
         )
         self.assertTrue(first["retired"])
         self.assertTrue(second["skipped"])
         self.assertEqual(len([call for call in self.client.calls if call[0] == "closeTask"]), 1)
         self.assertFalse(any(call[0] == "createComment" for call in self.client.calls))
-        event = self.writer.audit.events("secretary-468", kind="retired")[0]
+        event = self.writer.audit.events("ummanu-468", kind="retired")[0]
         self.assertEqual(event["actor"]["role"], "retro")
         self.assertEqual(event["payload"]["expected_date_moved"], 100)
         self.assertEqual(event["request_id"], tasks._done_retention_request_id(12, 100))
@@ -3171,7 +3171,7 @@ class AssessmentStateTests(CardStoreCase):
         self,
         *,
         card_sprint: str = SPRINT,
-        project: str = "secretary",
+        project: str = "ummanu",
         data_dir: str = "",
     ) -> None:
         """Put the card in an open sprint that reserves its project.
@@ -3186,7 +3186,7 @@ class AssessmentStateTests(CardStoreCase):
         bind_observer(self, card_sprint)
         self.client.save_metadata(12, sprint_ref=card_sprint)
         reader = FakeSprintReader({"ref": SPRINT, "status": "open", "reservations": [project]})
-        patcher = mock.patch("secretary.sprints.SprintReader", return_value=reader)
+        patcher = mock.patch("ummanu.sprints.SprintReader", return_value=reader)
         patcher.start()
         self.addCleanup(patcher.stop)
         refresh_active_sprint_projects(data_dir or self.tmpdir.name, reader)
@@ -3288,7 +3288,7 @@ class AssessmentStateTests(CardStoreCase):
                             self.writer.move(
                                 role=role,
                                 actor=role,
-                                reference="secretary-468",
+                                reference="ummanu-468",
                                 target=target,
                                 reason="authorization contract",
                                 request_id=f"transition-contract-{role}-{source}-{target}",
@@ -3306,7 +3306,7 @@ class AssessmentStateTests(CardStoreCase):
         entered = self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="assessment",
             reason="",
             request_id=request_id,
@@ -3320,7 +3320,7 @@ class AssessmentStateTests(CardStoreCase):
         return self.writer.decide(
             role="observer",
             actor="observer",
-            reference="secretary-468",
+            reference="ummanu-468",
             kind=kind,
             body="the round converged",
             request_id=request_id or f"decision-{kind}",
@@ -3333,7 +3333,7 @@ class AssessmentStateTests(CardStoreCase):
         left = self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="in_progress",
             reason="",
             decision="rework",
@@ -3350,7 +3350,7 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.move(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="done",
                 reason="",
                 request_id="undecided-release",
@@ -3371,7 +3371,7 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.move(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="done",
                 reason="",
                 decision="release",
@@ -3387,7 +3387,7 @@ class AssessmentStateTests(CardStoreCase):
         self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="done",
             reason="",
             decision="release",
@@ -3399,7 +3399,7 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.move(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="done",
                 reason="",
                 decision="release",
@@ -3412,7 +3412,7 @@ class AssessmentStateTests(CardStoreCase):
         self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="done",
             reason="",
             decision="release",
@@ -3445,7 +3445,7 @@ class AssessmentStateTests(CardStoreCase):
         first = self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="done",
             reason="Observer decision: release.",
             decision="release",
@@ -3455,7 +3455,7 @@ class AssessmentStateTests(CardStoreCase):
         replay = self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="done",
             reason="Observer decision: release.",
             decision="release",
@@ -3466,7 +3466,7 @@ class AssessmentStateTests(CardStoreCase):
         self.assertEqual(replay["event_id"], first["event_id"])
         fact = {
             "result": "red",
-            "card": "secretary-468",
+            "card": "ummanu-468",
             "base": "main",
             "merge_sha": "a" * 40,
             "runs": [{"id": "9", "url": "https://github.com/o/r/actions/runs/9"}],
@@ -3477,18 +3477,18 @@ class AssessmentStateTests(CardStoreCase):
         for _ in range(2):
             self.writer.post_merge_ci(
                 actor="d",
-                reference="secretary-468",
-                body="Post-merge CI RED for secretary-468",
+                reference="ummanu-468",
+                body="Post-merge CI RED for ummanu-468",
                 fact=fact,
                 request_id="post-merge-ci-card",
             )
-        events = self.writer.audit.events("secretary-468")
+        events = self.writer.audit.events("ummanu-468")
         [done] = [event for event in events if (recorded_card_transition(event) or ("", ""))[1] == "done"]
         self.assertEqual(done["data"]["release_merge"], marker)
         woken = [
             event
             for event in events
-            if is_significant_observer_event(event, linked_refs={"secretary-468"}, sprint_ref=SPRINT)
+            if is_significant_observer_event(event, linked_refs={"ummanu-468"}, sprint_ref=SPRINT)
         ]
         self.assertEqual([event["payload"]["post_merge_ci"] for event in woken[-1:]], [fact])
         self.assertNotIn(done, woken)
@@ -3499,7 +3499,7 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.move(
                 role="po",
                 actor="po",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="blocked",
                 reason="not a release",
                 request_id="po-with-marker",
@@ -3512,7 +3512,7 @@ class AssessmentStateTests(CardStoreCase):
         self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="done",
             reason="",
             decision="release",
@@ -3544,7 +3544,7 @@ class AssessmentStateTests(CardStoreCase):
         self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="done",
             reason="",
             decision="release",
@@ -3562,7 +3562,7 @@ class AssessmentStateTests(CardStoreCase):
         self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="done",
             reason="",
             decision="release",
@@ -3583,7 +3583,7 @@ class AssessmentStateTests(CardStoreCase):
         comment = decided["task"]["comments"][-1]
         self.assertEqual(comment["marker"], "decision:reslice")
         self.assertIn("the round converged", comment["body"])
-        event = self.writer.audit.events("secretary-468", kind="decided")[-1]
+        event = self.writer.audit.events("ummanu-468", kind="decided")[-1]
         self.assertEqual(event["kind"], "card.decided")
         self.assertEqual(event["data"]["decision"], "reslice")
         self.assertEqual(event["actor"], {"role": "observer", "id": "observer"})
@@ -3595,12 +3595,12 @@ class AssessmentStateTests(CardStoreCase):
         body = "Repair the local implementation and report the focused regression coverage."
         request_id = "dispatcher-receipt-rework"
 
-        with mock.patch("secretary.tasks.specification_revision", return_value="specification-revision-1"):
+        with mock.patch("ummanu.tasks.specification_revision", return_value="specification-revision-1"):
             with self.assertRaises(ArtifactOwnershipTaskError) as raised:
                 self.writer.decide(
                     role="observer",
                     actor="observer",
-                    reference="secretary-468",
+                    reference="ummanu-468",
                     kind="rework",
                     body=body,
                     protocol_prerequisites=("dispatcher_executed_exact_sha_gate_receipt",),
@@ -3613,7 +3613,7 @@ class AssessmentStateTests(CardStoreCase):
                 self.writer.decide(
                     role="observer",
                     actor="observer",
-                    reference="secretary-468",
+                    reference="ummanu-468",
                     kind="rework",
                     body=body,
                     protocol_prerequisites=("dispatcher_executed_exact_sha_gate_receipt",),
@@ -3624,11 +3624,11 @@ class AssessmentStateTests(CardStoreCase):
         self.assertEqual(retried.exception.code, "artifact_ownership_violation")
         self.assertIn("owned by dispatcher", raised.exception.message)
         self.assertIn("specification-revision-1", raised.exception.message)
-        self.assertEqual(self.writer.reader.show("secretary-468")["state"], "assessment")
+        self.assertEqual(self.writer.reader.show("ummanu-468")["state"], "assessment")
         self.assertFalse(
             any(comment.get("marker") == "decision:rework" for comment in self.client.comments(12))
         )
-        refusals = self.writer.audit.events("secretary-468", kind="card.decision_refused")
+        refusals = self.writer.audit.events("ummanu-468", kind="card.decision_refused")
         self.assertEqual(len(refusals), 1)
         refusal = refusals[0]["data"]
         self.assertEqual(refusal["code"], "artifact_ownership_violation")
@@ -3643,7 +3643,7 @@ class AssessmentStateTests(CardStoreCase):
         corrected = self.writer.decide(
             role="observer",
             actor="observer",
-            reference="secretary-468",
+            reference="ummanu-468",
             kind="rework",
             body="Repair the local implementation and report the focused regression coverage.",
             protocol_prerequisites=("worker_local_broad_check_receipt",),
@@ -3651,7 +3651,7 @@ class AssessmentStateTests(CardStoreCase):
         )
         self.assertFalse(corrected["replayed"])
         self.assertEqual(corrected["task"]["state"], "assessment")
-        decisions = self.writer.audit.events("secretary-468", kind="card.decided")
+        decisions = self.writer.audit.events("ummanu-468", kind="card.decided")
         self.assertEqual(len(decisions), 1)
         self.assertTrue(decisions[0]["data"]["assessment_visit"])
         self.assertEqual(decisions[0]["data"]["protocol_prerequisites"], ["worker_local_broad_check_receipt"])
@@ -3663,7 +3663,7 @@ class AssessmentStateTests(CardStoreCase):
         decided = self.writer.decide(
             role="observer",
             actor="observer",
-            reference="secretary-468",
+            reference="ummanu-468",
             kind="rework",
             body="Do not obtain an executed exact-SHA gate receipt. Address each reviewer finding.",
             protocol_prerequisites=(),
@@ -3673,9 +3673,9 @@ class AssessmentStateTests(CardStoreCase):
         self.assertFalse(decided["replayed"])
         self.assertEqual(decided["task"]["state"], "assessment")
         self.assertEqual(
-            self.writer.audit.events("secretary-468", kind="card.decision_refused"), []
+            self.writer.audit.events("ummanu-468", kind="card.decision_refused"), []
         )
-        self.assertEqual(self.writer.audit.events("secretary-468", kind="card.decided")[0]["data"]["decision"], "rework")
+        self.assertEqual(self.writer.audit.events("ummanu-468", kind="card.decided")[0]["data"]["decision"], "rework")
 
     def test_decide_cli_persists_declared_protocol_prerequisites(self) -> None:
         self._park()
@@ -3685,7 +3685,7 @@ class AssessmentStateTests(CardStoreCase):
         reason.write_text("repair the local implementation\n", encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("secretary.task_commands.card_client", return_value=self.client),
+            mock.patch("ummanu.task_commands.card_client", return_value=self.client),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -3694,7 +3694,7 @@ class AssessmentStateTests(CardStoreCase):
                     "task",
                     "decide",
                     "--ref",
-                    "secretary-468",
+                    "ummanu-468",
                     "--role",
                     "observer",
                     "--kind",
@@ -3711,7 +3711,7 @@ class AssessmentStateTests(CardStoreCase):
             )
 
         self.assertEqual((code, errors.getvalue()), (0, ""))
-        event = tasks.task_audit_for(self.client).events("secretary-468", kind="card.decided")[-1]
+        event = tasks.task_audit_for(self.client).events("ummanu-468", kind="card.decided")[-1]
         self.assertEqual(event["data"]["body"], "repair the local implementation\n")
         self.assertEqual(event["data"]["protocol_prerequisites"], ["worker_local_broad_check_receipt"])
 
@@ -3720,7 +3720,7 @@ class AssessmentStateTests(CardStoreCase):
         body.write_text("looks good\n", encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("secretary.task_commands.card_client", return_value=self.client),
+            mock.patch("ummanu.task_commands.card_client", return_value=self.client),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -3729,7 +3729,7 @@ class AssessmentStateTests(CardStoreCase):
                     "task",
                     "verdict",
                     "--ref",
-                    "secretary-468",
+                    "ummanu-468",
                     "--role",
                     "reviewer",
                     "--kind",
@@ -3755,7 +3755,7 @@ class AssessmentStateTests(CardStoreCase):
         self.assertFalse(first["replayed"])
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["event_id"], first["event_id"])
-        decisions = self.writer.audit.events("secretary-468", kind="decided")
+        decisions = self.writer.audit.events("ummanu-468", kind="decided")
         self.assertEqual(len(decisions), 1)
         self.assertTrue(decisions[0]["data"]["assessment_visit"])
         with self.assertRaisesRegex(TaskError, "already has a release decision") as raised:
@@ -3779,7 +3779,7 @@ class AssessmentStateTests(CardStoreCase):
                             self.writer.decide(
                                 role="observer",
                                 actor="observer",
-                                reference="secretary-468",
+                                reference="ummanu-468",
                                 kind=kind,
                                 body=kind,
                                 request_id="race-" + kind,
@@ -3794,7 +3794,7 @@ class AssessmentStateTests(CardStoreCase):
             thread.start()
         for thread in threads:
             thread.join()
-        decisions = self.writer.audit.events("secretary-468", kind="decided")
+        decisions = self.writer.audit.events("ummanu-468", kind="decided")
         self.assertEqual(len(decisions), 1, outcomes)
         self.assertEqual(sum(isinstance(result, dict) for _kind, result in outcomes), 1)
         self.assertEqual(sum(isinstance(result, TaskError) for _kind, result in outcomes), 1)
@@ -3813,7 +3813,7 @@ class AssessmentStateTests(CardStoreCase):
                     self.writer.decide(
                         role="observer",
                         actor="observer",
-                        reference="secretary-468",
+                        reference="ummanu-468",
                         kind="release",
                         body=body,
                         request_id="same-id-different-body",
@@ -3835,9 +3835,9 @@ class AssessmentStateTests(CardStoreCase):
         self.assertIn("belongs to another operation", refused[0].message)
 
     def test_observer_wake_predicate_excludes_routine_and_self_card_events(self) -> None:
-        refs = {"secretary-468"}
+        refs = {"ummanu-468"}
 
-        def event(kind: str, *, actor: str, ref: str = "secretary-468", payload: dict | None = None) -> dict:
+        def event(kind: str, *, actor: str, ref: str = "ummanu-468", payload: dict | None = None) -> dict:
             return {
                 "ref": ref,
                 "kind": kind,
@@ -3888,7 +3888,7 @@ class AssessmentStateTests(CardStoreCase):
         The predicate is told which record it holds by ``record_type``; it never reads a
         transition out of a generic payload or an outcome out of a typed one.
         """
-        refs = {"secretary-468"}
+        refs = {"ummanu-468"}
 
         def typed(source: CardState, target: CardState, *, actor: str = "dispatcher") -> dict:
             declaration = transition_for(EntityKind.CARD, source, target)
@@ -3896,7 +3896,7 @@ class AssessmentStateTests(CardStoreCase):
                 f"board-event-{actor}-{source.value}-{target.value}",
                 declaration.event_kind,
                 EntityKind.CARD,
-                "secretary-468",
+                "ummanu-468",
                 Actor(actor, actor),
                 "why",
                 datetime(2026, 8, 11, tzinfo=UTC),
@@ -3933,7 +3933,7 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.decide(
                 role="observer",
                 actor="observer",
-                reference="secretary-468",
+                reference="ummanu-468",
                 kind="release",
                 body="  ",
                 request_id="empty-reason",
@@ -3942,7 +3942,7 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.decide(
                 role="observer",
                 actor="observer",
-                reference="secretary-468",
+                reference="ummanu-468",
                 kind="merge",
                 body="ship it",
                 request_id="unknown-kind",
@@ -3951,7 +3951,7 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.decide(
                 role="worker",
                 actor="w",
-                reference="secretary-468",
+                reference="ummanu-468",
                 kind="release",
                 body="ship it",
                 request_id="worker-decision",
@@ -3964,7 +3964,7 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.decide(
                 role="observer",
                 actor="observer",
-                reference="secretary-468",
+                reference="ummanu-468",
                 kind="release",
                 body="ship it",
                 request_id="unparked-decision",
@@ -3977,7 +3977,7 @@ class AssessmentStateTests(CardStoreCase):
         escalated = self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="blocked",
             reason="the release could not land",
             request_id="parked-card-blocked",
@@ -3993,7 +3993,7 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.decide(
                 role="po",
                 actor="operator",
-                reference="secretary-468",
+                reference="ummanu-468",
                 kind="release",
                 body="ship it",
                 request_id="po-decision",
@@ -4008,7 +4008,7 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.move(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="in_progress",
                 reason="",
                 decision="release",
@@ -4028,7 +4028,7 @@ class AssessmentStateTests(CardStoreCase):
                 self.writer.move(
                     role="dispatcher",
                     actor="d",
-                    reference="secretary-468",
+                    reference="ummanu-468",
                     target=target,
                     reason="",
                     request_id=f"dispatcher-bypass-{target}",
@@ -4051,7 +4051,7 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.move(
                 role="observer",
                 actor="observer",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="done",
                 reason="",
                 decision="release",
@@ -4065,7 +4065,7 @@ class AssessmentStateTests(CardStoreCase):
         performed = self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="done",
             reason="",
             decision="release",
@@ -4086,7 +4086,7 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.decide(
                 role="observer",
                 actor="observer",
-                reference="secretary-468",
+                reference="ummanu-468",
                 kind="release",
                 body="ship it",
                 request_id="decision-without-a-sprint",
@@ -4100,13 +4100,13 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.decide(
                 role="observer",
                 actor="observer",
-                reference="secretary-468",
+                reference="ummanu-468",
                 kind="release",
                 body="ship it",
                 request_id="decision-from-another-sprint",
             )
         self.assertEqual(other.exception.code, "sprint_write_forbidden")
-        self.assertEqual(standing_decision(self.writer.audit.events("secretary-468")), "")
+        self.assertEqual(standing_decision(self.writer.audit.events("ummanu-468")), "")
 
     def test_the_decision_guard_also_places_the_caller(self) -> None:
         """The other half of the guard: which sprint's observer is writing.
@@ -4121,14 +4121,14 @@ class AssessmentStateTests(CardStoreCase):
         decided = self.writer.decide(
             role="observer",
             actor="observer",
-            reference="secretary-468",
+            reference="ummanu-468",
             kind="release",
             body="deciding from this card's own head",
             request_id="decision-from-its-own-head",
         )
 
         self.assertEqual(decided["action"], "decided")
-        event = self.writer.audit.events("secretary-468", kind="decided")[-1]
+        event = self.writer.audit.events("ummanu-468", kind="decided")[-1]
         self.assertEqual(event["actor"], {"role": "observer", "id": "observer"})
 
         self._park(request_id="park-again")
@@ -4136,13 +4136,13 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.decide(
                 role="observer",
                 actor="observer",
-                reference="secretary-468",
+                reference="ummanu-468",
                 kind="release",
                 body="deciding about a sprint I do not observe",
                 request_id="decision-from-another-head",
             )
         self.assertEqual(stranger.exception.code, "observer_sprint_mismatch")
-        denial = self.writer.audit.events("secretary-468", kind="sprint_guard_denied")[-1]
+        denial = self.writer.audit.events("ummanu-468", kind="sprint_guard_denied")[-1]
         self.assertEqual(denial["payload"]["code"], "observer_sprint_mismatch")
         self.assertEqual(denial["payload"]["sprint"], "sprint:2000")
 
@@ -4150,7 +4150,7 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.decide(
                 role="observer",
                 actor="observer",
-                reference="secretary-468",
+                reference="ummanu-468",
                 kind="release",
                 body="deciding from a head nobody bound",
                 request_id="decision-from-an-unbound-head",
@@ -4164,7 +4164,7 @@ class AssessmentStateTests(CardStoreCase):
         requeued = self.writer.move(
             role="po",
             actor="operator",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="ready",
             reason="taking this one back by hand",
             request_id="po-requeue",
@@ -4186,7 +4186,7 @@ class AssessmentStateTests(CardStoreCase):
             moved = self.writer.move(
                 role="po",
                 actor="operator",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target=target,
                 reason="finishing this one by hand",
                 sprint_override=True,
@@ -4205,7 +4205,7 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.move(
                 role="po",
                 actor="operator",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="done",
                 reason="",
                 decision="release",
@@ -4216,7 +4216,7 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.move(
                 role="po",
                 actor="operator",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="in_progress",
                 reason="",
                 decision="release",
@@ -4234,7 +4234,7 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.move(
                 role="worker",
                 actor="w",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="done",
                 reason="",
             )
@@ -4247,25 +4247,25 @@ class AssessmentStateTests(CardStoreCase):
             self.writer.move(
                 role="steward",
                 actor="s",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="blocked",
                 reason="",
             )
         escalated = self.writer.move(
             role="steward",
             actor="s",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="blocked",
             reason="the observer never came back",
             request_id="assessment-escalation",
         )
         self.assertEqual(escalated["task"]["state"], "blocked")
-        self.assertEqual(self.writer.reader.show("secretary-468")["state"], "blocked")
+        self.assertEqual(self.writer.reader.show("ummanu-468")["state"], "blocked")
 
     def _move_cli(self, *arguments: str) -> tuple[int, str, str]:
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("secretary.task_commands.card_client", return_value=self.client),
+            mock.patch("ummanu.task_commands.card_client", return_value=self.client),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -4274,7 +4274,7 @@ class AssessmentStateTests(CardStoreCase):
                     "task",
                     "move",
                     "--ref",
-                    "secretary-468",
+                    "ummanu-468",
                     "--data-dir",
                     str(Path(self.tmpdir.name) / "data"),
                     *arguments,
@@ -4318,7 +4318,7 @@ class AssessmentStateTests(CardStoreCase):
         reason.write_text("ship it", encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("secretary.task_commands.card_client", return_value=self.client),
+            mock.patch("ummanu.task_commands.card_client", return_value=self.client),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -4327,7 +4327,7 @@ class AssessmentStateTests(CardStoreCase):
                     "task",
                     "decide",
                     "--ref",
-                    "secretary-468",
+                    "ummanu-468",
                     "--role",
                     "observer",
                     "--kind",
@@ -4382,7 +4382,7 @@ class AssessmentStateTests(CardStoreCase):
 
 def _move_target_option_strings() -> list[str]:
     """Every flag `task move` accepts for the destination state."""
-    from secretary.task_commands import add_task_subcommands
+    from ummanu.task_commands import add_task_subcommands
 
     parser = argparse.ArgumentParser()
     add_task_subcommands(parser.add_subparsers(dest="command"))
@@ -4393,7 +4393,7 @@ def _move_target_option_strings() -> list[str]:
 
 def _task_state_choices() -> dict[tuple[str, str], tuple[str, ...]]:
     """{(task subcommand, argument dest): its choices} for every state-valued task argument."""
-    from secretary.task_commands import add_task_subcommands
+    from ummanu.task_commands import add_task_subcommands
 
     parser = argparse.ArgumentParser()
     add_task_subcommands(parser.add_subparsers(dest="command"))
@@ -4456,12 +4456,12 @@ class RoutingJournalTests(CardStoreCase):
         self.writer.routing(
             role="dispatcher",
             actor="pilot",
-            reference="secretary-468",
+            reference="ummanu-468",
             payload=self._payload(1, "worker", ("worker", "codex")),
             request_id="routing-1",
         )
 
-        events = self.audit.events("secretary-468", kind="routing")
+        events = self.audit.events("ummanu-468", kind="routing")
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["payload"]["heads"][0]["head"], "codex")
         self.assertEqual(
@@ -4475,19 +4475,19 @@ class RoutingJournalTests(CardStoreCase):
             self.writer.routing(
                 role="dispatcher",
                 actor="pilot",
-                reference="secretary-468",
+                reference="ummanu-468",
                 payload=self._payload(1, "worker", ("worker", "codex")),
                 request_id="routing-1",
             )
 
-        self.assertEqual(len(self.audit.events("secretary-468", kind="routing")), 1)
+        self.assertEqual(len(self.audit.events("ummanu-468", kind="routing")), 1)
 
     def test_only_the_dispatcher_may_write_routing(self) -> None:
         with self.assertRaisesRegex(TaskError, "not permitted"):
             self.writer.routing(
                 role="worker",
                 actor="w",
-                reference="secretary-468",
+                reference="ummanu-468",
                 payload=self._payload(1, "worker", ("worker", "codex")),
             )
 
@@ -4496,14 +4496,14 @@ class RoutingJournalTests(CardStoreCase):
             self.writer.routing(
                 role="dispatcher",
                 actor="pilot",
-                reference="secretary-468",
+                reference="ummanu-468",
                 payload={"attempt": 1, "phase": "guess", "heads": [{"role": "worker"}]},
             )
         with self.assertRaisesRegex(TaskError, "at least one head"):
             self.writer.routing(
                 role="dispatcher",
                 actor="pilot",
-                reference="secretary-468",
+                reference="ummanu-468",
                 payload={"attempt": 1, "phase": "worker", "heads": []},
             )
 
@@ -4512,21 +4512,21 @@ class RoutingJournalTests(CardStoreCase):
             self.writer.routing(
                 role="dispatcher",
                 actor="pilot",
-                reference="secretary-468",
+                reference="ummanu-468",
                 payload=self._payload(attempt, "worker", ("worker", "codex")),
                 request_id=f"routing-worker-{attempt}",
             )
             self.writer.routing(
                 role="dispatcher",
                 actor="pilot",
-                reference="secretary-468",
+                reference="ummanu-468",
                 payload=self._payload(attempt, "review", ("reviewer", "codex-reviewer")),
                 request_id=f"routing-review-{attempt}",
             )
             self.writer.routing(
                 role="dispatcher",
                 actor="pilot",
-                reference="secretary-468",
+                reference="ummanu-468",
                 payload=self._payload(
                     attempt,
                     "verdict",
@@ -4537,7 +4537,7 @@ class RoutingJournalTests(CardStoreCase):
                 request_id=f"routing-verdict-{attempt}",
             )
 
-        history = attempts(self.audit.events("secretary-468", kind="routing"))
+        history = attempts(self.audit.events("ummanu-468", kind="routing"))
         self.assertEqual([record.attempt for record in history], [1, 2])
         self.assertEqual([record.outcome for record in history], ["red", "green"])
         self.assertEqual([record.worker.head for record in history], ["codex", "codex"])
@@ -4648,7 +4648,7 @@ class RoutingJournalTests(CardStoreCase):
                 run_id="worker-launch",
                 spec=HeadSpec(profile_id="codex", adapter="codex"),
                 workspace=tmp,
-                task_ref=TaskRef.card("secretary-1517", document=str(document)),
+                task_ref=TaskRef.card("ummanu-1517", document=str(document)),
                 role="worker",
                 fanout_policy={
                     "version": 1,
@@ -4706,7 +4706,7 @@ class ReportDurabilityGateTests(CardStoreCase):
         return self.writer.report(
             role="worker",
             actor="w",
-            reference="secretary-468",
+            reference="ummanu-468",
             kind=kind,
             body=body,
             classification=classification,
@@ -4734,7 +4734,7 @@ class ReportDurabilityGateTests(CardStoreCase):
         first = self.writer.report(
             role="worker",
             actor="w",
-            reference="secretary-468",
+            reference="ummanu-468",
             kind="done",
             body="ready",
             request_id="replay-after-dirt",
@@ -4744,7 +4744,7 @@ class ReportDurabilityGateTests(CardStoreCase):
         replay = self.writer.report(
             role="worker",
             actor="w",
-            reference="secretary-468",
+            reference="ummanu-468",
             kind="done",
             body="ready",
             request_id="replay-after-dirt",
@@ -4756,8 +4756,8 @@ class ReportDurabilityGateTests(CardStoreCase):
 
     def test_a_research_or_infra_done_report_does_not_require_a_committed_workspace(self) -> None:
         """No candidate is published for these kinds; report artifacts may sit uncommitted."""
-        (self.workspace / ".secretary-report").mkdir()
-        (self.workspace / ".secretary-report" / "report.md").write_text("findings\n", encoding="utf-8")
+        (self.workspace / ".ummanu-report").mkdir()
+        (self.workspace / ".ummanu-report" / "report.md").write_text("findings\n", encoding="utf-8")
         infra = "## What was done\nRotated the key.\n\n## How to verify\n`ssh host true`\n"
         for kind, body in (("research", "findings"), ("infra", infra)):
             with self.subTest(kind=kind):
@@ -4770,7 +4770,7 @@ class ReportDurabilityGateTests(CardStoreCase):
         with self.assertRaises(TaskError) as caught:
             self._report("done", "findings")
         self.assertEqual(caught.exception.code, "validation")
-        self.assertIn("`.secretary-report/report.md`", caught.exception.message)
+        self.assertIn("`.ummanu-report/report.md`", caught.exception.message)
         self.assertEqual(
             [method for method, _params in self.client.calls if not method.startswith("get")], []
         )
@@ -4796,7 +4796,7 @@ class ReportDurabilityGateTests(CardStoreCase):
         self.assertIn("scratch.py", caught.exception.message)
 
     def test_runtime_audit_tail_does_not_block_done(self) -> None:
-        board = self.workspace / "secretary-data" / "board"
+        board = self.workspace / "ummanu-data" / "board"
         board.mkdir(parents=True)
         (board / "events.ndjson").write_text("{}\n", encoding="utf-8")
         self.assertEqual(self._report("done")["action"], "reported")
@@ -4813,15 +4813,15 @@ class ReportDurabilityGateTests(CardStoreCase):
             data_dir=str(Path(self.tmpdir.name) / "data"),
             workspace=str(plain),
         )
-        result = writer.report(role="worker", actor="w", reference="secretary-468", kind="done", body="ok")
+        result = writer.report(role="worker", actor="w", reference="ummanu-468", kind="done", body="ok")
         self.assertEqual(result["action"], "reported")
 
     def test_cwd_is_the_default_workspace(self) -> None:
         writer = TaskWriter(self.client, data_dir=str(Path(self.tmpdir.name) / "data"))  # type: ignore[arg-type]
         (self.workspace / "code.py").write_text("print(2)\n", encoding="utf-8")
-        with mock.patch("secretary.tasks.Path.cwd", return_value=self.workspace):
+        with mock.patch("ummanu.tasks.Path.cwd", return_value=self.workspace):
             with self.assertRaises(TaskError) as caught:
-                writer.report(role="worker", actor="w", reference="secretary-468", kind="done", body="ok")
+                writer.report(role="worker", actor="w", reference="ummanu-468", kind="done", body="ok")
         self.assertEqual(caught.exception.code, "uncommitted")
 
 
@@ -4853,8 +4853,8 @@ class BlockedContractTests(CardStoreCase):
     def _reserve(self) -> None:
         bind_observer(self, SPRINT)
         self.client.save_metadata(12, sprint_ref=SPRINT)
-        reader = FakeSprintReader({"ref": SPRINT, "status": "open", "reservations": ["secretary"]})
-        patcher = mock.patch("secretary.sprints.SprintReader", return_value=reader)
+        reader = FakeSprintReader({"ref": SPRINT, "status": "open", "reservations": ["ummanu"]})
+        patcher = mock.patch("ummanu.sprints.SprintReader", return_value=reader)
         patcher.start()
         self.addCleanup(patcher.stop)
         refresh_active_sprint_projects(self.tmpdir.name, reader)
@@ -4864,7 +4864,7 @@ class BlockedContractTests(CardStoreCase):
             self.writer.report(
                 role="worker",
                 actor="w",
-                reference="secretary-468",
+                reference="ummanu-468",
                 kind="blocked",
                 body="the upstream API is down",
                 request_id="blocked-unclassified",
@@ -4878,7 +4878,7 @@ class BlockedContractTests(CardStoreCase):
             self.writer.report(
                 role="worker",
                 actor="w",
-                reference="secretary-468",
+                reference="ummanu-468",
                 kind="blocked",
                 body="stuck",
                 classification="something_else",
@@ -4892,7 +4892,7 @@ class BlockedContractTests(CardStoreCase):
                 result = self.writer.report(
                     role="worker",
                     actor="w",
-                    reference="secretary-468",
+                    reference="ummanu-468",
                     kind="blocked",
                     body="stuck on the adapter",
                     classification=classification,
@@ -4919,7 +4919,7 @@ class BlockedContractTests(CardStoreCase):
         self.writer.report(
             role="worker",
             actor="w",
-            reference="secretary-468",
+            reference="ummanu-468",
             kind="blocked",
             body="stuck",
             classification="external_fact",
@@ -4936,7 +4936,7 @@ class BlockedContractTests(CardStoreCase):
         result = self.writer.report(
             role="worker",
             actor="w",
-            reference="secretary-468",
+            reference="ummanu-468",
             kind="done",
             body="ready",
             request_id="done-no-classification",
@@ -4948,7 +4948,7 @@ class BlockedContractTests(CardStoreCase):
             self.writer.report(
                 role="worker",
                 actor="w",
-                reference="secretary-468",
+                reference="ummanu-468",
                 kind="done",
                 body="ready",
                 classification="external_fact",
@@ -4961,7 +4961,7 @@ class BlockedContractTests(CardStoreCase):
         body.write_text("the upstream API is down\n", encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("secretary.task_commands.card_client", return_value=self.client),
+            mock.patch("ummanu.task_commands.card_client", return_value=self.client),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -4972,7 +4972,7 @@ class BlockedContractTests(CardStoreCase):
                     "--role",
                     "worker",
                     "--ref",
-                    "secretary-468",
+                    "ummanu-468",
                     "--kind",
                     "blocked",
                     "--data-dir",
@@ -4993,7 +4993,7 @@ class BlockedContractTests(CardStoreCase):
         body.write_text("the card contradicts itself\n", encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("secretary.task_commands.card_client", return_value=self.client),
+            mock.patch("ummanu.task_commands.card_client", return_value=self.client),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -5004,7 +5004,7 @@ class BlockedContractTests(CardStoreCase):
                     "--role",
                     "worker",
                     "--ref",
-                    "secretary-468",
+                    "ummanu-468",
                     "--kind",
                     "blocked",
                     "--classification",
@@ -5032,7 +5032,7 @@ class BlockedContractTests(CardStoreCase):
             self.writer.move(
                 role="observer",
                 actor="observer",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="ready",
                 reason="   ",
                 request_id="observer-silent-disposition",
@@ -5045,7 +5045,7 @@ class BlockedContractTests(CardStoreCase):
         moved = self.writer.move(
             role="observer",
             actor="observer",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="ready",
             reason=reason,
             request_id="observer-disposition",
@@ -5066,7 +5066,7 @@ class BlockedContractTests(CardStoreCase):
             self.writer.move(
                 role="observer",
                 actor="observer",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="in_progress",
                 reason="",
                 request_id="observer-silent-resume",
@@ -5079,7 +5079,7 @@ class BlockedContractTests(CardStoreCase):
         moved = self.writer.move(
             role="observer",
             actor="observer",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="blocked",
             reason="",
             request_id="observer-into-blocked",
@@ -5092,7 +5092,7 @@ class BlockedContractTests(CardStoreCase):
         self.writer.report(
             role="worker",
             actor="w",
-            reference="secretary-468",
+            reference="ummanu-468",
             kind="blocked",
             body="the upstream API is down",
             classification="external_fact",
@@ -5102,7 +5102,7 @@ class BlockedContractTests(CardStoreCase):
         requeued = self.writer.move(
             role="observer",
             actor="observer",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="ready",
             reason="the upstream fix landed",
             request_id="observer-requeue",
@@ -5118,14 +5118,14 @@ class BlockedContractTests(CardStoreCase):
             self.writer.move(
                 role="steward",
                 actor="s",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="blocked",
                 reason="",
             )
         escalated = self.writer.move(
             role="steward",
             actor="s",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="blocked",
             reason="the head went silent",
             request_id="steward-escalation",
@@ -5136,7 +5136,7 @@ class BlockedContractTests(CardStoreCase):
             self.writer.move(
                 role="steward",
                 actor="s",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="ready",
                 reason="",
                 request_id="steward-requeue",
@@ -5180,7 +5180,7 @@ class RequestIdOwnershipTests(CardStoreCase):
         call = {
             "role": "worker",
             "actor": "w",
-            "reference": "secretary-468",
+            "reference": "ummanu-468",
             "kind": "done",
             "body": "first round",
             "request_id": "round-1",
@@ -5242,7 +5242,7 @@ class RequestIdOwnershipTests(CardStoreCase):
             self._report(reference="old-1")
 
         self.assertEqual(len(self._events("round-1")), 1)
-        self.assertEqual(self._events("round-1")[0]["ref"], "secretary-468")
+        self.assertEqual(self._events("round-1")[0]["ref"], "ummanu-468")
         self.assertEqual(self._comments(13), [])
 
     def test_a_reused_id_from_another_write_is_refused(self) -> None:
@@ -5250,7 +5250,7 @@ class RequestIdOwnershipTests(CardStoreCase):
         self.writer.comment(
             role="worker",
             actor="w",
-            reference="secretary-468",
+            reference="ummanu-468",
             body="a note",
             request_id="round-1",
         )
@@ -5271,7 +5271,7 @@ class RequestIdOwnershipTests(CardStoreCase):
             "kind": "reported",
             "outcome": "success",
             "task_id": f"task_{RETIRED_STORE}_12",
-            "ref": "secretary-468",
+            "ref": "ummanu-468",
             "backend": {"kind": RETIRED_STORE, "task_id": 12, "revision": "pending"},
             "request_id": "round-1",
             "payload": {"marker": "report:done", "body_sha256": hashlib.sha256(body.encode()).hexdigest()},
@@ -5305,7 +5305,7 @@ class RequestIdOwnershipTests(CardStoreCase):
         self.writer.verdict(
             role="reviewer",
             actor="r",
-            reference="secretary-468",
+            reference="ummanu-468",
             kind="green",
             body="ok",
             request_id="round-1",
@@ -5315,7 +5315,7 @@ class RequestIdOwnershipTests(CardStoreCase):
             self.writer.verdict(
                 role="reviewer",
                 actor="r",
-                reference="secretary-468",
+                reference="ummanu-468",
                 kind="red",
                 body="the gate is red",
                 request_id="round-1",
@@ -5334,7 +5334,7 @@ class RequestIdOwnershipTests(CardStoreCase):
             "--role",
             "worker",
             "--ref",
-            "secretary-468",
+            "ummanu-468",
             "--kind",
             "done",
             "--data-dir",
@@ -5346,8 +5346,8 @@ class RequestIdOwnershipTests(CardStoreCase):
         ]
         output, errors = io.StringIO(), io.StringIO()
         with (
-            mock.patch("secretary.task_commands.card_client", return_value=self.client),
-            mock.patch("secretary.tasks.workspace_dirt", return_value=[]),
+            mock.patch("ummanu.task_commands.card_client", return_value=self.client),
+            mock.patch("ummanu.tasks.workspace_dirt", return_value=[]),
             contextlib.redirect_stdout(output),
             contextlib.redirect_stderr(errors),
         ):
@@ -5374,7 +5374,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
             return self.writer.report(
                 role="worker",
                 actor="worker",
-                reference="secretary-468",
+                reference="ummanu-468",
                 kind="done",
                 body=body,
                 request_id=request_id,
@@ -5383,7 +5383,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
             return self.writer.verdict(
                 role="reviewer",
                 actor="reviewer",
-                reference="secretary-468",
+                reference="ummanu-468",
                 kind="green",
                 body=body,
                 request_id=request_id,
@@ -5392,7 +5392,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
         return self.writer.decide(
             role="observer",
             actor="observer",
-            reference="secretary-468",
+            reference="ummanu-468",
             kind="release",
             body=body,
             request_id=request_id,
@@ -5412,7 +5412,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
                 assert event is not None
                 self.assertEqual(event["record_type"], "board.protocol_event")
                 self.assertEqual(event["kind"], kind)
-                self.assertEqual(event["subject"], {"kind": "card", "ref": "secretary-468"})
+                self.assertEqual(event["subject"], {"kind": "card", "ref": "ummanu-468"})
                 self.assertEqual(event["reason"], "complete typed reason")
                 self.assertEqual(event["data"]["marker"], marker)
                 self.assertEqual(event["data"]["body"], "complete typed reason")
@@ -5478,7 +5478,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
         call = {
             "role": "dispatcher",
             "actor": "pilot",
-            "reference": "secretary-468",
+            "reference": "ummanu-468",
             "payload": self._routing_payload(attempt),
             "request_id": "round-1",
         }
@@ -5507,7 +5507,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
             "kind": "routing",
             "outcome": "success",
             "task_id": f"task_{RETIRED_STORE}_12",
-            "ref": "secretary-468",
+            "ref": "ummanu-468",
             "backend": {"kind": RETIRED_STORE, "task_id": 12, "revision": "pending"},
             "request_id": "round-1",
             "payload": self._routing_payload(1),
@@ -5528,7 +5528,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
         self.writer.edit(
             role="po",
             actor="operator",
-            reference="secretary-468",
+            reference="ummanu-468",
             description="first spec",
             request_id="round-1",
         )
@@ -5537,7 +5537,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
             self.writer.edit(
                 role="po",
                 actor="operator",
-                reference="secretary-468",
+                reference="ummanu-468",
                 description="second spec",
                 request_id="round-1",
             )
@@ -5550,7 +5550,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
         first = self.writer.edit(
             role="po",
             actor="operator",
-            reference="secretary-468",
+            reference="ummanu-468",
             description="one spec",
             head="codex-terra",
             request_id="round-1",
@@ -5558,7 +5558,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
         second = self.writer.edit(
             role="po",
             actor="operator",
-            reference="secretary-468",
+            reference="ummanu-468",
             description="one spec",
             head="codex-terra",
             request_id="round-1",
@@ -5573,7 +5573,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
         self.writer.claim(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             worker="worker-a",
             request_id="round-1",
         )
@@ -5582,7 +5582,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
             self.writer.claim(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
+                reference="ummanu-468",
                 worker="worker-b",
                 request_id="round-1",
             )
@@ -5595,7 +5595,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
         self.writer.move(
             role="dispatcher",
             actor="d",
-            reference="secretary-468",
+            reference="ummanu-468",
             target="ready",
             reason="requeue",
             request_id="round-1",
@@ -5605,7 +5605,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
             self.writer.move(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="blocked",
                 reason="requeue",
                 request_id="round-1",
@@ -5614,7 +5614,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
             self.writer.move(
                 role="dispatcher",
                 actor="d",
-                reference="secretary-468",
+                reference="ummanu-468",
                 target="ready",
                 reason="a different reason entirely",
                 request_id="round-1",
@@ -5629,7 +5629,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
         call = {
             "role": "dispatcher",
             "actor": "d",
-            "reference": "secretary-468",
+            "reference": "ummanu-468",
             "target": "ready",
             "reason": "requeue",
             "request_id": "round-1",
@@ -5643,16 +5643,16 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
 
     def test_a_reused_restore_id_with_another_placement_is_refused(self) -> None:
         self.writer.restore_card(
-            reference="secretary-468",
-            metadata={"project": "secretary"},
+            reference="ummanu-468",
+            metadata={"project": "ummanu"},
             target="ready",
             request_id="round-1",
         )
 
         with self.assertRaisesRegex(TaskError, "belongs to another operation"):
             self.writer.restore_card(
-                reference="secretary-468",
-                metadata={"project": "secretary"},
+                reference="ummanu-468",
+                metadata={"project": "ummanu"},
                 target="blocked",
                 request_id="round-1",
             )
@@ -5662,7 +5662,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
 
     def test_a_reused_restore_comment_id_with_another_body_is_refused(self) -> None:
         self.writer.restore_comment(
-            reference="secretary-468",
+            reference="ummanu-468",
             body="the original comment",
             occurrence=0,
             request_id="round-1",
@@ -5670,7 +5670,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
 
         with self.assertRaisesRegex(TaskError, "belongs to another operation"):
             self.writer.restore_comment(
-                reference="secretary-468",
+                reference="ummanu-468",
                 body="another comment entirely",
                 occurrence=0,
                 request_id="round-1",
@@ -5683,7 +5683,7 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
         call = {
             "role": "observer",
             "actor": "observer",
-            "project": "secretary",
+            "project": "ummanu",
             "task_type": "code",
             "title": "First card",
             "target": "ready",
@@ -5724,9 +5724,9 @@ class LegacyTaskCodecTests(unittest.TestCase):
     def test_reader_and_restore_share_legacy_task_codec(self) -> None:
         import importlib
 
-        from secretary.board import legacy_codec
+        from ummanu.board import legacy_codec
 
-        restore = importlib.import_module("secretary.restore")
+        restore = importlib.import_module("ummanu.restore")
 
         self.assertIs(tasks._STATE_BY_COLUMN, legacy_codec.TASK_STATE_BY_COLUMN)
         self.assertIs(tasks._KNOWN_METADATA, legacy_codec.TASK_KNOWN_METADATA)
@@ -5742,7 +5742,7 @@ class LegacyTaskCodecTests(unittest.TestCase):
         self.assertIs(restore._enum_or_default, legacy_codec.enum_or_default)
 
     def test_legacy_task_codec_preserves_released_normalization(self) -> None:
-        from secretary.board import legacy_codec
+        from ummanu.board import legacy_codec
 
         self.assertEqual(legacy_codec.text(None), "")
         self.assertEqual(legacy_codec.text(17), "17")

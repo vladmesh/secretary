@@ -12,44 +12,44 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
-from secretary.checkpoint import PUSH_INTERVAL_SECONDS, CheckpointResult, is_push_due
-from secretary.dispatch.gate import GateResult
-from secretary.dispatch.heartbeat import run_heartbeat_identity
-from secretary.dispatch.host import (
+from tests.fakes.tasks import CardSeed
+from tests.head_registry import write_installed_pair
+from ummanu.checkpoint import PUSH_INTERVAL_SECONDS, CheckpointResult, is_push_due
+from ummanu.dispatch.gate import GateResult
+from ummanu.dispatch.heartbeat import run_heartbeat_identity
+from ummanu.dispatch.host import (
     CommandHostRuntime,
     LaunchedHead,
     _continuation_note,
     _report_nudge_prompt,
 )
-from secretary.dispatch.launch import CAUSE_BASE_BRANCH_CONTRACT
-from secretary.dispatch.launcher import claude_launch_model, role_launch_env
-from secretary.dispatch.types import (
+from ummanu.dispatch.launch import CAUSE_BASE_BRANCH_CONTRACT
+from ummanu.dispatch.launcher import claude_launch_model, role_launch_env
+from ummanu.dispatch.types import (
     STOPPED_BY_DISPATCHER,
     STOPPED_BY_REVIEW_FREEZE,
     HeadLaunchAborted,
     HostError,
     ReviewLaunch,
 )
-from secretary.dispatch.watchdog import head_run_process_status as _head_run_process_status
-from secretary.dispatch.watchdog import pid_file_path
-from secretary.dispatch.worker_comments import worker_comments_note
-from secretary.dispatch.worker_lifecycle import head_run_binding
-from secretary.projects.availability import ProjectAvailability
-from secretary.projects.contract import (
+from ummanu.dispatch.watchdog import head_run_process_status as _head_run_process_status
+from ummanu.dispatch.watchdog import pid_file_path
+from ummanu.dispatch.worker_comments import worker_comments_note
+from ummanu.dispatch.worker_lifecycle import head_run_binding
+from ummanu.projects.availability import ProjectAvailability
+from ummanu.projects.contract import (
     ContractVerdict,
     ModuleContract,
 )
-from secretary.projects.integration_base import (
+from ummanu.projects.integration_base import (
     IntegrationBaseError,
     resolve_integration_base,
     seed_ref_refusal,
 )
-from secretary.routing_journal import HeadRun, head_run_from_profile
-from secretary.runtime.head import operations as head_ops
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME
-from secretary.tasks import TaskError
-from tests.fakes.tasks import CardSeed
-from tests.head_registry import write_installed_pair
+from ummanu.routing_journal import HeadRun, head_run_from_profile
+from ummanu.runtime.head import operations as head_ops
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME
+from ummanu.tasks import TaskError
 
 #: The `command_terminal_status` answers that carry a pid heartbeat and no provider channel at
 #: all, because no readable connected pane was matched to probe one from: the two live shapes
@@ -151,7 +151,7 @@ def dispatcher_seed() -> CardSeed:
     tasks = [
         {
             "id": 12,
-            "reference": "secretary-510",
+            "reference": "ummanu-510",
             "title": "Pilot",
             "description": "pilot spec",
             "column_id": 2,
@@ -162,7 +162,7 @@ def dispatcher_seed() -> CardSeed:
         },
         {
             "id": 13,
-            "reference": "secretary-511",
+            "reference": "ummanu-511",
             "title": "Neighbor",
             "description": "do not claim",
             "column_id": 2,
@@ -173,8 +173,8 @@ def dispatcher_seed() -> CardSeed:
         },
     ]
     metadata = {
-        12: {"project": "secretary", "task_type": "code", "slug": "pilot"},
-        13: {"project": "secretary", "task_type": "code", "slug": "neighbor"},
+        12: {"project": "ummanu", "task_type": "code", "slug": "pilot"},
+        13: {"project": "ummanu", "task_type": "code", "slug": "neighbor"},
     }
     return CardSeed(tasks, metadata)
 
@@ -224,15 +224,15 @@ class TwoOpenSprintAdmission:
     SECOND = "sprint:2"
     # Two reserved projects each, so either sprint still has a card to claim once its first one
     # is in flight.
-    RESERVATIONS: ClassVar = {FIRST: ["secretary", "fourth"], SECOND: ["other", "third"]}
+    RESERVATIONS: ClassVar = {FIRST: ["ummanu", "fourth"], SECOND: ["other", "third"]}
 
     def sprint_instance(self) -> Path:
         """The installation directory the sprint entity validates and reads its limit from."""
         return self.data_dir / "registry" / "instance"
 
     def admit_two_open_sprints(self, *, observer: dict, second_observer: dict | None = None):
-        from secretary.sprint_observer import none_choice
-        from secretary.sprints import (
+        from ummanu.sprint_observer import none_choice
+        from ummanu.sprints import (
             SprintReader,
             SprintWriter,
             instance_open_sprint_limit,
@@ -240,7 +240,7 @@ class TwoOpenSprintAdmission:
 
         instance = self.sprint_instance()
         (instance / "projects").mkdir(parents=True, exist_ok=True)
-        for project in ("secretary", "other", "third", "fourth"):
+        for project in ("ummanu", "other", "third", "fourth"):
             (instance / "projects" / f"{project}.yaml").write_text(
                 f"id: {project}\n",
                 encoding="utf-8",
@@ -251,12 +251,12 @@ class TwoOpenSprintAdmission:
         (instance / "instance.yaml").write_text("open_sprint_limit: 2\n", encoding="utf-8")
         self.assertEqual(instance_open_sprint_limit(instance), 2)
         self.board.add_record(
-            "product:secretary",
-            "Secretary",
+            "product:ummanu",
+            "Ummanu",
             {
                 "record_type": "product",
-                "product_id": "secretary",
-                "product_projects": json.dumps(["secretary", "fourth"]),
+                "product_id": "ummanu",
+                "product_projects": json.dumps(["ummanu", "fourth"]),
             },
         )
         self.board.add_record(
@@ -269,11 +269,11 @@ class TwoOpenSprintAdmission:
             },
         )
         self.board.add_record(
-            "issue:secretary",
-            "Secretary issue",
+            "issue:ummanu",
+            "Ummanu issue",
             {
                 "record_type": "issue",
-                "issue_product": "secretary",
+                "issue_product": "ummanu",
                 "issue_kind": "feature",
                 "issue_priority": "P1",
             },
@@ -291,7 +291,7 @@ class TwoOpenSprintAdmission:
         writer = SprintWriter(self.board, data_dir=self.data_dir, instance=instance)
         roots = self.data_dir / "repos"
         for reference, product, issue, request in (
-            (self.FIRST, "secretary", "issue:secretary", "admit-first-sprint"),
+            (self.FIRST, "ummanu", "issue:ummanu", "admit-first-sprint"),
             (self.SECOND, "other", "issue:other", "admit-second-sprint"),
         ):
             writer.create(
@@ -432,7 +432,7 @@ class FakeCatalog:
     def broad_check_verdict(self, project: str) -> ContractVerdict:
         """The card's project can be broad-checked, as every card in this suite always could.
 
-        The pilot project here is Secretary itself, whose adapter declares its own `broad_check` —
+        The pilot project here is Ummanu itself, whose adapter declares its own `broad_check` —
         the live case secretary-1458 must keep working, so `fit` is the default answer. A test that
         needs one of the other two named states assigns it to `broad_check_state`; what produces
         each of them from a real adapter is pinned against `InstanceCatalog` and the worker's own
@@ -446,8 +446,8 @@ class FakeCatalog:
         if self.broad_check_state is not None:
             return self.broad_check_state
         return ContractVerdict.as_fit(
-            ModuleContract(sys.executable, "secretary", module="tests.broad"),
-            "secretary",
+            ModuleContract(sys.executable, "ummanu", module="tests.broad"),
+            "ummanu",
         )
 
     def adapter(self, project: str) -> dict:
@@ -1417,7 +1417,7 @@ class FakeHost:
     git_access_probe = None
 
     def project_git_access(self, project: str):
-        from secretary.infra.github_credential import ProjectGitAccess
+        from ummanu.infra.github_credential import ProjectGitAccess
 
         self.__dict__.setdefault("git_access_checks", []).append(project)
         if callable(self.git_access_probe):

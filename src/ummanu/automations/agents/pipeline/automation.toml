@@ -1,0 +1,14 @@
+# Portable spec for the pipeline board CLI.
+#
+# `pipeline` is not a scheduled agent: it has no LLM head and no tick of its own. The spec exists
+# so the role gets its own worktree and shows up in the agent inventory alongside the heads. Task
+# dispatch is ummanu/dispatch/production.py, on ummanu-dispatcher-production.timer.
+
+name = "pipeline"
+dispatcher = true          # no skill, no head: nothing for a triggered-agent timer to launch
+
+[health]
+# Freshness budget for health.py's runs.jsonl check. Board writes come from whoever drives the
+# CLI (the production dispatcher, the steward, a head), not from a clock of this agent's own, so
+# the budget is deliberately loose.
+max_age_s = 900

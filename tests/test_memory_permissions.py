@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from secretary.memory_write import (
+from ummanu.memory_write import (
     MemoryPermissionError,
     commit_memory_proposal,
     propose_memory_fact,
@@ -43,7 +43,7 @@ class MemoryWriteAuthorityTests(unittest.TestCase):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
         self.root = Path(tmpdir.name)
-        self.data_dir = self.root / "secretary-data"
+        self.data_dir = self.root / "ummanu-data"
         self.instance_dir = init_instance_repo(self.root / "instance")
         self.fact = self.root / "fact.md"
         self.fact.write_text("a fact the butler noticed\n", encoding="utf-8")
@@ -52,7 +52,7 @@ class MemoryWriteAuthorityTests(unittest.TestCase):
         return propose_memory_fact(
             self.data_dir,
             actor=actor,
-            scope="project:secretary",
+            scope="project:ummanu",
             slug=slug,
             fact_file=self.fact,
             source=source,
@@ -69,7 +69,7 @@ class MemoryWriteAuthorityTests(unittest.TestCase):
         self.assertEqual(proposal.actor, "butler:telegram/session")
         self.assertEqual(proposal.source, "butler:telegram/session")
         self.assertEqual(payload["actor"], "butler:telegram/session")
-        self.assertEqual(payload["scope_dir"], "secretary")
+        self.assertEqual(payload["scope_dir"], "ummanu")
         self.assertEqual(payload["slug"], "butler-fact")
         self.assertIn("a fact the butler noticed", (staged / "fact.md").read_text(encoding="utf-8"))
         # Nothing canonical was written: the proposal only asks the curator.
@@ -101,7 +101,7 @@ class MemoryWriteAuthorityTests(unittest.TestCase):
         """Publication stays with the reviewer, and the fact keeps butler provenance.
 
         Cross-actor commit authority is unchanged by this card: it is the
-        `secretary`/`operator` rule in `_ensure_commit_actor`, not a new one.
+        `ummanu`/`operator` rule in `_ensure_commit_actor`, not a new one.
         """
         proposal = self._propose(
             actor="butler:telegram/session", source="butler:telegram/session", slug="butler-fact"
@@ -114,11 +114,11 @@ class MemoryWriteAuthorityTests(unittest.TestCase):
             propose_id=proposal.propose_id,
         )
 
-        self.assertEqual(result.fact, "secretary/butler-fact")
+        self.assertEqual(result.fact, "ummanu/butler-fact")
         self.assertEqual(result.actor, "butler:telegram/session")
         self.assertEqual(result.source, "butler:telegram/session")
         self.assertTrue(
-            (self.instance_dir / "state" / "memory" / "facts" / "secretary" / "butler-fact.md").is_file()
+            (self.instance_dir / "state" / "memory" / "facts" / "ummanu" / "butler-fact.md").is_file()
         )
 
     def test_butler_cannot_supersede_a_canonical_fact(self):
@@ -139,7 +139,7 @@ class MemoryWriteAuthorityTests(unittest.TestCase):
                 self.data_dir,
                 self.instance_dir,
                 actor="butler:telegram/session",
-                scope="project:secretary",
+                scope="project:ummanu",
                 slug="new-fact",
                 fact_file=replacement,
                 supersedes=["old-fact"],
@@ -148,10 +148,10 @@ class MemoryWriteAuthorityTests(unittest.TestCase):
 
         self.assertIn("cannot supersede canonical memory", str(caught.exception))
         self.assertTrue(
-            (self.instance_dir / "state" / "memory" / "facts" / "secretary" / "old-fact.md").is_file()
+            (self.instance_dir / "state" / "memory" / "facts" / "ummanu" / "old-fact.md").is_file()
         )
         self.assertFalse(
-            (self.instance_dir / "state" / "memory" / "facts" / "secretary" / "new-fact.md").exists()
+            (self.instance_dir / "state" / "memory" / "facts" / "ummanu" / "new-fact.md").exists()
         )
 
     def test_butler_cannot_propose_a_fact_sourced_as_another_role(self):
@@ -196,7 +196,7 @@ class MemoryWriteAuthorityTests(unittest.TestCase):
             str(caught.exception),
         )
 
-        for actor in ("secretary:tick", "operator:vlad"):
+        for actor in ("ummanu:tick", "operator:vlad"):
             with self.subTest(actor=actor):
                 other = self._propose(
                     actor="curator:claude/one",

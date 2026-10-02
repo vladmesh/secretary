@@ -16,9 +16,6 @@ import unittest
 from typing import Any
 from unittest import mock
 
-from secretary.runtime.head_runtimes import ORCA_LEGACY_RUNTIME
-from secretary.web.app import ROUTES
-from secretary.webproto import head_view as head_reads
 from tests.web_head_view_fixtures import (
     FINISHED_EARLIER,
     FOREIGN,
@@ -31,6 +28,9 @@ from tests.web_head_view_fixtures import (
     HeadViewFixture,
     _routing,
 )
+from ummanu.runtime.head_runtimes import ORCA_LEGACY_RUNTIME
+from ummanu.web.app import ROUTES
+from ummanu.webproto import head_view as head_reads
 
 
 class TheCardPageListsItsHeadsTests(HeadViewFixture):
@@ -100,7 +100,7 @@ class AFinishedHeadTests(HeadViewFixture):
 class NothingSecretReachesThePageTests(HeadViewFixture):
     def test_a_planted_memory_token_is_on_neither_the_page_nor_the_document(self) -> None:
         tail = (
-            f"export SECRETARY_MEMORY_ACCESS_TOKEN={TOKEN}\r\n"
+            f"export UMMANU_MEMORY_ACCESS_TOKEN={TOKEN}\r\n"
             f"the token is {TOKEN} ok\r\n"
         ).encode()
         directory = self.run_dir(WORKER, tail=tail, subject=f"deliver {TOKEN}")
@@ -139,7 +139,7 @@ class OnlyTheCardsOwnRunsTests(HeadViewFixture):
                     self.assertNotIn("outside the heads root", body)
 
     def test_a_card_the_board_does_not_hold_is_not_found(self) -> None:
-        self.assertEqual(self.get(f"/tasks/secretary-404/heads/{WORKER}")[0], 404)
+        self.assertEqual(self.get(f"/tasks/ummanu-404/heads/{WORKER}")[0], 404)
 
     def test_a_recorded_run_whose_directory_names_another_card_is_not_read(self) -> None:
         self.run_dir(WORKER, ref=OTHER, tail=b"somebody else's\n")
@@ -257,7 +257,7 @@ class HostileJournalValuesTests(HeadViewFixture):
         self.assertEqual(head_reads.journal_record(["not", "a", "record"]), ({}, 0))
 
     def test_a_section_that_cannot_be_drawn_says_so_and_the_page_is_served(self) -> None:
-        from secretary.web import pages
+        from ummanu.web import pages
 
         self.run_dir(WORKER, tail=b"x\n")
         for section in ("_head_header", "_head_journal"):

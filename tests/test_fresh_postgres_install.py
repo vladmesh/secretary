@@ -7,7 +7,7 @@ enough on its own: a freshly migrated, empty store takes a card and lists it bac
 recovery on a real bootstrap checkout restores a checkpoint's cards into it at parity.
 
 `provision` itself is the one step not exercised: it drives Docker Compose against the installed
-`/opt/secretary` definition on port 5432. A throwaway container stands in for what it starts, and
+`/opt/ummanu` definition on port 5432. A throwaway container stands in for what it starts, and
 `board-store.env` is written for that container the way `provision` writes it for its own.
 
 There is no skip, for the reason `tests/sql_backend_fixtures.py` gives: a store proof that passes
@@ -27,19 +27,19 @@ from unittest import mock
 
 import psycopg
 
-from secretary import bootstrap as bootstrap_module
-from secretary import installation
-from secretary.board import store
-from secretary.board.backend import CARD, board_client
-from secretary.board.store import BoardStoreConfig
-from secretary.data import init_layout
-from secretary.tasks import TaskReader, TaskWriter
 from tests.fakes.installation import CARD as CHECKPOINT_CARD
 from tests.fakes.installation import PRODUCT_ROOT, _checkpoint, _git
 from tests.retired_board import STALE_FILE
 from tests.sql_backend_fixtures import PostgresBoard
+from ummanu import bootstrap as bootstrap_module
+from ummanu import installation
+from ummanu.board import store
+from ummanu.board.backend import CARD, board_client
+from ummanu.board.store import BoardStoreConfig
+from ummanu.data import init_layout
+from ummanu.tasks import TaskReader, TaskWriter
 
-STORE_DATABASE = "secretary"
+STORE_DATABASE = "ummanu"
 
 
 def _write_store_file(instance: Path, config: BoardStoreConfig) -> None:
@@ -84,12 +84,12 @@ class FreshStoreCase(unittest.TestCase):
             dry_run=False,
         )
         with (
-            mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
-            mock.patch("secretary.bootstrap._host_supported"),
-            mock.patch("secretary.bootstrap._ensure_installation_user"),
-            mock.patch("secretary.bootstrap._set_installation_owner"),
-            mock.patch("secretary.bootstrap._install_platform"),
-            mock.patch("secretary.bootstrap.provision_board_store", side_effect=provision),
+            mock.patch("ummanu.bootstrap.os.geteuid", return_value=0),
+            mock.patch("ummanu.bootstrap._host_supported"),
+            mock.patch("ummanu.bootstrap._ensure_installation_user"),
+            mock.patch("ummanu.bootstrap._set_installation_owner"),
+            mock.patch("ummanu.bootstrap._install_platform"),
+            mock.patch("ummanu.bootstrap.provision_board_store", side_effect=provision),
             mock.patch("builtins.print"),
         ):
             return bootstrap_module.bootstrap(args)
@@ -113,14 +113,14 @@ class EmptyStoreTests(FreshStoreCase):
         created = TaskWriter(client, data_dir=data).create(
             role="po",
             actor="po",
-            project="secretary",
+            project="ummanu",
             task_type="code",
             title="the first card on a fresh board",
         )["task"]
         listed = TaskReader(client).list()
 
-        self.assertEqual(created["ref"], "secretary-1")
-        self.assertEqual([(card["ref"], card["project"]) for card in listed], [("secretary-1", "secretary")])
+        self.assertEqual(created["ref"], "ummanu-1")
+        self.assertEqual([(card["ref"], card["project"]) for card in listed], [("ummanu-1", "ummanu")])
         self.assertEqual(listed[0]["audit"]["backend"]["kind"], "postgres")
 
 
@@ -136,12 +136,12 @@ class BootstrapThenRecoveryTests(FreshStoreCase):
         repository = self.root / "repository"
         repository.mkdir()
         (source / "projects").mkdir()
-        (source / "projects" / "secretary.yaml").write_text(
-            f"id: secretary\nrepo: {repository}\nenabled: false\nadapter: secretary\ndefault_branch: main\n",
+        (source / "projects" / "ummanu.yaml").write_text(
+            f"id: ummanu\nrepo: {repository}\nenabled: false\nadapter: ummanu\ndefault_branch: main\n",
             encoding="utf-8",
         )
         (source / "adapters").mkdir()
-        (source / "adapters" / "secretary.yaml").write_text(
+        (source / "adapters" / "ummanu.yaml").write_text(
             "setup:\n  commands: ['true']\nsmoke:\n  command: 'true'\n"
             "validation:\n  ci: local\n  command: 'true'\n"
             "artifact_policy:\n  write_project_files: false\n",
@@ -191,19 +191,19 @@ class BootstrapThenRecoveryTests(FreshStoreCase):
         )
         with ExitStack() as stack:
             for patch in (
-                mock.patch("secretary.installation._ensure_installation_user"),
-                mock.patch("secretary.installation._set_installation_owner"),
-                mock.patch("secretary.installation._run", side_effect=run),
+                mock.patch("ummanu.installation._ensure_installation_user"),
+                mock.patch("ummanu.installation._set_installation_owner"),
+                mock.patch("ummanu.installation._run", side_effect=run),
                 # Project checkouts and CODEX_HOME are host provisioning, not the board.
-                mock.patch("secretary.installation.provision_project_checkouts", return_value=[]),
-                mock.patch("secretary.installation.provision_codex_home", return_value=0),
-                mock.patch("secretary.installation.rebuild_memory_index", return_value=1),
+                mock.patch("ummanu.installation.provision_project_checkouts", return_value=[]),
+                mock.patch("ummanu.installation.provision_codex_home", return_value=0),
+                mock.patch("ummanu.installation.rebuild_memory_index", return_value=1),
                 mock.patch(
-                    "secretary.installation.materialize_host",
+                    "ummanu.installation.materialize_host",
                     return_value=SimpleNamespace(steps=[SimpleNamespace(status="changed")]),
                 ),
-                mock.patch("secretary.installation.materialize_pipeline_state", return_value=0),
-                mock.patch("secretary.installation.restore_findings", return_value=[]),
+                mock.patch("ummanu.installation.materialize_pipeline_state", return_value=0),
+                mock.patch("ummanu.installation.restore_findings", return_value=[]),
             ):
                 stack.enter_context(patch)
             result = installation.install(args)
@@ -222,7 +222,7 @@ class BootstrapThenRecoveryTests(FreshStoreCase):
         cards = TaskReader(client).list()
         self.assertEqual(
             [(card["ref"], card["title"], card["project"]) for card in cards],
-            [(CHECKPOINT_CARD["reference"], CHECKPOINT_CARD["title"], "secretary")],
+            [(CHECKPOINT_CARD["reference"], CHECKPOINT_CARD["title"], "ummanu")],
         )
 
 

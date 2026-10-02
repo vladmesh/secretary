@@ -45,7 +45,7 @@ Before removal, the owner verifies canonical paths, catalog binding, common-dir,
 registration, Git admin path/file, inode, branch and exact HEAD. It preserves
 tracked, untracked and ignored author work and unpublished commits. Only prompt
 bytes recorded by the prompt producer, and the existing exactly owned
-`.secretary-task-env` namespace, may be discarded. Author-modified prompts,
+`.ummanu-task-env` namespace, may be discarded. Author-modified prompts,
 check receipts, reports and other ignored files remain work unless their existing
 consumer has already settled them. Git removal uses no force, recursive directory
 fallback or broad metadata pruning, and confirms both directory and registration
@@ -89,8 +89,8 @@ failures or preserved work cannot starve newer intents.
 Supported maintenance surfaces:
 
 ```
-secretary instance-maintenance --instance INSTANCE --residue-inventory
-secretary instance-maintenance --instance INSTANCE --residue-replay --limit 20
+ummanu instance-maintenance --instance INSTANCE --residue-inventory
+ummanu instance-maintenance --instance INSTANCE --residue-replay --limit 20
 ```
 
 Inventory reads registered repositories/worktrees and local pipeline refs,

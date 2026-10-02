@@ -11,8 +11,8 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from secretary.memory import access
-from secretary.memory.po_bridge import bind_operator
+from ummanu.memory import access
+from ummanu.memory.po_bridge import bind_operator
 
 
 class MemoryPoBridgeTests(unittest.TestCase):
@@ -49,7 +49,7 @@ class MemoryPoBridgeProtocolTests(unittest.IsolatedAsyncioTestCase):
             }
             parameters = StdioServerParameters(
                 command=sys.executable,
-                args=["-m", "secretary.memory.po_bridge"],
+                args=["-m", "ummanu.memory.po_bridge"],
                 env=env,
             )
             async with stdio_client(parameters) as (read, write), ClientSession(read, write) as session:

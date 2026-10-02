@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.config import instance_data_dir, validate, validate_instance
+from ummanu.config import instance_data_dir, validate, validate_instance
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"
@@ -18,7 +18,7 @@ ONBOARDING_FIXTURES = REPO_ROOT / "tests" / "fixtures" / "onboarding"
 VALID_INSTANCE = {
     "version": 1,
     "name": "example",
-    "data_dir": "/var/lib/secretary-data",
+    "data_dir": "/var/lib/ummanu-data",
     "offsite": {"instance_remote": "git@example.invalid:x/y.git"},
 }
 
@@ -40,7 +40,7 @@ VALID_ADAPTER = {
 
 VALID_MANIFEST = {
     "version": 1,
-    "data_dir": "/var/lib/secretary-data",
+    "data_dir": "/var/lib/ummanu-data",
     "components": {
         "board": {"path": "board"},
         "memory": {
@@ -108,14 +108,14 @@ class SchemaValidTests(unittest.TestCase):
     def test_adapter_broad_check_contract_may_omit_the_interpreter(self):
         """issue:8b39e60e4df361c6138e: a supported contract must not require a nonexistent venv.
 
-        The Secretary worktrees have no `.venv` of their own and are not getting one. Since the
+        The Ummanu worktrees have no `.venv` of their own and are not getting one. Since the
         check subprocess prepends the candidate's own import roots to `sys.path` before importing
         the project, the interpreter running the wrapper imports the candidate rather than a shared
         editable installation's production checkout, so naming no interpreter is both legal and
         correct.
         """
         data = copy.deepcopy(VALID_ADAPTER)
-        data["broad_check"] = {"import_package": "secretary", "module": "tests.broad"}
+        data["broad_check"] = {"import_package": "ummanu", "module": "tests.broad"}
         self.assertEqual(validate(data, "adapter", "a.yaml"), [])
 
     def test_adapter_broad_check_contract_may_omit_the_module_at_the_schema_layer(self):
@@ -127,7 +127,7 @@ class SchemaValidTests(unittest.TestCase):
         schema calling the whole adapter invalid.
         """
         data = copy.deepcopy(VALID_ADAPTER)
-        data["broad_check"] = {"interpreter": ".venv/bin/python", "import_package": "secretary"}
+        data["broad_check"] = {"interpreter": ".venv/bin/python", "import_package": "ummanu"}
         self.assertEqual(validate(data, "adapter", "a.yaml"), [])
 
     def test_onboarding_draft_accepts_required_checks(self):
@@ -143,7 +143,7 @@ class SchemaInvalidTests(unittest.TestCase):
             instance.write_text(
                 "version: 1\n"
                 "name: example\n"
-                "data_dir: secretary-data\n"
+                "data_dir: ummanu-data\n"
                 "offsite:\n"
                 "  instance_remote: git@example.invalid:x/y.git\n",
                 encoding="utf-8",
@@ -152,8 +152,8 @@ class SchemaInvalidTests(unittest.TestCase):
             report = validate_instance(instance)
 
             self.assertTrue(report.ok, report.errors)
-            self.assertEqual(report.data_dir, instance.parent / "secretary-data")
-            self.assertEqual(instance_data_dir(instance.parent), instance.parent / "secretary-data")
+            self.assertEqual(report.data_dir, instance.parent / "ummanu-data")
+            self.assertEqual(instance_data_dir(instance.parent), instance.parent / "ummanu-data")
 
     def test_instance_expands_home_relative_data_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -163,14 +163,14 @@ class SchemaInvalidTests(unittest.TestCase):
             instance.write_text(
                 "version: 1\n"
                 "name: example\n"
-                "data_dir: ~/secretary-data\n"
+                "data_dir: ~/ummanu-data\n"
                 "offsite:\n"
                 "  instance_remote: git@example.invalid:x/y.git\n",
                 encoding="utf-8",
             )
 
             with mock.patch.dict(os.environ, {"HOME": str(home)}):
-                self.assertEqual(instance_data_dir(instance), home / "secretary-data")
+                self.assertEqual(instance_data_dir(instance), home / "ummanu-data")
 
     def test_instance_rejects_non_string_data_dir(self):
         data = copy.deepcopy(VALID_INSTANCE)
@@ -232,7 +232,7 @@ class SchemaInvalidTests(unittest.TestCase):
     def test_host_units_require_unit_prefix(self):
         data = copy.deepcopy(VALID_INSTANCE)
         # units with no unit_prefix cannot yield unmanaged-on-host, so reject it.
-        data["host"] = {"units": ["secretary-pipeline.service"]}
+        data["host"] = {"units": ["ummanu-pipeline.service"]}
         errors = validate(data, "instance", "instance.yaml")
         self.assertTrue(errors)
         self.assertTrue(any("unit_prefix" in e.message for e in errors), errors)
@@ -240,15 +240,15 @@ class SchemaInvalidTests(unittest.TestCase):
     def test_host_units_with_prefix_pass(self):
         data = copy.deepcopy(VALID_INSTANCE)
         data["host"] = {
-            "units": ["secretary-pipeline.service", "secretary-pipeline.timer"],
-            "unit_prefix": "secretary-",
+            "units": ["ummanu-pipeline.service", "ummanu-pipeline.timer"],
+            "unit_prefix": "ummanu-",
         }
         self.assertEqual(validate(data, "instance", "instance.yaml"), [])
 
     def test_host_units_require_type_suffix(self):
         # A suffixless name never matches systemctl output, so reject it up front.
         data = copy.deepcopy(VALID_INSTANCE)
-        data["host"] = {"units": ["secretary-pipeline"], "unit_prefix": "secretary-"}
+        data["host"] = {"units": ["ummanu-pipeline"], "unit_prefix": "ummanu-"}
         errors = validate(data, "instance", "instance.yaml")
         self.assertTrue(errors)
         self.assertTrue(any(e.path.startswith("host.units") for e in errors), errors)
@@ -264,7 +264,7 @@ class SchemaInvalidTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance = Path(tmpdir)
             (instance / "instance.yaml").write_text(
-                "version: 1\nname: example\ndata_dir: /var/lib/secretary-data\n"
+                "version: 1\nname: example\ndata_dir: /var/lib/ummanu-data\n"
                 "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
                 encoding="utf-8",
             )
@@ -362,7 +362,7 @@ class SchemaInvalidTests(unittest.TestCase):
     def test_adapter_broad_check_contract_rejects_non_string_args(self):
         data = copy.deepcopy(VALID_ADAPTER)
         data["broad_check"] = {
-            "import_package": "secretary",
+            "import_package": "ummanu",
             "module": "tests.broad",
             "args": [3],
         }

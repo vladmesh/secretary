@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from secretary.board.roles import Role
-from secretary.board.sprint_close import (
+from ummanu.board.roles import Role
+from ummanu.board.sprint_close import (
     SprintCloseConflict,
     SprintCloseDecision,
     SprintCloseDecisions,
@@ -12,7 +12,7 @@ from secretary.board.sprint_close import (
     SprintCloseSnapshot,
     SprintCloseTargets,
 )
-from secretary.sprint_close import parse_close_decisions, plan_close_decisions
+from ummanu.sprint_close import parse_close_decisions, plan_close_decisions
 
 
 class SprintCloseModelTests(unittest.TestCase):

@@ -12,21 +12,21 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
-from secretary.backup import create_backups
-from secretary.backup_verify import verify_backup
-from secretary.board import migrate, provision, schema
-from secretary.board.postgres_recovery import (
+from tests.container_cleanup import cleanup_test_project
+from ummanu.backup import create_backups
+from ummanu.backup_verify import verify_backup
+from ummanu.board import migrate, provision, schema
+from ummanu.board.postgres_recovery import (
     PostgresRecoveryError,
     restore_dump,
 )
-from secretary.board.sql_cards import SqlCardClient
-from secretary.board.store import BoardStoreConfig, BoardStoreError
-from secretary.data import DataExport, export_board, init_layout
-from secretary.restore import restore_postgres_backup
-from secretary.sprint_observer import none_choice
-from secretary.sprints import SprintWriter, sprint_client
-from secretary.tasks import TaskWriter
-from tests.container_cleanup import cleanup_test_project
+from ummanu.board.sql_cards import SqlCardClient
+from ummanu.board.store import BoardStoreConfig, BoardStoreError
+from ummanu.data import DataExport, export_board, init_layout
+from ummanu.restore import restore_postgres_backup
+from ummanu.sprint_observer import none_choice
+from ummanu.sprints import SprintWriter, sprint_client
+from ummanu.tasks import TaskWriter
 
 
 class PostgresRecoveryFailureTests(unittest.TestCase):
@@ -44,9 +44,9 @@ class PostgresRecoveryFailureTests(unittest.TestCase):
         )
         with (
             tempfile.TemporaryDirectory() as tmpdir,
-            mock.patch("secretary.board.postgres_recovery.resolve", return_value=config),
+            mock.patch("ummanu.board.postgres_recovery.resolve", return_value=config),
             mock.patch(
-                "secretary.board.postgres_recovery.migrate.migrate_instance",
+                "ummanu.board.postgres_recovery.migrate.migrate_instance",
                 side_effect=BoardStoreError("migration failed before preflight"),
             ),
             self.assertRaisesRegex(
@@ -89,12 +89,12 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         (instance / "projects").mkdir()
         repository = self.root / "repository"
         repository.mkdir(exist_ok=True)
-        (instance / "projects" / "secretary.yaml").write_text(
-            f"id: secretary\nrepo: {repository}\nenabled: false\nadapter: secretary\ndefault_branch: main\n",
+        (instance / "projects" / "ummanu.yaml").write_text(
+            f"id: ummanu\nrepo: {repository}\nenabled: false\nadapter: ummanu\ndefault_branch: main\n",
             encoding="utf-8",
         )
         (instance / "adapters").mkdir()
-        (instance / "adapters" / "secretary.yaml").write_text(
+        (instance / "adapters" / "ummanu.yaml").write_text(
             "setup:\n  commands: ['true']\nsmoke:\n  command: 'true'\n"
             "validation:\n  ci: local\n  command: 'true'\n"
             "artifact_policy:\n  write_project_files: false\n",
@@ -106,8 +106,8 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         config = BoardStoreConfig(
             host="127.0.0.1",
             port=port,
-            dbname="secretary",
-            owner_user="secretary_owner",
+            dbname="ummanu",
+            owner_user="ummanu_owner",
             owner_password=f"{name}-owner-secret",
             app_user=schema.APP_ROLE,
             app_password=f"{name}-app-secret",
@@ -121,7 +121,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         )
         path.chmod(0o600)
         compose = instance / "postgres-compose.yml"
-        project = f"secretary-recovery-{name}-{uuid.uuid4().hex}"
+        project = f"ummanu-recovery-{name}-{uuid.uuid4().hex}"
         self.projects.append((instance, project, False))
         provision.provision(instance, compose_path=compose, project=project,
                             test_owner_pid=os.getpid())
@@ -146,15 +146,15 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         client = SqlCardClient(self.source_config.for_role("owner"), self.source_instance)
         with client.transaction():
             product_key = client.call(
-                "createTask", project_id=1, title="Secretary", reference="product:secretary"
+                "createTask", project_id=1, title="Ummanu", reference="product:ummanu"
             )
             client.call(
                 "saveTaskMetadata",
                 task_id=product_key,
                 values={
                     "record_type": "product",
-                    "product_id": "secretary",
-                    "product_projects": '["secretary"]',
+                    "product_id": "ummanu",
+                    "product_projects": '["ummanu"]',
                     "future_product_key": "opaque",
                 },
             )
@@ -164,7 +164,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 task_id=issue_key,
                 values={
                     "record_type": "issue",
-                    "issue_product": "secretary",
+                    "issue_product": "ummanu",
                     "issue_kind": "feature",
                     "issue_priority": "P1",
                 },
@@ -178,9 +178,9 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             actor="test",
             goal="prove recovery",
             repositories=[str(self.root / "repository")],
-            product="secretary",
+            product="ummanu",
             issues=["issue:recovery"],
-            projects=["secretary"],
+            projects=["ummanu"],
             observer=none_choice(),
             reference="sprint:recovery-custom",
             request_id="create-nullable-number-sprint",
@@ -188,11 +188,11 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         first = writer.create(
             role="po",
             actor="test",
-            project="secretary",
+            project="ummanu",
             task_type="code",
             title="Recover me",
             target="ready",
-            reference="secretary-1",
+            reference="ummanu-1",
             sprint=sprint_ref,
             sprint_override=True,
             sprint_override_reason="integration fixture",
@@ -201,16 +201,16 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         second = writer.create(
             role="po",
             actor="test",
-            project="secretary",
+            project="ummanu",
             task_type="code",
             title="Dependent",
             target="ready",
-            reference="secretary-2",
+            reference="ummanu-2",
             sprint=sprint_ref,
-            blocked_by="secretary-1",
+            blocked_by="ummanu-1",
             request_id="create-recovery-two",
             seed_ref="a" * 40,
-            supersedes="secretary-1",
+            supersedes="ummanu-1",
             sprint_override=True,
             sprint_override_reason="integration fixture",
         )["task"]
@@ -219,7 +219,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             task_id=int(str(first["id"]).rsplit("_", 1)[1]),
             values={"future_task_key": "opaque", "issues": "issue:recovery"},
         )
-        self.assertEqual(second["workspace"]["supersedes"], "secretary-1")
+        self.assertEqual(second["workspace"]["supersedes"], "ummanu-1")
         with client.transaction():
             client._execute(
                 "INSERT INTO projects (project_id, enabled, registry_present) VALUES "
@@ -281,7 +281,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 "selected_step": "continue recovery",
                 "selected_why": "the dump is ready",
                 "rejected_alternatives": "none",
-                "current_task": "secretary-1",
+                "current_task": "ummanu-1",
                 "dod_state": "in progress",
                 "next_safe_step": "verify restore",
                 "recorded_at": "2026-09-08T00:00:00Z",
@@ -298,7 +298,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         writer.move(
             role="po",
             actor="test",
-            reference="secretary-1",
+            reference="ummanu-1",
             target="done",
             reason="recovery fixture complete",
             request_id="complete-recovery-one",
@@ -308,14 +308,14 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         writer.archive(
             role="po",
             actor="test",
-            reference="secretary-1",
+            reference="ummanu-1",
             reason="retain archived recovery evidence",
             request_id="archive-recovery-one",
         )
         writer.comment(
             role="worker",
             actor="test",
-            reference="secretary-1",
+            reference="ummanu-1",
             body="post-close evidence",
             request_id="post-close-comment",
         )
@@ -333,7 +333,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 ],
                 "cards": [
                     {
-                        "ref": "secretary-2",
+                        "ref": "ummanu-2",
                         "verdict": "drop",
                         "reason": "fixture closes with dependent work recorded",
                     }
@@ -368,16 +368,16 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
     def test_full_backup_destroy_source_restore_target_and_rerun(self) -> None:
         self._seed()
         # secretary-1770: owner events are a board table, so the engine dump carries them.
-        from secretary.board.owner_events import OwnerEventStore, record
+        from ummanu.board.owner_events import OwnerEventStore, record
 
         source_events = OwnerEventStore(self.source_config.for_role("app"))
-        self.assertTrue(record("card_handed_to_owner", "secretary-1", "handed", "recovery-handover", to=source_events))
+        self.assertTrue(record("card_handed_to_owner", "ummanu-1", "handed", "recovery-handover", to=source_events))
         with (
-            mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
-            mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-            mock.patch("secretary.backup._pipeline_action", return_value=None),
-            mock.patch("secretary.backup.export_all", side_effect=self._exports),
-            mock.patch("secretary.sprints.sprint_client", wraps=sprint_client) as sprint_factory,
+            mock.patch("ummanu.backup._claimed_workspace_from_cwd", return_value=None),
+            mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+            mock.patch("ummanu.backup._pipeline_action", return_value=None),
+            mock.patch("ummanu.backup.export_all", side_effect=self._exports),
+            mock.patch("ummanu.sprints.sprint_client", wraps=sprint_client) as sprint_factory,
         ):
             results = create_backups(self.source_instance, backup_kinds=("full", "core"))
         sprint_factory.assert_called_once_with(self.source_instance)
@@ -392,9 +392,9 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         self.assertIn("board_history", core.manifest["components"])
         self.assertNotIn("postgres_dump", core.manifest["components"])
         with tarfile.open(core.archive) as archive:
-            self.assertIn("secretary-backup/secretary-data/board/audit.json", archive.getnames())
-            self.assertIn("secretary-backup/secretary-data/board/audit.ndjson", archive.getnames())
-            self.assertNotIn("secretary-backup/engine/postgres.dump", archive.getnames())
+            self.assertIn("ummanu-backup/ummanu-data/board/audit.json", archive.getnames())
+            self.assertIn("ummanu-backup/ummanu-data/board/audit.ndjson", archive.getnames())
+            self.assertNotIn("ummanu-backup/engine/postgres.dump", archive.getnames())
         self.assertNotIn("raw_board", result.manifest["components"])
         counts = result.manifest["components"]["postgres_dump"]["table_counts"]
         self.assertEqual(counts["products"], 1)
@@ -433,15 +433,15 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         source_probe.close()
         with tarfile.open(result.archive) as archive:
             cards = json.loads(
-                archive.extractfile("secretary-backup/secretary-data/board/cards.json").read().decode("utf-8")
+                archive.extractfile("ummanu-backup/ummanu-data/board/cards.json").read().decode("utf-8")
             )["cards"]
             sprints = json.loads(
-                archive.extractfile("secretary-backup/secretary-data/board/sprints.json")
+                archive.extractfile("ummanu-backup/ummanu-data/board/sprints.json")
                 .read()
                 .decode("utf-8")
             )["sprints"]
             history = json.loads(
-                archive.extractfile("secretary-backup/secretary-data/board/audit.json").read().decode("utf-8")
+                archive.extractfile("ummanu-backup/ummanu-data/board/audit.json").read().decode("utf-8")
             )["events"]
         cards_by_ref = {card["reference"]: card for card in cards}
         self.assertEqual([card["reference"] for card in cards].count("butler-1"), 1)
@@ -457,8 +457,8 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             "kit collision comment",
             "\n".join(comment["text"] for comment in cards_by_ref["codegen-product-kit-1"]["comments"]),
         )
-        self.assertEqual(cards_by_ref["secretary-1"]["metadata"]["issues"], "issue:recovery")
-        self.assertEqual(cards_by_ref["secretary-2"]["metadata"]["supersedes"], "secretary-1")
+        self.assertEqual(cards_by_ref["ummanu-1"]["metadata"]["issues"], "issue:recovery")
+        self.assertEqual(cards_by_ref["ummanu-2"]["metadata"]["supersedes"], "ummanu-1")
         self.assertEqual(sprints[0]["repositories"], [str(self.root / "repository")])
         self.assertEqual(sprints[0]["resume"]["selected_step"], "continue recovery")
         self.assertEqual(sprints[0]["budget"]["by_type"]["red_ci"], 1)
@@ -491,7 +491,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 while chunk := stream.read(1024 * 1024):
                     for secret in secrets:
                         self.assertNotIn(secret, chunk)
-        self.assertNotIn("secretary-backup/instance/board-store.env", names)
+        self.assertNotIn("ummanu-backup/instance/board-store.env", names)
 
         source_project = self.projects[0]
         self._down(*source_project)
@@ -512,11 +512,11 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(
             target_probe._query("SELECT task_ref, issue_id FROM task_issues ORDER BY task_ref, issue_id"),
-            [("secretary-1", "recovery")],
+            [("ummanu-1", "recovery")],
         )
         self.assertEqual(
             target_probe._query("SELECT task_ref, supersedes FROM task_supersessions ORDER BY task_ref"),
-            [("secretary-2", "secretary-1")],
+            [("ummanu-2", "ummanu-1")],
         )
         self.assertIn(
             ("complete-recovery-one", True),
@@ -528,7 +528,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(
             target_probe._query("SELECT project_id FROM projects ORDER BY project_id"),
-            [("butler",), ("codegen-product-kit",), ("secretary",)],
+            [("butler",), ("codegen-product-kit",), ("ummanu",)],
         )
         collision_rows = target_probe._query(
             "SELECT task_ref, task_number, board_key, archived FROM tasks "
@@ -548,7 +548,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
                 "SELECT kind, \"class\", subject_ref, read_at FROM owner_events WHERE dedup_key = %s",
                 ("recovery-handover",),
             ),
-            [("card_handed_to_owner", "needs_owner", "secretary-1", None)],
+            [("card_handed_to_owner", "needs_owner", "ummanu-1", None)],
         )
         print(
             "postgres recovery evidence:",
@@ -572,7 +572,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         client = SqlCardClient(self.source_config.for_role("owner"), self.source_instance)
         try:
             TaskWriter(client, data_dir=self.root / "source-data").comment(
-                role="worker", actor="test", reference="secretary-1", body=body, request_id=request_id
+                role="worker", actor="test", reference="ummanu-1", body=body, request_id=request_id
             )
         finally:
             client.connection.close()
@@ -580,7 +580,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
     def test_writes_inside_the_freeze_and_during_the_dump_keep_counts_equal_to_the_dump(self) -> None:
         """secretary-1678 D1: the pause writes rows, and counts taken before it described no dump."""
         self._seed()
-        from secretary.board import postgres_recovery
+        from ummanu.board import postgres_recovery
 
         run_client = postgres_recovery._run_client
         dumps: list[list[str]] = []
@@ -599,11 +599,11 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             return run_client(args, action)
 
         with (
-            mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
-            mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-            mock.patch("secretary.backup._pipeline_action", side_effect=pipeline),
-            mock.patch("secretary.backup.export_all", side_effect=self._exports),
-            mock.patch("secretary.board.postgres_recovery._run_client", side_effect=client),
+            mock.patch("ummanu.backup._claimed_workspace_from_cwd", return_value=None),
+            mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+            mock.patch("ummanu.backup._pipeline_action", side_effect=pipeline),
+            mock.patch("ummanu.backup.export_all", side_effect=self._exports),
+            mock.patch("ummanu.board.postgres_recovery._run_client", side_effect=client),
         ):
             (result,) = create_backups(self.source_instance)
         self.assertEqual(len(dumps), 1)
@@ -630,7 +630,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         with source.transaction():
             # Older rows never repeated their kind in the bag.
             source._execute(
-                "UPDATE tasks SET extensions = extensions #- '{extra,record_type}' WHERE task_ref = 'secretary-2'"
+                "UPDATE tasks SET extensions = extensions #- '{extra,record_type}' WHERE task_ref = 'ummanu-2'"
             )
         source.connection.close()
         exported: list[dict] = []
@@ -651,24 +651,24 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
             return result
 
         with (
-            mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
-            mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-            mock.patch("secretary.backup._pipeline_action", return_value=None),
-            mock.patch("secretary.backup.export_all", side_effect=exports),
+            mock.patch("ummanu.backup._claimed_workspace_from_cwd", return_value=None),
+            mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+            mock.patch("ummanu.backup._pipeline_action", return_value=None),
+            mock.patch("ummanu.backup.export_all", side_effect=exports),
         ):
             (result,) = create_backups(self.source_instance)
 
         kinds = {card["reference"]: card["metadata"].get("record_type") for card in exported}
-        self.assertEqual(kinds["product:secretary"], "product")
+        self.assertEqual(kinds["product:ummanu"], "product")
         self.assertEqual(kinds["issue:recovery"], "issue")
-        self.assertEqual(kinds["secretary-2"], "task")
+        self.assertEqual(kinds["ummanu-2"], "task")
         self.assertEqual(
             {ref: kind for ref, kind in kinds.items() if ":" not in ref},
-            dict.fromkeys(("butler-1", "codegen-product-kit-1", "secretary-1", "secretary-2"), "task"),
+            dict.fromkeys(("butler-1", "codegen-product-kit-1", "ummanu-1", "ummanu-2"), "task"),
         )
         with tarfile.open(result.archive) as archive:
             archived = json.loads(
-                archive.extractfile("secretary-backup/secretary-data/board/cards.json").read().decode("utf-8")
+                archive.extractfile("ummanu-backup/ummanu-data/board/cards.json").read().decode("utf-8")
             )["cards"]
         self.assertFalse(any("record_type" in card["metadata"] for card in archived if ":" not in card["reference"]))
 
@@ -681,7 +681,7 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         self._seed()
         source = SqlCardClient(self.source_config.for_role("owner"), self.source_instance)
         with source.transaction():
-            for reference, stale in (("secretary-1", "product"), ("codegen-product-kit-1", "not-a-kind")):
+            for reference, stale in (("ummanu-1", "product"), ("codegen-product-kit-1", "not-a-kind")):
                 source._execute(
                     "UPDATE tasks SET extensions = jsonb_set(coalesce(extensions, '{}'::jsonb), "
                     "'{extra,record_type}', to_jsonb(%s::text), true) WHERE task_ref = %s",
@@ -690,21 +690,21 @@ class PostgresRecoveryIntegrationTests(unittest.TestCase):
         source.connection.close()
 
         with (
-            mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None),
-            mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
-            mock.patch("secretary.backup._pipeline_action", return_value=None),
-            mock.patch("secretary.backup.export_all", side_effect=self._exports),
+            mock.patch("ummanu.backup._claimed_workspace_from_cwd", return_value=None),
+            mock.patch("ummanu.backup._pipeline_status", return_value={"paused": False}),
+            mock.patch("ummanu.backup._pipeline_action", return_value=None),
+            mock.patch("ummanu.backup.export_all", side_effect=self._exports),
         ):
             (result,) = create_backups(self.source_instance)
 
         with tarfile.open(result.archive) as archive:
             cards = json.loads(
-                archive.extractfile("secretary-backup/secretary-data/board/cards.json").read().decode("utf-8")
+                archive.extractfile("ummanu-backup/ummanu-data/board/cards.json").read().decode("utf-8")
             )["cards"]
         kinds = {card["reference"]: card["metadata"]["record_type"] for card in cards}
-        self.assertEqual(kinds["secretary-1"], "task")
+        self.assertEqual(kinds["ummanu-1"], "task")
         self.assertEqual(kinds["codegen-product-kit-1"], "task")
-        self.assertEqual(kinds["product:secretary"], "product")
+        self.assertEqual(kinds["product:ummanu"], "product")
         self.assertEqual(kinds["issue:recovery"], "issue")
 
         # Counts, then normalized parity against the restored store; either refusal raises.

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from secretary.board.models import SprintState
-from secretary.board.sprint_admission import SprintAdmission, SprintReservationIndex
+from ummanu.board.models import SprintState
+from ummanu.board.sprint_admission import SprintAdmission, SprintReservationIndex
 
 
 class SprintAdmissionModelTests(unittest.TestCase):
@@ -29,7 +29,7 @@ class SprintAdmissionModelTests(unittest.TestCase):
 
     def test_unknown_state_does_not_become_an_open_guard_reservation(self) -> None:
         admission = SprintAdmission.from_document(
-            {"ref": "sprint:42", "status": "future", "reservations": ["secretary"]}
+            {"ref": "sprint:42", "status": "future", "reservations": ["ummanu"]}
         )
 
         self.assertIsNone(admission.state)
@@ -40,7 +40,7 @@ class SprintAdmissionModelTests(unittest.TestCase):
         raw = {
             "version": 2,
             "projects": {
-                "secretary": ["sprint:2", "sprint:1", "sprint:1", ""],
+                "ummanu": ["sprint:2", "sprint:1", "sprint:1", ""],
                 "other": [],
                 "ignored": "not-a-list",
             },
@@ -54,7 +54,7 @@ class SprintAdmissionModelTests(unittest.TestCase):
             index.to_document(version=2),
             {
                 "version": 2,
-                "projects": {"other": [], "secretary": ["sprint:1", "sprint:2"]},
+                "projects": {"other": [], "ummanu": ["sprint:1", "sprint:2"]},
             },
         )
         self.assertIsNone(SprintReservationIndex.from_document(raw, version=3))
@@ -62,13 +62,13 @@ class SprintAdmissionModelTests(unittest.TestCase):
 
     def test_index_updates_are_immutable_and_keep_open_sprints_only(self) -> None:
         first = SprintAdmission.from_document(
-            {"ref": "sprint:1", "status": "open", "reservations": ["secretary"]}
+            {"ref": "sprint:1", "status": "open", "reservations": ["ummanu"]}
         )
         second = SprintAdmission.from_document(
-            {"ref": "sprint:2", "status": "open", "reservations": ["secretary", "other"]}
+            {"ref": "sprint:2", "status": "open", "reservations": ["ummanu", "other"]}
         )
         closed = SprintAdmission.from_document(
-            {"ref": "sprint:3", "status": "closed", "reservations": ["secretary"]}
+            {"ref": "sprint:3", "status": "closed", "reservations": ["ummanu"]}
         )
 
         index = SprintReservationIndex.from_sprints([first, second, closed])
@@ -76,13 +76,13 @@ class SprintAdmissionModelTests(unittest.TestCase):
 
         self.assertEqual(
             index.to_projects_document(),
-            {"other": ["sprint:2"], "secretary": ["sprint:1", "sprint:2"]},
+            {"other": ["sprint:2"], "ummanu": ["sprint:1", "sprint:2"]},
         )
         self.assertEqual(
             removed.to_projects_document(),
-            {"other": ["sprint:2"], "secretary": ["sprint:2"]},
+            {"other": ["sprint:2"], "ummanu": ["sprint:2"]},
         )
-        self.assertEqual(index.to_projects_document()["secretary"], ["sprint:1", "sprint:2"])
+        self.assertEqual(index.to_projects_document()["ummanu"], ["sprint:1", "sprint:2"])
 
 
 if __name__ == "__main__":

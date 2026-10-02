@@ -57,71 +57,71 @@ mypy_path = "src"
 # Start with typed leaves only. Imported legacy modules are followed for type information, but
 # their existing debt is not promoted into this first gate; the checked set grows deliberately.
 files = [
-    "src/secretary/board/models.py",
-    "src/secretary/board/roles.py",
-    "src/secretary/board/attempt_usage.py",
-    "src/secretary/board/attempt_outcome.py",
-    "src/secretary/board/outcome_round_context.py",
-    "src/secretary/board/card_transitions.py",
-    "src/secretary/board/task_routing.py",
-    "src/secretary/board/sprint_read.py",
-    "src/secretary/board/sprint_admission.py",
-    "src/secretary/board/sprint_write.py",
-    "src/secretary/board/sprint_close.py",
-    "src/secretary/board/host.py",
-    "src/secretary/board/backend.py",
-    "src/secretary/dispatch/runtime_provenance.py",
-    "src/secretary/dispatch/attempt_accounting.py",
-    "src/secretary/dispatch/assessment_decision.py",
-    "src/secretary/dispatch/claim.py",
-    "src/secretary/dispatch/gate_lifecycle.py",
-    "src/secretary/dispatch/review_verdict.py",
-    "src/secretary/dispatch/release_lifecycle.py",
-    "src/secretary/dispatch/worker_launch.py",
-    "src/secretary/dispatch/worker_report.py",
-    "src/secretary/dispatch/worker_continuation.py",
-    "src/secretary/dispatch/wait_vitality.py",
-    "src/secretary/routing_journal.py",
-    "src/secretary/dispatch/state.py",
-    "src/secretary/dispatch/pause.py",
-    "src/secretary/dispatch/runtime.py",
-    "src/secretary/po/models.py",
-    "src/secretary/runtime/__init__.py",
-    "src/secretary/runtime/paths.py",
-    "src/secretary/runtime/references.py",
-    "src/secretary/runtime/prompt_document.py",
-    "src/secretary/runtime/launch_prefix.py",
-    "src/secretary/runtime/shared_state.py",
-    "src/secretary/runtime/claude_sessions.py",
-    "src/secretary/runtime/claude_env.py",
-    "src/secretary/runtime/role_env.py",
-    "src/secretary/runtime/redact.py",
-    "src/secretary/runtime/resource_probe.py",
-    "src/secretary/runtime/provider_errors.py",
-    "src/secretary/dispatch/provider_failure.py",
-    "src/secretary/runtime/agent_prompt_transport.py",
-    "src/secretary/runtime/tui_delivery.py",
-    "src/secretary/runtime/head_runtimes.py",
-    "src/secretary/runtime/local_pty_head.py",
-    "src/secretary/runtime/head_runtime_backends.py",
-    "src/secretary/runtime/codex_preflight.py",
-    "src/secretary/runtime/state.py",
-    "src/secretary/runtime/heads.py",
-    "src/secretary/runtime/head/__init__.py",
-    "src/secretary/runtime/head/command.py",
-    "src/secretary/runtime/head/children.py",
-    "src/secretary/runtime/head/identity.py",
-    "src/secretary/runtime/head/operations.py",
-    "src/secretary/runtime/head/run.py",
-    "src/secretary/runtime/head/runtime.py",
-    "src/secretary/runtime/head/spec.py",
-    "src/secretary/runtime/head/task_ref.py",
-    "src/secretary/runtime/head/local_pty/__init__.py",
-    "src/secretary/runtime/head/local_pty/client.py",
-    "src/secretary/runtime/head/local_pty/journal.py",
-    "src/secretary/runtime/head/local_pty/protocol.py",
-    "src/secretary/runtime/head/local_pty/supervisor.py",
-    "src/secretary/automations/composition.py",
+    "src/ummanu/board/models.py",
+    "src/ummanu/board/roles.py",
+    "src/ummanu/board/attempt_usage.py",
+    "src/ummanu/board/attempt_outcome.py",
+    "src/ummanu/board/outcome_round_context.py",
+    "src/ummanu/board/card_transitions.py",
+    "src/ummanu/board/task_routing.py",
+    "src/ummanu/board/sprint_read.py",
+    "src/ummanu/board/sprint_admission.py",
+    "src/ummanu/board/sprint_write.py",
+    "src/ummanu/board/sprint_close.py",
+    "src/ummanu/board/host.py",
+    "src/ummanu/board/backend.py",
+    "src/ummanu/dispatch/runtime_provenance.py",
+    "src/ummanu/dispatch/attempt_accounting.py",
+    "src/ummanu/dispatch/assessment_decision.py",
+    "src/ummanu/dispatch/claim.py",
+    "src/ummanu/dispatch/gate_lifecycle.py",
+    "src/ummanu/dispatch/review_verdict.py",
+    "src/ummanu/dispatch/release_lifecycle.py",
+    "src/ummanu/dispatch/worker_launch.py",
+    "src/ummanu/dispatch/worker_report.py",
+    "src/ummanu/dispatch/worker_continuation.py",
+    "src/ummanu/dispatch/wait_vitality.py",
+    "src/ummanu/routing_journal.py",
+    "src/ummanu/dispatch/state.py",
+    "src/ummanu/dispatch/pause.py",
+    "src/ummanu/dispatch/runtime.py",
+    "src/ummanu/po/models.py",
+    "src/ummanu/runtime/__init__.py",
+    "src/ummanu/runtime/paths.py",
+    "src/ummanu/runtime/references.py",
+    "src/ummanu/runtime/prompt_document.py",
+    "src/ummanu/runtime/launch_prefix.py",
+    "src/ummanu/runtime/shared_state.py",
+    "src/ummanu/runtime/claude_sessions.py",
+    "src/ummanu/runtime/claude_env.py",
+    "src/ummanu/runtime/role_env.py",
+    "src/ummanu/runtime/redact.py",
+    "src/ummanu/runtime/resource_probe.py",
+    "src/ummanu/runtime/provider_errors.py",
+    "src/ummanu/dispatch/provider_failure.py",
+    "src/ummanu/runtime/agent_prompt_transport.py",
+    "src/ummanu/runtime/tui_delivery.py",
+    "src/ummanu/runtime/head_runtimes.py",
+    "src/ummanu/runtime/local_pty_head.py",
+    "src/ummanu/runtime/head_runtime_backends.py",
+    "src/ummanu/runtime/codex_preflight.py",
+    "src/ummanu/runtime/state.py",
+    "src/ummanu/runtime/heads.py",
+    "src/ummanu/runtime/head/__init__.py",
+    "src/ummanu/runtime/head/command.py",
+    "src/ummanu/runtime/head/children.py",
+    "src/ummanu/runtime/head/identity.py",
+    "src/ummanu/runtime/head/operations.py",
+    "src/ummanu/runtime/head/run.py",
+    "src/ummanu/runtime/head/runtime.py",
+    "src/ummanu/runtime/head/spec.py",
+    "src/ummanu/runtime/head/task_ref.py",
+    "src/ummanu/runtime/head/local_pty/__init__.py",
+    "src/ummanu/runtime/head/local_pty/client.py",
+    "src/ummanu/runtime/head/local_pty/journal.py",
+    "src/ummanu/runtime/head/local_pty/protocol.py",
+    "src/ummanu/runtime/head/local_pty/supervisor.py",
+    "src/ummanu/automations/composition.py",
 ]
 follow_imports = "silent"
 check_untyped_defs = true
@@ -133,12 +133,12 @@ show_error_codes = true
 [tool.coverage.run]
 branch = true
 relative_files = true
-source = ["src/secretary"]
+source = ["src/ummanu"]
 
 [project]
-name = "secretary"
+name = "ummanu"
 version = "0.1.0"
-description = "Portable secretary appliance CLI skeleton."
+description = "Portable ummanu appliance CLI skeleton."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -146,12 +146,12 @@ requires-python = ">=3.12"
 dependencies = [
     "PyYAML>=6.0",
     # 4.18 is the first release whose validators take a `referencing` registry (its own
-    # dependency from then on): secretary/config.py resolves one bundled schema's `$ref` to
+    # dependency from then on): ummanu/config.py resolves one bundled schema's `$ref` to
     # another through it.
     "jsonschema>=4.18",
     # The secret store is part of the product, not an extra: an installation that
     # cannot open its own secrets is not recoverable. 41.0 is the first release
-    # with the AEAD and KDF surface secretary/secret_store.py uses.
+    # with the AEAD and KDF surface ummanu/secret_store.py uses.
     "cryptography>=41.0",
     # The board store's driver, core for the same reason: an installation that
     # cannot reach its board is not degraded, it is non-functional (docs/BOARD_STORE.md §5.8).
@@ -187,29 +187,29 @@ memory = [
 ]
 
 [project.scripts]
-secretary = "secretary.cli:main"
-secretary-memory-mcp = "secretary.memory_service:main"
-secretary-memory-po-bridge = "secretary.memory.po_bridge:main"
-secretary-memory-reindex = "secretary.memory_reindex:main"
+ummanu = "ummanu.cli:main"
+ummanu-memory-mcp = "ummanu.memory_service:main"
+ummanu-memory-po-bridge = "ummanu.memory.po_bridge:main"
+ummanu-memory-reindex = "ummanu.memory_reindex:main"
 
-[tool.secretary]
-# Where this product ships its background agents' `<agent>/automation.toml` specs. `secretary`
+[tool.ummanu]
+# Where this product ships its background agents' `<agent>/automation.toml` specs. `ummanu`
 # reads the location from here (automations, role worktrees) rather than naming the agents'
-# package: `secretary.automations` is built on top of the rest of `secretary`, never the other
+# package: `ummanu.automations` is built on top of the rest of `ummanu`, never the other
 # way round.
-agent-specs = "src/secretary/automations/agents"
+agent-specs = "src/ummanu/automations/agents"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["secretary*"]
+include = ["ummanu*"]
 
 [tool.setuptools.package-data]
-"secretary.schemas" = ["*.json"]
+"ummanu.schemas" = ["*.json"]
 # Alembic reads its environment, template and revisions from the installed tree by path, so
 # they ship with the package rather than only existing in the checkout.
-"secretary.board.migrations" = ["script.py.mako", "versions/*.py"]
-"secretary.runtime" = ["heads.toml", "docker-bin/docker"]
-"secretary.automations.agents.curator" = ["*.toml"]
-"secretary.automations.agents.pipeline" = ["*.toml"]
-"secretary.automations.agents.retro" = ["*.toml"]
-"secretary.automations.agents.steward" = ["*.toml"]
+"ummanu.board.migrations" = ["script.py.mako", "versions/*.py"]
+"ummanu.runtime" = ["heads.toml", "docker-bin/docker"]
+"ummanu.automations.agents.curator" = ["*.toml"]
+"ummanu.automations.agents.pipeline" = ["*.toml"]
+"ummanu.automations.agents.retro" = ["*.toml"]
+"ummanu.automations.agents.steward" = ["*.toml"]

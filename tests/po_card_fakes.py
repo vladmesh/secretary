@@ -19,26 +19,26 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-from secretary.board.completion_evidence import po_completion_fields, render_po_completion_record
-from secretary.board.owner_handover import (
+from tests.po_cli_fakes import FAKE_CLAUDE, eventually, unscoped_test_launch
+from tests.po_fake_store import FakeBoard, FakePoStore, FakeSprints
+from ummanu.board.completion_evidence import po_completion_fields, render_po_completion_record
+from ummanu.board.owner_handover import (
     HANDED_TO_OWNER,
     MARK_KEYS,
     mark_values,
     render_handover_comment,
     waiting_owner,
 )
-from secretary.dispatch.claim import claim_ready_task
-from secretary.dispatch.po_cards import ServicePoChannel, advance_po_card
-from secretary.dispatch.state import DispatcherRecord, new_attempt_id
-from secretary.po import store as po_store
-from secretary.po.runner import PoRunner
-from secretary.po.service import PoService, listening
-from tests.po_cli_fakes import FAKE_CLAUDE, eventually, unscoped_test_launch
-from tests.po_fake_store import FakeBoard, FakePoStore, FakeSprints
+from ummanu.dispatch.claim import claim_ready_task
+from ummanu.dispatch.po_cards import ServicePoChannel, advance_po_card
+from ummanu.dispatch.state import DispatcherRecord, new_attempt_id
+from ummanu.po import store as po_store
+from ummanu.po.runner import PoRunner
+from ummanu.po.service import PoService, listening
 
-REF = "secretary-1900"
+REF = "ummanu-1900"
 SPRINT = "sprint:1"
-DECISION_BODY = "## Decision\nShip the narrow cut.\n\n## How to verify\n`secretary sprint show --ref sprint:1`\n"
+DECISION_BODY = "## Decision\nShip the narrow cut.\n\n## How to verify\n`ummanu sprint show --ref sprint:1`\n"
 OPERATION_BODY = "## What was done\nRotated the key.\n\n## How to verify\n`ssh relay true` exits 0\n"
 
 
@@ -162,7 +162,7 @@ def card(
         "description": description,
         "type": kind,
         "state": state,
-        "project": "secretary",
+        "project": "ummanu",
         "sprint": SPRINT,
         "review": "skipped",
         "claim": {"worker": None},
@@ -251,7 +251,7 @@ class DispatcherFixture(unittest.TestCase):
         channel._store = FakePoStore(self.board)
         self.saved: list[dict[str, Any]] = []
         return SimpleNamespace(
-            owner="secretary-dispatcher",
+            owner="ummanu-dispatcher",
             reader=self.cards,
             writer=self.cards,
             audit=self.cards,

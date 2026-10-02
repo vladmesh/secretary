@@ -11,10 +11,11 @@ import unittest.mock
 from pathlib import Path
 from types import SimpleNamespace
 
-from secretary import cli, host_commands
-from secretary.cli import main
-from secretary.config import validate_instance
-from secretary.host import (
+from tests.runtime_account_fixtures import fixture_runtime_account
+from ummanu import cli, host_commands
+from ummanu.cli import main
+from ummanu.config import validate_instance
+from ummanu.host import (
     KINDS,
     SHIPPED_PACKAGING_ROOT,
     CollectResult,
@@ -34,21 +35,20 @@ from secretary.host import (
     plan_changes,
     plan_input_errors,
 )
-from secretary.host import (
+from ummanu.host import (
     _CmdResult as CmdResult,
 )
-from secretary.host_apply import (
+from ummanu.host_apply import (
     HostCommandError,
     SystemdUnitInstaller,
     resolve_packaged,
     resolve_systemd_layout,
 )
-from tests.runtime_account_fixtures import fixture_runtime_account
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # The units this checkout ships. A plan or a doctor run reads the checkout its host is configured
 # with, so a test about the shipped catalogue has to name it rather than let a home default decide.
-SHIPPED_UNITS = load_packaged_units(SHIPPED_PACKAGING_ROOT, "secretary-")
+SHIPPED_UNITS = load_packaged_units(SHIPPED_PACKAGING_ROOT, "ummanu-")
 EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"
 HOST_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "host"
 
@@ -73,20 +73,20 @@ def snapshot(root: Path) -> dict[str, tuple[float, int]]:
 class ExpectationTests(unittest.TestCase):
     def test_doctor_uses_exact_checkout_paths_and_canonical_resources(self):
         instance = {
-            "data_dir": "/var/lib/secretary-data",
-            "host": {"projects_root": "/srv/projects", "unit_prefix": "secretary-"},
+            "data_dir": "/var/lib/ummanu-data",
+            "host": {"projects_root": "/srv/projects", "unit_prefix": "ummanu-"},
         }
         bindings = [
             {"id": "outside", "repo": "/opt/checkouts/widget", "enabled": True, "orca_binding": "widget"},
         ]
         expected = build_doctor_expectations(instance, bindings)
         self.assertEqual(expected.projects, {"/opt/checkouts/widget"})
-        self.assertIn("secretary-dispatcher-production.timer", expected.units)
+        self.assertIn("ummanu-dispatcher-production.timer", expected.units)
 
     def test_doctor_compares_projects_and_units_only(self):
         """Orca repo registrations are Orca's own state: doctor has no section for them."""
         expected = build_doctor_expectations(
-            {"data_dir": "/srv/secretary-data", "host": {"unit_prefix": "secretary-"}},
+            {"data_dir": "/srv/ummanu-data", "host": {"unit_prefix": "ummanu-"}},
             [{"id": "widget", "repo": "/opt/checkouts/widget", "enabled": True, "orca_binding": "widget"}],
             packaged=[],
         )
@@ -94,7 +94,7 @@ class ExpectationTests(unittest.TestCase):
         self.assertEqual(set(inventory(expected, HostInventory())), set(KINDS))
 
     def test_observer_root_does_not_change_reconcile_plan(self):
-        instance = {"data_dir": "/srv/secretary-data", "host": {"unit_prefix": "secretary-"}}
+        instance = {"data_dir": "/srv/ummanu-data", "host": {"unit_prefix": "ummanu-"}}
         desired = build_plan(instance, [], packaged=[])
         changes = plan_changes(
             desired,
@@ -102,7 +102,7 @@ class ExpectationTests(unittest.TestCase):
                 units={resource.name for resource in desired if resource.kind == "unit"},
             ),
             desired,
-            "secretary-",
+            "ummanu-",
         )
         self.assertTrue(changes)
         self.assertTrue(all(change.action == "unchanged" for change in changes))
@@ -111,7 +111,7 @@ class ExpectationTests(unittest.TestCase):
     def test_doctor_checks_relative_checkout_path(self):
         repo = "missing-relative-doctor-checkout"
         expected = build_doctor_expectations(
-            {"host": {"projects_root": "/srv/projects", "unit_prefix": "secretary-"}},
+            {"host": {"projects_root": "/srv/projects", "unit_prefix": "ummanu-"}},
             [{"id": "relative", "repo": repo, "enabled": True, "orca_binding": "relative"}],
         )
 
@@ -123,15 +123,15 @@ class ExpectationTests(unittest.TestCase):
 
     def test_doctor_runtime_expectations_distinguish_service_and_timer(self):
         expected = build_doctor_expectations(
-            {"host": {"unit_prefix": "secretary-"}}, [], packaged=SHIPPED_UNITS
+            {"host": {"unit_prefix": "ummanu-"}}, [], packaged=SHIPPED_UNITS
         )
-        self.assertEqual(expected.unit_runtime["secretary-memory.service"], (True, True))
-        self.assertEqual(expected.unit_runtime["secretary-curator.timer"], (True, True))
+        self.assertEqual(expected.unit_runtime["ummanu-memory.service"], (True, True))
+        self.assertEqual(expected.unit_runtime["ummanu-curator.timer"], (True, True))
         # A oneshot unit fired by its timer has no [Install] section and is only briefly active
         # around the run, so neither is required. It still gets an entry: without one the live
         # collector never probes it, and a completed run would read to status/doctor as an
         # unprobed unit instead of the truthful, if transient, state it actually has.
-        self.assertEqual(expected.unit_runtime["secretary-curator.service"], (False, False))
+        self.assertEqual(expected.unit_runtime["ummanu-curator.service"], (False, False))
 
     def test_project_name_from_repo_path(self):
         exp = build_expectations([{"id": "an-id", "repo": "/srv/projects/on-disk-name"}], {})
@@ -166,19 +166,19 @@ class ExpectationTests(unittest.TestCase):
         self.assertEqual(result["units"].matched, ["u"])
 
     def test_foreign_unit_is_not_an_unmanaged_conflict(self):
-        expected = Expectations(units={"secretary-memory.service"}, foreign_units={"secretary-other.service"})
+        expected = Expectations(units={"ummanu-memory.service"}, foreign_units={"ummanu-other.service"})
         result = inventory(
-            expected, HostInventory(units={"secretary-memory.service", "secretary-other.service"})
+            expected, HostInventory(units={"ummanu-memory.service", "ummanu-other.service"})
         )
         self.assertEqual(result["units"].unmanaged_on_host, [])
 
     def test_foreign_shipped_unit_is_outside_desired_doctor_and_reconcile_parity(self):
-        owned = build_plan({"host": {"unit_prefix": "secretary-"}}, [], packaged=SHIPPED_UNITS)
-        memory = next(resource for resource in owned if resource.name == "secretary-memory.service")
+        owned = build_plan({"host": {"unit_prefix": "ummanu-"}}, [], packaged=SHIPPED_UNITS)
+        memory = next(resource for resource in owned if resource.name == "ummanu-memory.service")
         instance = {
             "host": {
-                "unit_prefix": "secretary-",
-                "foreign_units": ["secretary-memory.service"],
+                "unit_prefix": "ummanu-",
+                "foreign_units": ["ummanu-memory.service"],
             }
         }
 
@@ -186,23 +186,23 @@ class ExpectationTests(unittest.TestCase):
         expected = build_doctor_expectations(instance, [], packaged=SHIPPED_UNITS)
         diff = inventory(
             expected,
-            HostInventory(units={resource.name for resource in desired} | {"secretary-memory.service"}),
+            HostInventory(units={resource.name for resource in desired} | {"ummanu-memory.service"}),
         )
         changes = plan_changes(
             desired,
-            HostInventory(units={"secretary-memory.service"}),
+            HostInventory(units={"ummanu-memory.service"}),
             [memory],
-            "secretary-",
-            {"secretary-memory.service"},
+            "ummanu-",
+            {"ummanu-memory.service"},
         )
 
-        self.assertNotIn("secretary-memory.service", expected.units)
-        self.assertNotIn("secretary-memory.service", expected.unit_runtime)
-        self.assertNotIn("secretary-memory.service", {resource.name for resource in desired})
-        self.assertNotIn("secretary-memory.service", diff["units"].matched)
+        self.assertNotIn("ummanu-memory.service", expected.units)
+        self.assertNotIn("ummanu-memory.service", expected.unit_runtime)
+        self.assertNotIn("ummanu-memory.service", {resource.name for resource in desired})
+        self.assertNotIn("ummanu-memory.service", diff["units"].matched)
         self.assertEqual(diff["units"].missing_on_host, [])
         self.assertEqual(diff["units"].unmanaged_on_host, [])
-        self.assertNotIn("secretary-memory.service", {change.name for change in changes})
+        self.assertNotIn("ummanu-memory.service", {change.name for change in changes})
 
 
 class FixtureSourceTests(unittest.TestCase):
@@ -213,7 +213,7 @@ class FixtureSourceTests(unittest.TestCase):
         actual = result.inventory
         self.assertEqual(actual.projects, {"/srv/projects/example-project", "/srv/projects/stray-project"})
         # Full unit file names, exactly as systemctl list-unit-files prints them.
-        self.assertEqual(actual.units, {"secretary-pipeline.service", "secretary-retro.timer"})
+        self.assertEqual(actual.units, {"ummanu-pipeline.service", "ummanu-retro.timer"})
 
     def test_legacy_project_directories_keep_fixture_paths(self):
         import tempfile
@@ -275,7 +275,7 @@ class ReconcilePlanTests(unittest.TestCase):
             instance = root / "instance"
             instance.mkdir()
             packaged = resolve_packaged(
-                {"data_dir": str(root / "data"), "host": {"unit_prefix": "secretary-"}},
+                {"data_dir": str(root / "data"), "host": {"unit_prefix": "ummanu-"}},
                 instance_path=instance,
                 data_dir=root / "data",
             )
@@ -292,7 +292,7 @@ class ReconcilePlanTests(unittest.TestCase):
         with (
             tempfile.TemporaryDirectory() as tmp,
             contextlib.chdir(tmp),
-            unittest.mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(REPO_ROOT)}),
+            unittest.mock.patch.dict(os.environ, {"UMMANU_REPO": str(REPO_ROOT)}),
         ):
             root = Path(tmp)
             instance = root / "instance"
@@ -301,13 +301,13 @@ class ReconcilePlanTests(unittest.TestCase):
             config = instance / "instance.yaml"
             config.write_text(
                 "version: 1\nname: operator\ndata_dir: relative-data"
-                + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: secretary-\n",
+                + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: ummanu-\n",
                 encoding="utf-8",
             )
             product_root = root / "product"
             account = SimpleNamespace(pw_dir="/srv/operator")
             with (
-                unittest.mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
+                unittest.mock.patch("ummanu.host_apply.pwd.getpwnam", return_value=account),
             ):
                 directory_report = validate_instance(Path("instance"))
                 relative_report = validate_instance(Path("instance/instance.yaml"))
@@ -366,7 +366,7 @@ class ReconcilePlanTests(unittest.TestCase):
 
         with (
             tempfile.TemporaryDirectory() as tmp,
-            unittest.mock.patch.dict(os.environ, {"USER": "root", "TA_SECRETARY_REPO": str(REPO_ROOT)}),
+            unittest.mock.patch.dict(os.environ, {"USER": "root", "UMMANU_REPO": str(REPO_ROOT)}),
         ):
             root = Path(tmp)
             instance_path = root / "instance"
@@ -374,17 +374,17 @@ class ReconcilePlanTests(unittest.TestCase):
             (instance_path / "instance.yaml").write_text(
                 "version: 1\nname: operator\ndata_dir: "
                 + str(root / "data")
-                + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: secretary-\n",
+                + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: ummanu-\n",
                 encoding="utf-8",
             )
             report_instance = {
                 "data_dir": str(root / "data"),
-                "host": {"unit_prefix": "secretary-"},
+                "host": {"unit_prefix": "ummanu-"},
             }
             account = SimpleNamespace(pw_name="operator", pw_dir="/srv/operator")
             with (
-                unittest.mock.patch("secretary.host_apply.pwd.getpwuid", return_value=account),
-                unittest.mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
+                unittest.mock.patch("ummanu.host_apply.pwd.getpwuid", return_value=account),
+                unittest.mock.patch("ummanu.host_apply.pwd.getpwnam", return_value=account),
             ):
                 packaged = resolve_packaged(
                     report_instance,
@@ -394,7 +394,7 @@ class ReconcilePlanTests(unittest.TestCase):
                 desired = build_plan(report_instance, [], packaged=packaged)
                 self.assertIn(
                     b"User=operator",
-                    next(unit.content for unit in packaged if unit.name == "secretary-memory.service"),
+                    next(unit.content for unit in packaged if unit.name == "ummanu-memory.service"),
                 )
                 fixture = root / "host"
                 fixture.mkdir()
@@ -441,9 +441,9 @@ class ReconcilePlanTests(unittest.TestCase):
                 )
 
         self.assertEqual(code, 0, output)
-        self.assertIn("unchanged systemd:unit:secretary-memory.service", output)
+        self.assertIn("unchanged systemd:unit:ummanu-memory.service", output)
         self.assertEqual(apply_code, 0, apply_output)
-        self.assertNotIn("update systemd:unit:secretary-memory.service", apply_output)
+        self.assertNotIn("update systemd:unit:ummanu-memory.service", apply_output)
         self.assertIn("already reconciled", apply_output)
 
     def test_cli_plan_uses_live_source_by_default(self):
@@ -491,11 +491,11 @@ class ReconcilePlanTests(unittest.TestCase):
 
     def test_production_host_drift_reports_an_unreadable_managed_manifest(self):
         report = SimpleNamespace(
-            host={"unit_prefix": "secretary-"},
+            host={"unit_prefix": "ummanu-"},
             instance={},
             bindings=[],
             instance_path=Path("/tmp/secretary-instance.yaml"),
-            data_dir=Path("/tmp/secretary-data"),
+            data_dir=Path("/tmp/ummanu-data"),
         )
         collected = CollectResult(HostInventory(), {})
         with (
@@ -516,7 +516,7 @@ class ReconcilePlanTests(unittest.TestCase):
 
         class FakeLiveHost:
             def collect(self, expected):
-                return CollectResult(HostInventory(units={"secretary-worker.service"}), {})
+                return CollectResult(HostInventory(units={"ummanu-worker.service"}), {})
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -527,7 +527,7 @@ class ReconcilePlanTests(unittest.TestCase):
                 "version: 1\nname: plan\ndata_dir: "
                 + str(data_dir)
                 + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n"
-                "  unit_prefix: secretary-\nheads:\n  - role: worker\n    model: test\n",
+                "  unit_prefix: ummanu-\nheads:\n  - role: worker\n    model: test\n",
                 encoding="utf-8",
             )
             manifest = data_dir / "host-managed.json"
@@ -559,16 +559,16 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "usage")
 
     def test_runtime_payload_changes_require_an_update(self):
-        instance = {"host": {"unit_prefix": "secretary-"}, "heads": [{"role": "worker", "model": "old"}]}
+        instance = {"host": {"unit_prefix": "ummanu-"}, "heads": [{"role": "worker", "model": "old"}]}
         bindings = [
             {"id": "project-id", "repo": "/srv/old-path", "orca_binding": "project_id", "enabled": True}
         ]
         original = build_plan(instance, bindings, packaged=[])
         actual = HostInventory(
             units={
-                "secretary-worker.service",
-                "secretary-dispatcher-production.service",
-                "secretary-dispatcher-production.timer",
+                "ummanu-worker.service",
+                "ummanu-dispatcher-production.service",
+                "ummanu-dispatcher-production.timer",
             },
         )
         instance["heads"][0]["model"] = "new"
@@ -628,7 +628,7 @@ class ReconcilePlanTests(unittest.TestCase):
 
     def test_plan_rejects_duplicate_logical_id_and_host_name(self):
         duplicate_heads = {
-            "host": {"unit_prefix": "secretary-"},
+            "host": {"unit_prefix": "ummanu-"},
             "heads": [
                 {"role": "worker", "model": "one"},
                 {"role": "worker", "model": "two"},
@@ -660,7 +660,7 @@ class ReconcilePlanTests(unittest.TestCase):
 
     def test_plan_is_stable_and_name_match_without_manifest_is_conflict(self):
         instance = {
-            "host": {"unit_prefix": "secretary-"},
+            "host": {"unit_prefix": "ummanu-"},
             "heads": [{"role": "worker", "model": "test"}],
         }
         bindings = [
@@ -670,16 +670,16 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertEqual(
             [resource.name for resource in desired],
             [
-                "secretary-dispatcher-production.service",
-                "secretary-dispatcher-production.timer",
-                "secretary-worker.service",
+                "ummanu-dispatcher-production.service",
+                "ummanu-dispatcher-production.timer",
+                "ummanu-worker.service",
             ],
         )
         actual = HostInventory(
             units={
-                "secretary-worker.service",
-                "secretary-dispatcher-production.service",
-                "secretary-dispatcher-production.timer",
+                "ummanu-worker.service",
+                "ummanu-dispatcher-production.service",
+                "ummanu-dispatcher-production.timer",
             },
         )
         first = plan_changes(desired, actual, [])
@@ -688,33 +688,33 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertEqual({change.action for change in first}, {"conflict"})
 
     def test_production_dispatcher_units_carry_runtime_bindings(self):
-        resources = build_plan({"host": {"unit_prefix": "secretary-"}}, [])
+        resources = build_plan({"host": {"unit_prefix": "ummanu-"}}, [])
         by_id = {resource.logical_id: resource for resource in resources}
 
         service = json.loads(by_id["systemd:dispatcher:production.service"].spec)
         timer = json.loads(by_id["systemd:dispatcher:production.timer"].spec)
 
         self.assertEqual(
-            by_id["systemd:dispatcher:production.service"].name, "secretary-dispatcher-production.service"
+            by_id["systemd:dispatcher:production.service"].name, "ummanu-dispatcher-production.service"
         )
         self.assertEqual(
-            by_id["systemd:dispatcher:production.timer"].name, "secretary-dispatcher-production.timer"
+            by_id["systemd:dispatcher:production.timer"].name, "ummanu-dispatcher-production.timer"
         )
-        self.assertEqual(service["managed_by"], "secretary")
+        self.assertEqual(service["managed_by"], "ummanu")
         self.assertIn("production-tick", service["runtime"])
         self.assertNotIn("EXAMPLE_API_TOKEN", service["env"])
-        self.assertIn("SECRETARY_INSTANCE", service["env"])
-        self.assertEqual(timer["service"], "secretary-dispatcher-production.service")
+        self.assertIn("UMMANU_INSTANCE", service["env"])
+        self.assertEqual(timer["service"], "ummanu-dispatcher-production.service")
 
     def test_production_dispatcher_unit_sets_path_for_head_cli_lookup(self):
         units = load_packaged_units(
             REPO_ROOT / "packaging" / "systemd",
-            "secretary-",
+            "ummanu-",
             SystemdLayout(
                 REPO_ROOT, Path("/srv/instance"), Path("/srv/data"), "operator", Path("/home/operator")
             ),
         )
-        unit = next(unit for unit in units if unit.name == "secretary-dispatcher-production.service")
+        unit = next(unit for unit in units if unit.name == "ummanu-dispatcher-production.service")
         lines = unit.content.decode("utf-8").splitlines()
         path_lines = [line for line in lines if line.startswith("Environment=PATH=")]
         self.assertEqual(len(path_lines), 1)
@@ -737,8 +737,8 @@ class ReconcilePlanTests(unittest.TestCase):
             REPO_ROOT, Path("/srv/instance"), Path("/srv/data"), "operator", Path("/home/operator")
         )
         shipped_root = REPO_ROOT / "packaging" / "systemd"
-        name = "secretary-dispatcher-production.service"
-        shipped = load_packaged_units(shipped_root, "secretary-", layout)
+        name = "ummanu-dispatcher-production.service"
+        shipped = load_packaged_units(shipped_root, "ummanu-", layout)
         unit = next(unit for unit in shipped if unit.name == name)
         self.assertIn("KillMode=process", unit.content.decode("utf-8").splitlines())
 
@@ -754,9 +754,9 @@ class ReconcilePlanTests(unittest.TestCase):
             template = (previous_root / name).read_text(encoding="utf-8")
             self.assertIn(setting, template)
             (previous_root / name).write_text(template.replace(setting, ""), encoding="utf-8")
-            previous = load_packaged_units(previous_root, "secretary-", layout)
+            previous = load_packaged_units(previous_root, "ummanu-", layout)
 
-        instance = {"host": {"unit_prefix": "secretary-"}}
+        instance = {"host": {"unit_prefix": "ummanu-"}}
         applied = build_plan(instance, [], packaged=previous)
         desired = build_plan(instance, [], packaged=shipped)
         actual = HostInventory(units={resource.name for resource in applied if resource.kind == "unit"})
@@ -769,7 +769,7 @@ class ReconcilePlanTests(unittest.TestCase):
     def test_memory_unit_uses_persistent_cache_and_configured_thread_limit(self):
         units = load_packaged_units(
             REPO_ROOT / "packaging" / "systemd",
-            "secretary-",
+            "ummanu-",
             SystemdLayout(
                 REPO_ROOT,
                 Path("/srv/instance"),
@@ -781,7 +781,7 @@ class ReconcilePlanTests(unittest.TestCase):
                 memory_threads=2,
             ),
         )
-        unit = next(unit for unit in units if unit.name == "secretary-memory.service").content
+        unit = next(unit for unit in units if unit.name == "ummanu-memory.service").content
         self.assertIn(b"Environment=MEMORY_CACHE_DIR=/srv/data/memory/fastembed-cache", unit)
         self.assertIn(b"Environment=MEMORY_MODEL=test-model", unit)
         self.assertIn(b"Environment=MEMORY_DIM=4", unit)
@@ -792,17 +792,17 @@ class ReconcilePlanTests(unittest.TestCase):
         its X display, so a host that stops and disables both runs every scheduler unit as before."""
         units = load_packaged_units(
             REPO_ROOT / "packaging" / "systemd",
-            "secretary-",
+            "ummanu-",
             SystemdLayout(
                 REPO_ROOT, Path("/srv/instance"), Path("/srv/data"), "operator", Path("/home/operator")
             ),
         )
         scheduler_services = {
-            "secretary-curator.service",
-            "secretary-dispatcher-production.service",
-            "secretary-retro.service",
-            "secretary-steward.service",
-            "secretary-steward-deep-sweep.service",
+            "ummanu-curator.service",
+            "ummanu-dispatcher-production.service",
+            "ummanu-retro.service",
+            "ummanu-steward.service",
+            "ummanu-steward-deep-sweep.service",
         }
 
         rendered = {unit.name: unit.content for unit in units}
@@ -810,13 +810,13 @@ class ReconcilePlanTests(unittest.TestCase):
         for name in scheduler_services:
             self.assertIn(b"After=network-online.target\n", rendered[name], name)
         for name, content in rendered.items():
-            for foreign in (b"orca-server", b"xvfb", b"secretary-orca.service"):
+            for foreign in (b"orca-server", b"xvfb", b"ummanu-orca.service"):
                 self.assertNotIn(foreign, content, name)
         for template in (REPO_ROOT / "packaging" / "systemd").iterdir():
             text = template.read_bytes()
             self.assertNotIn(b"orca-server", text, template.name)
             self.assertNotIn(b"xvfb", text, template.name)
-            self.assertNotIn(b"SECRETARY_ORCA_EXECUTABLE", text, template.name)
+            self.assertNotIn(b"UMMANU_ORCA_EXECUTABLE", text, template.name)
 
     def test_cli_plan_reports_update_delete_and_conflict_without_writing(self):
         import tempfile
@@ -828,7 +828,7 @@ class ReconcilePlanTests(unittest.TestCase):
             (instance / "instance.yaml").write_text(
                 "version: 1\nname: plan\ndata_dir: "
                 + str(root / "data")
-                + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: secretary-\nheads:\n  - role: worker\n    model: test\n",
+                + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: ummanu-\nheads:\n  - role: worker\n    model: test\n",
                 encoding="utf-8",
             )
             (instance / "projects" / "project-id.yaml").write_text(
@@ -837,7 +837,7 @@ class ReconcilePlanTests(unittest.TestCase):
             )
             fixture = root / "host"
             fixture.mkdir()
-            (fixture / "units.txt").write_text("secretary-worker.service\n", encoding="utf-8")
+            (fixture / "units.txt").write_text("ummanu-worker.service\n", encoding="utf-8")
             manifest = root / "managed.json"
             manifest.write_text(
                 json.dumps(
@@ -846,13 +846,13 @@ class ReconcilePlanTests(unittest.TestCase):
                             {
                                 "logical_id": "systemd:head:worker",
                                 "kind": "unit",
-                                "name": "secretary-worker.service",
+                                "name": "ummanu-worker.service",
                                 "fingerprint": "old",
                             },
                             {
                                 "logical_id": "systemd:head:retired",
                                 "kind": "unit",
-                                "name": "secretary-retired.service",
+                                "name": "ummanu-retired.service",
                                 "fingerprint": "old",
                             },
                         ]
@@ -861,8 +861,8 @@ class ReconcilePlanTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (fixture / "units.txt").write_text(
-                "secretary-worker.service\nsecretary-retired.service\n"
-                "secretary-dispatcher-production.timer\n",
+                "ummanu-worker.service\nummanu-retired.service\n"
+                "ummanu-dispatcher-production.timer\n",
                 encoding="utf-8",
             )
             before = manifest.read_bytes()
@@ -894,19 +894,19 @@ class ReconcilePlanTests(unittest.TestCase):
             root = Path(tmp)
             instance = root / "instance.yaml"
             instance.write_text(
-                "version: 1\nname: plan\ndata_dir: /tmp/data\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: secretary-\nheads:\n  - role: worker\n    model: test\n",
+                "version: 1\nname: plan\ndata_dir: /tmp/data\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: ummanu-\nheads:\n  - role: worker\n    model: test\n",
                 encoding="utf-8",
             )
             fixture = root / "host"
             fixture.mkdir()
             # A name in our namespace that the product does not ship: nothing in
             # the plan claims it and no managed record owns it.
-            (fixture / "units.txt").write_text("secretary-legacy-sweep.timer\n", encoding="utf-8")
+            (fixture / "units.txt").write_text("ummanu-legacy-sweep.timer\n", encoding="utf-8")
             code, output = run_cli(
                 ["reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture)]
             )
         self.assertEqual(code, 1, output)
-        self.assertIn("conflict systemd:conflict:secretary-legacy-sweep.timer", output)
+        self.assertIn("conflict systemd:conflict:ummanu-legacy-sweep.timer", output)
 
     def test_cli_plan_rejects_heads_without_unit_prefix(self):
         import tempfile
@@ -949,8 +949,8 @@ class ReconcilePlanTests(unittest.TestCase):
 class ReconcileAdoptTests(unittest.TestCase):
     """Adoption records one verified desired resource. Units are the only kind with an identity."""
 
-    LOGICAL_ID = "systemd:unit:secretary-curator.timer"
-    UNIT = "secretary-curator.timer"
+    LOGICAL_ID = "systemd:unit:ummanu-curator.timer"
+    UNIT = "ummanu-curator.timer"
 
     @staticmethod
     def _record(logical_id: str, kind: str, name: str, spec: str) -> dict[str, str]:
@@ -974,7 +974,7 @@ class ReconcileAdoptTests(unittest.TestCase):
             "version: 1\nname: adopt\ndata_dir: "
             + str(data)
             + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n"
-            "  projects_root: " + str(root) + "\n  unit_prefix: secretary-\n",
+            "  projects_root: " + str(root) + "\n  unit_prefix: ummanu-\n",
             encoding="utf-8",
         )
         (instance / "projects" / "project.yaml").write_text(
@@ -1189,7 +1189,7 @@ class NoOrcaUnitInDoctorTests(unittest.TestCase):
     """A20 step 9 (secretary-1726): doctor neither expects nor probes Orca's units.
 
     The fake systemd below is a host where `orca-server.service` and `xvfb.service` are both
-    stopped and disabled, and every Secretary unit is in the state its runtime expectation wants.
+    stopped and disabled, and every Ummanu unit is in the state its runtime expectation wants.
     """
 
     FOREIGN = ("orca-server.service", "xvfb.service")
@@ -1277,12 +1277,12 @@ class LiveSourceErrorTests(unittest.TestCase):
                 "orca": _cmd(stdout=""),
             }
         )
-        expected = Expectations(units={"secretary-pipeline.service"}, unit_prefix="secretary-")
+        expected = Expectations(units={"ummanu-pipeline.service"}, unit_prefix="ummanu-")
         result = host.collect(expected)
         self.assertNotIn("units", result.errors)
         self.assertEqual(result.inventory.units, set())
         diff = inventory(expected, result.inventory)
-        self.assertEqual(diff["units"].missing_on_host, ["secretary-pipeline.service"])
+        self.assertEqual(diff["units"].missing_on_host, ["ummanu-pipeline.service"])
 
     def test_full_unit_names_match_systemctl_output(self):
         # The reviewer's scenario: systemctl list-unit-files prints full file
@@ -1293,29 +1293,29 @@ class LiveSourceErrorTests(unittest.TestCase):
             {
                 "systemctl": _cmd(
                     stdout=(
-                        "secretary-pipeline.service static  -\nsecretary-pipeline.timer   enabled enabled\n"
+                        "ummanu-pipeline.service static  -\nummanu-pipeline.timer   enabled enabled\n"
                     )
                 ),
                 "orca": _cmd(stdout=""),
             }
         )
-        expected = Expectations(units={"secretary-pipeline.service"}, unit_prefix="secretary-")
+        expected = Expectations(units={"ummanu-pipeline.service"}, unit_prefix="ummanu-")
         result = host.collect(expected)
         self.assertNotIn("units", result.errors)
         self.assertEqual(
             result.inventory.units,
-            {"secretary-pipeline.service", "secretary-pipeline.timer"},
+            {"ummanu-pipeline.service", "ummanu-pipeline.timer"},
         )
         diff = inventory(expected, result.inventory)
-        self.assertEqual(diff["units"].matched, ["secretary-pipeline.service"])
+        self.assertEqual(diff["units"].matched, ["ummanu-pipeline.service"])
         self.assertEqual(diff["units"].missing_on_host, [])
-        self.assertEqual(diff["units"].unmanaged_on_host, ["secretary-pipeline.timer"])
+        self.assertEqual(diff["units"].unmanaged_on_host, ["ummanu-pipeline.timer"])
 
     def test_runtime_probe_records_enabled_and_active_states(self):
         class RuntimeHost(LiveHostSource):
             def _run(self, cmd):
                 if cmd[1] == "list-unit-files":
-                    return _cmd(stdout="secretary-memory.service enabled enabled\n")
+                    return _cmd(stdout="ummanu-memory.service enabled enabled\n")
                 if cmd[1] == "is-enabled":
                     return _cmd(returncode=1, stdout="disabled\n")
                 if cmd[1] == "is-active":
@@ -1323,13 +1323,13 @@ class LiveSourceErrorTests(unittest.TestCase):
                 return _cmd(stdout="")
 
         expected = Expectations(
-            units={"secretary-memory.service"},
-            unit_prefix="secretary-",
-            unit_runtime={"secretary-memory.service": (True, True)},
+            units={"ummanu-memory.service"},
+            unit_prefix="ummanu-",
+            unit_runtime={"ummanu-memory.service": (True, True)},
         )
         result = RuntimeHost().collect(expected)
         self.assertEqual(result.errors, {})
-        self.assertEqual(result.inventory.unit_states["secretary-memory.service"], ("disabled", "failed"))
+        self.assertEqual(result.inventory.unit_states["ummanu-memory.service"], ("disabled", "failed"))
 
     def test_systemctl_stderr_is_a_failure(self):
         host = self._host(
@@ -1345,7 +1345,7 @@ class LiveSourceErrorTests(unittest.TestCase):
         # No namespace means unmanaged-on-host cannot be computed. The live path
         # must refuse rather than emit a diff that silently omits stray units.
         host = self._host({"systemctl": _cmd(stdout=""), "orca": _cmd(stdout="")})
-        result = host.collect(Expectations(units={"secretary-pipeline.service"}, unit_prefix=""))
+        result = host.collect(Expectations(units={"ummanu-pipeline.service"}, unit_prefix=""))
         self.assertIn("units", result.errors)
         self.assertIn("unit_prefix", result.errors["units"])
         self.assertEqual(result.inventory.units, set())
@@ -1355,15 +1355,15 @@ class LiveSourceErrorTests(unittest.TestCase):
         # unmanaged-on-host, so ownership of the namespace is not silently dropped.
         host = self._host(
             {
-                "systemctl": _cmd(stdout="secretary-retro.service enabled enabled\n"),
+                "systemctl": _cmd(stdout="ummanu-retro.service enabled enabled\n"),
                 "orca": _cmd(stdout=""),
             }
         )
-        expected = Expectations(units=set(), unit_prefix="secretary-")
+        expected = Expectations(units=set(), unit_prefix="ummanu-")
         result = host.collect(expected)
         self.assertNotIn("units", result.errors)
         diff = inventory(expected, result.inventory)
-        self.assertEqual(diff["units"].unmanaged_on_host, ["secretary-retro.service"])
+        self.assertEqual(diff["units"].unmanaged_on_host, ["ummanu-retro.service"])
 
     def test_declared_projects_without_root_is_unavailable(self):
         expected = Expectations(projects={"a"}, projects_root="")
@@ -1385,7 +1385,7 @@ class LiveSourceErrorTests(unittest.TestCase):
             loop = Path(tmp) / "loop"
             loop.symlink_to(loop)
             expected = build_doctor_expectations(
-                {"host": {"projects_root": tmp, "unit_prefix": "secretary-"}},
+                {"host": {"projects_root": tmp, "unit_prefix": "ummanu-"}},
                 [{"id": "loop", "repo": str(loop), "enabled": True, "orca_binding": "loop"}],
             )
         self.assertEqual(expected.project_error, "expected project checkout path could not be normalized")
@@ -1436,9 +1436,9 @@ class LiveSourceErrorTests(unittest.TestCase):
 
     def test_execution_failures_and_unrecognized_status_are_unavailable_for_collector_and_installer(self):
         expected = Expectations(
-            units={"secretary-steward.timer"},
-            unit_prefix="secretary-",
-            unit_runtime={"secretary-steward.timer": (True, True)},
+            units={"ummanu-steward.timer"},
+            unit_prefix="ummanu-",
+            unit_runtime={"ummanu-steward.timer": (True, True)},
         )
         failures = (
             FileNotFoundError(),
@@ -1450,17 +1450,17 @@ class LiveSourceErrorTests(unittest.TestCase):
         for failure in failures:
             with self.subTest(failure=failure):
                 if isinstance(failure, BaseException):
-                    patch = unittest.mock.patch("secretary.infra.systemd._proc.run", side_effect=failure)
+                    patch = unittest.mock.patch("ummanu.infra.systemd._proc.run", side_effect=failure)
                 else:
                     listed = subprocess.CompletedProcess(
-                        [], 0, stdout="secretary-steward.timer enabled enabled\n", stderr=""
+                        [], 0, stdout="ummanu-steward.timer enabled enabled\n", stderr=""
                     )
                     loaded = subprocess.CompletedProcess(
-                        [], 0, stdout="secretary-steward.timer loaded active waiting\n", stderr=""
+                        [], 0, stdout="ummanu-steward.timer loaded active waiting\n", stderr=""
                     )
                     enabled = subprocess.CompletedProcess([], 0, stdout="enabled\n", stderr="")
                     patch = unittest.mock.patch(
-                        "secretary.infra.systemd._proc.run", side_effect=[listed, loaded, enabled, failure, failure]
+                        "ummanu.infra.systemd._proc.run", side_effect=[listed, loaded, enabled, failure, failure]
                     )
                 with patch:
                     collected = LiveHostSource("operator").collect(expected)
@@ -1469,7 +1469,7 @@ class LiveSourceErrorTests(unittest.TestCase):
                     self.assertEqual(cli._unit_runtime_findings(expected, collected), [])
                     with self.assertRaisesRegex(HostCommandError, "system manager/bus unavailable"):
                         SystemdUnitInstaller(sudo=False, runtime_user="operator").is_active(
-                            "secretary-steward.timer"
+                            "ummanu-steward.timer"
                         )
 
 
@@ -1477,7 +1477,7 @@ class DoctorHostCliTests(unittest.TestCase):
     def setUp(self) -> None:
         # Doctor reports an installation, and an installation runs a checkout. These fixtures are
         # hosts configured with this one; without the name, doctor would have no units to compare.
-        env = unittest.mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(REPO_ROOT)})
+        env = unittest.mock.patch.dict(os.environ, {"UMMANU_REPO": str(REPO_ROOT)})
         env.start()
         self.addCleanup(env.stop)
 
@@ -1492,7 +1492,7 @@ class DoctorHostCliTests(unittest.TestCase):
             "offsite:\n"
             "  instance_remote: git@example.invalid:x/y.git\n"
             "host:\n"
-            "  unit_prefix: secretary-\n"
+            "  unit_prefix: ummanu-\n"
             "  components:\n"
             "    curator: {enabled: false}\n"
             "    instance-maintenance: {enabled: false}\n"
@@ -1534,7 +1534,7 @@ class DoctorHostCliTests(unittest.TestCase):
                         "version": 1,
                         "mode": "production",
                         "phase": "production",
-                        "owner": "secretary-dispatcher",
+                        "owner": "ummanu-dispatcher",
                     }
                 ),
                 encoding="utf-8",
@@ -1555,7 +1555,7 @@ class DoctorHostCliTests(unittest.TestCase):
 
         self.assertEqual(code, 1, output)
         self.assertIn("state: production-owner", output)
-        self.assertIn("create secretary-dispatcher-production.service", output)
+        self.assertIn("create ummanu-dispatcher-production.service", output)
 
     def test_doctor_accepts_a_managed_production_owner(self):
         import tempfile
@@ -1569,7 +1569,7 @@ class DoctorHostCliTests(unittest.TestCase):
                         "version": 1,
                         "mode": "production",
                         "phase": "production",
-                        "owner": "secretary-dispatcher",
+                        "owner": "ummanu-dispatcher",
                     }
                 ),
                 encoding="utf-8",
@@ -1608,19 +1608,19 @@ class DoctorHostCliTests(unittest.TestCase):
             fixture = root / "host"
             fixture.mkdir()
             (fixture / "units.txt").write_text(
-                "secretary-dispatcher-production.service\nsecretary-dispatcher-production.timer\n",
+                "ummanu-dispatcher-production.service\nummanu-dispatcher-production.timer\n",
                 encoding="utf-8",
             )
             (fixture / "unit-states.txt").write_text(
-                "secretary-dispatcher-production.service static inactive\n"
-                "secretary-dispatcher-production.timer enabled active\n",
+                "ummanu-dispatcher-production.service static inactive\n"
+                "ummanu-dispatcher-production.timer enabled active\n",
                 encoding="utf-8",
             )
 
             account = SimpleNamespace(pw_name="operator", pw_dir=str(root / "operator"))
             with (
-                unittest.mock.patch("secretary.host_apply.pwd.getpwuid", return_value=account),
-                unittest.mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
+                unittest.mock.patch("ummanu.host_apply.pwd.getpwuid", return_value=account),
+                unittest.mock.patch("ummanu.host_apply.pwd.getpwnam", return_value=account),
             ):
                 code, output = run_cli(
                     [
@@ -1656,8 +1656,8 @@ class DoctorHostCliTests(unittest.TestCase):
         self.assertIn("unmanaged-on-host: /srv/projects/stray-project", output)
         # units: one of each outcome, full unit file names
         self.assertIn("units:\n  matched: (none)", output)
-        self.assertIn("missing-on-host: secretary-curator.service", output)
-        self.assertIn("secretary-retro.timer", output)
+        self.assertIn("missing-on-host: ummanu-curator.service", output)
+        self.assertIn("ummanu-retro.timer", output)
         # Orca repo registrations are Orca's own state: no section, no comparison.
         self.assertNotIn("orca repos", output)
         self.assertIn("status: findings", output)
@@ -1674,7 +1674,7 @@ class DoctorHostCliTests(unittest.TestCase):
             instance.write_text(
                 "version: 1\nname: doctor\ndata_dir: " + str(data) + "\noffsite:\n"
                 "  instance_remote: git@example.invalid:x/y\nhost:\n"
-                "  projects_root: " + str(root) + "\n  unit_prefix: secretary-\n",
+                "  projects_root: " + str(root) + "\n  unit_prefix: ummanu-\n",
                 encoding="utf-8",
             )
             projects = root / "projects"
@@ -1688,12 +1688,12 @@ class DoctorHostCliTests(unittest.TestCase):
             fixture = root / "host"
             fixture.mkdir()
             (fixture / "projects.txt").write_text(str(repo) + "\n", encoding="utf-8")
-            (fixture / "units.txt").write_text("secretary-memory.service\n", encoding="utf-8")
+            (fixture / "units.txt").write_text("ummanu-memory.service\n", encoding="utf-8")
 
             code, output = run_cli(["doctor", "--instance", str(instance), "--host-fixture", str(fixture)])
 
         self.assertEqual(code, 1, output)
-        self.assertIn("secretary-dispatcher-production.service", output)
+        self.assertIn("ummanu-dispatcher-production.service", output)
         # The binding's legacy orca_binding still loads, and doctor has no Orca-repo section for it.
         self.assertIn("projects:\n  matched: " + str(repo), output)
         self.assertNotIn("orca repos", output)
@@ -1712,7 +1712,7 @@ class DoctorHostCliTests(unittest.TestCase):
             instance.write_text(
                 "version: 1\nname: doctor\ndata_dir: " + str(data) + "\noffsite:\n"
                 "  instance_remote: git@example.invalid:x/y\nhost:\n"
-                "  projects_root: " + str(projects_root) + "\n  unit_prefix: secretary-\n",
+                "  projects_root: " + str(projects_root) + "\n  unit_prefix: ummanu-\n",
                 encoding="utf-8",
             )
             (projects_root / "demo.yaml").write_text(
@@ -1731,19 +1731,19 @@ class DoctorHostCliTests(unittest.TestCase):
         self.assertIn("unmanaged-on-host: " + str(fixture / "projects" / "same-name"), output)
 
     def test_doctor_fails_for_required_inactive_service(self):
-        expected = build_doctor_expectations({"host": {"unit_prefix": "secretary-"}}, [])
+        expected = build_doctor_expectations({"host": {"unit_prefix": "ummanu-"}}, [])
 
         class HealthyFilesFailedRuntime:
             def collect(self, ignored):
                 states = {name: ("enabled", "active") for name in expected.unit_runtime}
-                states["secretary-memory.service"] = ("enabled", "failed")
+                states["ummanu-memory.service"] = ("enabled", "failed")
                 return CollectResult(HostInventory(units=expected.units, unit_states=states), {})
 
         with unittest.mock.patch.object(cli, "LiveHostSource", return_value=HealthyFilesFailedRuntime()):
             code, output = run_cli(["doctor", "--instance", str(EXAMPLE_INSTANCE)])
 
         self.assertEqual(code, 1, output)
-        self.assertIn("secretary-memory.service: expected active, got failed", output)
+        self.assertIn("ummanu-memory.service: expected active, got failed", output)
 
     def test_doctor_returns_unavailable_for_symlink_loop_checkout(self):
         import tempfile
@@ -1759,7 +1759,7 @@ class DoctorHostCliTests(unittest.TestCase):
             instance.write_text(
                 "version: 1\nname: doctor\ndata_dir: " + str(data) + "\noffsite:\n"
                 "  instance_remote: git@example.invalid:x/y\nhost:\n"
-                "  projects_root: " + str(root) + "\n  unit_prefix: secretary-\n",
+                "  projects_root: " + str(root) + "\n  unit_prefix: ummanu-\n",
                 encoding="utf-8",
             )
             (projects / "loop.yaml").write_text(
@@ -1872,7 +1872,7 @@ class DoctorHostCliTests(unittest.TestCase):
             instance.write_text(
                 "version: 1\n"
                 "name: leak-check\n"
-                "data_dir: /var/lib/secretary-data\n"
+                "data_dir: /var/lib/ummanu-data\n"
                 "offsite:\n"
                 "  instance_remote: git@example.invalid:x/y.git\n"
                 "host:\n"
@@ -1899,12 +1899,12 @@ class DoctorHostCliTests(unittest.TestCase):
             instance.write_text(
                 "version: 1\n"
                 "name: no-prefix\n"
-                "data_dir: /var/lib/secretary-data\n"
+                "data_dir: /var/lib/ummanu-data\n"
                 "offsite:\n"
                 "  instance_remote: git@example.invalid:x/y.git\n"
                 "host:\n"
                 "  units:\n"
-                "    - secretary-pipeline\n",
+                "    - ummanu-pipeline\n",
                 encoding="utf-8",
             )
             code, output = run_cli(["doctor", "--dry-run", "--instance", str(instance), "--host"])
@@ -1926,7 +1926,7 @@ class DoctorHostCliTests(unittest.TestCase):
             project.mkdir(parents=True)
             # A secret sitting inside a project dir must never be opened or printed.
             (project / ".env").write_text(f"API_KEY={secret}\n", encoding="utf-8")
-            (fixture / "units.txt").write_text("secretary-pipeline\n", encoding="utf-8")
+            (fixture / "units.txt").write_text("ummanu-pipeline\n", encoding="utf-8")
 
             code, output = run_cli(
                 [

@@ -1,4 +1,4 @@
-"""Focused contract tests for the one entry of the background agents, `secretary automations`."""
+"""Focused contract tests for the one entry of the background agents, `ummanu automations`."""
 
 from __future__ import annotations
 
@@ -14,21 +14,21 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary import cli as secretary_cli
-from secretary.automations import __main__ as triggered_main
-from secretary.automations import composition
-from secretary.automations.agents.retro import cli as retro_cli
-from secretary.automations.agents.steward import cli as steward_cli
-from secretary.board.steward_reports import StewardReportBoard
-from secretary.config import DataDirError
-from secretary.runtime.state import (
+from ummanu import cli as ummanu_cli
+from ummanu.automations import __main__ as triggered_main
+from ummanu.automations import composition
+from ummanu.automations.agents.retro import cli as retro_cli
+from ummanu.automations.agents.steward import cli as steward_cli
+from ummanu.board.steward_reports import StewardReportBoard
+from ummanu.config import DataDirError
+from ummanu.runtime.state import (
     PRECHECK_BOARD_UNREACHABLE,
     PRECHECK_DEFERRED,
     PRECHECK_SKIP,
     AgentState,
     BoardUnavailable,
 )
-from secretary.tasks import TaskError
+from ummanu.tasks import TaskError
 
 
 class StewardCliReaderTests(unittest.TestCase):
@@ -63,9 +63,9 @@ class StewardCliReaderTests(unittest.TestCase):
 class StandingAgentEntrypointTests(unittest.TestCase):
     def test_retired_board_cli_modules_are_not_importable(self) -> None:
         for name in (
-            "secretary.automations.agents.pipeline.cli",
-            "secretary.automations.agents.pipeline.model",
-            "secretary.automations.agents.pipeline.ops",
+            "ummanu.automations.agents.pipeline.cli",
+            "ummanu.automations.agents.pipeline.model",
+            "ummanu.automations.agents.pipeline.ops",
         ):
             with self.subTest(name=name):
                 self.assertIsNone(importlib.util.find_spec(name))
@@ -95,7 +95,7 @@ class StandingAgentEntrypointTests(unittest.TestCase):
         with (
             mock.patch.dict(
                 os.environ,
-                {"SECRETARY_INSTANCE": "/instance", "SECRETARY_DATA_DIR": "/audit"},
+                {"UMMANU_INSTANCE": "/instance", "UMMANU_DATA_DIR": "/audit"},
                 clear=False,
             ),
             mock.patch.object(composition, "card_client", return_value=client) as factory,
@@ -172,7 +172,7 @@ class StandingAgentEntrypointTests(unittest.TestCase):
 
         with (
             tempfile.TemporaryDirectory() as tmp,
-            mock.patch.dict(os.environ, {"SECRETARY_DATA_DIR": tmp}, clear=False),
+            mock.patch.dict(os.environ, {"UMMANU_DATA_DIR": tmp}, clear=False),
             mock.patch.object(composition, "card_client", return_value=object()),
             mock.patch.object(composition, "TaskReader", return_value=Reader()),
             mock.patch.object(composition, "TaskWriter", return_value=Writer()),
@@ -184,7 +184,7 @@ class StandingAgentEntrypointTests(unittest.TestCase):
     def test_report_config_errors_remain_failures_when_a_report_is_needed(self) -> None:
         with (
             mock.patch.dict(
-                os.environ, {"SECRETARY_INSTANCE": "/instance", "SECRETARY_DATA_DIR": ""}, clear=False
+                os.environ, {"UMMANU_INSTANCE": "/instance", "UMMANU_DATA_DIR": ""}, clear=False
             ),
             mock.patch.object(composition, "card_client", return_value=object()),
             mock.patch.object(composition, "instance_data_dir", side_effect=DataDirError("bad instance")),
@@ -279,7 +279,7 @@ class StandingAgentEntrypointTests(unittest.TestCase):
 
 
 class ModuleEntryTests(unittest.TestCase):
-    """`python3 -P -m secretary automations` is the one entry, and it always goes through the wiring."""
+    """`python3 -P -m ummanu automations` is the one entry, and it always goes through the wiring."""
 
     def test_module_entry_injects_board_ports_for_every_board_role(self) -> None:
         # An Orca automation's precheck string names the module, not a composition root. Before the
@@ -292,11 +292,11 @@ class ModuleEntryTests(unittest.TestCase):
                     "PATH": "/usr/bin:/bin",
                     "HOME": str(root / "home"),
                     "TA_STATE": str(root / "state"),
-                    "SECRETARY_INSTANCE": str(root / "instance"),
+                    "UMMANU_INSTANCE": str(root / "instance"),
                     "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
                 }
                 result = subprocess.run(
-                    [sys.executable, "-P", "-m", "secretary", "automations", agent, "precheck"],
+                    [sys.executable, "-P", "-m", "ummanu", "automations", agent, "precheck"],
                     env=env,
                     capture_output=True,
                     text=True,
@@ -307,22 +307,22 @@ class ModuleEntryTests(unittest.TestCase):
                 self.assertEqual(result.returncode, PRECHECK_BOARD_UNREACHABLE, result.stderr)
 
 
-class SecretaryCliEntryTests(unittest.TestCase):
-    """`secretary automations <agent> <cmd>` is the composition root behind the product CLI."""
+class UmmanuCliEntryTests(unittest.TestCase):
+    """`ummanu automations <agent> <cmd>` is the composition root behind the product CLI."""
 
     def _environment(self, root: Path) -> dict[str, str]:
         return {
             "PATH": "/usr/bin:/bin",
             "HOME": str(root / "home"),
             "TA_STATE": str(root / "state"),
-            "SECRETARY_INSTANCE": str(root / "instance"),
+            "UMMANU_INSTANCE": str(root / "instance"),
             "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
         }
 
     def test_the_argv_reaches_the_composition_root_untouched(self) -> None:
         argv = ["curator", "baseline", "--project", "review:po", "--json", "--help"]
         with mock.patch.object(composition, "main", return_value=0) as composed:
-            self.assertEqual(secretary_cli.main(["automations", *argv]), 0)
+            self.assertEqual(ummanu_cli.main(["automations", *argv]), 0)
         composed.assert_called_once_with(argv)
 
     def test_every_precheck_code_is_the_commands_exit_code(self) -> None:
@@ -330,7 +330,7 @@ class SecretaryCliEntryTests(unittest.TestCase):
             for agent in triggered_main.AGENTS:
                 with self.subTest(agent=agent, code=code):
                     with mock.patch.object(composition, "main", return_value=code) as composed:
-                        self.assertEqual(secretary_cli.main(["automations", agent, "precheck"]), code)
+                        self.assertEqual(ummanu_cli.main(["automations", agent, "precheck"]), code)
                     composed.assert_called_once_with([agent, "precheck"])
 
     def test_help_and_an_unknown_agent_answer_as_the_agents_runner_does(self) -> None:
@@ -338,24 +338,24 @@ class SecretaryCliEntryTests(unittest.TestCase):
             with self.subTest(argv=argv):
                 through_cli, direct = io.StringIO(), io.StringIO()
                 with contextlib.redirect_stdout(through_cli):
-                    cli_code = secretary_cli.main(["automations", *argv])
+                    cli_code = ummanu_cli.main(["automations", *argv])
                 with contextlib.redirect_stdout(direct):
                     direct_code = composition.main(argv)
                 self.assertEqual(cli_code, direct_code)
                 self.assertEqual(through_cli.getvalue(), direct.getvalue())
-                self.assertIn("python3 -P -m secretary automations <agent> <cmd>", direct.getvalue())
+                self.assertIn("python3 -P -m ummanu automations <agent> <cmd>", direct.getvalue())
         with contextlib.redirect_stderr(io.StringIO()):
-            self.assertEqual(secretary_cli.main(["automations", "pipeline", "list"]), 2)
+            self.assertEqual(ummanu_cli.main(["automations", "pipeline", "list"]), 2)
 
     def test_health_is_the_cross_agent_check(self) -> None:
-        from secretary.automations.runtime import health
+        from ummanu.automations.runtime import health
 
         with mock.patch.object(health, "check", return_value=0) as check:
-            self.assertEqual(secretary_cli.main(["automations", "health"]), 0)
+            self.assertEqual(ummanu_cli.main(["automations", "health"]), 0)
         check.assert_called_once_with(triggered_main.HEALTH_COMPONENTS)
 
     def test_the_parser_tree_names_the_subcommand(self) -> None:
-        parser = secretary_cli.build_parser()
+        parser = ummanu_cli.build_parser()
         subcommands = next(
             action.choices for action in parser._actions if hasattr(action, "choices") and action.choices
         )
@@ -372,7 +372,7 @@ class SecretaryCliEntryTests(unittest.TestCase):
             "retro": PRECHECK_BOARD_UNREACHABLE,
             "steward": PRECHECK_BOARD_UNREACHABLE,
         }
-        for module in (["secretary", "automations"], ["secretary.automations"]):
+        for module in (["ummanu", "automations"], ["ummanu.automations"]):
             for agent, code in expected.items():
                 with self.subTest(module=module, agent=agent), tempfile.TemporaryDirectory() as tmp:
                     result = subprocess.run(
@@ -389,7 +389,7 @@ class SecretaryCliEntryTests(unittest.TestCase):
         """No installation behind it: every component says so, and the check fails rather than crash."""
         with tempfile.TemporaryDirectory() as tmp:
             result = subprocess.run(
-                [sys.executable, "-P", "-m", "secretary", "automations", "health"],
+                [sys.executable, "-P", "-m", "ummanu", "automations", "health"],
                 env=self._environment(Path(tmp)),
                 capture_output=True,
                 text=True,

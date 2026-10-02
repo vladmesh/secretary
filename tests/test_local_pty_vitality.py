@@ -23,20 +23,20 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from secretary.dispatch import review as dispatcher_review
-from secretary.dispatch.head_vitality import snapshots_from_status
-from secretary.dispatch.head_vitality_episode import (
+from ummanu.dispatch import review as dispatcher_review
+from ummanu.dispatch.head_vitality import snapshots_from_status
+from ummanu.dispatch.head_vitality_episode import (
     DEFAULT_VITALITY_THRESHOLDS,
     VitalityEpisode,
     VitalityVerdict,
     reduce_vitality,
 )
-from secretary.dispatch.state import DispatcherRecord
-from secretary.dispatch.worker_lifecycle import head_run_binding
-from secretary.runtime.head import HeadRun, HeadSpec, TaskRef
-from secretary.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
+from ummanu.dispatch.state import DispatcherRecord
+from ummanu.dispatch.worker_lifecycle import head_run_binding
+from ummanu.runtime.head import HeadRun, HeadSpec, TaskRef
+from ummanu.runtime.head_runtimes import LOCAL_PTY_RUNTIME, ORCA_LEGACY_RUNTIME
 
-REF = "secretary-9719"
+REF = "ummanu-9719"
 SUSPECT = DEFAULT_VITALITY_THRESHOLDS.suspect_after
 CONFIRM = DEFAULT_VITALITY_THRESHOLDS.confirm_after
 TICK = 60.0
@@ -72,14 +72,14 @@ class ResumedLocalPtyWorkerVitalityTests(unittest.TestCase):
         run = HeadRun(
             run_id=f"run-{runtime}",
             spec=HeadSpec(profile_id="claude-opus-high-local-pty", adapter="claude", runtime=runtime),
-            workspace="/tmp/secretary-9719",
+            workspace="/tmp/ummanu-9719",
             task_ref=TaskRef.card(REF),
             role="worker",
-            pid_file="/tmp/secretary-9719/worker.pid",
+            pid_file="/tmp/ummanu-9719/worker.pid",
         ).to_json()
         return DispatcherRecord(
             worker=f"{REF}-worker",
-            workspace="/tmp/secretary-9719",
+            workspace="/tmp/ummanu-9719",
             handle="",
             head="claude-opus-high-local-pty",
             review_head="claude-opus-high-local-pty",

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from typing import ClassVar
 from unittest import mock
 
-from secretary import checkpoint, installation, state_repo, upgrade
+from ummanu import checkpoint, installation, state_repo, upgrade
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -46,9 +46,9 @@ class StateRepoPrivilegeTests(unittest.TestCase):
             result = SimpleNamespace(returncode=0, stdout="", stderr="")
             account = SimpleNamespace(pw_name="runtime")
             with (
-                mock.patch("secretary.state_repo.os.getuid", return_value=0),
-                mock.patch("secretary.state_repo.pwd.getpwuid", return_value=account),
-                mock.patch("secretary.state_repo._proc.run_isolated", return_value=result) as run,
+                mock.patch("ummanu.state_repo.os.getuid", return_value=0),
+                mock.patch("ummanu.state_repo.pwd.getpwuid", return_value=account),
+                mock.patch("ummanu.state_repo._proc.run_isolated", return_value=result) as run,
             ):
                 state_repo.git(instance, ["status", "--porcelain"], label="test")
 
@@ -68,19 +68,19 @@ class StateRepoPrivilegeTests(unittest.TestCase):
             result = SimpleNamespace(returncode=0, stdout="", stderr="")
             account = SimpleNamespace(pw_name="runtime")
             with (
-                mock.patch("secretary.state_repo.os.getuid", return_value=0),
-                mock.patch("secretary.state_repo.pwd.getpwuid", return_value=account),
-                mock.patch("secretary.state_repo._proc.run_isolated", return_value=result) as run,
+                mock.patch("ummanu.state_repo.os.getuid", return_value=0),
+                mock.patch("ummanu.state_repo.pwd.getpwuid", return_value=account),
+                mock.patch("ummanu.state_repo._proc.run_isolated", return_value=result) as run,
             ):
                 state_repo.run_git(
                     instance,
                     ["status", "--porcelain"],
                     label="test",
-                    extra_env={"SECRETARY_CHECKPOINT_INSTANCE": str(instance)},
+                    extra_env={"UMMANU_CHECKPOINT_INSTANCE": str(instance)},
                 )
         command = run.call_args.args[0]
-        self.assertIn(f"SECRETARY_CHECKPOINT_INSTANCE={instance}", command)
-        self.assertLess(command.index("SECRETARY_CHECKPOINT_INSTANCE=" + str(instance)), command.index("git"))
+        self.assertIn(f"UMMANU_CHECKPOINT_INSTANCE={instance}", command)
+        self.assertLess(command.index("UMMANU_CHECKPOINT_INSTANCE=" + str(instance)), command.index("git"))
 
     def test_root_boundary_never_runs_runtime_hooks_or_config_as_root(self) -> None:
         """The pusher shares this boundary before any Git subcommand starts."""
@@ -89,9 +89,9 @@ class StateRepoPrivilegeTests(unittest.TestCase):
             result = SimpleNamespace(returncode=0, stdout="", stderr="")
             account = SimpleNamespace(pw_name="runtime")
             with (
-                mock.patch("secretary.state_repo.os.getuid", return_value=0),
-                mock.patch("secretary.state_repo.pwd.getpwuid", return_value=account),
-                mock.patch("secretary.state_repo._proc.run_isolated", return_value=result) as run,
+                mock.patch("ummanu.state_repo.os.getuid", return_value=0),
+                mock.patch("ummanu.state_repo.pwd.getpwuid", return_value=account),
+                mock.patch("ummanu.state_repo._proc.run_isolated", return_value=result) as run,
             ):
                 state_repo.run_git(instance, ["push", "origin", "HEAD:main"], label="test")
 
@@ -111,7 +111,7 @@ class StateRepoPrivilegeTests(unittest.TestCase):
     def test_non_root_calls_git_directly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = SimpleNamespace(returncode=0, stdout="", stderr="")
-            with mock.patch("secretary.state_repo._proc.run_isolated", return_value=result) as run:
+            with mock.patch("ummanu.state_repo._proc.run_isolated", return_value=result) as run:
                 state_repo.git(Path(tmp), ["status", "--porcelain"], label="test")
         self.assertEqual(run.call_args.args[0][0], "git")
 
@@ -139,7 +139,7 @@ class GitEnvironmentTests(unittest.TestCase):
             result = SimpleNamespace(returncode=0, stdout="", stderr="")
             with (
                 mock.patch.dict(os.environ, self.CONTAMINATION, clear=False),
-                mock.patch("secretary.state_repo._proc.run_isolated", return_value=result) as run,
+                mock.patch("ummanu.state_repo._proc.run_isolated", return_value=result) as run,
             ):
                 state_repo.run_git(Path(tmp), ["status", "--porcelain"], label="test")
         env = run.call_args.kwargs["env"]
@@ -154,9 +154,9 @@ class GitEnvironmentTests(unittest.TestCase):
             account = SimpleNamespace(pw_name="runtime")
             with (
                 mock.patch.dict(os.environ, self.CONTAMINATION, clear=False),
-                mock.patch("secretary.state_repo.os.getuid", return_value=0),
-                mock.patch("secretary.state_repo.pwd.getpwuid", return_value=account),
-                mock.patch("secretary.state_repo._proc.run_isolated", return_value=result) as run,
+                mock.patch("ummanu.state_repo.os.getuid", return_value=0),
+                mock.patch("ummanu.state_repo.pwd.getpwuid", return_value=account),
+                mock.patch("ummanu.state_repo._proc.run_isolated", return_value=result) as run,
             ):
                 state_repo.git(instance, ["status", "--porcelain"], label="test")
         command = run.call_args.args[0]
@@ -171,13 +171,13 @@ class GitEnvironmentTests(unittest.TestCase):
             result = SimpleNamespace(returncode=0, stdout="", stderr="")
             with (
                 mock.patch.dict(os.environ, self.CONTAMINATION, clear=False),
-                mock.patch("secretary.upgrade._proc.run", return_value=result) as run,
+                mock.patch("ummanu.upgrade._proc.run", return_value=result) as run,
             ):
                 upgrade._git(root, ["rev-parse", "HEAD"])
             upgrade_env = run.call_args.kwargs["env"]
             with (
                 mock.patch.dict(os.environ, self.CONTAMINATION, clear=False),
-                mock.patch("secretary.installation._proc.run", return_value=result) as run,
+                mock.patch("ummanu.installation._proc.run", return_value=result) as run,
             ):
                 installation._run(["git", "clone", "--", "remote", str(root)], label="clone")
             install_env = run.call_args.kwargs["env"]

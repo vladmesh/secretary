@@ -12,7 +12,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.board.completion_evidence import (
+from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
+from tests.fakes.dispatcher import FakeCatalog
+from tests.integration_setup import require_disposable_board_fixture
+from tests.sql_backend_fixtures import PostgresBoard
+from ummanu.board.completion_evidence import (
     has_candidate,
     infra_completion_record,
     infra_report_fields,
@@ -21,14 +25,10 @@ from secretary.board.completion_evidence import (
     render_research_completion_link,
     review_required,
 )
-from secretary.dispatch import release_lifecycle
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.dispatch.observer import render_observer_prompt
-from secretary.tasks import TaskError
-from tests.dispatcher_fixtures import CARD_REF, DispatcherRuntimeFixture
-from tests.fakes.dispatcher import FakeCatalog
-from tests.integration_setup import require_disposable_board_fixture
-from tests.sql_backend_fixtures import PostgresBoard
+from ummanu.dispatch import release_lifecycle
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.dispatch.observer import render_observer_prompt
+from ummanu.tasks import TaskError
 
 INFRA_REPORT = "## What was done\nRotated the relay key.\n\n## How to verify\n`ssh relay true` exits 0\n"
 # Host calls that would publish a branch, open a pull request, poll CI or dispatch a workflow: the
@@ -81,9 +81,9 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         _git(self.data_dir, "commit", "--quiet", "-m", "config")
 
     def _write_report(self, files: dict[str, str]) -> None:
-        """The worker's `.secretary-report/`, replaced wholesale, and the report writer pointed at it."""
+        """The worker's `.ummanu-report/`, replaced wholesale, and the report writer pointed at it."""
         workspace = Path(self._pilot_record()["workspace"])
-        report = workspace / ".secretary-report"
+        report = workspace / ".ummanu-report"
         if report.exists():
             for path in sorted(report.rglob("*"), reverse=True):
                 path.rmdir() if path.is_dir() else path.unlink()
@@ -202,7 +202,7 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.start_dispatcher()
         self._unobserved()
         self.tick()
-        self.assertIn("`.secretary-report/report.md`", self._task_document())
+        self.assertIn("`.ummanu-report/report.md`", self._task_document())
         self._write_report({"report.md": "# Findings\n", "data/results.csv": "a,b\n1,2\n"})
         self._report_done("findings written up")
 
@@ -276,7 +276,7 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
             with self.subTest(files=files), self.assertRaises(TaskError) as caught:
                 self._report_done("findings written up")
             self.assertEqual(caught.exception.code, "validation")
-            self.assertIn(".secretary-report/report.md", caught.exception.message)
+            self.assertIn(".ummanu-report/report.md", caught.exception.message)
 
         self.assertEqual(self.tick()["action"], "waiting-worker-report")
         self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
@@ -317,7 +317,7 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._report_done("findings written up")
         self.assertEqual(self.tick()["to"], "validate")
 
-        with mock.patch("secretary.knowledge_write.KNOWLEDGE_DIRECTORY_CAP_BYTES", 32):
+        with mock.patch("ummanu.knowledge_write.KNOWLEDGE_DIRECTORY_CAP_BYTES", 32):
             self._assert_transfer_refused_blocks("size_cap")
 
     def test_a_link_written_by_anyone_but_the_dispatcher_is_not_evidence(self) -> None:
@@ -454,7 +454,7 @@ class NoCandidateReviewerDocumentTests(DispatcherRuntimeFixture, unittest.TestCa
         document = self._review_document("research")
         self.assertNotIn("commit messages on this branch", document)
         self.assertNotIn("inspect the diff", document)
-        self.assertIn("`.secretary-report/`", document)
+        self.assertIn("`.ummanu-report/`", document)
         self.assertIn(f"`state/knowledge/reports/{CARD_REF}/`", document)
 
     def test_an_infra_reviewer_is_pointed_at_the_report_body(self) -> None:
@@ -466,7 +466,7 @@ class NoCandidateReviewerDocumentTests(DispatcherRuntimeFixture, unittest.TestCa
     def test_a_code_reviewer_still_reads_the_commit_messages(self) -> None:
         document = self._review_document("code")
         self.assertIn("Read the commit messages on this branch, not only the diff.", document)
-        self.assertNotIn(".secretary-report", document)
+        self.assertNotIn(".ummanu-report", document)
 
 
 class ObserverReviewChoiceWordingTests(unittest.TestCase):

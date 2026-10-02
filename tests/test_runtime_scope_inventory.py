@@ -13,8 +13,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import cli, status, upgrade
-from secretary.host import (
+from ummanu import cli, status, upgrade
+from ummanu.host import (
     FixtureHostSource,
     LiveHostSource,
     PlannedResource,
@@ -22,21 +22,21 @@ from secretary.host import (
     inventory,
     plan_changes,
 )
-from secretary.host_apply import ApplyInputs, apply_host
-from secretary.infra.systemd import CommandResult
-from secretary.runtime.head.local_pty import protocol
-from secretary.runtime.head.local_pty import scope_inventory as reader
-from secretary.runtime.head.local_pty import scope_environment, scope_launcher
-from secretary.runtime.head.local_pty.journal import RUN_STARTED, SCOPE_BOUND, JournalWriter
-from secretary.runtime.head.local_pty.scoped_lifecycle import (
+from ummanu.host_apply import ApplyInputs, apply_host
+from ummanu.infra.systemd import CommandResult
+from ummanu.runtime.head.local_pty import protocol
+from ummanu.runtime.head.local_pty import scope_inventory as reader
+from ummanu.runtime.head.local_pty import scope_environment, scope_launcher
+from ummanu.runtime.head.local_pty.journal import RUN_STARTED, SCOPE_BOUND, JournalWriter
+from ummanu.runtime.head.local_pty.scoped_lifecycle import (
     LAUNCH_BINDING_ENV,
     ScopedHeadLifecycle,
     binding_description,
     launch_binding,
 )
-from secretary.runtime.head.local_pty.supervisor import Supervisor, SupervisorStartupError
-from secretary.runtime.head.memory import MemoryScopeError, scope_unit
-from secretary.runtime.local_pty_head import runtime_scope_inventory
+from ummanu.runtime.head.local_pty.supervisor import Supervisor, SupervisorStartupError
+from ummanu.runtime.head.memory import MemoryScopeError, scope_unit
+from ummanu.runtime.local_pty_head import runtime_scope_inventory
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.runtime_scope_fixtures import host_fixture
 from tests.scoped_environment_fixtures import deployed_scope_argv
@@ -224,7 +224,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
 
     def test_foreign_and_missing_owner_remain_conflicts_and_prevent_all_effects(self):
         _, _, owned = self.owner("worker", "previous-1896", "heads")
-        unknown = "secretary-head-foreign.scope"
+        unknown = "ummanu-head-foreign.scope"
         collected = self.collect(owned, unknown)
         self.assertFalse(collected.errors)
         self.assertEqual(inventory(self.expected, collected.inventory)["units"].unmanaged_on_host, [unknown])
@@ -241,7 +241,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         actual = self.collect(unit).inventory
         resource = PlannedResource("bad-resource", "unit", unit, "{}", "digest")
         for desired, managed in (([resource], []), ([], [resource])):
-            changes = plan_changes(desired, actual, managed, "secretary-")
+            changes = plan_changes(desired, actual, managed, "ummanu-")
             self.assertEqual([change.action for change in changes], ["conflict"])
 
     def test_selected_data_root_and_swapped_or_escaping_directories_refused(self):
@@ -380,7 +380,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
             self.native[unit]["Description"] = "released native command description"
             for live in (False, True):
                 with self.subTest(role=role, launcher_live=live), mock.patch(
-                    "secretary.runtime.head.local_pty.scoped_lifecycle.launch_identity",
+                    "ummanu.runtime.head.local_pty.scoped_lifecycle.launch_identity",
                     return_value=owner.read_owner(directory)["launch_identity"] if live else None,
                 ):
                     collected = self.collect(unit)
@@ -393,8 +393,8 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
                         self.assertEqual(installer.calls, [])
             # The runtime owner still settles its old generation. Host inspection
             # writes no receipt and never adds missing historical evidence.
-            with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", self.root / "absent-cgroups"), mock.patch(
-                "secretary.runtime.head.local_pty.scoped_lifecycle.launch_group_present", return_value=False,
+            with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", self.root / "absent-cgroups"), mock.patch(
+                "ummanu.runtime.head.local_pty.scoped_lifecycle.launch_group_present", return_value=False,
             ):
                 owner.stop_and_prove_empty()
             self.assertTrue(owner.read_owner(directory)["cleanup_complete"])
@@ -449,7 +449,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         owner = ScopedHeadLifecycle(directory.name, 96)
         workspace = str(Path.cwd())
         owner.persist(directory, role="po", task="po:released:operation", workspace=workspace)
-        supervisor = [sys.executable, "-P", "-m", "secretary.runtime.head.local_pty.supervisor",
+        supervisor = [sys.executable, "-P", "-m", "ummanu.runtime.head.local_pty.supervisor",
                       "--run-dir", str(directory), "--run-id", owner.run_id, "--role", "po",
                       "--task", "po:released:operation", "--cwd", workspace]
         arguments = [str(directory), str(directory / "supervisor.log"), "1", owner.generation,
@@ -461,7 +461,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
             child.extend(copied)
             self.assertNotIn("launch_pid", owner.read_owner(directory))
             return SimpleNamespace(pid=os.getpid(), poll=lambda: 0)
-        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen", side_effect=launched):
+        with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen", side_effect=launched):
             self.assertEqual(ScopedHeadLifecycle.launch_until_started(arguments), 0)
         record = owner.read_owner(directory)
         self.assertEqual(record["generation"], arguments[3])
@@ -493,9 +493,9 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
                          int(record["launch_identity"].rsplit(":", 1)[1]) * 1_000_000 // os.sysconf("SC_CLK_TCK")))
         self.native[record["unit"]] = state
         with (mock.patch.dict(os.environ, {LAUNCH_BINDING_ENV: json.dumps(binding)}),
-              mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.own_cgroup", return_value=group),
-              mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", reader.CGROUP_ROOT),
-              mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.native_scope_state", return_value=state)):
+              mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.own_cgroup", return_value=group),
+              mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", reader.CGROUP_ROOT),
+              mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.native_scope_state", return_value=state)):
             with owner.attest_launch(directory=directory, role="po", task=record["task"], workspace=workspace) as proof:
                 with self.assertRaises(MemoryScopeError):
                     with owner.ownership():
@@ -505,7 +505,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         self.assertNotIn(LAUNCH_BINDING_ENV, captured["argv"])
         self.assertFalse(self.collect(record["unit"]).errors)
         # A prospective launch requires the original caller's generation.
-        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen") as launch:
+        with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.subprocess.Popen") as launch:
             arguments[3] = "wrong-caller-generation"
             self.assertEqual(ScopedHeadLifecycle.launch_until_started(arguments), 1)
             launch.assert_not_called()
@@ -534,10 +534,10 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
               mock.patch.object(supervisor, "_install_signals"),
               mock.patch.object(supervisor, "_prepare_memory_scope"),
               mock.patch.object(supervisor, "start_head", side_effect=head_boundary),
-              mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", reader.CGROUP_ROOT),
-              mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.own_cgroup", return_value=group),
-              mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.native_scope_state", return_value=self.native[unit]),
-              mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.launch_identity", return_value=record["launch_identity"]),
+              mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.CGROUP_ROOT", reader.CGROUP_ROOT),
+              mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.own_cgroup", return_value=group),
+              mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.native_scope_state", return_value=self.native[unit]),
+              mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.launch_identity", return_value=record["launch_identity"]),
               mock.patch("os.getcwd", return_value=record["workspace"])):
             with self.assertRaises(HeadBoundary):
                 supervisor._begin()
@@ -557,11 +557,11 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
 
     def test_released_live_scope_arguments_have_no_independent_po_generation(self):
         owner, directory, _ = self.owner()
-        supervisor = ["python", "-P", "-m", "secretary.runtime.head.local_pty.supervisor",
+        supervisor = ["python", "-P", "-m", "ummanu.runtime.head.local_pty.supervisor",
                       "--run-dir", str(directory), "--run-id", owner.run_id, "--role", "po",
                       "--task", "po:other-project:operation", "--cwd", str(self.workspace)]
         other = ScopedHeadLifecycle(owner.run_id, owner.limit_mib, generation="different-generation")
-        with mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.scope_argv", deployed_scope_argv()):
+        with mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.scope_argv", deployed_scope_argv()):
             original = owner.launcher_argv(supervisor, run_dir=directory, log_path=directory / "supervisor.log",
                                            timeout=5, pythonpath="")
             changed = other.launcher_argv(supervisor, run_dir=directory, log_path=directory / "supervisor.log",
@@ -575,7 +575,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
     def test_live_generation_substitution_must_refuse(self):
         owner, directory, unit = self.owner()
         original = owner.read_owner(directory)
-        supervisor = ["python", "-P", "-m", "secretary.runtime.head.local_pty.supervisor",
+        supervisor = ["python", "-P", "-m", "ummanu.runtime.head.local_pty.supervisor",
                       "--run-dir", str(directory), "--run-id", owner.run_id, "--role", "po",
                       "--task", original["task"], "--cwd", original["workspace"]]
         launch = owner.launcher_argv(supervisor, run_dir=directory, log_path=directory / "supervisor.log",
@@ -585,7 +585,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
         cmdline = Path(f"/proc/{original['launch_pid']}/cmdline")
         original_read = Path.read_bytes
         with (
-            mock.patch("secretary.runtime.head.local_pty.scoped_lifecycle.launch_identity",
+            mock.patch("ummanu.runtime.head.local_pty.scoped_lifecycle.launch_identity",
                        return_value=original["launch_identity"]),
             mock.patch.object(Path, "read_bytes", autospec=True,
                               side_effect=lambda path: native_argv if path == cmdline else original_read(path)),
@@ -615,7 +615,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
     def test_forged_owner_native_identity_and_damaged_heartbeat_remain_unavailable(self):
         owner, directory, unit = self.owner()
         original = owner.read_owner(directory)
-        for field, value in (("run_id", "forged-run"), ("unit", "secretary-head-forged.scope"),
+        for field, value in (("run_id", "forged-run"), ("unit", "ummanu-head-forged.scope"),
                              ("generation", ""), ("role", "forged-role"), ("task", "forged-task"),
                              ("workspace", "relative"), ("launch_identity", "other-boot:100")):
             record = {**original, field: value}
@@ -673,7 +673,7 @@ class RuntimeScopeConsumerTests(unittest.TestCase):
 
     def test_packaged_deletion_cannot_stop_a_preserved_scope_through_binds_to(self):
         _, _, unit = self.owner()
-        self.native[unit]["BindsTo"] = "secretary-memory.service"
+        self.native[unit]["BindsTo"] = "ummanu-memory.service"
         collected = self.collect(unit)
         instance = {**self.instance, "host": {**self.instance["host"], "components": {"memory": {"enabled": False}}}}
         for dry in (True, False):

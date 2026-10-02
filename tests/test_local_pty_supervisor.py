@@ -26,21 +26,21 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.dispatch.watchdog import (
+from ummanu.dispatch.watchdog import (
     HEARTBEAT_DEAD,
     HEARTBEAT_LIVE_MATCH,
     head_process_status,
 )
-from secretary.runtime.head.local_pty import journal as journal_module
-from secretary.runtime.head.local_pty import protocol
-from secretary.runtime.head.local_pty import supervisor as supervisor_module
-from secretary.runtime.head.local_pty.client import (
+from ummanu.runtime.head.local_pty import journal as journal_module
+from ummanu.runtime.head.local_pty import protocol
+from ummanu.runtime.head.local_pty import supervisor as supervisor_module
+from ummanu.runtime.head.local_pty.client import (
     HeadHandle,
     LocalPtySpawnError,
     SupervisorClient,
     spawn_head,
 )
-from secretary.runtime.head.local_pty.journal import (
+from ummanu.runtime.head.local_pty.journal import (
     DRAIN_REQUESTED,
     EVENT_KINDS,
     INPUT_ACCEPTED,
@@ -57,8 +57,8 @@ from secretary.runtime.head.local_pty.journal import (
     read_events,
     read_tail,
 )
-from secretary.runtime.head.memory import scope_unit
-from secretary.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
+from ummanu.runtime.head.memory import scope_unit
+from ummanu.runtime.head.local_pty.scoped_lifecycle import ScopedHeadLifecycle
 
 REPO = Path(__file__).resolve().parents[1]
 CHILD = REPO / "tests" / "fixtures" / "local_pty_child.py"
@@ -83,7 +83,7 @@ def _identity_of(pid: int, run_id: str) -> dict[str, object]:
         "proc_starttime_ticks": _proc_field(pid, 22),
         "run_id": run_id,
         "role": "worker",
-        "task": "secretary-1463",
+        "task": "ummanu-1463",
     }
 
 
@@ -144,7 +144,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
             root=self.root,
             run_id=run_id,
             role="worker",
-            task="secretary-1463",
+            task="ummanu-1463",
             command=command,
             quiet_seconds=options.pop("quiet_seconds", 0.4),
             **options,
@@ -184,7 +184,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
         exited = handle.events().of_kind(RUN_EXITED)[-1]
         self.assertEqual(exited.get("signal"), signal.SIGKILL, exited)
         self.assertEqual(exited.get("head_loss_reason"), "memory_limit")
-        self.assertTrue(scope_unit(handle.run_id).startswith("secretary-head-"))
+        self.assertTrue(scope_unit(handle.run_id).startswith("ummanu-head-"))
 
     def _client(self, handle: HeadHandle) -> SupervisorClient:
         client = handle.connect()
@@ -218,8 +218,8 @@ class LocalPtySubstrateTests(unittest.TestCase):
 
     def test_the_backend_renders_the_heads_screen_for_the_provider_failure_reader(self) -> None:
         """`head_run_screen_lines` reads a live head's screen through its supervisor, read-only."""
-        from secretary.runtime.local_pty_head import head_run_screen_lines
-        from secretary.runtime.provider_errors import screen_turn_failure
+        from ummanu.runtime.local_pty_head import head_run_screen_lines
+        from ummanu.runtime.provider_errors import screen_turn_failure
 
         error = "  \u23bf  API Error: 401 invalid token \u00b7 Please run /login"
         handle = self._start(
@@ -990,7 +990,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
                 root=self.root,
                 run_id="half-up",
                 role="worker",
-                task="secretary-1463",
+                task="ummanu-1463",
                 command=CHILD_COMMAND,
                 timeout=20.0,
             )
@@ -1030,7 +1030,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
                 root=self.root,
                 run_id="double",
                 role="worker",
-                task="secretary-1463",
+                task="ummanu-1463",
                 command=CHILD_COMMAND,
                 timeout=10.0,
             )
@@ -1080,7 +1080,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
                 root=self.root,
                 run_id="still-alive",
                 role="worker",
-                task="secretary-1463",
+                task="ummanu-1463",
                 command=CHILD_COMMAND,
                 timeout=10.0,
             )
@@ -1108,7 +1108,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
                 "-P",
                 "-c",
                 "import sys;sys.path.insert(0, sys.argv[1]);"
-                "from secretary.runtime.head.local_pty.journal import read_events;"
+                "from ummanu.runtime.head.local_pty.journal import read_events;"
                 "import json;result=read_events(sys.argv[2]);"
                 "print(json.dumps({'kinds': list(result.kinds), 'ordered': result.ordered}))",
                 str(REPO / "src"),
@@ -1298,9 +1298,9 @@ class LocalPtySubstrateTests(unittest.TestCase):
             self.assertTrue(str(record.get(name) or ""), f"{name} is missing from the identity")
         self.assertEqual(record["run_id"], "identity")
         self.assertEqual(record["role"], "worker")
-        self.assertEqual(record["task"], "secretary-1463")
+        self.assertEqual(record["task"], "ummanu-1463")
 
-        expected = {"run_id": "identity", "role": "worker", "task": "secretary-1463"}
+        expected = {"run_id": "identity", "role": "worker", "task": "ummanu-1463"}
         status = head_process_status(str(handle.pid_file), expected=expected)
         self.assertEqual(status["state"], HEARTBEAT_LIVE_MATCH, status)
         self.assertEqual(status["pid"], handle.head_pid)
@@ -1404,10 +1404,10 @@ class SubstrateIsNotWiredInTests(unittest.TestCase):
     """
 
     def test_only_the_scoped_head_consumers_reach_for_it(self) -> None:
-        package = REPO / "src" / "secretary" / "runtime" / "head" / "local_pty"
-        backend = REPO / "src" / "secretary" / "runtime" / "local_pty_head.py"
-        po_runner = REPO / "src" / "secretary" / "po" / "runner.py"
-        substrate = "secretary.runtime.head.local_pty"
+        package = REPO / "src" / "ummanu" / "runtime" / "head" / "local_pty"
+        backend = REPO / "src" / "ummanu" / "runtime" / "local_pty_head.py"
+        po_runner = REPO / "src" / "ummanu" / "po" / "runner.py"
+        substrate = "ummanu.runtime.head.local_pty"
         offenders = []
         for path in (REPO / "src").rglob("*.py"):
             if package in path.parents or path in (backend, po_runner):
@@ -1424,7 +1424,7 @@ class SubstrateIsNotWiredInTests(unittest.TestCase):
 
     def test_the_substrate_implements_none_of_the_six_verbs_as_a_boundary(self) -> None:
         """Prose about `HeadRuntime` is fine; an implementation of it is what this card excludes."""
-        package = REPO / "src" / "secretary" / "runtime" / "head" / "local_pty"
+        package = REPO / "src" / "ummanu" / "runtime" / "head" / "local_pty"
         verbs = {"start", "deliver", "observe", "request_drain", "attach"}
         for path in sorted(package.glob("*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))

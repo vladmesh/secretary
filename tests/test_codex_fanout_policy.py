@@ -6,9 +6,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from secretary.dispatch.host import CommandHostRuntime
-from secretary.runtime import codex_preflight
-from secretary.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
+from ummanu.dispatch.host import CommandHostRuntime
+from ummanu.runtime import codex_preflight
+from ummanu.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
 
 
 class CodexFanoutPolicyTests(unittest.TestCase):
@@ -29,7 +29,7 @@ class CodexFanoutPolicyTests(unittest.TestCase):
             run_id="run-1",
             spec=HeadSpec(profile_id="codex-extra", adapter="codex", model="gpt-5.6-terra"),
             workspace=str(self.workspace),
-            task_ref=TaskRef.card("secretary-1428", document=str(self.workspace / "TASK.md")),
+            task_ref=TaskRef.card("ummanu-1428", document=str(self.workspace / "TASK.md")),
             role=role,
         )
 
@@ -278,7 +278,7 @@ class CodexFanoutPolicyTests(unittest.TestCase):
 
         catalog = Catalog()
         runtime = CommandHostRuntime(catalog, self.root / "data", mode="noop")  # type: ignore[arg-type]
-        task = {"ref": "secretary-1428", "project": "secretary"}
+        task = {"ref": "ummanu-1428", "project": "ummanu"}
         for role in ("worker", "reviewer"):
             with self.subTest(role=role):
                 launched = runtime._launch(
@@ -287,7 +287,7 @@ class CodexFanoutPolicyTests(unittest.TestCase):
                     "codex-extra",
                     "TASK.md",
                     role=role,
-                    env_name="SECRETARY_UNSET_COMMAND",
+                    env_name="UMMANU_UNSET_COMMAND",
                     task=task,
                 )
                 self.assertEqual(launched.head_run["fanout_policy"]["state"], "schema_absent")

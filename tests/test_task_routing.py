@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import unittest
 
-from secretary import tasks
-from secretary.board.models import CardState
-from secretary.board.task_routing import (
+from ummanu import tasks
+from ummanu.board.models import CardState
+from ummanu.board.task_routing import (
     ACTIVE_STATES,
     BLOCK_CLASSIFICATION_VALUES,
     DECIDED_TARGETS,
@@ -105,9 +105,9 @@ class TaskRoutingVocabularyTests(unittest.TestCase):
     def test_metadata_is_typed_internally_but_keeps_the_public_shape(self) -> None:
         metadata = TaskMetadata.from_legacy(
             {
-                "project": "secretary",
+                "project": "ummanu",
                 "task_type": "code",
-                "blocked_by": "secretary-1",
+                "blocked_by": "ummanu-1",
                 "claim": "worker-1",
                 "complexity": "frontier",
                 "family_preference": "claude",
@@ -117,7 +117,7 @@ class TaskRoutingVocabularyTests(unittest.TestCase):
                 "slug": "work",
                 "base_branch": "main",
                 "seed_ref": "abc123",
-                "supersedes": "secretary-2",
+                "supersedes": "ummanu-2",
                 "sprint_ref": "sprint:7",
                 "record_type": "task",
             },

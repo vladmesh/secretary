@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from secretary.dispatch.runtime_provenance import RuntimeProvenance
+from ummanu.dispatch.runtime_provenance import RuntimeProvenance
 
 
 @dataclass(frozen=True)
@@ -37,5 +37,5 @@ def registered_production_runtime(fixture_root: Path) -> RegisteredProductionRun
     return RegisteredProductionRuntime(
         interpreter=str(product_root / ".venv" / "bin" / "python3"),
         product_root=str(product_root),
-        import_origin=str(product_root / "src" / "secretary" / "__init__.py"),
+        import_origin=str(product_root / "src" / "ummanu" / "__init__.py"),
     )

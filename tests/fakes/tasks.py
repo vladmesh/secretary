@@ -19,7 +19,7 @@ CARD_STATES = ("issues", "ready", "in_progress", "validate", "assessment", "bloc
 
 
 @contextlib.contextmanager
-def open_sprint(ref: str = "sprint:test", project: str = "secretary"):
+def open_sprint(ref: str = "sprint:test", project: str = "ummanu"):
     """Stand in for the open sprint every Ready card needs.
 
     These tests are about the create and audit path; the sprint link is a precondition of a
@@ -29,7 +29,7 @@ def open_sprint(ref: str = "sprint:test", project: str = "secretary"):
     that sprint's own head; an unbound caller is refused before the create path is reached.
     """
     sprint = {"ref": ref, "status": "open", "repositories": [project], "reservations": [project]}
-    with mock.patch("secretary.sprints.SprintReader.show", return_value=sprint), as_observer(ref):
+    with mock.patch("ummanu.sprints.SprintReader.show", return_value=sprint), as_observer(ref):
         yield ref
 
 
@@ -62,7 +62,7 @@ class CardSeed:
     """A starting board: card rows, their metadata and their comments, keyed by row id."""
 
     columns: ClassVar[list[dict[str, Any]]] = SEED_COLUMNS
-    lanes: list[dict[str, Any]] = [{"id": 4, "name": "Secretary"}]  # noqa: RUF012 - copied per seed
+    lanes: list[dict[str, Any]] = [{"id": 4, "name": "Ummanu"}]  # noqa: RUF012 - copied per seed
 
     def __init__(
         self,
@@ -84,7 +84,7 @@ def _two_cards() -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
     tasks: list[dict[str, Any]] = [
         {
             "id": 12,
-            "reference": "secretary-468",
+            "reference": "ummanu-468",
             "title": "Readonly task protocol",
             "description": "",
             "column_id": 2,
@@ -97,7 +97,7 @@ def _two_cards() -> tuple[list[dict[str, Any]], dict[int, dict[str, Any]]]:
     ]
     metadata: dict[int, dict[str, Any]] = {
         12: {
-            "project": "secretary",
+            "project": "ummanu",
             "task_type": "code",
             "claim": "codex-terra",
             "head": "codex-terra",

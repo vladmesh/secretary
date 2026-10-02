@@ -7,20 +7,20 @@ from unittest import mock
 
 import psycopg
 
-from secretary.board.owner_events import OwnerEventStore, OwnerEventsUnavailable, ReadRefused, record
-from secretary.board.owner_handover import waiting_owner
-from secretary.board.sql_cards import SqlCardClient
-from secretary.tasks import TaskError, TaskReader, TaskWriter
-from secretary.web.app import WebApp
-from secretary.webproto.owner_events import OwnerEventLayer
 from tests.web_fakes import Recording, system_snapshot
 from tests.webproto_sprint_fixtures import SprintProtocolFixture
+from ummanu.board.owner_events import OwnerEventStore, OwnerEventsUnavailable, ReadRefused, record
+from ummanu.board.owner_handover import waiting_owner
+from ummanu.board.sql_cards import SqlCardClient
+from ummanu.tasks import TaskError, TaskReader, TaskWriter
+from ummanu.web.app import WebApp
+from ummanu.webproto.owner_events import OwnerEventLayer
 
 
 class SprintAttentionTests(SprintProtocolFixture):
     def setUp(self):
         super().setUp()
-        self.add_sprint_row("sprint:1", current_task="secretary-12")
+        self.add_sprint_row("sprint:1", current_task="ummanu-12")
         self.store = OwnerEventStore(self.board.credentials, client=self.board)
         self.events = OwnerEventLayer(self.instance, store=self.store)
         self.sprints = self.reads(owner_events=self.events)
@@ -53,25 +53,25 @@ class SprintAttentionTests(SprintProtocolFixture):
 
     def claim(self, kind="code"):
         self.board.save_metadata(12, task_type=kind)
-        return self.writer.claim(role="dispatcher", actor="dispatcher", reference="secretary-12",
+        return self.writer.claim(role="dispatcher", actor="dispatcher", reference="ummanu-12",
                                  worker="fixture", request_id="claim-12")
 
     def move(self, target, request="move-12"):
-        return self.writer.move(role="dispatcher", actor="dispatcher", reference="secretary-12",
+        return self.writer.move(role="dispatcher", actor="dispatcher", reference="ummanu-12",
                                 target=target, reason="fixture decision", request_id=request)
 
     def handover(self, request="handover-12"):
-        return self.writer.handover(role="po", actor="po", reference="secretary-12", to="owner",
+        return self.writer.handover(role="po", actor="po", reference="ummanu-12", to="owner",
                                     reason="Choose the fixture option", request_id=request)
 
     def complete(self, request="complete-12"):
-        return self.writer.complete(role="po", actor="po", reference="secretary-12", kind="decision",
+        return self.writer.complete(role="po", actor="po", reference="ummanu-12", kind="decision",
                                     body="## Decision\nChoose option A.\n\n## How to verify\nRead the fixture.\n",
                                     request_id=request)
 
     def committed_state(self):
-        return (self.writer.reader.show("secretary-12"), self.store.events(),
-                self.writer.audit.events("secretary-12"))
+        return (self.writer.reader.show("ummanu-12"), self.store.events(),
+                self.writer.audit.events("ummanu-12"))
 
     def assert_event_timeout_rolls_back(self, action, request, *, row_lock=False):
         before = self.committed_state()
@@ -119,8 +119,8 @@ class SprintAttentionTests(SprintProtocolFixture):
 
         def at_uncommitted_mark(method, **params):
             if method == "createComment":
-                self.assertIsNotNone(waiting_owner(self.writer.reader.show("secretary-12")))
-                self.assertIsNone(waiting_owner(TaskReader(observer).show("secretary-12")))
+                self.assertIsNotNone(waiting_owner(self.writer.reader.show("ummanu-12")))
+                self.assertIsNone(waiting_owner(TaskReader(observer).show("ummanu-12")))
                 [event] = events.owner_event_list(unread_only=True)["events"]
                 self.assertEqual((event["id"], event["kind"]), (po.id, "card_waits_for_person"))
                 page = app.handle("GET", "/").body.decode()
@@ -145,10 +145,10 @@ class SprintAttentionTests(SprintProtocolFixture):
         def interrupt_after_commit(*args, **kwargs):
             result = write(*args, **kwargs)
             # This independent read verifies that _write really committed before interruption.
-            self.assertIsNotNone(waiting_owner(TaskReader(observer).show("secretary-12")))
+            self.assertIsNotNone(waiting_owner(TaskReader(observer).show("ummanu-12")))
             [event] = events.owner_event_list(unread_only=True)["events"]
             self.assertEqual(event["kind"], "card_handed_to_owner")
-            self.assertEqual(event["dedup_key"], f"card_handed_to_owner:secretary-12:{result['event_id']}")
+            self.assertEqual(event["dedup_key"], f"card_handed_to_owner:ummanu-12:{result['event_id']}")
             page = app.handle("GET", "/").body.decode()
             self.assertIn("attention required", page)
             self.assertIn('<span class="bell-count">1</span>', page)
@@ -177,16 +177,16 @@ class SprintAttentionTests(SprintProtocolFixture):
         self.board.save_metadata(12, task_type="decision")
 
         def claim():
-            return self.writer.claim(role="dispatcher", actor="dispatcher", reference="secretary-12",
+            return self.writer.claim(role="dispatcher", actor="dispatcher", reference="ummanu-12",
                                      worker="fixture", request_id="timeout-claim")
 
         self.assert_event_timeout_rolls_back(claim, "timeout-claim")
-        self.assertEqual(self.writer.reader.show("secretary-12")["state"], "ready")
+        self.assertEqual(self.writer.reader.show("ummanu-12")["state"], "ready")
         self.assert_wait(False)
         self.assertFalse(claim()["replayed"])
         self.assert_committed_replay(claim)
         [event] = self.store.events()
-        self.assertEqual(event.dedup_key, "card_waits_for_person:secretary-12:timeout-claim")
+        self.assertEqual(event.dedup_key, "card_waits_for_person:ummanu-12:timeout-claim")
         self.assertEqual(self.sprints.sprint_state("sprint:1")["work"]["waiting_on"][0]["kind"], "po")
         self.assert_wait(True)
         self.assertEqual(self.events.unread_count()["count"], 1)
@@ -195,21 +195,21 @@ class SprintAttentionTests(SprintProtocolFixture):
         self.claim()
         block = lambda: self.move("blocked", "timeout-block")
         self.assert_event_timeout_rolls_back(block, "timeout-block")
-        self.assertEqual(self.writer.reader.show("secretary-12")["state"], "in_progress")
+        self.assertEqual(self.writer.reader.show("ummanu-12")["state"], "in_progress")
         self.assert_wait(False)
         self.assertFalse(block()["replayed"])
         self.assert_committed_replay(block)
         [event] = self.store.events()
-        self.assertEqual(event.dedup_key, "card_waits_for_person:secretary-12:timeout-block")
+        self.assertEqual(event.dedup_key, "card_waits_for_person:ummanu-12:timeout-block")
         self.assert_wait(True)
 
         def unblock():
-            return self.writer.move(role="po", actor="po", reference="secretary-12", target="ready",
+            return self.writer.move(role="po", actor="po", reference="ummanu-12", target="ready",
                                     reason="decision taken", sprint_override=True,
                                     sprint_override_reason="fixture decision", request_id="timeout-unblock")
 
         self.assert_event_timeout_rolls_back(unblock, "timeout-unblock")
-        self.assertEqual(self.writer.reader.show("secretary-12")["state"], "blocked")
+        self.assertEqual(self.writer.reader.show("ummanu-12")["state"], "blocked")
         self.assert_wait(True)
         self.assertFalse(unblock()["replayed"])
         self.assert_committed_replay(unblock)
@@ -226,14 +226,14 @@ class SprintAttentionTests(SprintProtocolFixture):
         # A row lock permits the replacement INSERT, then cancels predecessor settlement.
         # Both savepoints and the mark/audit still roll back together.
         self.assert_event_timeout_rolls_back(self.handover, "handover-12", row_lock=True)
-        self.assertIsNone(waiting_owner(self.writer.reader.show("secretary-12")))
+        self.assertIsNone(waiting_owner(self.writer.reader.show("ummanu-12")))
         [po] = self.store.events()
         self.assertEqual(po.kind, "card_waits_for_person")
         self.handover()
         self.assert_committed_replay(self.handover)
         self.assert_wait(True)
         self.assert_event_timeout_rolls_back(self.complete, "complete-12")
-        self.assertIsNotNone(waiting_owner(self.writer.reader.show("secretary-12")))
+        self.assertIsNotNone(waiting_owner(self.writer.reader.show("ummanu-12")))
         [owner] = self.store.events(unread_only=True)
         self.assertEqual(owner.kind, "card_handed_to_owner")
         with self.assertRaises(ReadRefused):
@@ -258,7 +258,7 @@ class SprintAttentionTests(SprintProtocolFixture):
         self.board.add_card(90, "other-90", metadata={"task_type": "code", "sprint_ref": "sprint:90"})
         record("e2e_budget_spent", "other-90", "other sprint decision", "other", to=self.store)
         self.assert_wait(False)
-        record("e2e_budget_spent", "secretary-12", "this sprint decision", "local", to=self.store)
+        record("e2e_budget_spent", "ummanu-12", "this sprint decision", "local", to=self.store)
         self.assert_wait(True)
         self.assertEqual(self.attention()["event_ids"], [self.store.events()[0].id])
         self.events.mark_read(self.attention()["event_ids"][0])
@@ -273,7 +273,7 @@ class SprintAttentionTests(SprintProtocolFixture):
         self.assertEqual(self.sprints.sprint_state("sprint:1")["work"]["waiting_on"][0]["kind"], "po")
         with self.assertRaises(ReadRefused):
             self.store.mark_read(po.id)
-        self.writer.handover(role="po", actor="po", reference="secretary-12", to="owner",
+        self.writer.handover(role="po", actor="po", reference="ummanu-12", to="owner",
                              reason="Choose the fixture option", request_id="handover-12")
         self.assert_wait(True)
         [owner] = self.store.events(unread_only=True)
@@ -283,7 +283,7 @@ class SprintAttentionTests(SprintProtocolFixture):
         with self.assertRaises(ReadRefused):
             self.store.mark_read(owner.id)
         self.assertEqual(self.store.mark_all_read(), 0)
-        self.writer.complete(role="po", actor="po", reference="secretary-12", kind="decision",
+        self.writer.complete(role="po", actor="po", reference="ummanu-12", kind="decision",
                              body="## Decision\nChoose option A.\n\n## How to verify\nRead the fixture.\n",
                              request_id="complete-12")
         self.assert_wait(False)
@@ -294,10 +294,10 @@ class SprintAttentionTests(SprintProtocolFixture):
         self.move("blocked")
         self.assert_wait(True)
         [event] = self.store.events(unread_only=True)
-        self.assertEqual((event.kind, event.subject_ref), ("card_waits_for_person", "secretary-12"))
+        self.assertEqual((event.kind, event.subject_ref), ("card_waits_for_person", "ummanu-12"))
         with self.assertRaises(ReadRefused):
             self.store.mark_read(event.id)
-        self.writer.move(role="po", actor="po", reference="secretary-12", target="ready",
+        self.writer.move(role="po", actor="po", reference="ummanu-12", target="ready",
                          reason="decision taken", sprint_override=True, sprint_override_reason="fixture decision",
                          request_id="unblock-12")
         self.assert_wait(False)
@@ -307,14 +307,14 @@ class SprintAttentionTests(SprintProtocolFixture):
         self.claim()
         self.move("blocked")
         self.assert_wait(True)
-        self.board.add_card(91, "secretary-91", metadata={"task_type": "code", "sprint_ref": "sprint:1", "supersedes": "secretary-12"})
+        self.board.add_card(91, "ummanu-91", metadata={"task_type": "code", "sprint_ref": "sprint:1", "supersedes": "ummanu-12"})
         self.assert_wait(False)
         with mock.patch.object(self.store, "snapshot", side_effect=OwnerEventsUnavailable("board unavailable")):
             page = self.page()
         self.assertNotIn("attention required", page)
         self.assertIn('<span class="bell-count">?</span>', page)
-        from secretary.sprints import SprintReader
-        from secretary.tasks import TaskError
+        from ummanu.sprints import SprintReader
+        from ummanu.tasks import TaskError
         with mock.patch.object(SprintReader, "linked_cards", side_effect=TaskError("unavailable", "cannot read cards", 4)):
             self.assert_wait(False)
             self.assertEqual(self.attention()["state"], "unknown")
@@ -323,7 +323,7 @@ class SprintAttentionTests(SprintProtocolFixture):
         self.assertIn("observer unknown", self.assert_wait(False))
 
     def test_wait_cards_and_ci_waits_do_not_mint_human_events(self):
-        from secretary.board.wait_card import TARGET_TIME, WaitSpec, WaitTarget
+        from ummanu.board.wait_card import TARGET_TIME, WaitSpec, WaitTarget
 
         spec = WaitSpec(WaitTarget(TARGET_TIME, at="2026-09-29T01:00:00Z"),
                         deadline="2026-09-29T02:00:00Z", returns=("observer",),
@@ -339,15 +339,15 @@ class SprintAttentionTests(SprintProtocolFixture):
     def test_a_known_pending_ci_run_is_neutral_through_the_real_card_read(self):
         import json
 
-        from secretary.board.e2e_record import E2eRun, E2eState
+        from ummanu.board.e2e_record import E2eRun, E2eState
 
         self.claim()
         run = E2eRun(dispatch_id="ci-fixture", sha="a" * 40, repo="example/fixture", branch="main",
                      workflow="ci.yml", intent_at="2026-09-29T00:00:00Z", run_id=42,
-                     head_sha="a" * 40, wait_ref="secretary-wait",
+                     head_sha="a" * 40, wait_ref="ummanu-wait",
                      run_url="https://github.com/example/fixture/actions/runs/42")
         self.board.save_metadata(12, e2e=json.dumps(E2eState(runs=[run]).to_json()))
-        self._production({}, {"secretary-12": {"state": "validate", "gate_state": "pending"}})
+        self._production({}, {"ummanu-12": {"state": "validate", "gate_state": "pending"}})
         work = self.sprints.sprint_state("sprint:1")["work"]
         self.assertEqual(work["waiting_on"][0]["kind"], "run")
         self.assertIn(run.run_url, work["waiting_on"][0]["detail"])
@@ -377,7 +377,7 @@ class SprintAttentionTests(SprintProtocolFixture):
             calls.append(1)
             answer = snapshot()
             # A real settlement after the reading cannot split this response's chip/count.
-            self.store.settle_subject("secretary-12")
+            self.store.settle_subject("ummanu-12")
             return answer
 
         with mock.patch.object(self.store, "snapshot", side_effect=read_once):

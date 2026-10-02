@@ -20,10 +20,10 @@ from unittest import mock
 
 import psycopg
 
-from secretary import cli
-from secretary.board import migrate, schema_gate
-from secretary.board.sql_cards import CardSchemaOwed, SqlCardClient
-from secretary.tasks import TaskError
+from ummanu import cli
+from ummanu.board import migrate, schema_gate
+from ummanu.board.sql_cards import CardSchemaOwed, SqlCardClient
+from ummanu.tasks import TaskError
 
 
 class _Credentials:
@@ -187,15 +187,15 @@ class DoctorRenderingTests(unittest.TestCase):
                     f"{key}=value-{index}\n" if "PORT" not in key else f"{key}=5432\n"
                     for index, key in enumerate(
                         (
-                            "SECRETARY_DB_HOST",
-                            "SECRETARY_DB_PORT",
-                            "SECRETARY_DB_NAME",
-                            "SECRETARY_DB_OWNER_USER",
-                            "SECRETARY_DB_OWNER_PASSWORD",
-                            "SECRETARY_DB_APP_USER",
-                            "SECRETARY_DB_APP_PASSWORD",
-                            "SECRETARY_DB_READ_USER",
-                            "SECRETARY_DB_READ_PASSWORD",
+                            "UMMANU_DB_HOST",
+                            "UMMANU_DB_PORT",
+                            "UMMANU_DB_NAME",
+                            "UMMANU_DB_OWNER_USER",
+                            "UMMANU_DB_OWNER_PASSWORD",
+                            "UMMANU_DB_APP_USER",
+                            "UMMANU_DB_APP_PASSWORD",
+                            "UMMANU_DB_READ_USER",
+                            "UMMANU_DB_READ_PASSWORD",
                         )
                     )
                 ),

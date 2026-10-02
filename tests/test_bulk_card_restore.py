@@ -20,15 +20,15 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary.board.sql_audit import SqlTaskAudit
-from secretary.task_restore import (
-    commit_restored_cards,
-    restore_cards_batched,
-)
-from secretary.tasks import TaskError, TaskReader
 from tests.fakes.tasks import CardSeed
 from tests.restore_fixtures import _restore_card
 from tests.sql_backend_fixtures import card_store
+from ummanu.board.sql_audit import SqlTaskAudit
+from ummanu.task_restore import (
+    commit_restored_cards,
+    restore_cards_batched,
+)
+from ummanu.tasks import TaskError, TaskReader
 
 #: The methods that change the board.
 _WRITES = {"createTask", "saveTaskMetadata", "moveTaskPosition", "closeTask", "createComment"}
@@ -38,7 +38,7 @@ def _cards(count: int = 3) -> list[dict[str, object]]:
     return [
         _restore_card(
             task_id=index + 1,
-            reference=f"secretary-{index + 1}",
+            reference=f"ummanu-{index + 1}",
             title=f"Card {index + 1}",
             position=index * 3 + 1,
         )
@@ -58,7 +58,7 @@ def _production_task_cards(limit: int) -> list[dict[str, object]]:
         index = len(cards) + 1
         card = _restore_card(
             task_id=int(row["ordinal"]),
-            reference=f"secretary-{index:04d}",
+            reference=f"ummanu-{index:04d}",
             title=f"Sanitized task {index}",
             column=str(row["column"]),
             swimlane=str(row["swimlane"]),
@@ -104,7 +104,7 @@ class BulkCardRestoreTests(unittest.TestCase):
         commit_restored_cards(self.writer, cards, self._live(), request_prefix="restore:test:")
 
         events = self.writer.audit.events(kind="restored_bulk")
-        self.assertEqual(sorted(event["ref"] for event in events), ["secretary-1", "secretary-2", "secretary-3"])
+        self.assertEqual(sorted(event["ref"] for event in events), ["ummanu-1", "ummanu-2", "ummanu-3"])
         live = self._live()
         for event in events:
             with self.subTest(ref=event["ref"]):
@@ -135,13 +135,13 @@ class BulkCardRestoreTests(unittest.TestCase):
                 self.setUp()
                 self.store.add_card(
                     1,
-                    "secretary-1",
+                    "ummanu-1",
                     title="wrong" if defect == "content" else "Card 1",
                     description="body",
-                    lane="Secretary",
+                    lane="Ummanu",
                 )
                 row = self.store.row(1)
-                existing = {"secretary-1": row}
+                existing = {"ummanu-1": row}
                 if defect == "duplicate":
                     # Two rows of the enumeration naming one reference: the store's key refuses
                     # that state, so it is the enumeration the caller hands in that carries it.
@@ -166,7 +166,7 @@ class BulkCardRestoreTests(unittest.TestCase):
         ):
             self._batch(_cards(1))
         self.assertEqual(raised.exception.code, "backend_error")
-        self.assertIn("create for secretary-1", raised.exception.message)
+        self.assertIn("create for ummanu-1", raised.exception.message)
         self.assertNotIn("uncertain", raised.exception.message)
         self.assertEqual(self.writer.audit.pending_events(), [])
 

@@ -1,4 +1,4 @@
-"""Board-comment scrub contract (`secretary.runtime.redact.scrub_secrets`).
+"""Board-comment scrub contract (`ummanu.runtime.redact.scrub_secrets`).
 
 It used to live in the pipeline dispatcher's worker.py with no coverage at all; the dispatcher is
 gone (secretary-1135) and its two surviving callers — ops.add_comment for steward bodies and the
@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.runtime.redact import REDACTED, redact, scrub_secrets
+from ummanu.runtime.redact import REDACTED, redact, scrub_secrets
 
 
 class ScrubSecretsTests(unittest.TestCase):
@@ -44,7 +44,7 @@ class ScrubSecretsTests(unittest.TestCase):
         self.assertEqual(scrub_secrets("failed at 4baca94"), "failed at 4baca94")
 
     def test_a_filesystem_path_survives(self):
-        path = "/home/dev/orca/workspaces/secretary/secretary-1135-drop-pipeline/tests"
+        path = "/home/dev/orca/workspaces/ummanu/ummanu-1135-drop-pipeline/tests"
 
         self.assertEqual(scrub_secrets(f"cwd {path}"), f"cwd {path}")
 
@@ -98,7 +98,7 @@ class ScrubSecretsTests(unittest.TestCase):
             selected = root / "selected.env"
             default.write_text("SERVICE_TOKEN=default-secret-value\n", encoding="utf-8")
             selected.write_text("SERVICE_TOKEN=selected-secret-value\n", encoding="utf-8")
-            with mock.patch("secretary.runtime.redact.DEFAULT_ENV_FILES", [default]):
+            with mock.patch("ummanu.runtime.redact.DEFAULT_ENV_FILES", [default]):
                 output = redact("default-secret-value selected-secret-value", env_files=[selected])
 
         self.assertNotIn("default-secret-value", output)

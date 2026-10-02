@@ -1,6 +1,6 @@
 """The sprint form, the sprint page and the cross-origin guard, driven as a person drives them.
 
-Every test here goes through :class:`secretary.web.app.WebApp` — the same object the socket handler
+Every test here goes through :class:`ummanu.web.app.WebApp` — the same object the socket handler
 calls — over fakes of the sprint layer. There is no live installation, no board and no head
 registry, and that is the point twice over: what is being pinned is the *transport*, and the layer
 it calls already has its own suite (`tests/test_web_sprint_protocol.py`) proving the rules those
@@ -24,20 +24,20 @@ from typing import Any
 from unittest import mock
 from urllib.parse import quote, urlencode
 
-from secretary.web.app import ROUTES, WebApp, cross_origin_reason
-from secretary.web.server import build_server
-from secretary.webproto.errors import (
+from tests.webproto_sprint_fixtures import OBSERVER_PROFILE as PROTOCOL_OBSERVER
+from tests.webproto_sprint_fixtures import SprintProtocolFixture
+from ummanu.web.app import ROUTES, WebApp, cross_origin_reason
+from ummanu.web.server import build_server
+from ummanu.webproto.errors import (
     OperationPending,
     OwnerConflict,
     ReadError,
     TaskNotFound,
     ValidationRefused,
 )
-from secretary.webproto.runs import RunStoreError
-from secretary.webproto.sprint_ops import PENDING_REASON
-from secretary.webproto.sprint_requests import SPRINT_CREATE_OPERATION, SprintRequestStore
-from tests.webproto_sprint_fixtures import OBSERVER_PROFILE as PROTOCOL_OBSERVER
-from tests.webproto_sprint_fixtures import SprintProtocolFixture
+from ummanu.webproto.runs import RunStoreError
+from ummanu.webproto.sprint_ops import PENDING_REASON
+from ummanu.webproto.sprint_requests import SPRINT_CREATE_OPERATION, SprintRequestStore
 
 OBSERVER_PROFILE = "claude-observer"
 WORKER_PROFILE = "codex-product-worker"
@@ -98,7 +98,7 @@ def options_document(**overrides: Any) -> dict[str, Any]:
         "products": {
             "source": available(),
             "items": [
-                {"id": "secretary", "label": "Secretary", "ref": "product:1", "projects": ["secretary"]},
+                {"id": "ummanu", "label": "Ummanu", "ref": "product:1", "projects": ["ummanu"]},
                 {"id": "codegen", "label": "Codegen", "ref": "product:2", "projects": ["codegen"]},
             ],
         },
@@ -108,7 +108,7 @@ def options_document(**overrides: Any) -> dict[str, Any]:
                 {
                     "ref": "issue:web",
                     "label": "the web needs a sprint form",
-                    "product": "secretary",
+                    "product": "ummanu",
                     "kind": "feature",
                     "priority": None,
                 },
@@ -124,7 +124,7 @@ def options_document(**overrides: Any) -> dict[str, Any]:
         "projects": {
             "source": available(),
             "items": [
-                {"id": "secretary", "label": "secretary", "reserved_by": []},
+                {"id": "ummanu", "label": "ummanu", "reserved_by": []},
                 {"id": "codegen", "label": "codegen", "reserved_by": ["sprint:7"]},
                 {"id": "orca", "label": "orca", "reserved_by": None},
             ],
@@ -178,9 +178,9 @@ def sprint_document(
                 "goal": "Make the web a client of the sprint contract",
                 "definition_of_done": "the form and the page exist and are tested",
                 "status": "open",
-                "product": "secretary",
+                "product": "ummanu",
                 "issues": ["issue:web"],
-                "reservations": ["secretary"],
+                "reservations": ["ummanu"],
                 "repositories": [],
                 "current_task": current_task,
                 "executors": {"worker": pin(worker), "reviewer": pin(reviewer)},
@@ -409,11 +409,11 @@ class SprintTransportFixture(unittest.TestCase):
     def valid(self, **overrides: Any) -> dict[str, Any]:
         fields = {
             "request_id": self.request_id_of(self.form()),
-            "product": "secretary",
+            "product": "ummanu",
             "goal": "Make the web a client of the sprint contract",
             "definition_of_done": "the form and the page exist and are tested",
             "issues": ["issue:web"],
-            "projects": ["secretary"],
+            "projects": ["ummanu"],
             "observer": OBSERVER_PROFILE,
             "worker": "",
             "reviewer": "",
@@ -462,7 +462,7 @@ class SprintRouteTests(SprintTransportFixture):
 class SprintFormTests(SprintTransportFixture):
     def test_local_run_json_is_visible_passed_and_invalid_json_is_refused_before_create(self) -> None:
         self.assertIn('name="local_run_exceptions"', self.form())
-        entries = [{"project": "secretary", "argv": ["docker", "run", "two words"], "rationale": "owner's probe"}]
+        entries = [{"project": "ummanu", "argv": ["docker", "run", "two words"], "rationale": "owner's probe"}]
         response = self.submit(self.valid(local_run_exceptions=json.dumps(entries)))
         self.assertEqual(response.status, 303)
         self.assertEqual(self.sprint_ops.calls[-1]["local_run_exceptions"], entries)
@@ -475,7 +475,7 @@ class SprintFormTests(SprintTransportFixture):
     def test_the_form_offers_the_products_issues_projects_and_profiles_the_layer_answered(self) -> None:
         markup = self.form()
         for expected in (
-            'value="secretary"',
+            'value="ummanu"',
             'value="codegen"',
             "issue:web",
             "the web needs a sprint form",
@@ -576,7 +576,7 @@ class ObserverFieldTests(SprintTransportFixture):
     def test_the_no_observer_answer_is_not_offered_on_this_route(self) -> None:
         """A sprint with no observer starts nothing, so the button that says "start" cannot offer it.
 
-        It stays a legal answer to `secretary sprint create` and to the rows that already carry it;
+        It stays a legal answer to `ummanu sprint create` and to the rows that already carry it;
         what is narrowed here is the browser client, not the sprint contract.
         """
         observer = self.form().split('<select id="observer"')[1].split("</select>")[0]
@@ -679,17 +679,17 @@ class FormRefusalTests(SprintTransportFixture):
             definition_of_done="A definition of done that is equally hard to retype",
             observer="",
             issues=["issue:web", "issue:codegen"],
-            projects=["secretary", "orca"],
+            projects=["ummanu", "orca"],
             worker=WORKER_PROFILE,
         )
         markup = self.text_of(self.submit(fields))
         self.assertIn("A goal nobody should have to type twice", markup)
         self.assertIn("A definition of done that is equally hard to retype", markup)
-        self.assertIn('value="secretary" selected', markup)
+        self.assertIn('value="ummanu" selected', markup)
         for checked in (
             'name="issues" value="issue:web" checked',
             'name="issues" value="issue:codegen" checked',
-            'name="projects" value="secretary" checked',
+            'name="projects" value="ummanu" checked',
             'name="projects" value="orca" checked',
         ):
             with self.subTest(checked=checked):
@@ -707,12 +707,12 @@ class FormRefusalTests(SprintTransportFixture):
         a field and be told the correction is a different request, with no sprint and no way on.
         Nothing durable was created, so a corrected submission really is a new request.
         """
-        self.sprint_ops.refusal = OwnerConflict("an open sprint already reserves secretary")
+        self.sprint_ops.refusal = OwnerConflict("an open sprint already reserves ummanu")
         fields = self.valid(goal="A goal that survives a conflict")
         response = self.submit(fields)
         self.assertEqual(response.status, 409)
         markup = self.text_of(response)
-        self.assertIn("an open sprint already reserves secretary", markup)
+        self.assertIn("an open sprint already reserves ummanu", markup)
         self.assertIn("A goal that survives a conflict", markup)
         self.assertNotEqual(self.request_id_of(markup), fields["request_id"])
         self.assertIn("new request id", markup)
@@ -741,13 +741,13 @@ class FormRefusalTests(SprintTransportFixture):
         self.assertEqual(self.sprint_ops.created, [])
 
     def test_a_refusal_shown_over_an_unreadable_catalogue_is_still_the_refusal(self) -> None:
-        self.sprint_ops.refusal = OwnerConflict("an open sprint already reserves secretary")
+        self.sprint_ops.refusal = OwnerConflict("an open sprint already reserves ummanu")
         fields = self.valid()
         self.sprint_reads.options_refusal = TaskNotFound("the board could not be read")
         response = self.submit(fields)
         self.assertEqual(response.status, 409)
         markup = self.text_of(response)
-        self.assertIn("an open sprint already reserves secretary", markup)
+        self.assertIn("an open sprint already reserves ummanu", markup)
         self.assertIn("the board could not be read", markup)
 
 
@@ -765,19 +765,19 @@ class SprintPageTests(SprintTransportFixture):
         markup = self.page(
             sprint_document(
                 worker=WORKER_PROFILE,
-                current_task="secretary-1570",
+                current_task="ummanu-1570",
                 resume={"selected_step": "the transport", "next_safe_step": "write the tests"},
             )
         )
         for expected in (
             "Make the web a client of the sprint contract",
             "the form and the page exist and are tested",
-            "secretary",
+            "ummanu",
             "issue:web",
             OBSERVER_PROFILE,
             f"pinned to {WORKER_PROFILE}",
             "the observer chooses",
-            "secretary-1570",
+            "ummanu-1570",
             "the transport",
             "write the tests",
         ):
@@ -830,22 +830,22 @@ class SprintPageTests(SprintTransportFixture):
         """The duration in the text, the exact ISO moment as the title -- `_reset`'s convention."""
         markup = self.page(
             sprint_document(
-                current_task="secretary-1570",
+                current_task="ummanu-1570",
                 work={
                     "current_task": {
                         "source": available(),
-                        "ref": "secretary-1570",
+                        "ref": "ummanu-1570",
                         "live": True,
                         "reason": "the observer has it as the current card",
                     },
                     "current_card_state": {
                         "source": available(),
-                        "card": "secretary-1570",
+                        "card": "ummanu-1570",
                         "state": "validate",
                         "since": "2026-09-05T21:30:00Z",
                         "age_seconds": 9000.0,
                         "transition": "recorded",
-                        "reason": "secretary-1570 stands in validate",
+                        "reason": "ummanu-1570 stands in validate",
                     },
                 },
             )
@@ -864,17 +864,17 @@ class SprintPageTests(SprintTransportFixture):
             with self.subTest(transition=transition):
                 markup = self.page(
                     sprint_document(
-                        current_task="secretary-1570",
+                        current_task="ummanu-1570",
                         work={
                             "current_task": {
                                 "source": available(),
-                                "ref": "secretary-1570",
+                                "ref": "ummanu-1570",
                                 "live": transition != "not_applicable",
                                 "reason": reason,
                             },
                             "current_card_state": {
                                 "source": available(),
-                                "card": "secretary-1570",
+                                "card": "ummanu-1570",
                                 "state": None,
                                 "since": None,
                                 "age_seconds": None,
@@ -885,7 +885,7 @@ class SprintPageTests(SprintTransportFixture):
                     )
                 )
                 self.assertIn(said, markup)
-                self.assertIn("secretary-1570", markup)
+                self.assertIn("ummanu-1570", markup)
                 self.assertNotIn("in this state", markup)
 
     def test_the_three_launch_states_are_told_apart_in_words(self) -> None:
@@ -1013,14 +1013,14 @@ class IdempotentSubmissionTests(SprintTransportFixture):
 
 
 class CrossOriginTests(SprintTransportFixture):
-    HOST = "secretary.example"
+    HOST = "ummanu.example"
 
     def mutations(self) -> list[tuple[str, bytes, str]]:
         """Every mutating route, with a body it would otherwise be answered on."""
         return [
             (
                 "/api/runs/start",
-                json.dumps({"ref": "secretary-1", "request_id": "r", "profile": WORKER_PROFILE}).encode(
+                json.dumps({"ref": "ummanu-1", "request_id": "r", "profile": WORKER_PROFILE}).encode(
                     "utf-8"
                 ),
                 "run_start",
@@ -1069,7 +1069,7 @@ class CrossOriginTests(SprintTransportFixture):
     def test_the_scheme_is_not_compared_because_the_front_terminates_tls(self) -> None:
         """A real request through the published front arrives as https origin over plain http."""
         self.assertIsNone(
-            cross_origin_reason({"Origin": "https://secretary.example", "Host": "secretary.example"})
+            cross_origin_reason({"Origin": "https://ummanu.example", "Host": "ummanu.example"})
         )
         self.assertIsNone(cross_origin_reason({"Origin": "http://127.0.0.1:8787", "Host": "127.0.0.1:8787"}))
 
@@ -1079,7 +1079,7 @@ class CrossOriginTests(SprintTransportFixture):
         )
 
     def test_a_client_that_sends_no_origin_is_not_a_browser_and_keeps_working(self) -> None:
-        """`secretary web-run`, curl and the OPERATIONS.md diagnostics send none. Criterion 8."""
+        """`ummanu web-run`, curl and the OPERATIONS.md diagnostics send none. Criterion 8."""
         for path, body, _operation in self.mutations():
             with self.subTest(path=path):
                 response = self.post(path, body, {"Host": self.HOST})
@@ -1166,11 +1166,11 @@ class RealLayerFormTests(SprintProtocolFixture):
     def fields(self, **overrides: Any) -> list[tuple[str, str]]:
         values: dict[str, Any] = {
             "request_id": self.request_id_of(self.form()),
-            "product": "secretary",
+            "product": "ummanu",
             "goal": "Open a sprint from the browser",
             "definition_of_done": "the form works end to end",
             "issues": ["issue:open"],
-            "projects": ["secretary"],
+            "projects": ["ummanu"],
             "observer": PROTOCOL_OBSERVER,
             "worker": "",
             "reviewer": "",
@@ -1196,7 +1196,7 @@ class RealLayerFormTests(SprintProtocolFixture):
         markup = self.form()
         self.assertIn("issue:open", markup)
         self.assertIn(PROTOCOL_OBSERVER, markup)
-        self.assertIn('value="secretary"', markup)
+        self.assertIn('value="ummanu"', markup)
         # The one answer that is not a profile is not offered on this route.
         observer = markup.split('<select id="observer"')[1].split("</select>")[0]
         self.assertNotIn('value="none"', observer)
@@ -1278,11 +1278,11 @@ class RealLayerFormTests(SprintProtocolFixture):
         created = self.ops().sprint_create(
             request_id="cli-1",
             actor="operator",
-            product="secretary",
+            product="ummanu",
             goal="A sprint the CLI opened without an observer",
             definition_of_done="it exists",
             issues=["issue:open"],
-            projects=["secretary"],
+            projects=["ummanu"],
             observer="none",
         )
         reference = str(created["sprint"]["ref"])

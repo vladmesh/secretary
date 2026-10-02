@@ -20,13 +20,13 @@ from unittest import mock
 
 import yaml
 
-from secretary.sprint_observer import OBSERVER_FIELD
-from secretary.sprints import SPRINT_BOARD_NAME, ensure_sprint_board
-from secretary.webproto.errors import OperationPending, ReadError
-from secretary.webproto.sprint_ops import PENDING_REASON, SprintOperationLayer
-from secretary.webproto.sprint_reads import SprintReadLayer
 from tests.fakes.sprints import sprint_store
 from tests.head_registry import write_installed_pair
+from ummanu.sprint_observer import OBSERVER_FIELD
+from ummanu.sprints import SPRINT_BOARD_NAME, ensure_sprint_board
+from ummanu.webproto.errors import OperationPending, ReadError
+from ummanu.webproto.sprint_ops import PENDING_REASON, SprintOperationLayer
+from ummanu.webproto.sprint_reads import SprintReadLayer
 
 OBSERVER_PROFILE = "codex-observer"
 WORKER_PROFILE = "claude-worker"
@@ -94,7 +94,7 @@ class SprintProtocolFixture(unittest.TestCase):
             "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
             encoding="utf-8",
         )
-        for project in ("secretary", "secretary-instance", "other"):
+        for project in ("ummanu", "secretary-instance", "other"):
             repo = self.tmp / "repos" / project
             repo.mkdir(parents=True)
             (instance_dir / "projects" / f"{project}.yaml").write_text(
@@ -103,7 +103,7 @@ class SprintProtocolFixture(unittest.TestCase):
                         "id": project,
                         "repo": str(repo),
                         "enabled": True,
-                        "adapter": "secretary",
+                        "adapter": "ummanu",
                         "default_branch": "main",
                     }
                 ),
@@ -122,11 +122,11 @@ class SprintProtocolFixture(unittest.TestCase):
             encoding="utf-8",
         )
 
-    #: The two layers a `secretary sprint ...` protocol command builds bind `board_client` by
+    #: The two layers a `ummanu sprint ...` protocol command builds bind `board_client` by
     #: name, so the fixture's board is injected at each binding.
     BOARD_CLIENT_SEAMS = (
-        "secretary.webproto.sprint_reads.board_client",
-        "secretary.webproto.sprint_ops.board_client",
+        "ummanu.webproto.sprint_reads.board_client",
+        "ummanu.webproto.sprint_ops.board_client",
     )
 
     @contextlib.contextmanager
@@ -166,11 +166,11 @@ class SprintProtocolFixture(unittest.TestCase):
         request = {
             "request_id": "req-1",
             "actor": "operator",
-            "product": "secretary",
+            "product": "ummanu",
             "goal": "Give webproto a sprint create",
             "definition_of_done": "the operation exists and is tested",
             "issues": ["issue:open"],
-            "projects": ["secretary"],
+            "projects": ["ummanu"],
             "observer": OBSERVER_PROFILE,
         }
         request.update(kwargs)
@@ -204,7 +204,7 @@ class SprintProtocolFixture(unittest.TestCase):
             "sprint_goal": goal,
             "sprint_definition_of_done": "stated when the sprint was opened",
             "sprint_status": status,
-            "sprint_product": "secretary",
+            "sprint_product": "ummanu",
             "sprint_issues": json.dumps(["issue:open"]),
             "sprint_reservations": json.dumps([]),
         }

@@ -12,14 +12,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from secretary import upgrade
-from secretary.backup_policy import FULL_POLICY, should_skip_data_entry
-from secretary.memory import DEFAULT_MODEL
 from tests.fakes.upgrade import FakeUnitInstaller
+from ummanu import upgrade
+from ummanu.backup_policy import FULL_POLICY, should_skip_data_entry
+from ummanu.memory import DEFAULT_MODEL
 
-MEMORY_UNIT = "secretary-memory.service"
+MEMORY_UNIT = "ummanu-memory.service"
 PYPROJECT = """[project]
-name = "secretary"
+name = "ummanu"
 
 [project.optional-dependencies]
 dev = ["ruff==0.16.4"]
@@ -34,7 +34,7 @@ def memory_unit(model: str | None = "model-a") -> bytes:
     return (
         "[Service]\nEnvironment=MEMORY_PORT=8077\n"
         + environment
-        + "ExecStart=/x/.venv/bin/secretary-memory-mcp\n"
+        + "ExecStart=/x/.venv/bin/ummanu-memory-mcp\n"
     ).encode()
 
 
@@ -51,8 +51,8 @@ class StateReceiptFixture(unittest.TestCase):
         self._write_product()
         self.units = FakeUnitInstaller(present={MEMORY_UNIT: memory_unit()}, active={MEMORY_UNIT})
         self.report = SimpleNamespace(
-            host={"unit_prefix": "secretary-"},
-            instance={"host": {"unit_prefix": "secretary-"}, "data_dir": str(self.data)},
+            host={"unit_prefix": "ummanu-"},
+            instance={"host": {"unit_prefix": "ummanu-"}, "data_dir": str(self.data)},
             data_dir=self.data,
             bindings=[],
         )
@@ -71,8 +71,8 @@ class StateReceiptFixture(unittest.TestCase):
     def _write_product(self) -> None:
         files = {
             "pyproject.toml": PYPROJECT.replace("NUMPY", "2.4.6"),
-            "src/secretary/__init__.py": "",
-            "src/secretary/app.py": "VERSION = 'A'\n",
+            "src/ummanu/__init__.py": "",
+            "src/ummanu/app.py": "VERSION = 'A'\n",
             "docs/README.md": "a\n",
             ".gitignore": ".venv/\n",
         }
@@ -86,7 +86,7 @@ class StateReceiptFixture(unittest.TestCase):
         ruff = bin_dir / "ruff"
         ruff.write_text("#!/bin/sh\necho 'ruff 0.16.4'\n", encoding="utf-8")
         ruff.chmod(0o755)
-        dist_info = self.site_packages() / "secretary-0.1.0.dist-info"
+        dist_info = self.site_packages() / "ummanu-0.1.0.dist-info"
         dist_info.mkdir(parents=True)
         (dist_info / "direct_url.json").write_text(
             json.dumps({"url": "file:///product", "dir_info": {"editable": True}}), encoding="utf-8"
@@ -174,7 +174,7 @@ class DependencyReceiptTests(StateReceiptFixture):
 
     def test_a_source_only_move_leaves_the_venv_alone(self) -> None:
         upgrade.step_dependencies(self.context())
-        self.move_checkout("src/secretary/app.py", "VERSION = 'B'\n")
+        self.move_checkout("src/ummanu/app.py", "VERSION = 'B'\n")
 
         result = upgrade.step_dependencies(self.context())
 
@@ -285,7 +285,7 @@ class MemoryReceiptTests(StateReceiptFixture):
 
     def test_a_source_commit_outside_upgrade_restarts_the_service_on_no_pull(self) -> None:
         upgrade.step_memory(self.context())
-        self.move_checkout("src/secretary/app.py", "VERSION = 'B'\n")
+        self.move_checkout("src/ummanu/app.py", "VERSION = 'B'\n")
         context = self.context()
 
         steps = upgrade.run_steps(
@@ -359,7 +359,7 @@ class MemoryReceiptTests(StateReceiptFixture):
 
     def test_dry_run_names_the_moved_checkout_and_restarts_nothing(self) -> None:
         upgrade.step_memory(self.context())
-        self.move_checkout("src/secretary/app.py", "VERSION = 'B'\n")
+        self.move_checkout("src/ummanu/app.py", "VERSION = 'B'\n")
         self.units.calls.clear()
 
         result = upgrade.step_memory(self.context(dry_run=True))
@@ -387,7 +387,7 @@ class MemoryReceiptTests(StateReceiptFixture):
             return json.dumps(payload)
 
         cases = _hostile(body, extras_key="inputs")
-        cases["another unit"] = body(unit="secretary-other.service")
+        cases["another unit"] = body(unit="ummanu-other.service")
         cases["huge pid"] = body(process={**valid["process"], "pid": 10**30})
         cases["negative start ticks"] = body(process={**valid["process"], "start_ticks": -1})
         cases["model with a newline"] = body(inputs={**valid["inputs"], "memory_model": "a\nb"})
