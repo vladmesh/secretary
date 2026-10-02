@@ -17,7 +17,7 @@ from unittest import mock
 
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.retired_board import STALE_FILE, legacy_runtime_lines, write_stale_leftovers
-from ummanu import state_repo, status, upgrade
+from ummanu import installation, state_repo, status, upgrade
 from ummanu.board import provision as board_provision
 from ummanu.config import DataDirError
 from ummanu.head_health import HeadReadiness, resolve_head_chain
@@ -2100,6 +2100,145 @@ class InstanceHeadCanonTests(unittest.TestCase):
             units=FakeUnitInstaller(),
             report=_Report(),
         )
+
+
+class PipelineStateStepTests(unittest.TestCase):
+    """`pipeline-state` restores the untracked run journals a recreated worktree lost (ummanu-1)."""
+
+    RECORDS: ClassVar = [{"event": "claim", "reference": "ummanu-1"}, {"event": "review"}]
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.instance = self.root / "instance"
+        self.state_dir = self.root / "home" / "pipeline" / "state" / "pipeline"
+        patcher = mock.patch.dict(os.environ, {"TA_PIPELINE_STATE_DIR": str(self.state_dir)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def checkpoint(self, records: list[dict] | None = None) -> None:
+        runs = self.instance / "state" / "runs"
+        runs.mkdir(parents=True)
+        rows = [
+            {"source": "runs.jsonl", "line": line, "record": record}
+            for line, record in enumerate(self.RECORDS if records is None else records, start=1)
+        ]
+        (runs / "runs.ndjson").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    def context(self, **overrides) -> upgrade.UpgradeContext:
+        base = upgrade.UpgradeContext(
+            instance_path=self.instance,
+            product_root=upgrade.running_product_root(),
+            base_branch="main",
+            dry_run=False,
+            units=FakeUnitInstaller(),
+            report=_Report(),
+            runtime_home=self.root / "home",
+        )
+        return replace(base, **overrides)
+
+    def journal(self) -> list[dict]:
+        text = (self.state_dir / "runs.jsonl").read_text(encoding="utf-8")
+        return [json.loads(line) for line in text.splitlines() if line.strip()]
+
+    def test_the_step_runs_right_after_the_role_worktrees(self):
+        index = upgrade.STEPS.index(upgrade.step_worktrees)
+        self.assertIs(upgrade.STEPS[index + 1], upgrade.step_pipeline_state)
+
+    def test_an_absent_state_dir_is_restored_with_exactly_the_checkpoint_records(self):
+        self.checkpoint()
+
+        result = upgrade.step_pipeline_state(self.context())
+
+        self.assertEqual(result.status, "changed", result.detail)
+        self.assertIn("restored 2 run record(s)", result.detail)
+        self.assertEqual(self.journal(), self.RECORDS)
+
+    def test_a_second_run_is_unchanged(self):
+        self.checkpoint()
+        upgrade.step_pipeline_state(self.context())
+        stamp = (self.state_dir / "runs.jsonl").stat().st_mtime_ns
+
+        result = upgrade.step_pipeline_state(self.context())
+
+        self.assertEqual(result.status, "unchanged", result.detail)
+        self.assertEqual((self.state_dir / "runs.jsonl").stat().st_mtime_ns, stamp)
+
+    def test_an_empty_live_journal_receives_the_checkpoint_records(self):
+        self.checkpoint()
+        self.state_dir.mkdir(parents=True)
+        (self.state_dir / "runs.jsonl").write_text("", encoding="utf-8")
+
+        result = upgrade.step_pipeline_state(self.context())
+
+        self.assertEqual(result.status, "changed", result.detail)
+        self.assertEqual(self.journal(), self.RECORDS)
+
+    def test_a_live_journal_that_extends_the_checkpoint_is_preserved(self):
+        self.checkpoint()
+        self.state_dir.mkdir(parents=True)
+        live = "".join(json.dumps(record) + "\n" for record in [*self.RECORDS, {"event": "release"}])
+        (self.state_dir / "runs.jsonl").write_text(live, encoding="utf-8")
+
+        result = upgrade.step_pipeline_state(self.context())
+
+        self.assertEqual(result.status, "unchanged", result.detail)
+        self.assertEqual((self.state_dir / "runs.jsonl").read_text(encoding="utf-8"), live)
+
+    def test_a_diverged_live_journal_is_refused_and_left_byte_for_byte(self):
+        self.checkpoint()
+        self.state_dir.mkdir(parents=True)
+        live = b'{"event": "live"}\n'
+        (self.state_dir / "runs.jsonl").write_bytes(live)
+
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run):
+                result = upgrade.step_pipeline_state(self.context(dry_run=dry_run))
+
+                self.assertEqual(result.status, "failed")
+                self.assertIn("does not extend the checkpoint", result.detail)
+                self.assertEqual((self.state_dir / "runs.jsonl").read_bytes(), live)
+
+    def test_dry_run_reports_the_restore_and_writes_nothing(self):
+        self.checkpoint()
+
+        result = upgrade.step_pipeline_state(self.context(dry_run=True))
+
+        self.assertEqual(result.status, "changed", result.detail)
+        self.assertIn("would restore 2 run record(s)", result.detail)
+        self.assertFalse(self.state_dir.parent.exists())
+
+    def test_a_checkpoint_without_records_never_creates_an_empty_source(self):
+        """An empty directory would make the next export replace the checkpoint's runs with nothing."""
+        for name, records in (("no journal", None), ("no records", [])):
+            with self.subTest(name):
+                if records is not None:
+                    self.checkpoint(records)
+
+                result = upgrade.step_pipeline_state(self.context())
+
+                self.assertEqual(result.status, "skipped", result.detail)
+                self.assertFalse(self.state_dir.exists())
+
+    def test_recovery_leaves_the_restore_to_its_own_ownership_barrier(self):
+        seen: list[tuple] = []
+
+        def run(context, *, steps):
+            seen.append(tuple(steps))
+            return upgrade.UpgradeResult()
+
+        with (
+            mock.patch("ummanu.installation.validate_instance", return_value=SimpleNamespace(ok=True)),
+            mock.patch(
+                "ummanu.installation.resolve_runtime_owner", return_value=("operator", self.root / "home")
+            ),
+            mock.patch("ummanu.installation.run_steps", side_effect=run),
+        ):
+            installation.materialize_host(self.instance, self.root / "product", before_host=lambda _: None)
+
+        self.assertTrue(seen)
+        self.assertFalse(any(upgrade.step_pipeline_state in steps for steps in seen))
 
 
 def _restore_mode(path: Path, mode: int = 0o644) -> None:

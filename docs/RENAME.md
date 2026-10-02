@@ -532,6 +532,20 @@ them with `--through move`), step 5 is the bootstrap's own, steps 6–12 run fro
   `git -C ~/ummanu reset --hard <pre_transition_sha>` on `main` (the SHA from the journal) and then
   run `--rollback`.
 
+**Post-transition repairs** (ummanu-1). Two pieces of state the one-shot run left unreadable are
+repaired afterwards, in this order:
+
+1. Stop the heads still running from the old checkout.
+2. `ummanu upgrade --instance <instance>`. Its `pipeline-state` step, right after `role-worktrees`,
+   restores the untracked `state/pipeline/` journals that step 10 deleted with the old worktrees. It
+   restores them from `<instance>/state/runs` and refuses a live journal that does not extend the
+   checkpoint.
+3. `ummanu transition from-secretary --repair-scope-owners --instance <instance>` lists the settled
+   heads whose `scope-owner.json` still names a `secretary-head-*.scope`. Adding `--apply` renames
+   each listed unit to `ummanu-head-*.scope`, and the original files are kept under
+   `~/ummanu-transition/heads/`. Any other record that carries the old prefix is left as it is and
+   reported, and the command exits non-zero.
+
 **Rollback**: `scripts/transition-from-secretary.sh --rollback` (or `… transition from-secretary --rollback`),
 driven by the journal, before step 12 or if verify fails. It stops `ummanu-*` and the new store
 container; moves the Claude directories back and drops the trust entries it added; reverts the instance

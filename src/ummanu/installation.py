@@ -99,6 +99,7 @@ from ummanu.upgrade import (
     default_product_root,
     run_steps,
     step_host,
+    step_pipeline_state,
     workspaces_root,
 )
 
@@ -1074,7 +1075,9 @@ def materialize_pipeline_state(
             )
     records = sum(len(journal) for journal in journals.values())
     if dry_run:
-        return PipelineStateMaterialization(records=records, changed=False)
+        # What a real run would change: a missing directory or an absent/empty journal.
+        pending = not state_dir.exists() or any(not existing.get(relative) for relative in journals)
+        return PipelineStateMaterialization(records=records, changed=pending)
     try:
         created = not state_dir.exists()
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -1133,13 +1136,15 @@ def materialize_host(
         if before_host is None:
             result = run_steps(context)
         else:
-            host_index = STEPS.index(step_host)
-            prepared = run_steps(context, steps=STEPS[:host_index])
+            # Recovery restores the pipeline state itself, inside its ownership barrier.
+            steps = tuple(step for step in STEPS if step is not step_pipeline_state)
+            host_index = steps.index(step_host)
+            prepared = run_steps(context, steps=steps[:host_index])
             if not prepared.ok:
                 failed = prepared.steps[-1]
                 raise InstallError(f"materializer {failed.name} failed: {failed.detail}")
             before_host(context)
-            finished = run_steps(context, steps=STEPS[host_index:])
+            finished = run_steps(context, steps=steps[host_index:])
             result = UpgradeResult(steps=[*prepared.steps, *finished.steps])
     if not result.ok:
         failed = result.steps[-1]

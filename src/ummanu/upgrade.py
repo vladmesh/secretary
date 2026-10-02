@@ -1228,6 +1228,56 @@ def step_worktrees(context: UpgradeContext) -> StepResult:
     return StepResult("role-worktrees", "changed", "; ".join(details))
 
 
+def step_pipeline_state(context: UpgradeContext) -> StepResult:
+    """Put the dispatcher's untracked run journals back from the instance checkpoint.
+
+    `state/pipeline/` lives in the pipeline worktree but is not tracked, so a worktree the previous
+    step recreated comes back without the journals every checkpoint exports (ummanu-1). The restore
+    is install's own and keeps its refusal: a live journal that does not extend the checkpoint fails
+    the step and is never overwritten.
+    """
+    # installation imports this module; the restore lives there with install's own call of it.
+    from ummanu.installation import InstallError, materialize_pipeline_state, pipeline_state_path
+
+    if not (context.instance_path / "state" / "runs" / "runs.ndjson").is_file():
+        return StepResult("pipeline-state", "skipped", "the instance checkpoint carries no run journal")
+    state_dir = pipeline_state_path(context.runtime_home or Path.home())
+    try:
+        plan = materialize_pipeline_state(context.instance_path, state_dir, dry_run=True)
+    except InstallError as exc:
+        return StepResult("pipeline-state", "failed", str(exc))
+    if not plan.changed:
+        return StepResult(
+            "pipeline-state", "unchanged", f"{state_dir} extends the checkpoint's {plan.records} run record(s)"
+        )
+    if not plan.records:
+        # An empty source would make the next export replace the checkpoint's runs with nothing.
+        return StepResult("pipeline-state", "skipped", "the checkpoint carries no run records to restore")
+    if context.dry_run:
+        return StepResult(
+            "pipeline-state", "changed", f"would restore {plan.records} run record(s) into {state_dir}"
+        )
+    created: list[Path] = []
+    candidate = state_dir
+    while not candidate.exists() and candidate != candidate.parent:
+        created.append(candidate)
+        candidate = candidate.parent
+    try:
+        restored = materialize_pipeline_state(context.instance_path, state_dir)
+        _set_runtime_owner(state_dir, context.runtime_user)
+        for directory in created[1:]:
+            _set_runtime_directory_owner(directory, context.runtime_user)
+    except (InstallError, GitError) as exc:
+        return StepResult("pipeline-state", "failed", str(exc))
+    if not restored.changed:
+        return StepResult(
+            "pipeline-state", "unchanged", f"{state_dir} extends the checkpoint's {restored.records} run record(s)"
+        )
+    return StepResult(
+        "pipeline-state", "changed", f"restored {restored.records} run record(s) into {state_dir}"
+    )
+
+
 def step_host(context: UpgradeContext) -> StepResult:
     report = context.report
     assert report.data_dir is not None
@@ -2428,6 +2478,8 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_instance_packing,
     step_publish_head_registry,
     step_worktrees,
+    # Right after the worktrees: a recreated pipeline worktree has no untracked run journals.
+    step_pipeline_state,
     step_role_skills,
     step_po_workspace_owner,
     step_po_token,

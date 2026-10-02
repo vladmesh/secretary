@@ -935,5 +935,123 @@ class CommandTests(FixtureTestCase):
         self.assertIn(code, (0, 1))
 
 
+class ScopeOwnerRepairTests(unittest.TestCase):
+    """`--repair-scope-owners`: settled heads recorded before the rename get their current scope unit."""
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.home = Path(temporary.name)
+        self.data = self.home / NEW.data_dir
+        self.instance = self.home / "instance"
+        write(self.instance / "instance.yaml",
+              f"version: 1\nname: fixture\ndata_dir: {self.data}\n"
+              "offsite:\n  instance_remote: https://github.com/example/fixture.git\n")
+        self.memory = importlib.import_module(f"{PACKAGE}.runtime.head.memory")
+        self.lifecycle = importlib.import_module(
+            f"{PACKAGE}.runtime.head.local_pty.scoped_lifecycle").ScopedHeadLifecycle
+        self.repair = importlib.import_module(f"{PACKAGE}.transition.scope_owners")
+
+    def owner(self, run_id: str, *, unit: str = "", settled: bool = True) -> Path:
+        record = {
+            "run_id": run_id, "unit": unit or self.repair.old_scope_unit(run_id), "generation": "g1",
+            "launch_allowed": not settled, "cleanup_complete": settled,
+            "role": "worker", "task": "card", "workspace": "/w",
+        }
+        path = write(self.data / "heads" / run_id / "scope-owner.json", json.dumps(record))
+        (path.parent / "scope-owner.lock").touch()
+        return path
+
+    def run_cli(self, *extra: str) -> tuple[int, str]:
+        cli = importlib.import_module(f"{PACKAGE}.cli")
+        return quietly(cli.main, ["transition", f"from-{OLD.package}", "--repair-scope-owners", *extra,
+                                  "--instance", str(self.instance), "--home", str(self.home)])
+
+    def backup(self, run_id: str) -> Path:
+        return self.home / names.STATE_DIR_NAME / "heads" / run_id / "scope-owner.json"
+
+    def test_a_settled_old_record_is_renamed_and_its_original_kept(self) -> None:
+        path = self.owner("run-a")
+        original = path.read_bytes()
+
+        code, output = self.run_cli("--apply")
+
+        self.assertEqual(code, 0, output)
+        record = json.loads(path.read_text())
+        self.assertEqual(record["unit"], self.memory.scope_unit("run-a"))
+        self.assertEqual({**record, "unit": None}, {**json.loads(original), "unit": None})
+        self.assertIs(self.lifecycle.validate_owner(record), record)
+        self.assertEqual(self.backup("run-a").read_bytes(), original)
+        self.assertIn("1 repaired", output)
+
+    def test_an_unsettled_or_inconsistent_old_record_is_left_untouched_and_fails_the_command(self) -> None:
+        unsettled = self.owner("run-live", settled=False)
+        foreign = self.owner("run-odd", unit=self.repair.old_scope_unit("someone-else"))
+        settled = self.owner("run-done")
+        before = {path: path.read_bytes() for path in (unsettled, foreign)}
+
+        code, output = self.run_cli("--apply")
+
+        self.assertNotEqual(code, 0)
+        for path, raw in before.items():
+            self.assertEqual(path.read_bytes(), raw)
+            self.assertIn(f"untouched heads/{path.parent.name}", " ".join(output.split()))
+        self.assertFalse(self.backup("run-live").exists())
+        self.assertEqual(json.loads(settled.read_text())["unit"], self.memory.scope_unit("run-done"))
+
+    def test_a_current_record_is_neither_listed_nor_touched(self) -> None:
+        path = self.owner("run-new", unit=self.memory.scope_unit("run-new"))
+        raw, stamp = path.read_bytes(), path.stat().st_mtime_ns
+
+        code, output = self.run_cli("--apply")
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), (raw, stamp))
+        self.assertNotIn("run-new", output)
+        self.assertFalse((self.home / names.STATE_DIR_NAME).exists())
+
+    def test_without_apply_it_lists_the_candidates_and_writes_nothing(self) -> None:
+        path = self.owner("run-a")
+        raw, stamp = path.read_bytes(), path.stat().st_mtime_ns
+
+        code, output = self.run_cli()
+
+        self.assertEqual(code, 0, output)
+        self.assertIn("nothing is written", output)
+        self.assertIn(f"{self.repair.old_scope_unit('run-a')} -> {self.memory.scope_unit('run-a')}", output)
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), (raw, stamp))
+        self.assertFalse((self.home / names.STATE_DIR_NAME).exists())
+
+    def test_a_second_apply_is_a_no_op(self) -> None:
+        path = self.owner("run-a")
+        self.assertEqual(self.run_cli("--apply")[0], 0)
+        raw, stamp = path.read_bytes(), path.stat().st_mtime_ns
+        kept = self.backup("run-a").read_bytes()
+
+        code, output = self.run_cli("--apply")
+
+        self.assertEqual(code, 0, output)
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), (raw, stamp))
+        self.assertEqual(self.backup("run-a").read_bytes(), kept)
+        self.assertIn("0 repaired", output)
+
+    def test_a_record_whose_lock_is_held_is_left_for_a_later_run(self) -> None:
+        path = self.owner("run-a")
+        raw = path.read_bytes()
+
+        with self.lifecycle.owner_lock(path.parent):
+            code, output = self.run_cli("--apply")
+
+        self.assertNotEqual(code, 0)
+        self.assertEqual(path.read_bytes(), raw)
+        self.assertIn("not repaired", output)
+
+    def test_the_repair_does_not_combine_with_the_transition_modes(self) -> None:
+        self.owner("run-a")
+        with contextlib.redirect_stderr(io.StringIO()):
+            code, _ = self.run_cli("--plan")
+        self.assertEqual(code, 2)
+
+
 if __name__ == "__main__":
     unittest.main()
