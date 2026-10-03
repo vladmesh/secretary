@@ -79,6 +79,7 @@ from ummanu.po import client as po_client
 from ummanu.po import token as po_token
 from ummanu.po import workspace as po_workspace
 from ummanu.projects.availability import ProjectAvailability
+from ummanu.runtime import interactive_workspace
 from ummanu.runtime.paths import component_enabled, configured_product_root
 from ummanu.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
 from ummanu.web.health import WebProbeError, probe_web, target_from_unit
@@ -765,6 +766,42 @@ def step_po_workspace_owner(context: UpgradeContext) -> StepResult:
     except GitError as exc:
         return StepResult("po-workspace-owner", "failed", str(exc))
     return StepResult("po-workspace-owner", "unchanged", f"{workspace} owned by {context.runtime_user}")
+
+
+def step_interactive_workspace(context: UpgradeContext) -> StepResult:
+    """Materialize the interactive head's working directory and hand it to the runtime user.
+
+    `AGENTS.md` is the product's shared part followed by the live root's `persona/AGENTS.md`; recover
+    runs this same step against the live root it extracted. Nothing else receives the persona.
+    """
+    source = interactive_workspace.shared_source(context.product_root)
+    if not source.exists() and not source.is_symlink():
+        return StepResult(
+            "interactive-workspace", "skipped", f"no {interactive_workspace.SHARED_SOURCE_RELATIVE} in the product checkout"
+        )
+    data_dir = _data_dir(context)
+    if data_dir is None:
+        return StepResult("interactive-workspace", "failed", "instance data directory is unresolved")
+    try:
+        result = interactive_workspace.materialize(
+            context.product_root, context.instance_path, data_dir, dry_run=context.dry_run
+        )
+    except interactive_workspace.WorkspaceError as exc:
+        return StepResult("interactive-workspace", "failed", str(exc))
+    if not context.dry_run:
+        try:
+            _set_runtime_owner(result.path, context.runtime_user)
+        except GitError as exc:
+            return StepResult("interactive-workspace", "failed", str(exc))
+    sources = f"shared {result.shared}, personal {result.personal or 'absent'}"
+    if not result.changed:
+        return StepResult("interactive-workspace", "unchanged", f"{result.path} current ({sources})")
+    action = "would write" if context.dry_run else "wrote"
+    return StepResult(
+        "interactive-workspace",
+        "changed",
+        f"{action} {', '.join(result.changed)} in {result.path} ({sources})",
+    )
 
 
 def step_po_token(context: UpgradeContext) -> StepResult:
@@ -2434,6 +2471,7 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_memory_clients,
     step_codex_home,
     step_po_workspace,
+    step_interactive_workspace,
     step_head_registry,
     step_instance_packing,
     step_worktrees,

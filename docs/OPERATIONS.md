@@ -41,7 +41,7 @@ directory of the private repository) and are materialised into env files. The st
 [Recovery](RECOVERY.md#secrets). `runtime.env` next to `instance.yaml` can be a materialisation target;
 whether it is shows under `secret_store.materialize` in `ummanu status --json`. The product does
 not migrate it on its own. Either way the file is `0600`, outside the export allowlist and in no checkpoint or archive.
-`ummanu shell` receives the whole file; dispatcher-launched workers and reviewers receive
+`ummanu shell` ([the interactive head](#the-interactive-head-and-its-workspace)) receives the whole file; dispatcher-launched workers and reviewers receive
 non-secret runtime switches through the role-environment wrapper.
 
 Migrate an existing `<instance>/runtime.env` with the CLI, never by copying values through a shell or
@@ -264,6 +264,48 @@ Check:
 ls -la DATA_DIR/po DATA_DIR/po/.claude/skills DATA_DIR/po/.agents/skills
 ummanu role-skills audit --instance INSTANCE
 ```
+
+### The interactive head and its workspace
+
+The owner's interactive head starts with `ummanu shell` and no alias:
+
+```bash
+ummanu shell                     # the registry's role_defaults.new_card head
+ummanu shell --head codex        # any adapter or heads.toml profile id
+ummanu shell --print             # cd DATA_DIR/interactive && <launch command>; starts nothing
+ummanu shell --workspace DIR     # another cwd and Codex trust directory, without the persona
+```
+
+Without `--workspace` the head's cwd and its Codex trust directory are `DATA_DIR/interactive`, the
+data dir of the selected installation (`UMMANU_DATA_DIR`, `UMMANU_INSTANCE`, the `--env-file`'s
+instance, else the default instance). An explicit `--workspace` wins. The shell never materializes
+the workspace: a missing one is refused, exit 2, with a message that names the path and
+`ummanu upgrade`.
+
+Install, upgrade and recover materialize it in the `interactive-workspace` step and hand it to the
+runtime user on a root-invoked run ([The persona boundary](ARCHITECTURE.md#the-persona-boundary)):
+
+| Path | Content | On upgrade |
+| --- | --- | --- |
+| `AGENTS.md` | the shared part `packaging/interactive-workspace/AGENTS.md` from the product checkout, a separator, then the personal part `INSTANCE/persona/AGENTS.md` byte for byte (the shared part alone when that file is absent) | rewritten |
+| `CLAUDE.md` | the single line `@AGENTS.md` | rewritten |
+| `.sources.json` | the digests of both parts and of `AGENTS.md` | rewritten |
+
+The persona lives in two places, and neither is this directory: the shared role contract in the
+product (changed by a product card), the owner's part in the live root's `persona/AGENTS.md` (changed
+by a PO operation and `ummanu config check`, exported with the snapshot). Edits made here are
+overwritten by the next upgrade, which reports `changed` whenever either part changed and
+`unchanged` otherwise. No other head's workspace and nothing under `~/.claude` receives the persona.
+
+`ummanu doctor` and `ummanu status` print one line for it, and `status --json` carries it under
+`installation.interactive_workspace`:
+
+```text
+interactive workspace: DATA_DIR/interactive (shared sha256:<12 hex>, personal sha256:<12 hex>|absent)
+```
+
+A workspace not yet materialized reads `(absent; ...)`, one edited by hand since reads
+`AGENTS.md differs from its sources`; both name `ummanu upgrade` as the repair.
 
 ### PO head sessions and turns
 
@@ -2939,6 +2981,7 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `board-store-roles` | verify owner/app/read credentials, attributes and privilege boundaries |
 | `memory-clients` | reconcile the `po_memory` MCP entries (Claude, `~/.codex`, the legacy Codex home and an existing `DATA_DIR/codex-home`, seeding what it lacks) without touching provider login state |
 | `codex-home` | seed `AGENTS.md` and `config.toml` copy-once into `DATA_DIR/codex-home`; never `auth.json`, never the legacy Orca home ([Codex home](#codex-home-codex_home)) |
+| `interactive-workspace` | compose `DATA_DIR/interactive/AGENTS.md` from the product's shared part and the live root's `persona/AGENTS.md`, write `CLAUDE.md`, hand the tree to the runtime user ([The interactive head](#the-interactive-head-and-its-workspace)) |
 | `head-registry` | generate `<data>/heads/heads.yaml` and `<data>/heads/source.yaml` from the canon; no Git call |
 | `instance-packing` | keep the instance repository's local Git packing controls bounded, with implicit `gc --auto` off (`gc.auto=0`, `maintenance.auto=false`); packing runs from `ummanu-instance-maintenance.timer` ([Recovery](RECOVERY.md#local-git-packing-controls)) |
 | `role-worktrees` | fast-forward role worktrees onto the base branch |

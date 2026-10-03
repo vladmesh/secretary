@@ -285,6 +285,10 @@ class PortableFixture(unittest.TestCase):
         codex_home.mkdir(parents=True)
         (codex_home / "AGENTS.md").write_text("# portable\n", encoding="utf-8")
         (codex_home / "config.toml").write_text("[portable]\n", encoding="utf-8")
+        # The shared part of the interactive head's persona, composed into `<data>/interactive`.
+        interactive = self.product / "packaging" / "interactive-workspace"
+        interactive.mkdir(parents=True)
+        (interactive / "AGENTS.md").write_text("# portable interactive head\n", encoding="utf-8")
         # An installed product is a Git checkout: `dependencies` and `memory` bind their receipts to
         # its revision and tracked inputs, so a fixture that is not one could never be current.
         for command in (

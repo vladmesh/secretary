@@ -26,6 +26,7 @@ from ummanu.host import (
 )
 from ummanu.host_apply import resolve_installed_packaged, resolve_runtime_owner
 from ummanu.infra.recovery_inventory import collect_recovery_inventory
+from ummanu.runtime import interactive_workspace
 from ummanu.secret_store import store_health
 from ummanu.sprints import SprintReader, budget_thresholds
 from ummanu.tasks import TaskError
@@ -97,6 +98,7 @@ def collect_status(
             "projects": report.projects,
             "heads": _heads(report.instance),
             "head_registry": _head_registry(report.instance_path.parent, report.data_dir),
+            "interactive_workspace": interactive_workspace.describe(data_dir),
             "cards": {
                 "total": _card_count(data_dir),
                 "active_attempts": len(_attempts(production, probe_panels=False)),

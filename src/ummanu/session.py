@@ -7,17 +7,22 @@ worker/reviewer heads stay narrowly scoped through role_env; the operator delibe
 
 The env is injected at the launch boundary, not by the head, so switching heads never changes
 whether the credentials are there.
+
+The head starts in the installation's interactive workspace, `<data>/interactive`, which carries its
+persona (`ummanu.runtime.interactive_workspace`); `--workspace` names another directory instead.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
 from pathlib import Path
 
 from ummanu.memory import access as memory_access
 from ummanu.runtime import heads as head_registry
+from ummanu.runtime import interactive_workspace
 from ummanu.runtime.codex_home import bound_data_dir
 from ummanu.runtime.head import (
     HeadCommandError,
@@ -28,6 +33,7 @@ from ummanu.runtime.head import (
     render_head_command,
     with_pid_heartbeat,
 )
+from ummanu.runtime.paths import default_instance_path
 from ummanu.runtime.role_env import load_env_file
 
 # The operator names a head the way a human thinks about it ("claude", "codex", "hermes"): a bare
@@ -118,13 +124,14 @@ def run_shell(args: argparse.Namespace) -> int:
 def _run_shell(args: argparse.Namespace) -> int:
     try:
         profile_id = resolve_profile_id(args.head)
-        command = render_interactive(profile_id, workspace=args.workspace)
         env = operator_env(args.env_file)
+        workspace = launch_workspace(args.workspace, args.env_file, env)
+        command = render_interactive(profile_id, workspace=workspace)
     except (SessionError, head_registry.HeadRegistryError) as exc:
         print(f"ummanu shell: {exc}", file=sys.stderr)
         return 2
     if args.print_command:
-        print(command)
+        print(f"cd {shlex.quote(workspace)} && {command}")
         return 0
     try:
         registry = head_registry.load_registry()
@@ -135,7 +142,7 @@ def _run_shell(args: argparse.Namespace) -> int:
         run = HeadRun(
             run_id=run_id,
             spec=HeadSpec.from_profile(profile_id, registry.profile(profile_id)),
-            workspace=args.workspace or os.getcwd(),
+            workspace=workspace,
             task_ref=TaskRef.standing("interactive"),
             role="po",
             pid_file=str(pid_dir / f"{run_id}.pid"),
@@ -152,11 +159,46 @@ def _run_shell(args: argparse.Namespace) -> int:
         return 2
     argv = ["/bin/sh", "-c", command]
     try:
+        os.chdir(workspace)
         os.execvpe(argv[0], argv, env)
     except OSError as exc:
-        print(f"ummanu shell: exec {command!r} failed: {exc}", file=sys.stderr)
+        print(f"ummanu shell: exec {command!r} in {workspace} failed: {exc}", file=sys.stderr)
         return 126
     return 0  # unreachable after a successful execvpe
+
+
+def launch_workspace(
+    explicit: str | None, env_file: str | os.PathLike[str] | None, env: dict[str, str]
+) -> str:
+    """The head's cwd and Codex trust directory: `--workspace` when given, else `<data>/interactive`.
+
+    The interactive workspace is never materialized here. Upgrade and recover own it (they read the
+    product checkout and the live root, and hand the tree to the runtime user); a missing one is
+    refused with the command that creates it.
+    """
+    if explicit:
+        return explicit
+    from ummanu.config import DataDirError
+
+    try:
+        data_dir = _memory_data_dir(env_file, env) or _default_data_dir()
+    except (DataDirError, OSError) as exc:
+        raise SessionError(
+            f"cannot resolve the interactive workspace: {exc}; run `ummanu upgrade` or pass --workspace"
+        ) from None
+    workspace = interactive_workspace.workspace_dir(data_dir)
+    if not (workspace / interactive_workspace.AGENTS_FILE).is_file():
+        raise SessionError(
+            f"interactive workspace {workspace} is missing; run `ummanu upgrade` to materialize it, "
+            "or pass --workspace"
+        )
+    return str(workspace)
+
+
+def _default_data_dir() -> Path:
+    from ummanu.config import instance_data_dir
+
+    return instance_data_dir(default_instance_path())
 
 
 def _memory_data_dir(env_file: str | os.PathLike[str] | None, env: dict[str, str]) -> Path | None:
