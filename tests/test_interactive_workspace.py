@@ -344,7 +344,7 @@ class StatusLineTests(Fixture):
         snapshot = {
             "installation": {
                 "name": "interactive",
-                "head_registry": {"legacy_source": None, "error": "none here"},
+                "head_registry": {"error": "none here"},
                 "interactive_workspace": iw.describe(self.data),
                 "sprints": {"error": None, "items": []},
             },
@@ -450,7 +450,8 @@ class ShellWithoutAnExportedInstallationTests(Fixture):
     def setUp(self) -> None:
         super().setUp()
         self.home = self.root / "home"
-        self.instance = self.home / "secretary-instance"
+        # The default live root under this home (`runtime.paths.default_instance_path`).
+        self.instance = self.home / "ummanu-data" / "instance"
         self.instance.mkdir(parents=True)
         (self.instance / "instance.yaml").write_text(instance_yaml(self.data), encoding="utf-8")
         self.env_file = self.instance / "runtime.env"

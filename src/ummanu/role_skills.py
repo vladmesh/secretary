@@ -29,9 +29,14 @@ from pathlib import Path
 from typing import Any
 
 from ummanu.config import DataDirError, instance_data_dir
-from ummanu.onboarding import DEFAULT_INSTANCE
 from ummanu.po.workspace import workspace_dir
-from ummanu.runtime.paths import configured_product_root
+from ummanu.runtime.paths import (
+    MissingDefaultInstance,
+    add_instance_argument,
+    configured_product_root,
+    default_instance_path,
+    resolve_instance_argument,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 # Manifest shipped by this checkout; hosts use their configured product checkout instead.
@@ -105,7 +110,7 @@ def instance_dir(value: Path | str) -> Path:
 
 
 def configured_instance_path() -> Path:
-    return _absolute(os.environ.get(INSTANCE_ENV) or DEFAULT_INSTANCE)
+    return _absolute(os.environ.get(INSTANCE_ENV) or default_instance_path())
 
 
 def _expand_home(value: Path | str, home: Path | str | None) -> Path:
@@ -1059,11 +1064,10 @@ def run_role_skills(args) -> int:
 def _add_common_arguments(parser, name: str) -> None:
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--targets", help="comma-separated target names from skills/manifest.toml")
-    parser.add_argument(
-        "--instance",
-        default=os.environ.get(INSTANCE_ENV, DEFAULT_INSTANCE),
+    add_instance_argument(
+        parser,
         help="instance dir or instance.yaml whose skills/manifest.toml is layered over the product "
-        f"manifest (default: {INSTANCE_ENV} or {DEFAULT_INSTANCE})",
+        f"manifest (default: {INSTANCE_ENV}, else {default_instance_path()})",
     )
     parser.add_argument(
         "--product-root",
@@ -1100,6 +1104,11 @@ def main(argv: list[str] | None = None) -> int:
         _add_common_arguments(p, name)
     args = parser.parse_args(argv)
     args.check = getattr(args, "check", False)
+    try:
+        resolve_instance_argument(args)
+    except MissingDefaultInstance as exc:
+        print(f"ummanu role-skills: {exc}", file=sys.stderr)
+        return 2
     return run_role_skills(args)
 
 

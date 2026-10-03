@@ -15,6 +15,8 @@ from __future__ import annotations
 import fnmatch
 import re
 
+from ummanu.transition.names import INSTANCE_PROJECT
+
 OLD_NAME = re.compile(r"(?i)secretary")
 
 #: (class, what the old name may appear in, the paths where it may). A pattern of `None` allows the
@@ -36,9 +38,9 @@ LIVE_ROOT_ALLOWLIST: tuple[Row, ...] = (
     # The Hermes Telegram agent `secretary` keeps its name. Today it is named only inside the R paths
     # below (board cards, audit, knowledge reports); the row admits its own spellings and no others.
     ("H", re.compile(r"\bhermes-secretary(?:-roles)?\b|~/\.hermes/skills/secretary(?:-roles)?\b"), ANYWHERE),
-    # The repository name, its project id and its cards. `secretary-instance-maintenance` was a
-    # product unit, not this repository.
-    ("I", re.compile(r"\bsecretary-instance\b(?!-maintenance)"), ANYWHERE),
+    # The repository name, its project id and its cards (`transition.names.INSTANCE_PROJECT`, the one
+    # spelling). The same name with `-maintenance` was a product unit, not this repository.
+    ("I", re.compile(rf"\b{re.escape(INSTANCE_PROJECT)}\b(?!-maintenance)"), ANYWHERE),
     # A card ref of the old product, e.g. `secretary-1566` or `pipeline/secretary-1932`.
     ("R", re.compile(r"\bsecretary-\d+\b(?!\.\d)"), ANYWHERE),
     # A knowledge directory named after the old product (`projects/secretary/`, kept by D9): a path

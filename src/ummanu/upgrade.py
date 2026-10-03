@@ -80,7 +80,7 @@ from ummanu.po import token as po_token
 from ummanu.po import workspace as po_workspace
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.runtime import interactive_workspace
-from ummanu.runtime.paths import component_enabled, configured_product_root
+from ummanu.runtime.paths import add_instance_argument, component_enabled, configured_product_root
 from ummanu.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
 from ummanu.web.health import WebProbeError, probe_web, target_from_unit
 from ummanu.web.server import LoopbackOnly
@@ -2665,7 +2665,7 @@ def add_upgrade_command(subparsers) -> None:
         "upgrade",
         help="pull the current product version and re-materialize this installation",
     )
-    upgrade.add_argument("--instance", required=True, help="path to an instance dir or instance.yaml")
+    add_instance_argument(upgrade)
     upgrade.add_argument("--dry-run", action="store_true", help="decide every step but write nothing")
     upgrade.add_argument("--no-pull", action="store_true", help="re-materialize without moving the checkout")
     upgrade.add_argument("--base-branch", default="main")

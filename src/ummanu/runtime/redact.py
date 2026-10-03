@@ -19,12 +19,13 @@ import re
 from collections.abc import Iterable
 from pathlib import Path
 
+from ummanu.runtime.paths import default_instance_path
 from ummanu.runtime.role_env import is_sensitive_env_name
 
 # .env files whose VALUES are known secrets on this host. Exact matches get scrubbed.
 DEFAULT_ENV_FILES = [
     Path.home() / ".hermes" / ".env",
-    Path.home() / "secretary-instance" / "runtime.env",
+    default_instance_path() / "runtime.env",
 ]
 
 # Minimum length for an .env value to be treated as a secret worth scrubbing verbatim

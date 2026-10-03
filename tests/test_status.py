@@ -740,9 +740,9 @@ class HeadRegistrySourceTests(unittest.TestCase):
         self.assertIsNone(registry["error"])
         self.assertEqual(registry["product_root"], str(product_root))
         self.assertEqual(registry["revision"], product_revision(product_root))
-        # The generated pair's home is the data directory, and no legacy copy was read.
+        # The generated pair's home is the data directory, and there is no legacy source to name.
         self.assertEqual(registry["snapshot"], str(root / "data" / "heads" / "heads.yaml"))
-        self.assertIsNone(registry["legacy_source"])
+        self.assertNotIn("legacy_source", registry)
         self.assertEqual(registry["canonical_owner"], "product")
         self.assertEqual(
             registry["canonical"],
@@ -803,8 +803,10 @@ class HeadRegistrySourceTests(unittest.TestCase):
 
         self.assertIn("[resources] table", snapshot["installation"]["head_registry"]["error"])
 
-    def test_status_names_the_legacy_live_root_pair_it_fell_back_to(self):
-        """Deploy skew: until `ummanu upgrade` writes `<data>/heads/`, the live root's pair is read."""
+    def test_status_never_reads_a_live_root_pair(self):
+        """ummanu-39 removed the deploy-skew fallback: a live root's pair is not read, and the error
+        names the data directory's pair and `ummanu upgrade` (was: the live root's pair was read and
+        named as `legacy_source`)."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             instance = self._instance(root)
@@ -820,9 +822,10 @@ class HeadRegistrySourceTests(unittest.TestCase):
 
         registry = snapshot["installation"]["head_registry"]
         self.assertEqual(validate(snapshot, "status", "status.json"), [])
-        self.assertIsNone(registry["error"])
-        self.assertEqual(registry["legacy_source"], str(root / "heads" / "heads.yaml"))
-        self.assertEqual(registry["snapshot"], str(root / "heads" / "heads.yaml"))
+        self.assertNotIn("legacy_source", registry)
+        self.assertEqual(registry["snapshot"], str(root / "data" / "heads" / "heads.yaml"))
+        self.assertIn(str(root / "data" / "heads" / "heads.yaml"), registry["error"])
+        self.assertIn("ummanu upgrade", registry["error"])
 
 
 class SecretStoreObservabilityTests(unittest.TestCase):
@@ -910,6 +913,14 @@ class SecretStoreObservabilityTests(unittest.TestCase):
             },
         )
 
+    def assert_only_the_work_tree_finding(self, code: int, output: str) -> None:
+        """`_init_instance_repo` makes the live root a Git work tree, which doctor reds since ummanu-39
+        (`live_root.git_work_tree`); green apart from that one finding."""
+        self.assertEqual(code, 1, output)
+        self.assertEqual(output.count("live_root."), 1, output)
+        self.assertIn("live_root.git_work_tree: ", output)
+        self.assertIn("status: findings", output)
+
     def test_doctor_stays_green_when_there_is_no_store(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -929,7 +940,7 @@ class SecretStoreObservabilityTests(unittest.TestCase):
                     ]
                 )
 
-        self.assertEqual(code, 0, output.getvalue())
+        self.assert_only_the_work_tree_finding(code, output.getvalue())
         self.assertNotIn("secret store findings", output.getvalue())
 
     def test_doctor_stays_green_when_the_store_is_healthy(self):
@@ -960,7 +971,7 @@ class SecretStoreObservabilityTests(unittest.TestCase):
                     ]
                 )
 
-        self.assertEqual(code, 0, output.getvalue())
+        self.assert_only_the_work_tree_finding(code, output.getvalue())
         self.assertNotIn("secret store findings", output.getvalue())
 
     def test_doctor_reports_a_broken_store_as_a_finding(self):

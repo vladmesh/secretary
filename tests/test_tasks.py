@@ -487,8 +487,8 @@ class TaskCliTests(CardStoreCase):
         """A transport failure is `backend_unavailable` and carries none of the token.
 
         The installation is named and is one this test built: unnamed, the command resolves
-        `DEFAULT_INSTANCE` — `~/secretary-instance`, which on the appliance host is the *live*
-        installation, whose card backend this suite must never read (secretary-1622).
+        the default live root (`runtime.paths.default_instance_path`), which on the appliance host is
+        the *live* installation, whose card backend this suite must never read (secretary-1622).
         The retired transport's variables are still exported while it runs and its stale file is
         still in the named instance, because "not a source of board configuration" is part of what
         this case is about (secretary-1026); the credential that must not be echoed is theirs.
@@ -512,9 +512,9 @@ class TaskCliTests(CardStoreCase):
 
     def test_missing_runtime_configuration_is_json_error(self) -> None:
         # The instance is named explicitly and points at an empty directory. Clearing the
-        # environment is not enough on its own: `DEFAULT_INSTANCE` is `Path.home()/secretary-instance`
-        # resolved at import, so on the appliance host itself an unnamed run resolves the live
-        # installation and reads the production board.
+        # environment is not enough on its own: the default live root is under `Path.home()`, so on
+        # the appliance host itself an unnamed run resolves the live installation and reads the
+        # production board.
         output, errors = io.StringIO(), io.StringIO()
         with (
             tempfile.TemporaryDirectory() as tmp,
@@ -706,6 +706,8 @@ class TaskCliTests(CardStoreCase):
                         "po",
                         "--ref",
                         "ummanu-468",
+                        "--instance",
+                        tmp,
                         "--data-dir",
                         str(data_dir),
                         "--reason-file",
@@ -3706,6 +3708,8 @@ class AssessmentStateTests(CardStoreCase):
                     "worker_local_broad_check_receipt",
                     "--reason-file",
                     str(reason),
+                    "--instance",
+                    self.tmpdir.name,
                     "--data-dir",
                     str(data_dir),
                     "--request-id",
@@ -3739,6 +3743,8 @@ class AssessmentStateTests(CardStoreCase):
                     "green",
                     "--body-file",
                     str(body),
+                    "--instance",
+                    self.tmpdir.name,
                     "--data-dir",
                     str(Path(self.tmpdir.name) / "cli-verdict"),
                     "--request-id",
@@ -4278,6 +4284,8 @@ class AssessmentStateTests(CardStoreCase):
                     "move",
                     "--ref",
                     "ummanu-468",
+                    "--instance",
+                    self.tmpdir.name,
                     "--data-dir",
                     str(Path(self.tmpdir.name) / "data"),
                     *arguments,
@@ -4337,6 +4345,8 @@ class AssessmentStateTests(CardStoreCase):
                     "release",
                     "--reason-file",
                     str(reason),
+                    "--instance",
+                    self.tmpdir.name,
                     "--data-dir",
                     str(Path(self.tmpdir.name) / "data"),
                     "--request-id",
@@ -4978,6 +4988,8 @@ class BlockedContractTests(CardStoreCase):
                     "ummanu-468",
                     "--kind",
                     "blocked",
+                    "--instance",
+                    self.tmpdir.name,
                     "--data-dir",
                     str(Path(self.tmpdir.name) / "cli"),
                     "--body-file",
@@ -5012,6 +5024,8 @@ class BlockedContractTests(CardStoreCase):
                     "blocked",
                     "--classification",
                     "wrong_task_definition",
+                    "--instance",
+                    self.tmpdir.name,
                     "--data-dir",
                     str(Path(self.tmpdir.name) / "cli"),
                     "--body-file",
@@ -5340,6 +5354,8 @@ class RequestIdOwnershipTests(CardStoreCase):
             "ummanu-468",
             "--kind",
             "done",
+            "--instance",
+            self.tmpdir.name,
             "--data-dir",
             data_dir,
             "--body-file",

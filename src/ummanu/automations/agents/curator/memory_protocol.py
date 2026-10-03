@@ -41,7 +41,7 @@ class MemoryWriteRequest:
 
 
 def default_ummanu_instance() -> Path:
-    return Path(os.environ.get("UMMANU_INSTANCE", str(DEFAULT_UMMANU_INSTANCE)))
+    return Path(os.environ.get("UMMANU_INSTANCE") or default_instance_path())
 
 
 def write_fact(

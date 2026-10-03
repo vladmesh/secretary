@@ -255,7 +255,9 @@ def _parse_registry(path: Path) -> dict:
     try:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError as e:
-        raise HeadRegistryError(f"head registry missing: {path}") from e
+        # An installation's snapshot is generated, never written by hand: name what generates it.
+        hint = "; run `ummanu upgrade` to generate it" if path.suffix in {".yaml", ".yml"} else ""
+        raise HeadRegistryError(f"head registry missing: {path}{hint}") from e
     except (OSError, UnicodeError) as e:
         raise HeadRegistryError(f"cannot read head registry {path}: {e}") from e
     if path.suffix in {".yaml", ".yml"}:

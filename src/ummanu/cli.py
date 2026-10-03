@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import shlex
 import sys
 import time
@@ -48,8 +47,9 @@ from ummanu.head_health import (
     HeadReadiness,
     run_probe,
 )
-from ummanu.head_registry import HeadRegistryConfigError, installed_heads, installed_pair, read_source
+from ummanu.head_registry import HeadRegistryConfigError, installed_heads, read_source
 from ummanu.host import (
+    FIXTURE_UNIT_FILES_DIR,
     KINDS,
     CollectResult,
     FixtureHostSource,
@@ -85,7 +85,7 @@ from ummanu.memory_write import (
     propose_memory_fact,
     supersede_memory_fact,
 )
-from ummanu.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
+from ummanu.onboarding import project_add, render_artifact
 from ummanu.po.commands import add_po_subcommands
 from ummanu.po.service import add_po_serve_subcommands
 from ummanu.product_issue_commands import add_product_issue_subcommands
@@ -102,6 +102,7 @@ from ummanu.runtime.codex_preflight import (
     data_dir_codex_home,
     resolve_codex_home,
 )
+from ummanu.runtime.paths import MissingDefaultInstance, add_instance_argument, resolve_instance_argument
 from ummanu.secret_commands import add_secret_subcommands
 from ummanu.secret_store import store_findings as _secret_store_findings
 from ummanu.session import run_shell
@@ -164,7 +165,12 @@ def main(argv: list[str] | None = None) -> int:
     if handler is None:
         parser.print_help()
         return 2
-    return handler(args)
+    try:
+        resolve_instance_argument(args)
+        return handler(args)
+    except MissingDefaultInstance as exc:
+        print(f"ummanu: {exc}", file=sys.stderr)
+        return 2
 
 
 def run_automations(argv: list[str]) -> int:
@@ -205,7 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = subparsers.add_parser("doctor", help="inspect an instance without changing the host")
     doctor.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
-    _add_instance(doctor, help="path to an instance dir or instance.yaml")
+    _add_env_instance(doctor)
     doctor.add_argument(
         "--offline",
         action="store_true",
@@ -226,7 +232,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.set_defaults(handler=run_doctor)
 
     status = subparsers.add_parser("status", help="show the current installation state")
-    _add_instance(status, help="path to an instance dir or instance.yaml")
+    _add_env_instance(status)
     status.add_argument("--json", action="store_true", help="print the stable JSON status schema")
     status.add_argument("--offline", action="store_true", help="do not inspect the live host")
     status.add_argument("--host-fixture", metavar="DIR", help="read a fixture host inventory")
@@ -405,25 +411,16 @@ def build_parser() -> argparse.ArgumentParser:
             "and a legacy orca_binding, drop the canonical adapter, and require provision and gate again"
         ),
     )
-    _add_env_instance(
-        project_add,
-        help=f"instance directory (default: UMMANU_INSTANCE or {DEFAULT_INSTANCE})",
-    )
+    _add_env_instance(project_add)
     project_add.set_defaults(handler=run_project_add)
     provision_start = project_subcommands.add_parser("provision-start")
     provision_start.add_argument("project_id")
-    _add_env_instance(
-        provision_start,
-        help=f"instance directory (default: UMMANU_INSTANCE or {DEFAULT_INSTANCE})",
-    )
+    _add_env_instance(provision_start)
     provision_start.set_defaults(handler=run_project_provision_start)
     provision_apply = project_subcommands.add_parser("provision-apply")
     provision_apply.add_argument("project_id")
     provision_apply.add_argument("--result")
-    _add_env_instance(
-        provision_apply,
-        help=f"instance directory (default: UMMANU_INSTANCE or {DEFAULT_INSTANCE})",
-    )
+    _add_env_instance(provision_apply)
     provision_apply.set_defaults(handler=run_project_provision_apply)
     gate = project_subcommands.add_parser("gate")
     gate.add_argument("project_id")
@@ -557,11 +554,7 @@ def _add_instance(
 
 
 def _add_env_instance(parser: argparse.ArgumentParser, *, help: str | None = None) -> None:
-    parser.add_argument(
-        "--instance",
-        default=os.environ.get("UMMANU_INSTANCE", DEFAULT_INSTANCE),
-        help=help,
-    )
+    add_instance_argument(parser, help=help)
 
 
 def run_config_check(args: argparse.Namespace) -> int:
@@ -599,9 +592,6 @@ def run_doctor(args: argparse.Namespace) -> int:
     print(f"projects: {report.projects}")
     print(f"adapters: {report.adapters}")
     print(f"adapter drafts: {report.adapter_drafts}")
-    legacy_heads = _legacy_head_registry_source(report)
-    if legacy_heads:
-        print(f"head registry source: legacy {legacy_heads} (until `ummanu upgrade` writes <data>/heads/)")
     print(f"data manifest: {'present' if report.has_manifest else 'absent'}")
     if report.manifest_path:
         print(f"data manifest path: {report.manifest_path}")
@@ -640,6 +630,8 @@ def run_doctor(args: argparse.Namespace) -> int:
             print(f"root filesystem: {finding['message']}")
         elif finding["code"] == "automation_busy_without_advance":
             print(f"{finding['agent']}: {finding['message']}")
+        elif str(finding["code"]).startswith("live_root."):
+            print(f"{finding['code']}: {finding['message']}")
 
     print("host changes: none")
     if inspection.unavailable:
@@ -688,15 +680,6 @@ def _codex_home_status(report) -> dict[str, object]:
         "login_missing": "",
         "codex_required": required,
     }
-
-
-def _legacy_head_registry_source(report) -> str | None:
-    """The live root's legacy snapshot while the readers fall back to it, else None."""
-    try:
-        pair = installed_pair(report.instance_path.parent, report.data_dir)
-    except HeadRegistryConfigError:
-        return None
-    return str(pair.snapshot) if pair.legacy else None
 
 
 def _codex_required(instance_dir: Path) -> bool:
@@ -761,8 +744,6 @@ def run_status(args: argparse.Namespace) -> int:
     print(f"Ummanu status: {snapshot['installation']['name'] or 'unnamed'}")
     print(f"active attempts: {len(snapshot['dispatcher']['active_attempts'])}")
     canon = snapshot["installation"]["head_registry"]
-    if canon["legacy_source"]:
-        print(f"head registry source: legacy {canon['legacy_source']} (until `ummanu upgrade` writes <data>/heads/)")
     if canon["error"]:
         print(f"head registry: {canon['error']}")
     else:
@@ -861,6 +842,7 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     findings.extend({"code": "restore_problem", "message": finding} for finding in restore)
     findings.extend(automation_busy_findings(report.data_dir))
     inspect_host = not args.offline and (not args.dry_run or args.host or args.host_fixture)
+    findings.extend(doctor_live_root_findings(report, args, inspect_host=inspect_host))
     collected: CollectResult | None = None
     expected = None
     diffs = None
@@ -949,6 +931,29 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         diffs,
         board_schema,
     )
+
+
+def doctor_live_root_findings(report, args: argparse.Namespace, *, inspect_host: bool) -> list[dict[str, object]]:
+    """`live_root.git_work_tree` and `live_root.old_path` (`infra.live_root_findings`).
+
+    The installed unit files are host state, read only when doctor inspects the host: the live
+    systemd directory, or a fixture host's `unit-files/`. A test that replaces the live host source
+    with one that names no unit directory reads none.
+    """
+    from ummanu.infra.live_root_findings import live_root_findings
+
+    live_root = report.instance_path.parent
+    unit_dirs: list[Path] = []
+    if inspect_host:
+        if args.host_fixture:
+            unit_dirs.append(Path(args.host_fixture) / FIXTURE_UNIT_FILES_DIR)
+        elif isinstance(unit_dir := getattr(LiveHostSource, "unit_files_dir", None), Path):
+            unit_dirs.append(unit_dir)
+    try:
+        _, home = resolve_runtime_owner(live_root)
+    except ValueError:
+        home = None
+    return live_root_findings(live_root, unit_dirs=unit_dirs, home=home)
 
 
 def automation_busy_findings(data_dir: Path | None) -> list[dict[str, object]]:

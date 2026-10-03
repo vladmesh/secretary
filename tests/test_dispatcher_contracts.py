@@ -701,7 +701,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
 
     A role that is handed no `UMMANU_INSTANCE` falls back to the default installation path, so
     on a host with a real installation a unit rendered for another instance would quietly route
-    off `~/secretary-instance`'s heads instead of its own.
+    off the default live root's heads instead of its own.
     """
 
     UNITS = (

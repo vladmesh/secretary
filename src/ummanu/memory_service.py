@@ -31,11 +31,12 @@ from ummanu.memory.canon import (  # noqa: F401  # Service-level names of the ca
     parse_frontmatter,
     scope_for_relative,
 )
+from ummanu.runtime.paths import default_instance_path
 
 DEFAULT_MEMORY_DIR = Path.home() / "ummanu-data" / "memory"
 # Canon lives in the private instance repo (docs/RECOVERY.md, "Layout"); the
 # export and the vector index stay derived under the data dir.
-DEFAULT_CANON = Path.home() / "secretary-instance" / "state" / "memory" / "facts"
+DEFAULT_CANON = default_instance_path() / "state" / "memory" / "facts"
 
 CANON = Path(os.environ.get("MEMORY_CANON_ROOT", DEFAULT_CANON))
 

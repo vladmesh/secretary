@@ -34,7 +34,7 @@ from ummanu.infra.systemd import (
 )
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.runtime.local_pty_head import runtime_scope_inventory
-from ummanu.runtime.paths import component_enabled, configured_product_root
+from ummanu.runtime.paths import component_enabled, configured_product_root, default_instance_path
 
 KINDS = ("projects", "units")
 UNIT_SUFFIXES = (".service", ".timer")
@@ -115,7 +115,7 @@ def default_systemd_layout() -> SystemdLayout:
     root = configured_product_root()
     home = Path.home()
     return SystemdLayout(
-        root, home / "secretary-instance", home / "ummanu-data", os.environ.get("USER", "dev"), home
+        root, default_instance_path(), home / "ummanu-data", os.environ.get("USER", "dev"), home
     )
 
 
@@ -718,6 +718,10 @@ def _names_from_dir(directory: Path) -> set[str]:
     return {entry.name for entry in directory.iterdir() if entry.is_dir()}
 
 
+#: A fixture host's directory of installed unit files (`FixtureHostSource`).
+FIXTURE_UNIT_FILES_DIR = "unit-files"
+
+
 class FixtureHostSource(HostSource):
     """A host modelled by a fixture directory. Used by tests and offline checks.
 
@@ -725,6 +729,7 @@ class FixtureHostSource(HostSource):
 
             projects/<name>/     one directory per project repo on the fixture host
             units.txt            one systemd unit name per line
+            unit-files/          installed unit files, read by doctor's live-root findings
 
     Reads only. A missing root is an inspection failure, so every kind is marked unavailable; within
     an existing root a missing per-kind file means an empty set.
@@ -841,6 +846,8 @@ class LiveHostSource(HostSource):
 
     # Cap each host probe so a hung systemctl cannot wedge doctor.
     timeout_seconds = 10
+    # Where the installed unit files are read from (doctor's live-root findings).
+    unit_files_dir = Path("/etc/systemd/system")
 
     def __init__(self, runtime_user: str | None = None):
         self.runtime_user = runtime_user

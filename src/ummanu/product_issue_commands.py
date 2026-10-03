@@ -7,8 +7,8 @@ import json
 import os
 
 from ummanu.board.backend import PRODUCT_ISSUE, board_client
-from ummanu.onboarding import DEFAULT_INSTANCE
 from ummanu.product_issues import ISSUE_WRITE_ROLES, ProductIssueStore
+from ummanu.runtime.paths import add_instance_argument
 from ummanu.task_commands import _read_body, resolve_data_dir, run_task_command
 from ummanu.tasks import TaskError
 
@@ -16,7 +16,7 @@ from ummanu.tasks import TaskError
 def _common(
     parser: argparse.ArgumentParser, *, write: bool = False, roles: tuple[str, ...] = ISSUE_WRITE_ROLES
 ) -> None:
-    parser.add_argument("--instance", default=os.environ.get("UMMANU_INSTANCE", DEFAULT_INSTANCE))
+    add_instance_argument(parser)
     parser.add_argument("--data-dir", default=os.environ.get("UMMANU_DATA_DIR"))
     if write:
         parser.add_argument("--role", required=True, choices=roles)

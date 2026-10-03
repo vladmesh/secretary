@@ -470,7 +470,7 @@ def launch_binding() -> list[str]:
     The launched process is a terminal Orca creates, not a child of the launcher, so it inherits
     none of the launcher's unit environment. Naming the runtime env file and the instance in the
     command itself is what keeps a role started by a non-default installation from reading
-    the home default ``~/secretary-instance``. Only names the launcher was actually given are rendered:
+    the home default live root (``paths.default_instance_path``). Only names the launcher was actually given are rendered:
     writing out the fallback would state a choice nobody made.
     """
     return [f"{name}={shlex.quote(value)}" for name in LAUNCH_BOUND_ENV if (value := os.environ.get(name))]
