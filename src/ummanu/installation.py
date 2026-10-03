@@ -515,18 +515,10 @@ def _snapshot_checkout(
             offsite_remote = instance_offsite_remote(tree.root / "instance.yaml")
         except DataDirError as exc:
             raise InstallError(f"snapshot instance.yaml: {exc}") from None
-        for location, label in ((data_dir, "data directory"), (repository, "snapshot repository")):
-            # Unsupported layout: whatever is inside the live root has to be written before the
-            # live root is laid out, so it could no longer be absent or empty.
-            if location == target or location.is_relative_to(target):
-                raise InstallError(
-                    f"snapshot instance.yaml puts the {label} {location} inside the live root {target}; "
-                    "a data directory or snapshot repository inside the live root is not supported, "
-                    "nothing was written"
-                )
+        live_root_in_data = _snapshot_layout(target, data_dir, repository)
         live = snapshot_tree.live_root_state(target, tree)
-        # The live root may sit inside the data directory (`data_dir: ..`), with this staging beside it.
-        not_data = (target, scratch)
+        # Shape (b): the live root `<data>/<name>` and this staging beside it, exactly, are not data.
+        not_data = (target, scratch) if live_root_in_data else ()
         bootstrap_evidence = _checked_data_target(data_dir, ignore=not_data)
         existing = _existing_snapshot_tip(repository)
         if dry_run:
@@ -535,7 +527,7 @@ def _snapshot_checkout(
                 tip, repository, tree.root, scratch, True, f"would recover exporter snapshot {tip[:12]}"
             )
         changed = live != "same" or existing != tip
-        inside_data = repository.is_relative_to(data_dir) or target.is_relative_to(data_dir)
+        inside_data = repository.is_relative_to(data_dir) or live_root_in_data
         if inside_data and (not _data_target_entries(data_dir, not_data) or bootstrap_evidence):
             # The checkpoint step accepts a data root only empty or laid out by ummanu, so lay it out
             # before the snapshot repository or the live root becomes one of its entries.
@@ -564,6 +556,32 @@ def _snapshot_checkout(
     finally:
         if not keep:
             shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _snapshot_layout(target: Path, data_dir: Path, repository: Path) -> bool:
+    """The one layout check of a snapshot recovery; True for shape (b), False for (a), else refused.
+
+    Accepted (docs/RECOVERY.md, "Snapshot recovery"):
+    (a) the live root and the data directory are disjoint, neither containing the other;
+    (b) the live root is a direct child of the data directory, `<data>/<name>` (`data_dir: ..`).
+    In both the snapshot repository lies outside the live root. Anything inside the live root
+    would be written before the live root is laid out, which then could no longer be absent or
+    empty; a live root deeper in the data directory would make its parents look like data.
+    """
+    for location, label in ((data_dir, "data directory"), (repository, "snapshot repository")):
+        if location == target or location.is_relative_to(target):
+            raise InstallError(
+                f"snapshot instance.yaml puts the {label} {location} inside the live root {target}; "
+                "this layout is not supported, nothing was written"
+            )
+    if not target.is_relative_to(data_dir):
+        return False
+    if target.parent != data_dir:
+        raise InstallError(
+            f"the live root {target} lies inside the data directory {data_dir} but is not a direct "
+            "child of it; this layout is not supported, nothing was written"
+        )
+    return True
 
 
 def _validate_snapshot_clone(staging: Path, remote: str) -> tuple[str, str]:
@@ -889,20 +907,18 @@ def _valid_existing_layout(data_dir: Path) -> bool:
 
 
 def _data_target_entries(data_dir: Path, ignore: tuple[Path, ...] = ()) -> set[str]:
-    """The data target's entries, less the top-level entry holding each path of `ignore`."""
+    """The data target's entries, less the ones that are exactly a path of `ignore`."""
     if not data_dir.exists():
         return set()
-    ignored = {
-        path.relative_to(data_dir).parts[0] for path in ignore if path != data_dir and path.is_relative_to(data_dir)
-    }
-    return {entry.name for entry in data_dir.iterdir()} - ignored
+    return {entry.name for entry in data_dir.iterdir() if entry not in ignore}
 
 
 def _checked_data_target(data_dir: Path, *, ignore: tuple[Path, ...] = ()) -> bool:
     """Refuse a non-empty data target ummanu did not create; True when it holds bootstrap evidence only.
 
-    `ignore` names paths inside the data target that are not its contents: a snapshot recovery's
-    live root, when the live root sits inside the data directory, and the staging beside it.
+    `ignore` names direct entries of the data target that are not its contents: a snapshot
+    recovery's live root `<data>/<name>` and the staging it created beside it. Nothing else is
+    left out, siblings and deeper paths included.
     """
     entries = _data_target_entries(data_dir, ignore)
     if not entries:

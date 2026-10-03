@@ -666,13 +666,13 @@ nothing outside its staging until the checks have passed:
    lineage; a newer (or unknown) head is refused naming both heads.
 3. **Locations.** The extracted `instance.yaml` names the data directory (a relative value is rooted
    at the live root) and `offsite.snapshot_repo`, resolved as the exporter resolves it, by default
-   `<data>/backup/instance.git`. A non-empty data directory ummanu did not lay out is refused. The
-   live root may sit inside the data directory (`data_dir: ..` with the live root at
-   `<data>/instance`, the snapshot repository at `<data>/backup/instance.git` beside it); the live
-   root and recovery's staging do not count as data-directory contents. **Unsupported layout:** a
-   data directory or snapshot repository that is the live root or lies inside it (for example
-   `data_dir: data`) is refused, naming both paths, before anything is written. Both would have to
-   be written before the live root is laid out, so the live root could no longer be absent or empty.
+   `<data>/backup/instance.git`. One layout check runs before anything is written. It accepts
+   exactly two shapes, and the snapshot repository lies outside the live root in both:
+   - (a) the live root and the data directory are disjoint, neither containing the other;
+   - (b) the live root is a direct child of the data directory, `<data>/<name>` (`data_dir: ..`).
+   Every other layout is refused with a message naming the paths. A non-empty data directory
+   ummanu did not lay out is refused too. In shape (b), only the live root entry itself and the
+   staging recovery created beside it are not counted as data-directory contents.
 4. **Live root rule.** The `--instance-dir` must be absent, empty, or already the live root of this
    same tip: every exported path the tree's, byte for byte and with its executable bit, and no
    exported path extra. A file the allowlist does not match (`secrets/installation.key`,

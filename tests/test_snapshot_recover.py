@@ -387,6 +387,53 @@ class SnapshotRefusalTests(SnapshotRecoverCase):
         self.assert_refused_before_writing(result, "9999_from_the_future")
         self.assertIn(f"this product's schema head {head_revision()}", self.steps(result)["install"][1])
 
+    def assert_nothing_written_beside(self, data_dir: Path, operator_file: Path) -> None:
+        self.assertFalse(self.fixture.target.exists())
+        self.assertEqual(operator_file.read_text(encoding="utf-8"), "the operator's\n")
+        self.assertFalse((data_dir / "data-manifest.json").exists())
+        self.assertFalse((data_dir / "backup").exists())
+        self.assertEqual(self.leftovers(), [])
+
+    def test_a_live_root_deeper_inside_the_data_directory_is_refused(self):
+        """The reviewer's reproduction: `data_dir: ../..` into `<data>/foreign-parent/instance`."""
+        data_dir = self.root / "ummanu-data"
+        self.fixture.target = data_dir / "foreign-parent" / "instance"
+        self.relocate_data_dir("../..")
+        self.fixture.data_dir = data_dir
+        operator_file = data_dir / "foreign-parent" / "operator-file.txt"
+        operator_file.parent.mkdir(parents=True)
+        operator_file.write_text("the operator's\n", encoding="utf-8")
+
+        result = self.recover()
+
+        self.assertEqual(result.status, "failed", result.render())
+        refusal = self.steps(result)["install"][1]
+        self.assertIn(
+            f"the live root {self.fixture.target} lies inside the data directory {data_dir}", refusal
+        )
+        self.assertIn("not a direct child of it; this layout is not supported, nothing was written", refusal)
+        self.assert_nothing_written_beside(data_dir, operator_file)
+
+    def test_a_foreign_sibling_of_a_direct_child_live_root_is_refused(self):
+        """Shape (b) leaves out the live root and its staging exactly; any other entry is data ummanu
+        did not lay out."""
+        data_dir = self.root / "ummanu-data"
+        self.fixture.target = data_dir / "instance"
+        self.relocate_data_dir("..")
+        self.fixture.data_dir = data_dir
+        operator_file = data_dir / "operator-file.txt"
+        data_dir.mkdir()
+        operator_file.write_text("the operator's\n", encoding="utf-8")
+
+        result = self.recover()
+
+        self.assertEqual(result.status, "failed", result.render())
+        self.assertIn(
+            f"data target {data_dir} is not an installation created by ummanu",
+            self.steps(result)["install"][1],
+        )
+        self.assert_nothing_written_beside(data_dir, operator_file)
+
     def test_a_data_directory_inside_the_live_root_is_refused_before_anything_is_written(self):
         self.relocate_data_dir("data")
         target = self.fixture.target
