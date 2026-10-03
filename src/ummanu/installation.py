@@ -466,6 +466,22 @@ class SnapshotCheckout:
     scratch: Path
     changed: bool
     detail: str
+    data_dir: Path
+
+
+def _reads_remote_shape(target: Path, *, recovery: bool, dry_run: bool) -> bool:
+    """The one shape decision (docs/RECOVERY.md, "Two remote shapes"): whether the clone step reads
+    the remote tip before it decides how to clone, for `install`, `recover` and `bootstrap` alike.
+
+    A recovery into an absent or empty target reads it; a dry run there stays offline. A live root an
+    earlier snapshot recovery or bootstrap laid out (an `instance.yaml` and no `.git`) is read by a
+    recovery and by the first install of a bootstrapped target. A work-tree target, any other
+    non-empty target and a fresh install never read it.
+    """
+    if not target.exists() or (target.is_dir() and not any(target.iterdir())):
+        return recovery and not dry_run
+    snapshot_live_root = (target / "instance.yaml").is_file() and not (target / ".git").exists()
+    return snapshot_live_root and (recovery or (target / ".ummanu-bootstrap").is_file())
 
 
 def _snapshot_checkout(
@@ -524,7 +540,13 @@ def _snapshot_checkout(
         if dry_run:
             keep = True
             return SnapshotCheckout(
-                tip, repository, tree.root, scratch, True, f"would recover exporter snapshot {tip[:12]}"
+                tip,
+                repository,
+                tree.root,
+                scratch,
+                True,
+                f"would recover exporter snapshot {tip[:12]}",
+                data_dir,
             )
         changed = live != "same" or existing != tip
         inside_data = repository.is_relative_to(data_dir) or live_root_in_data
@@ -545,7 +567,13 @@ def _snapshot_checkout(
         keep = True
         verb = "recovered" if changed else "reused"
         return SnapshotCheckout(
-            tip, repository, tree.root, scratch, changed, f"{verb} exporter snapshot {tip[:12]} into {repository}"
+            tip,
+            repository,
+            tree.root,
+            scratch,
+            changed,
+            f"{verb} exporter snapshot {tip[:12]} into {repository}",
+            data_dir,
         )
     except CredentialError as exc:
         raise InstallError(str(exc)) from None
@@ -1741,14 +1769,10 @@ def install(args: argparse.Namespace) -> InstallResult:
             or getattr(args, "bootstrap_credential_stdin", False)
         ):
             bootstrap, disposable_bootstrap = _bootstrap_credential(args, target)
-        # The one shape decision (docs/RECOVERY.md, "Two remote shapes"): a recovery into an absent
-        # or empty target, or into a live root an earlier snapshot recovery laid out (it has an
-        # `instance.yaml` and no `.git`), reads the remote tip first. An exporter snapshot takes the
-        # snapshot path; a legacy checkpoint, a work-tree target, any other non-empty target and a
-        # fresh install take the clone step below unchanged. A dry run against an absent target
-        # stays offline, as before.
-        snapshot_live_root = (target / "instance.yaml").is_file() and not (target / ".git").exists()
-        if recovery and (needs_clone or snapshot_live_root) and not (args.dry_run and needs_clone):
+        # The one shape decision (docs/RECOVERY.md, "Two remote shapes"). An exporter snapshot takes
+        # the snapshot path; a legacy checkpoint and every target that does not read the shape take
+        # the clone step below unchanged.
+        if _reads_remote_shape(target, recovery=recovery, dry_run=args.dry_run):
             snapshot = _snapshot_checkout(
                 args.instance_remote,
                 target,

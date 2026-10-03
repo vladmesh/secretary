@@ -16,6 +16,7 @@ from ummanu.bootstrap import (
     _install_platform,
     bootstrap,
 )
+from ummanu.installation import SnapshotCheckout
 
 
 class BootstrapTests(unittest.TestCase):
@@ -109,6 +110,8 @@ class BootstrapTests(unittest.TestCase):
             mock.patch("ummanu.bootstrap.os.geteuid", return_value=0),
             mock.patch("ummanu.bootstrap._host_supported"),
             mock.patch("ummanu.bootstrap._ensure_installation_user"),
+            # A legacy remote: the shape decision finds no snapshot manifest at its tip.
+            mock.patch("ummanu.bootstrap._snapshot_checkout", return_value=None),
             mock.patch("ummanu.bootstrap._clone_or_reuse", clone),
             mock.patch("ummanu.bootstrap._install_platform", steps.install_platform),
             mock.patch("ummanu.bootstrap._set_installation_owner", steps.set_owner),
@@ -152,6 +155,56 @@ class BootstrapTests(unittest.TestCase):
             self.assertIn("/runtime.env", exclude)
             for removed in ("ensure_pipeline_board", "migrate_assessment_column", "_compose_file"):
                 self.assertFalse(hasattr(bootstrap_module, removed), removed)
+
+    def test_a_snapshot_remote_is_laid_out_by_the_recovery_clone_step_and_gets_no_git_exclude(self) -> None:
+        """The snapshot branch: `_snapshot_checkout` lays the live root out, bootstrap adds its stamp
+        and the store, and hands over the live root and the data directory; no `.git` is written."""
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target, data, scratch = root / "instance", root / "data", root / ".instance.snapshot-x"
+
+            def lay_out(remote: str, directory: Path, **kwargs: object) -> SnapshotCheckout:
+                self.assertEqual((remote, kwargs), ("remote", {"dry_run": False, "installation_user": "dev"}))
+                directory.mkdir()
+                (directory / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+                scratch.mkdir()
+                return SnapshotCheckout(
+                    "tip", data / "backup" / "instance.git", scratch, scratch, True, "", data
+                )
+
+            args = SimpleNamespace(
+                instance_dir=str(target), instance_remote="remote", installation_user="dev", dry_run=False
+            )
+            steps = mock.Mock()
+            with (
+                mock.patch("ummanu.bootstrap.os.geteuid", return_value=0),
+                mock.patch("ummanu.bootstrap._host_supported"),
+                mock.patch("ummanu.bootstrap._ensure_installation_user"),
+                mock.patch("ummanu.bootstrap._snapshot_checkout", side_effect=lay_out),
+                mock.patch("ummanu.bootstrap._clone_or_reuse", steps.clone),
+                mock.patch("ummanu.bootstrap._install_platform", steps.install_platform),
+                mock.patch("ummanu.bootstrap._set_installation_owner", steps.set_owner),
+                mock.patch("ummanu.bootstrap.provision_board_store", steps.provision),
+                mock.patch("ummanu.bootstrap.migrate_instance", steps.migrate),
+                mock.patch("ummanu.bootstrap.verify_board_store_roles", steps.verify),
+                mock.patch("builtins.print"),
+            ):
+                self.assertEqual(bootstrap(args), 0)
+
+            self.assertEqual(
+                steps.mock_calls,
+                [
+                    mock.call.install_platform(dry_run=False, runtime_user="dev"),
+                    mock.call.provision(target, allow_create=True),
+                    mock.call.migrate(target),
+                    mock.call.verify(target),
+                    mock.call.set_owner(target, "dev"),
+                    mock.call.set_owner(data, "dev"),
+                ],
+            )
+            self.assertTrue((target / BOOTSTRAP_STAMP).is_file())
+            self.assertFalse((target / ".git").exists())
+            self.assertFalse(scratch.exists())
 
     def test_a_fresh_bootstrap_writes_no_runtime_file(self) -> None:
         """There is one board backend, so bootstrap has nothing to record in `runtime.env`."""
@@ -222,6 +275,7 @@ class BootstrapTests(unittest.TestCase):
                 mock.patch("ummanu.bootstrap.os.geteuid", return_value=0),
                 mock.patch("ummanu.bootstrap._host_supported"),
                 mock.patch("ummanu.bootstrap._ensure_installation_user"),
+                mock.patch("ummanu.bootstrap._snapshot_checkout", return_value=None),
                 mock.patch("ummanu.bootstrap._clone_or_reuse", side_effect=self._clone),
                 mock.patch("ummanu.bootstrap._install_platform"),
                 # `provision` itself runs; only Docker is answered for it.

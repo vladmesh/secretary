@@ -5,6 +5,10 @@ reproducible host state: this module installs Docker and Compose, provisions the
 PostgreSQL board store (`board/provision.py`), migrates it to this build's schema
 (`board/migrate.py`) and verifies its role contract. That empty, migrated store is the whole board a fresh installation starts from:
 cards come later from `task create` or from install recovery restoring a checkpoint into it.
+
+The instance comes from the remote through recovery's own clone step (docs/RECOVERY.md, "Fresh
+install and recovery"): a legacy checkpoint is cloned as a Git checkout, an exporter snapshot is laid
+out as a plain live root and a snapshot repository, exactly as `recover` lays it out.
 """
 
 from __future__ import annotations
@@ -23,10 +27,13 @@ from ummanu.board.provision import provision as provision_board_store
 from ummanu.board.provision import verify_roles as verify_board_store_roles
 from ummanu.installation import (
     InstallError,
+    SnapshotCheckout,
     _clone_or_reuse,
     _ensure_installation_user,
+    _reads_remote_shape,
     _run,
     _set_installation_owner,
+    _snapshot_checkout,
 )
 
 BOOTSTRAP_STAMP = ".ummanu-bootstrap"
@@ -107,10 +114,16 @@ def _ensure_docker_ready(*, timeout: int = 60) -> None:
         time.sleep(1)
 
 
-def _mark_bootstrap_checkout(target: Path) -> None:
-    """Mark the one clean checkout that may proceed through its first install."""
+def _mark_bootstrap_checkout(target: Path, *, work_tree: bool = True) -> None:
+    """Mark the one clean checkout that may proceed through its first install.
+
+    A snapshot live root (`work_tree=False`) has no Git to exclude the stamp from: the export
+    allowlist does not match it, so it is host-local there without any entry.
+    """
     stamp = target / BOOTSTRAP_STAMP
     write_text_atomic(stamp, "created by ummanu bootstrap\n")
+    if not work_tree:
+        return
     exclude = target / ".git" / "info" / "exclude"
     existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
     entries = (f"/{BOOTSTRAP_STAMP}", "/runtime.env")
@@ -123,6 +136,7 @@ def _mark_bootstrap_checkout(target: Path) -> None:
 
 def bootstrap(args: argparse.Namespace) -> int:
     target = Path(args.instance_dir).expanduser().resolve()
+    snapshot: SnapshotCheckout | None = None
     try:
         if not args.dry_run and os.geteuid() != 0:
             raise BootstrapError("host bootstrap must run as root")
@@ -130,25 +144,41 @@ def bootstrap(args: argparse.Namespace) -> int:
             _host_supported()
         # Bootstrap may be safely rerun for an existing dedicated user.
         _ensure_installation_user(args.installation_user, recovery=True, dry_run=args.dry_run)
-        _clone_or_reuse(
-            args.instance_remote,
-            target,
-            recovery=True,
-            dry_run=args.dry_run,
-            installation_user=args.installation_user,
-        )
+        # The clone step makes recovery's one shape decision (docs/RECOVERY.md, "Two remote
+        # shapes"): an exporter snapshot is laid out exactly as `recover` lays it out, so the
+        # `recover` that follows finds the same tip and continues; a legacy checkpoint is cloned.
+        if _reads_remote_shape(target, recovery=True, dry_run=args.dry_run):
+            snapshot = _snapshot_checkout(
+                args.instance_remote,
+                target,
+                dry_run=args.dry_run,
+                installation_user=args.installation_user,
+            )
+        if snapshot is None:
+            _clone_or_reuse(
+                args.instance_remote,
+                target,
+                recovery=True,
+                dry_run=args.dry_run,
+                installation_user=args.installation_user,
+            )
         if not args.dry_run:
-            _mark_bootstrap_checkout(target)
+            _mark_bootstrap_checkout(target, work_tree=snapshot is None)
             _install_platform(dry_run=False, runtime_user=args.installation_user)
             provision_board_store(target, allow_create=True)
             migrate_instance(target)
             verify_board_store_roles(target)
             # Last, so the handoff covers what provisioning created as root under the instance:
             # `board-store.env` (0600, read by every role and instance-bound CLI). The Compose
-            # definition stays root's in /opt/ummanu.
+            # definition stays root's in /opt/ummanu. A snapshot also laid the data directory out.
             _set_installation_owner(target, args.installation_user)
+            if snapshot is not None:
+                _set_installation_owner(snapshot.data_dir, args.installation_user)
         print("ummanu bootstrap\nstatus: " + ("preview" if args.dry_run else "ok"))
         return 0
     except (BootstrapError, InstallError, OSError, RuntimeError) as exc:
         print(f"ummanu bootstrap\nstatus: failed: {exc}")
         return 1
+    finally:
+        if snapshot is not None:
+            shutil.rmtree(snapshot.scratch, ignore_errors=True)

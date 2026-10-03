@@ -13,6 +13,7 @@ from __future__ import annotations
 import getpass
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -30,7 +31,10 @@ from tests.fakes.snapshot_remote import (
     exporter_remote,
     git,
 )
-from ummanu import installation, upgrade
+from ummanu import bootstrap as bootstrap_module
+from ummanu import installation, secret_store, upgrade
+from ummanu.board import provision as provision_module
+from ummanu.board import store
 from ummanu.board.migrate import head_revision
 from ummanu.checkpoint import (
     SNAPSHOT_BASE_REF,
@@ -45,6 +49,10 @@ from ummanu.config import validate_instance
 from ummanu.head_registry import installed_heads, installed_pair
 from ummanu.infra.export_allowlist import is_exported
 from ummanu.installation import InstallError, _recovery_identity
+from ummanu.secret_words import RECOVERY_WORDS
+
+PHRASE = " ".join(RECOVERY_WORDS[:16])
+SERVICE_ENV = "EXAMPLE_URL=http://127.0.0.1/rpc\nEXAMPLE_API_TOKEN=live-token\n"
 
 
 def _args(fixture, **overrides) -> SimpleNamespace:
@@ -72,6 +80,54 @@ def _head_registry_only(context, steps=installation.STEPS):
     return upgrade.run_steps(
         context, steps=tuple(step for step in steps if step is upgrade.step_head_registry)
     )
+
+
+def _fast_key_params() -> dict:
+    """The store's key parameters at a cheap work factor; the derivation reads them back from the file."""
+    return {
+        "format": secret_store.KEY_PARAMS_FORMAT,
+        "version": secret_store.KEY_PARAMS_VERSION,
+        "kdf": {
+            "id": "scrypt",
+            "salt": secret_store._b64(b"0123456789abcdef"),
+            "length": 32,
+            "n": 2**8,
+            "r": 8,
+            "p": 1,
+        },
+    }
+
+
+def _stood_in_bootstrap(
+    args: SimpleNamespace, opt: Path, store_steps: mock.Mock, chowned: list[tuple[Path, int, int]]
+) -> int:
+    """The real `ummanu bootstrap` with root's view, the host check, the platform install and Docker
+    stood in for. `provision` runs and writes `board-store.env`; the migration and the role check are
+    recorded on `store_steps`; every `chown` runs and is recorded on `chowned`."""
+    kwdefaults = dict(provision_module.provision.__kwdefaults__ or {})
+    kwdefaults["compose_path"] = opt / "postgres-compose.yml"
+    real_chown = os.chown
+
+    def chown(path, uid: int, gid: int, *, follow_symlinks: bool = True) -> None:
+        chowned.append((Path(os.fsdecode(path)), uid, gid))
+        real_chown(path, uid, gid, follow_symlinks=follow_symlinks)
+
+    with (
+        mock.patch("ummanu.bootstrap.os.geteuid", return_value=0),
+        mock.patch("ummanu.bootstrap.os.chown", side_effect=chown),
+        mock.patch("ummanu.bootstrap._host_supported"),
+        mock.patch("ummanu.bootstrap._ensure_installation_user"),
+        mock.patch("ummanu.bootstrap._install_platform", store_steps.install_platform),
+        mock.patch.object(provision_module.provision, "__kwdefaults__", kwdefaults),
+        mock.patch("ummanu.board.provision._exists", return_value=False),
+        mock.patch("ummanu.board.provision._run", return_value="container-id"),
+        mock.patch("ummanu.board.provision._inspect_container"),
+        mock.patch("ummanu.board.provision._wait_ready"),
+        mock.patch("ummanu.bootstrap.migrate_instance", store_steps.migrate),
+        mock.patch("ummanu.bootstrap.verify_board_store_roles", store_steps.verify),
+        mock.patch("builtins.print"),
+    ):
+        return bootstrap_module.bootstrap(args)
 
 
 def _rebuilt_index(data_dir: Path, instance_dir: Path, **_kwargs) -> int:
@@ -612,6 +668,176 @@ class SnapshotRetryTests(SnapshotRecoverCase):
         self.assertEqual(self.leftovers(), [])
 
 
+class SnapshotBootstrapTests(SnapshotRecoverCase):
+    """`ummanu bootstrap` against a snapshot remote, then `ummanu recover` (docs/RECOVERY.md, "Fresh
+    install and recovery"): the clean-host sequence the stand drill runs.
+
+    Bootstrap runs for real with root's view, the host check, the platform install and Docker stood
+    in for: the shape decision, the snapshot repository, the live root and `provision`'s
+    `board-store.env` are real, and so is every ownership handoff, recorded on its way to `chown`.
+    The source carries a secret store, so recovery opens it from the phrase.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        service_env = self.root / "service.env"
+        service_env.write_text(SERVICE_ENV, encoding="utf-8")
+        service_env.chmod(0o600)
+        with mock.patch.object(secret_store, "_new_key_params", side_effect=_fast_key_params):
+            secret_store.initialize_store(self.fixture.source, phrase=PHRASE, actor="tester")
+        secret_store.import_env_file(
+            self.fixture.source,
+            source=service_env,
+            scope="installation",
+            purpose="service credentials",
+            actor="tester",
+            materialize={"target": secret_store.MATERIALIZE_RUNTIME_ENV},
+        )
+        self.fixture.cut()
+        self.phrase_file = self.root / "phrase.txt"
+        self.phrase_file.write_text(PHRASE + "\n", encoding="utf-8")
+        self.chowned: list[tuple[Path, int, int]] = []
+        self.store_steps = mock.Mock()
+        self.account = (os.getuid(), os.getgid())
+
+    def bootstrap(self, **overrides) -> int:
+        args = SimpleNamespace(
+            instance_dir=str(self.fixture.target),
+            instance_remote=str(self.fixture.remote),
+            installation_user=getpass.getuser(),
+            dry_run=False,
+        )
+        for name, value in overrides.items():
+            setattr(args, name, value)
+        return _stood_in_bootstrap(args, self.root / "opt", self.store_steps, self.chowned)
+
+    def assert_bootstrapped(self, tip: str) -> None:
+        target = self.fixture.target
+        repo = self.repository
+        # The snapshot repository at its resolved location, at the tip, with the takeover marker.
+        self.assertEqual(git(repo, "rev-parse", "--is-bare-repository"), "true")
+        self.assertEqual(git(repo, "rev-parse", SNAPSHOT_REF), tip)
+        self.assertEqual(git(repo, "cat-file", "blob", SNAPSHOT_BASE_REF), tip)
+        # A plain live root: exactly the allowlisted tree, plus the two host-local files bootstrap adds.
+        tree = git(repo, "ls-tree", "-r", "--name-only", "--full-tree", tip).splitlines()
+        live = self.live_files()
+        self.assertEqual(
+            sorted(live),
+            sorted([*(path for path in tree if is_exported(path)), ".ummanu-bootstrap", "board-store.env"]),
+        )
+        self.assertFalse((target / ".git").exists())
+        self.assertEqual(live[".ummanu-bootstrap"], b"created by ummanu bootstrap\n")
+        # `board-store.env`: private, handed to the installation user after the store steps used it.
+        store_file = store.store_path(target)
+        self.assertEqual(store_file.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(store.resolve(target).dbname, store.parse(store_file).dbname)
+        self.assertIn((store_file, *self.account), self.chowned)
+        self.assertIn((target / ".ummanu-bootstrap", *self.account), self.chowned)
+        self.assertEqual(self.leftovers(), [])
+        self.assertEqual(
+            self.store_steps.mock_calls[-3:],
+            [
+                mock.call.install_platform(dry_run=False, runtime_user=getpass.getuser()),
+                mock.call.migrate(target),
+                mock.call.verify(target),
+            ],
+        )
+
+    def test_bootstrap_lays_a_snapshot_out_as_recover_does_and_recover_then_finishes(self):
+        tip = self.fixture.tip
+        target = self.fixture.target
+
+        self.assertEqual(self.bootstrap(), 0)
+
+        self.assert_bootstrapped(tip)
+        # The data directory the clone step laid out is the installation user's too.
+        self.assertTrue((self.fixture.data_dir / "data-manifest.json").is_file())
+        self.assertIn((self.fixture.data_dir, *self.account), self.chowned)
+
+        result = self.recover(recovery_phrase_file=str(self.phrase_file))
+
+        steps = self.steps(result)
+        self.assertEqual(result.status, "ok", result.render())
+        # The live root bootstrap laid out is this tip's (`live_root_state` same): nothing is cloned again.
+        self.assertEqual(steps["instance-checkout"][0], "unchanged")
+        self.assertIn(f"reused exporter snapshot {tip[:12]}", steps["instance-checkout"][1])
+        self.assertEqual(git(self.repository, "rev-parse", SNAPSHOT_REF), tip)
+        # The secret store opened from the phrase and materialised runtime.env.
+        self.assertEqual(steps["secret-store"][0], "changed")
+        self.assertTrue(secret_store.key_path(target).is_file())
+        self.assertEqual((target / "runtime.env").read_text(encoding="utf-8"), SERVICE_ENV)
+        # Board, memory, heads, and the first tick's writer.
+        self.assertEqual(steps["board"], ("changed", "1 card(s) at parity"))
+        self.board.assert_called_once_with(self.fixture.data_dir, instance=target)
+        self.assertEqual(steps["memory"], ("changed", "rebuilt index for 1 fact(s)"))
+        self.assertEqual(installed_pair(target).snapshot.parent, self.fixture.data_dir / "heads")
+        self.assertEqual(installed_heads(target)["role_defaults"]["new_card"], HEAD)
+        writer = tick_checkpoint_writer(self.fixture.data_dir, target)
+        self.assertIsInstance(writer, SnapshotExporter)
+        self.assertEqual(writer.snapshot_repo, self.repository.resolve())
+
+    def test_a_second_bootstrap_and_a_second_recover_change_nothing(self):
+        tip = self.fixture.tip
+        self.assertEqual(self.bootstrap(), 0)
+        credentials = store.store_path(self.fixture.target).read_bytes()
+        self.assertEqual(self.recover(recovery_phrase_file=str(self.phrase_file)).status, "ok")
+
+        self.assertEqual(self.bootstrap(), 0)
+
+        # Same tip, same credentials, and the live root still the tip's plus host-local files.
+        self.assertEqual(git(self.repository, "rev-parse", SNAPSHOT_REF), tip)
+        self.assertEqual(store.store_path(self.fixture.target).read_bytes(), credentials)
+        self.assertEqual(self.leftovers(), [])
+        again = self.recover(recovery_phrase_file=str(self.phrase_file))
+        self.assertEqual(again.status, "ok", again.render())
+        steps = self.steps(again)
+        for name in ("instance-checkout", "checkpoint", "board", "memory"):
+            self.assertEqual(steps[name][0], "unchanged", (name, steps[name]))
+        self.assertEqual(self.board.call_count, 1)
+        self.assertEqual(store.store_path(self.fixture.target).read_bytes(), credentials)
+
+    def test_a_live_root_inside_the_data_directory_bootstraps_and_recovers(self):
+        data_dir = self.root / "ummanu-data"
+        self.fixture.target = data_dir / "instance"
+        tip = self.relocate_data_dir("..")
+        self.fixture.data_dir = data_dir
+
+        self.assertEqual(self.bootstrap(), 0)
+
+        repository = data_dir / "backup" / "instance.git"
+        self.assertEqual(git(repository, "rev-parse", SNAPSHOT_REF), tip)
+        self.assertTrue((data_dir / "data-manifest.json").is_file())
+        self.assertIn((data_dir, *self.account), self.chowned)
+        result = self.recover(recovery_phrase_file=str(self.phrase_file))
+        self.assertEqual(result.status, "ok", result.render())
+        self.assertEqual(self.steps(result)["instance-checkout"][0], "unchanged")
+        self.assertEqual(self.steps(result)["checkpoint"][0], "changed")
+        self.assertEqual(
+            tick_checkpoint_writer(data_dir, self.fixture.target).snapshot_repo, repository.resolve()
+        )
+
+    def test_a_plain_install_after_a_snapshot_bootstrap_is_the_first_install_as_after_a_legacy_one(self):
+        self.assertEqual(self.bootstrap(), 0)
+
+        result = self.recover(recover=False, recovery_phrase_file=str(self.phrase_file))
+
+        self.assertEqual(result.status, "ok", result.render())
+        self.assertIn("reused exporter snapshot", self.steps(result)["instance-checkout"][1])
+        self.assertEqual(self.steps(result)["board"][0], "changed")
+        # The first install consumes the stamp, and a second one is refused as an existing installation.
+        self.assertFalse((self.fixture.target / ".ummanu-bootstrap").exists())
+        again = self.recover(recover=False)
+        self.assertEqual(again.status, "failed")
+        self.assertIn("choose --recover", self.steps(again)["install"][1])
+
+    def test_a_preview_against_an_absent_target_stays_offline(self):
+        with mock.patch.object(bootstrap_module, "_snapshot_checkout") as probe:
+            self.assertEqual(self.bootstrap(dry_run=True), 0)
+
+        probe.assert_not_called()
+        self.assertFalse(self.fixture.target.exists())
+
+
 class LegacyShapeTests(unittest.TestCase):
     def test_a_remote_tip_without_a_manifest_takes_the_legacy_clone_step(self):
         # A bare remote, and a work tree named as the remote (as tests/test_secret_recover.py does).
@@ -664,6 +890,41 @@ class LegacyShapeTests(unittest.TestCase):
                 self.assertEqual(
                     sorted(p.name for p in root.iterdir() if p.name.startswith(".instance.")), []
                 )
+
+    def test_bootstrap_clones_a_legacy_remote_as_before_after_reading_its_shape(self):
+        with tempfile.TemporaryDirectory(prefix="legacy-shape-") as temporary:
+            root = Path(temporary)
+            source, remote, target = root / "source", root / "instance.git", root / "instance"
+            source.mkdir()
+            _checkpoint(source, root / "data")
+            _git(source, "init", "-b", "main")
+            _git(source, "add", ".")
+            _git(source, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-m", "x")
+            subprocess.run(["git", "clone", "--quiet", "--bare", str(source), str(remote)], check=True)
+            args = SimpleNamespace(
+                instance_dir=str(target),
+                instance_remote=str(remote),
+                installation_user=getpass.getuser(),
+                dry_run=False,
+            )
+            probe = mock.Mock(wraps=installation._snapshot_checkout)
+            chowned: list[tuple[Path, int, int]] = []
+
+            for _run in range(2):
+                with mock.patch.object(bootstrap_module, "_snapshot_checkout", probe):
+                    self.assertEqual(_stood_in_bootstrap(args, root / "opt", mock.Mock(), chowned), 0)
+
+            # The first run read the shape and found no manifest; the rerun of a checkout did not.
+            probe.assert_called_once()
+            self.assertEqual(git(target, "rev-parse", "HEAD"), git(remote, "rev-parse", "main"))
+            self.assertEqual(git(target, "status", "--porcelain", "--untracked-files=no"), "")
+            exclude = (target / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+            self.assertIn("/.ummanu-bootstrap\n", exclude)
+            self.assertIn("/runtime.env\n", exclude)
+            self.assertEqual(store.store_path(target).stat().st_mode & 0o777, 0o600)
+            # No data directory and no snapshot repository: nothing of the snapshot path ran.
+            self.assertFalse((root / "data").exists())
+            self.assertEqual(sorted(p.name for p in root.iterdir() if p.name.startswith(".instance.")), [])
 
     def test_a_work_tree_target_never_reads_the_remote_shape(self):
         with tempfile.TemporaryDirectory() as temporary:

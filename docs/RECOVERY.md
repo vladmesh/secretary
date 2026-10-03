@@ -612,12 +612,29 @@ sudo ummanu recover --instance-remote REMOTE --instance-dir INSTANCE --installat
   --bootstrap-credential-file TOKEN_FILE --recovery-phrase-file PHRASE_FILE
 ```
 
+The clean-host sequence is the same two commands for both [remote shapes](#two-remote-shapes);
+only what `bootstrap` leaves in `INSTANCE` differs:
+
+| Step | Legacy remote (tip without a manifest) | Snapshot remote (tip with `snapshot-manifest.json`) |
+| --- | --- | --- |
+| 1. `sudo ummanu bootstrap ...` | clones a Git checkout ([Checkout](#checkout)), writes `.ummanu-bootstrap` and adds it and `/runtime.env` to `.git/info/exclude` | lays out the plain live root and the snapshot repository with its takeover marker ([Snapshot recovery](#snapshot-recovery) steps 1-7; the data directory is laid out when the repository or the live root is in it), writes `.ummanu-bootstrap`; no `.git` is written |
+| 2. same run | provisions, migrates and role-verifies the board store; `board-store.env` (0600) in `INSTANCE`; everything handed to `--installation-user` | the same; the data directory is handed over too |
+| 3. `sudo ummanu recover ... --recovery-phrase-file PHRASE_FILE` | fetches and fast-forwards the checkout, then runs the [sequence](#sequence) | finds the live root of the same tip (the stamp and `board-store.env` are host-local, not a divergence) and the repository at the tip, so nothing is cloned again; then runs the [sequence](#sequence) on the extracted tree: phrase, board and sprint parity, memory reindex, heads in `<data>/heads/`, the exporter on the first tick |
+
+For a snapshot remote this is the documented flow: `bootstrap`, then `recover` with the phrase. A
+rerun of either is idempotent: the same tip, no second board import, the store credentials kept.
+A plain `install` instead of `recover` after `bootstrap` takes the same path for both shapes: it is
+the bootstrapped target's first install, runs the same sequence and removes `.ummanu-bootstrap` at
+the end; after that, `install` refuses the target and names `--recover`.
+
 ### Two remote shapes
 
-`recover` reads the remote tip before it decides how to clone, whenever the `--instance-dir` target
-is not a Git work tree (absent, empty, or a live root an earlier snapshot recovery laid out). It
-clones the default branch depth 1, bare, into a private sibling staging directory and looks for
-`snapshot-manifest.json` at the root of the tip's tree:
+`recover` and `bootstrap` read the remote tip before they decide how to clone, whenever the
+`--instance-dir` target is not a Git work tree (absent, empty, or a live root an earlier snapshot
+recovery or bootstrap laid out); the first `install` of a bootstrapped live root reads it too. It is
+one decision and one clone step for all three commands. It clones the default branch depth 1, bare,
+into a private sibling staging directory and looks for `snapshot-manifest.json` at the root of the
+tip's tree:
 
 - **With a manifest** the tip is an exporter snapshot, and recovery takes the
   [snapshot path](#snapshot-recovery).
@@ -626,7 +643,7 @@ clones the default branch depth 1, bare, into a private sibling staging director
   manifest.
 
 A target that is already a Git work tree, a fresh `install` and a `--dry-run` against an absent
-target do not read the shape and take the checkout path, as before.
+target (of `recover` or `bootstrap`) do not read the shape and take the checkout path, as before.
 
 ### Checkout
 
