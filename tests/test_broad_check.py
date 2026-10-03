@@ -86,6 +86,12 @@ class BroadCheckTestCase(unittest.TestCase):
         self.scripts.mkdir()
         self._init_workspace(self.root)
         self.stream = StringIO()
+        # A live root with no registered project, unless a case names its own with `--instance`: the
+        # CLI neither reads this host's installation nor falls back to the default live root, which
+        # it refuses when absent (ummanu-39). An empty one answers `no_project_binding`, as before.
+        empty_live_root = Path(self.tmpdir.name) / "live-root"
+        empty_live_root.mkdir()
+        self.enterContext(mock.patch.dict(os.environ, {"UMMANU_INSTANCE": str(empty_live_root)}))
 
     def _init_workspace(self, root: Path, *, project_package: str = "ummanu") -> Path:
         """A committed candidate checkout, optionally without any importable project package.

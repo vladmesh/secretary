@@ -487,8 +487,8 @@ class TaskCliTests(CardStoreCase):
         """A transport failure is `backend_unavailable` and carries none of the token.
 
         The installation is named and is one this test built: unnamed, the command resolves
-        `DEFAULT_INSTANCE` — `~/secretary-instance`, which on the appliance host is the *live*
-        installation, whose card backend this suite must never read (secretary-1622).
+        the default live root (`runtime.paths.default_instance_path`), which on the appliance host is
+        the *live* installation, whose card backend this suite must never read (secretary-1622).
         The retired transport's variables are still exported while it runs and its stale file is
         still in the named instance, because "not a source of board configuration" is part of what
         this case is about (secretary-1026); the credential that must not be echoed is theirs.
@@ -512,9 +512,9 @@ class TaskCliTests(CardStoreCase):
 
     def test_missing_runtime_configuration_is_json_error(self) -> None:
         # The instance is named explicitly and points at an empty directory. Clearing the
-        # environment is not enough on its own: `DEFAULT_INSTANCE` is `Path.home()/secretary-instance`
-        # resolved at import, so on the appliance host itself an unnamed run resolves the live
-        # installation and reads the production board.
+        # environment is not enough on its own: the default live root is under `Path.home()`, so on
+        # the appliance host itself an unnamed run resolves the live installation and reads the
+        # production board.
         output, errors = io.StringIO(), io.StringIO()
         with (
             tempfile.TemporaryDirectory() as tmp,

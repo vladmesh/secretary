@@ -21,6 +21,7 @@ from pathlib import Path
 from ummanu.infra import old_name_guard
 from ummanu.infra.old_name_guard import applies as _applies
 from ummanu.infra.old_name_guard import text_of
+from ummanu.transition.names import INSTANCE_PROJECT
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -71,6 +72,23 @@ def violations(path: str, text: str | None) -> list[str]:
     return old_name_guard.violations(path, text, ALLOWLIST)
 
 
+#: The product's source, where the instance repository's name is a transition name only (ummanu-39):
+#: the live root is `runtime.paths.default_instance_path`, the old path lives in `transition.names`.
+PRODUCT_SOURCE = "src/*"
+TRANSITION_SOURCE = "src/ummanu/transition/*"
+
+
+def instance_literals(path: str, text: str | None) -> list[str]:
+    """Every line of a product source file outside `transition/` that spells the old live root's name."""
+    if text is None or not _applies((PRODUCT_SOURCE,), path) or _applies((TRANSITION_SOURCE,), path):
+        return []
+    return [
+        f"{path}:{number}: {line.strip()}"
+        for number, line in enumerate(text.splitlines(), 1)
+        if INSTANCE_PROJECT in line
+    ]
+
+
 def tracked_files() -> list[str]:
     completed = subprocess.run(["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, check=False)
     if completed.returncode != 0:
@@ -88,6 +106,27 @@ class OldNameGuardTests(unittest.TestCase):
                 continue
             found += violations(name, text_of(path.read_bytes()))
         self.assertEqual(found, [], "the old product name outside docs/RENAME.md §T5:\n" + "\n".join(found))
+
+    def test_the_product_source_outside_the_transition_never_spells_the_instance_name(self) -> None:
+        """`git grep secretary-instance -- src ':!src/ummanu/transition'` stays empty, the guard included."""
+        found: list[str] = []
+        for name in tracked_files():
+            path = ROOT / name
+            if path.is_file() and not path.is_symlink():
+                found += instance_literals(name, text_of(path.read_bytes()))
+        self.assertEqual(found, [], "spell it through ummanu.transition.names:\n" + "\n".join(found))
+        self.assertEqual(INSTANCE_PROJECT, "secretary-instance")
+
+    def test_a_reintroduced_instance_literal_fails_outside_the_transition_only(self) -> None:
+        line = 'DEFAULT = Path.home() / "secretary-instance"\n'
+        self.assertEqual(
+            instance_literals("src/ummanu/runtime/paths.py", line),
+            ['src/ummanu/runtime/paths.py:1: DEFAULT = Path.home() / "secretary-instance"'],
+        )
+        self.assertEqual(len(instance_literals("src/ummanu/schemas/adapter.schema.json", line)), 1)
+        self.assertEqual(instance_literals("src/ummanu/transition/names.py", line), [])
+        self.assertEqual(instance_literals("docs/RECOVERY.md", line), [])
+        self.assertEqual(instance_literals("tests/test_x.py", line), [])
 
     def test_a_stray_old_name_fails_in_every_file_outside_the_whole_file_rows(self) -> None:
         names = tracked_files()

@@ -32,6 +32,22 @@ installs Docker and Compose from the distribution and provisions the board store
 writes no state. `doctor` reports broken invariants (`--json` for structured findings). Changing the
 host requires `reconcile plan` and a separate confirmed apply.
 
+### Pointing a command at a live root
+
+A command reads its live root from `--instance <dir>` (the directory or its `instance.yaml`), else
+from `UMMANU_INSTANCE`, else from the default `~/ummanu-data/instance`. To reach a live root
+anywhere else, name it:
+
+```bash
+ummanu doctor --instance /srv/other/instance        # one command
+export UMMANU_INSTANCE=/srv/other/instance           # every command of this shell
+sudo --preserve-env=UMMANU_INSTANCE ummanu upgrade   # sudo drops the variable otherwise
+```
+
+With neither given and no directory at the default, the command exits non-zero, names the default
+path and asks for `--instance` or `UMMANU_INSTANCE`; it creates nothing. The packaged units and every
+head the dispatcher launches set `UMMANU_INSTANCE` explicitly, so they never fall back.
+
 ## Runtime secrets
 
 ### Installation secrets
@@ -1394,9 +1410,9 @@ Both are reads: they write nothing and never re-send, retry or repair. Contract 
 ### The last commands, across everything
 
 ```bash
-python3 -P -m ummanu web-read commands --instance ~/secretary-instance
-python3 -P -m ummanu web-read commands --instance ~/secretary-instance --limit 20
-python3 -P -m ummanu web-read commands --instance ~/secretary-instance --json
+python3 -P -m ummanu web-read commands --instance INSTANCE
+python3 -P -m ummanu web-read commands --instance INSTANCE --limit 20
+python3 -P -m ummanu web-read commands --instance INSTANCE --json
 ```
 
 One line per command, newest first, across cards, sprints, products and issues: who, action, entity,
@@ -1407,7 +1423,7 @@ be read; an empty history is `items: []`.
 ### What happened to a request id
 
 ```bash
-python3 -P -m ummanu web-read request --instance ~/secretary-instance --request-id ID
+python3 -P -m ummanu web-read request --instance INSTANCE --request-id ID
 ```
 
 Use the `web-read request` form when a command failed, timed out or was interrupted, instead of
@@ -2602,8 +2618,8 @@ Code: `ummanu upgrade` moves the checkout and its `web` step restarts and probes
 Head profiles: edit the canonical registry, then materialize:
 
 ```bash
-$EDITOR ~/secretary-instance/heads/heads.toml
-cd ~/ummanu && python3 -P -m ummanu upgrade --instance ~/secretary-instance --no-pull
+$EDITOR INSTANCE/heads/heads.toml
+cd ~/ummanu && python3 -P -m ummanu upgrade --instance INSTANCE --no-pull
 ```
 
 Never edit `<data>/heads/heads.yaml`: it is a generated snapshot pinned by `<data>/heads/source.yaml`, and an edited one
@@ -2652,23 +2668,23 @@ Values never travel through argv:
 
 ```bash
 # the owner types their own, and it is read from stdin
-python3 -P -m ummanu web-front set-password --instance ~/secretary-instance --stdin
+python3 -P -m ummanu web-front set-password --instance INSTANCE --stdin
 
 # or the product generates one from `secrets` and stores it
-python3 -P -m ummanu web-front set-password --instance ~/secretary-instance --generate
+python3 -P -m ummanu web-front set-password --instance INSTANCE --generate
 ```
 
 Read the current one back (writes a mode-0600 env file outside the repository):
 
 ```bash
-python3 -P -m ummanu secret materialize --instance ~/secretary-instance --target file
+python3 -P -m ummanu secret materialize --instance INSTANCE --target file
 cat ~/ummanu-data/webfront/owner-password.env      # UMMANU_WEB_FRONT_PASSWORD=...
 ```
 
 A new password takes effect after render and restart:
 
 ```bash
-python3 -P -m ummanu web-front render --instance ~/secretary-instance \
+python3 -P -m ummanu web-front render --instance INSTANCE \
   --site https://HOST [--site https://ADDRESS ...]
 sudo systemctl restart ummanu-web-front.service
 ```
@@ -2679,7 +2695,7 @@ sudo systemctl restart ummanu-web-front.service
 sudo systemctl status ummanu-web.service ummanu-web-front.service
 sudo systemctl restart ummanu-web-front.service       # after a render
 sudo systemctl stop ummanu-web-front.service          # off the public interfaces, now
-python3 -P -m ummanu status --instance ~/secretary-instance   # both units, enabled and active
+python3 -P -m ummanu status --instance INSTANCE   # both units, enabled and active
 ```
 
 The front is `PartOf=ummanu-web.service`: restarting or stopping the transport does the same to the
@@ -2696,7 +2712,7 @@ now, so a checkout that moves under a running process can stop it answering. The
 command:
 
 ```bash
-ummanu upgrade --instance ~/secretary-instance      # `pull` fast-forwards ~/ummanu onto main
+ummanu upgrade --instance INSTANCE      # `pull` fast-forwards ~/ummanu onto main
 ```
 
 Its `web` step runs after `pull`, `dependencies`, `head-registry` and `host` succeed, restarts
@@ -2782,7 +2798,7 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/api/system
 ```bash
 git -C ~/ummanu log --oneline -3                  # the revision to go back to
 git -C ~/ummanu switch --detach <previous-sha>
-ummanu upgrade --instance ~/secretary-instance --no-pull
+ummanu upgrade --instance INSTANCE --no-pull
 ```
 
 `git switch` alone leaves the head-registry pin, units, dependencies and the memory and web processes as
@@ -2824,7 +2840,7 @@ keep running ([Rolling back to before this front existed](#rolling-back-to-befor
 ```bash
 git -C ~/ummanu log --oneline -10     # `git -C ~/ummanu reflog` says what was installed when
 git -C ~/ummanu switch --detach <revision>
-ummanu upgrade --instance ~/secretary-instance --no-pull
+ummanu upgrade --instance INSTANCE --no-pull
 ```
 
 - `upgrade --no-pull` compares the venv and the memory service with the moved checkout through the
@@ -2844,7 +2860,7 @@ A detached checkout makes the next upgrade's `pull` refuse by name. Return expli
 
 ```bash
 git -C ~/ummanu switch main
-ummanu upgrade --instance ~/secretary-instance --no-pull
+ummanu upgrade --instance INSTANCE --no-pull
 ```
 
 ### A snapshot of the whole thing, in one go
@@ -2859,8 +2875,8 @@ No password, nothing written to the installation:
   systemctl show -p ActiveState -p SubState -p ExecMainStartTimestamp \
     ummanu-web.service ummanu-web-front.service
   ss -ltnp '( sport = :8787 or sport = :443 )'
-  ummanu status --instance ~/secretary-instance
-  ummanu web-front check --instance ~/secretary-instance
+  ummanu status --instance INSTANCE
+  ummanu web-front check --instance INSTANCE
   for path in / /api/system /api/tasks/secretary-1/events; do
     printf '%s ' "$path"
     curl -sk -o /dev/null -w '%{http_code} %{size_download}\n' "https://HOST$path"
@@ -2874,7 +2890,7 @@ and only Caddy on `443`, the installation view, unguarded routes, and what an un
 ### Auditing what is exposed
 
 ```bash
-python3 -P -m ummanu web-front check --instance ~/secretary-instance
+python3 -P -m ummanu web-front check --instance INSTANCE
 ```
 
 It parses the running configuration against every published route and prints `"unguarded": []`, or exits
@@ -2903,7 +2919,7 @@ Nothing in the pipeline depends on either unit. In increasing permanence:
 sudo systemctl stop ummanu-web-front.service
 
 # 2. rehearse or run guarded on loopback only — the same file, one line different
-python3 -P -m ummanu web-front render --instance ~/secretary-instance \
+python3 -P -m ummanu web-front render --instance INSTANCE \
   --site https://HOST --bind 127.0.0.1
 sudo systemctl restart ummanu-web-front.service
 
@@ -3037,7 +3053,7 @@ No absolute product path is shipped. First hit wins:
 
 | what | order |
 | --- | --- |
-| the installation | `--instance` / `UMMANU_INSTANCE`, else `~/secretary-instance` |
+| the installation | `--instance` / `UMMANU_INSTANCE`, else `~/ummanu-data/instance` (refused when absent) |
 | the product checkout a head imports | `UMMANU_REPO`, else `$HOME/ummanu` |
 | the checkout an install or upgrade materializes | `--product-root`, else `UMMANU_REPO`, else `$HOME/ummanu` |
 | the product skill manifest | `--product-root`, else `UMMANU_ROLE_SKILLS_MANIFEST`, else the configured checkout's |

@@ -164,9 +164,6 @@ def _head_registry(instance_dir: Path, data_dir: Path | None = None) -> dict[str
     alone would credit the wrong file, and `canonical_owner` says which side owns it. An
     installation upgraded before the pin existed reads back with null source and an error naming
     what to run. Nothing here consults a checkout: the snapshot is validated on its own.
-
-    `legacy_source` names the live root's pair while the readers fall back to it because
-    `<data>/heads/` has none yet (deploy skew until the next `ummanu upgrade`); otherwise null.
     """
     record: dict[str, Any] = {
         "snapshot": "",
@@ -174,7 +171,6 @@ def _head_registry(instance_dir: Path, data_dir: Path | None = None) -> dict[str
         "canonical_owner": None,
         "product_root": None,
         "revision": None,
-        "legacy_source": None,
         "error": None,
     }
     try:
@@ -183,8 +179,6 @@ def _head_registry(instance_dir: Path, data_dir: Path | None = None) -> dict[str
         record["error"] = str(exc)
         return record
     record["snapshot"] = str(pair.snapshot)
-    if pair.legacy:
-        record["legacy_source"] = str(pair.snapshot)
     try:
         source = head_registry.read_source(instance_dir, pair)
         head_registry.installed_heads(instance_dir, pair)

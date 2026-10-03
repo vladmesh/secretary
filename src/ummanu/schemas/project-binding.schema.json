@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "project-binding.schema.json",
   "title": "Project binding",
-  "description": "One connected project (secretary-instance/projects/<id>.yaml).",
+  "description": "One connected project (<live root>/projects/<id>.yaml).",
   "type": "object",
   "additionalProperties": false,
   "required": ["id", "repo", "enabled", "adapter", "default_branch"],

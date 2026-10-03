@@ -9,6 +9,11 @@ which checkout they are talking to.
 
 Only the fallback lives here. Every caller reads its own override first, so an operator who
 configured a path keeps it.
+
+The live root's fallback is a plain directory below the data plane, ``~/ummanu-data/instance``. A
+command that would fall back to it while it does not exist refuses (:func:`resolve_instance_path`)
+instead of creating it or running against nothing: only ``install``, ``recover`` and ``bootstrap``,
+given their target explicitly, bring a live root into being.
 """
 
 from __future__ import annotations
@@ -19,14 +24,73 @@ from pathlib import Path
 from typing import Any
 
 PRODUCT_ENV = "UMMANU_REPO"
-INSTANCE_DIRNAME = "secretary-instance"
+INSTANCE_ENV = "UMMANU_INSTANCE"
+DATA_DIRNAME = "ummanu-data"
+INSTANCE_DIRNAME = "instance"
 PRODUCT_DIRNAME = "ummanu"
 INSTANCE_CONFIG_NAME = "instance.yaml"
 
 
+class MissingDefaultInstance(RuntimeError):
+    """Nothing named a live root and the default one does not exist."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        super().__init__(
+            f"no live root at the default {path}: pass --instance or set {INSTANCE_ENV} to name the installation"
+        )
+
+
 def default_instance_path() -> Path:
-    """The instance directory of a host that never configured one."""
-    return Path.home() / INSTANCE_DIRNAME
+    """The live root of a host that never configured one: a plain directory, not a Git work tree."""
+    return Path.home() / DATA_DIRNAME / INSTANCE_DIRNAME
+
+
+def resolve_instance_path(
+    explicit: str | Path | None = None, environ: Mapping[str, str] | None = None
+) -> Path:
+    """The live root a command was pointed at: ``--instance``, else ``UMMANU_INSTANCE``, else the default.
+
+    The default is taken only when it exists. Between a release that moves the default and the
+    cutover that moves the live root, a command whose environment lost ``UMMANU_INSTANCE`` (a
+    ``sudo`` that dropped it, a cleared unit) would otherwise run against an empty path, or render
+    units naming it; it raises :class:`MissingDefaultInstance` instead, and creates nothing.
+    """
+    if explicit:
+        return Path(explicit).expanduser()
+    env = os.environ if environ is None else environ
+    configured = env.get(INSTANCE_ENV)
+    if configured:
+        return Path(configured).expanduser()
+    default = default_instance_path()
+    if not default.is_dir():
+        raise MissingDefaultInstance(default)
+    return default
+
+
+#: Set on a parsed namespace whose ``--instance`` falls back to the environment and the default.
+INSTANCE_FALLBACK_FLAG = "instance_fallback"
+
+
+def add_instance_argument(parser: Any, *, help: str | None = None) -> None:
+    """``--instance`` for a command that may fall back: resolved by :func:`resolve_instance_argument`.
+
+    The default is left ``None`` rather than read from the environment while the parser is built, so
+    the one resolver decides, and refuses, after parsing.
+    """
+    parser.add_argument(
+        "--instance",
+        default=None,
+        help=help
+        or f"live root: an instance dir or instance.yaml (default: {INSTANCE_ENV}, else {default_instance_path()})",
+    )
+    parser.set_defaults(**{INSTANCE_FALLBACK_FLAG: True})
+
+
+def resolve_instance_argument(args: Any, environ: Mapping[str, str] | None = None) -> None:
+    """Fill a parsed ``--instance`` that fell back; raises :class:`MissingDefaultInstance`."""
+    if getattr(args, INSTANCE_FALLBACK_FLAG, False) and not getattr(args, "instance", None):
+        args.instance = str(resolve_instance_path(None, environ))
 
 
 def default_product_root() -> Path:

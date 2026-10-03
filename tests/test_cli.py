@@ -204,6 +204,17 @@ class CliTests(unittest.TestCase):
         (state / "production-state.json").write_text(json.dumps(production), encoding="utf-8")
         return instance_dir
 
+    def assert_only_the_work_tree_finding(self, code: int, output: str) -> None:
+        """`seed_checkpoint_instance` lays out a legacy checkpoint: a live root that is a Git work tree.
+
+        Since ummanu-39 doctor reds that shape (`live_root.git_work_tree`), so these cases, which are
+        about other sections, exit 1 with that one finding instead of 0 with none.
+        """
+        self.assertEqual(code, 1, output)
+        self.assertEqual(output.count("live_root."), 1, output)
+        self.assertIn("live_root.git_work_tree: ", output)
+        self.assertIn("status: findings", output)
+
     def seed_probe_instance(self, tmpdir: Path, *, recorded: dict | None = None) -> Path:
         """An installation whose head registry describes one runnable probe and one broken one.
 
@@ -280,7 +291,7 @@ class CliTests(unittest.TestCase):
             instance_dir = self.seed_checkpoint_instance(Path(tmpdir), {"version": 1})
             code, output = self.run_cli(["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)])
 
-        self.assertEqual(code, 0, output)
+        self.assert_only_the_work_tree_finding(code, output)
         self.assertNotIn("resource probes", output)
 
     def test_doctor_reports_no_background_automations_and_never_asks_orca_for_them(self):
@@ -322,12 +333,11 @@ class CliTests(unittest.TestCase):
             )
             code, output = self.run_cli(["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)])
 
-        self.assertEqual(code, 0, output)
+        self.assert_only_the_work_tree_finding(code, output)
         self.assertIn("checkpoint freshness: read-only", output)
         self.assertIn("last push: 2026-07-20T10:00:00Z", output)
         self.assertIn("push: pushed", output)
         self.assertIn("lag: ", output)
-        self.assertIn("status: ok", output)
 
     def test_doctor_names_local_instance_packing_drift_and_exact_remediation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -511,7 +521,7 @@ class CliTests(unittest.TestCase):
             instance_dir = self.seed_checkpoint_instance(Path(tmpdir), {"version": 1})
             code, output = self.run_cli(["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)])
 
-        self.assertEqual(code, 0, output)
+        self.assert_only_the_work_tree_finding(code, output)
         self.assertNotIn("checkpoint freshness", output)
 
     def test_backup_create_accepts_kind_both(self):

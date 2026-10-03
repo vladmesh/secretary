@@ -32,7 +32,7 @@ class PortableDefaultTests(unittest.TestCase):
 
     def test_the_instance_and_checkout_defaults_follow_the_running_user(self):
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
-            self.assertEqual(paths.default_instance_path(), Path(tmp) / "secretary-instance")
+            self.assertEqual(paths.default_instance_path(), Path(tmp) / "ummanu-data" / "instance")
             self.assertEqual(paths.default_product_root(), Path(tmp) / "ummanu")
 
     def test_an_instance_is_named_by_its_directory_or_its_config_file(self):

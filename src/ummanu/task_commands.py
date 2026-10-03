@@ -23,10 +23,10 @@ from ummanu.board.task_routing import (
 )
 from ummanu.cli_output import print_json
 from ummanu.config import ConfigError, DataDirError, instance_data_dir, load_config
-from ummanu.head_registry import HeadRegistryConfigError, installed_pair
-from ummanu.onboarding import DEFAULT_INSTANCE
+from ummanu.head_registry import HeadRegistryConfigError, installed_pair, missing_snapshot
 from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV
 from ummanu.runtime.head import CODEX_LAUNCH_MODES
+from ummanu.runtime.paths import add_instance_argument, resolve_instance_path
 from ummanu.tasks import (
     BOARD_STORE_KIND,
     TaskError,
@@ -44,18 +44,14 @@ def _role_choices(roles: frozenset[Role]) -> tuple[str, ...]:
 def _add_instance_arg(parser) -> None:
     """Every task command names the installation it talks to, reads included.
 
-    Reads used to skip this and fall through `_instance` to `DEFAULT_INSTANCE`, which is
-    ``Path.home()/secretary-instance`` resolved at import: neither ``--instance`` nor
-    ``UMMANU_INSTANCE`` could move them, so a process bound to one installation still read the
-    home one. On the appliance host that is the production board, reached from a cleared
-    environment — the accident class of secretary-1026, and the reason a unit-suite `task show`
-    could answer with live cards.
+    Reads used to skip this and fall through `_instance` to a home default resolved at import:
+    neither ``--instance`` nor ``UMMANU_INSTANCE`` could move them, so a process bound to one
+    installation still read the home one. On the appliance host that is the production board,
+    reached from a cleared environment — the accident class of secretary-1026, and the reason a
+    unit-suite `task show` could answer with live cards. The fallback now goes through the one
+    resolver, which refuses a default live root that does not exist.
     """
-    parser.add_argument(
-        "--instance",
-        default=os.environ.get("UMMANU_INSTANCE", DEFAULT_INSTANCE),
-        help=f"instance directory (default: UMMANU_INSTANCE or {DEFAULT_INSTANCE})",
-    )
+    add_instance_argument(parser)
 
 
 def _add_data_dir_args(parser) -> None:
@@ -72,7 +68,7 @@ def resolve_data_dir(args: argparse.Namespace) -> str:
     explicit = getattr(args, "data_dir", None)
     if explicit:
         return str(Path(explicit).expanduser())
-    instance = Path(getattr(args, "instance", None) or DEFAULT_INSTANCE).expanduser()
+    instance = resolve_instance_path(getattr(args, "instance", None))
     try:
         return str(instance_data_dir(instance))
     except DataDirError as exc:
@@ -84,7 +80,7 @@ def resolve_data_dir(args: argparse.Namespace) -> str:
 
 def _instance(args: argparse.Namespace) -> str:
     """One explicit board-routing source for every task command."""
-    return str(getattr(args, "instance", None) or DEFAULT_INSTANCE)
+    return str(resolve_instance_path(getattr(args, "instance", None)))
 
 
 def add_task_subcommands(subparsers) -> None:
@@ -782,6 +778,8 @@ def _validate_codex_mode_for_create(args: argparse.Namespace) -> None:
 def _load_heads(instance: Path) -> dict:
     try:
         heads_file = installed_pair(instance).snapshot
+        if not heads_file.exists():
+            raise missing_snapshot(instance, heads_file)
         loaded = load_config(heads_file)
     except (ConfigError, HeadRegistryConfigError) as exc:
         raise TaskError("validation", f"cannot validate --codex-mode: {exc}", 2) from None

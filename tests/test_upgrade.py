@@ -1771,7 +1771,9 @@ class CommandSurfaceTests(unittest.TestCase):
         self.assertIn("does not match the shipped file", output)
 
     def test_role_skills_audit_is_available_as_a_health_command(self):
-        code, output = self.run_cli(["role-skills", "audit"])
+        # Named: with neither `--instance` nor `UMMANU_INSTANCE` the command takes the default live
+        # root, and refuses it when absent (ummanu-39), as it is on a CI runner.
+        code, output = self.run_cli(["role-skills", "audit", "--instance", str(self.instance)])
         self.assertIn(code, (0, 1))
         self.assertIn("role skills:", output)
 

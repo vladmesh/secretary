@@ -20,7 +20,8 @@ A recovery recreates these names; nothing reads an older spelling of them.
 |---|---|
 | Product checkout and venv | `~/ummanu`, `~/ummanu/.venv` (console scripts `ummanu`, `ummanu-memory-*`) |
 | Data plane | `~/ummanu-data` unless `instance.yaml` `data_dir` says otherwise |
-| Instance repository | `~/secretary-instance` (it keeps its name) |
+| Live root | `~/ummanu-data/instance`, a plain directory with no `.git`; the default of `--instance` and `UMMANU_INSTANCE` (`runtime.paths.default_instance_path`) |
+| Instance repository | the private remote keeps its name; it is the snapshot exporter's target, not a checkout the live root runs from |
 | systemd units | `ummanu-*` from `packaging/systemd/` (`host.unit_prefix: ummanu-`), e.g. `ummanu-dispatcher-production.timer`, `ummanu-po.service`, `ummanu-instance-maintenance.timer` |
 | Role worktrees | `~/orca/workspaces/ummanu/<role>` |
 | Environment | `UMMANU_INSTANCE`, `UMMANU_DATA_DIR`, `UMMANU_REPO`, `UMMANU_RUNTIME_ENV_FILE`, and every other `UMMANU_*` key |
@@ -29,6 +30,24 @@ A recovery recreates these names; nothing reads an older spelling of them.
 
 An installation from before the product rename is moved onto these names once, by the transition in
 `docs/RENAME.md` §T3; archives taken before it restore only with the pre-transition code.
+
+A command given neither `--instance` nor `UMMANU_INSTANCE` uses the default live root and refuses,
+naming the path, when that directory does not exist; it never creates it. Only `install`, `recover`
+and `bootstrap`, with their explicit target, bring a live root into being.
+
+`ummanu doctor` reports two red findings for a live root still in its old shape:
+
+- `live_root.git_work_tree`: the configured live root holds `.git`;
+- `live_root.old_path`: an installed `ummanu-*` unit file, the live root's `runtime.env`, or the role
+  env of a process bound to this live root (`UMMANU_INSTANCE`, `UMMANU_RUNTIME_ENV_FILE`,
+  `TA_RUNTIME_ENV_FILE`) names the old live-root path, `~/secretary-instance` (the spelling lives
+  only in `ummanu.transition.names`).
+
+Both are expected to be red on an installation that has not been cut over yet: its live root is
+still the instance repository's work tree and its units name it. The cutover moves the live root to
+`~/ummanu-data/instance` and re-renders the units; both findings clear then. The installation head
+registry is read only from `<data>/heads/`; a missing `<data>/heads/heads.yaml` is an error that
+names `ummanu upgrade`, which generates it.
 
 The private repository is the only Git canon for the data plane: one remote, one HEAD, one RPO.
 
@@ -763,15 +782,11 @@ upgrade`'s instance packing step skips a live root that is not a work tree.
 host-packaging lookup. The product root to materialise comes from `--product-root` or the
 configured/default root, not from the pin.
 
-**Temporary legacy fallback.** Before this layout, `ummanu upgrade` committed the pair into the live
-root's `heads/`. A host that runs the new code but has not yet run `ummanu upgrade` has no
-`<data>/heads/heads.yaml`, so until then every reader of the pair (the dispatcher catalog,
-`task --codex-mode`, the PO runner, web sprint reads, status, doctor and upgrade) reads the live
-root's `heads/heads.yaml` and `heads/source.yaml` instead, and only while `<data>/heads/heads.yaml`
-is absent: a data-directory file that is present but broken is never bypassed. `ummanu status`
-reports it as `head_registry.legacy_source` and prints, like `doctor`, `head registry source: legacy
-<path>`. The next `ummanu upgrade` or `recover` writes `<data>/heads/` and the fallback stops
-applying. The cutover removes it.
+**No live-root fallback.** Before this layout, `ummanu upgrade` committed the pair into the live
+root's `heads/`. Every reader of the pair (the dispatcher catalog, `task --codex-mode`, the PO
+runner, web sprint reads, status, doctor and upgrade) now reads `<data>/heads/` only; a live root's
+own `heads/heads.yaml` is never consulted. A missing `<data>/heads/heads.yaml` is an error naming
+`ummanu upgrade`, which (like `recover`) generates the pair.
 
 `ummanu recover --dry-run` checks checkout, credentials, runtime prerequisites and checkpoint
 integrity and prints steps as `would-change`. It writes no data plane, does not touch the board and

@@ -408,6 +408,21 @@ class PortableFixture(unittest.TestCase):
         code, output = self.run_cli(argv)
         return code, json.loads(output)
 
+    #: The fixture's live root is the private repository's work tree (`_initialize_instance_repo`),
+    #: the pre-cutover shape doctor reds since ummanu-39. A doctor run that found nothing else exits 1
+    #: with that one finding where it used to exit 0 with none.
+    WORK_TREE = "live_root.git_work_tree"
+
+    def assert_only_the_work_tree_finding(self, code: int, report: dict) -> None:
+        self.assertEqual(code, 1, report)
+        self.assertEqual([finding["code"] for finding in report["findings"]], [self.WORK_TREE], report)
+
+    def assert_only_the_work_tree_line(self, code: int, text: str) -> None:
+        self.assertEqual(code, 1, text)
+        self.assertEqual(text.count("live_root."), 1, text)
+        self.assertIn(f"{self.WORK_TREE}: ", text)
+        self.assertIn("status: findings", text)
+
     def statuses(self, result: upgrade.UpgradeResult) -> dict[str, str]:
         return {step.name: step.status for step in result.steps}
 
@@ -742,7 +757,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         self.assertEqual(baseline_code, 1, baseline)
         self.assertEqual(
             {finding["code"] for finding in baseline["findings"]},
-            {"production_runtime_provenance", "dispatcher"},
+            {"production_runtime_provenance", "dispatcher", self.WORK_TREE},
         )
         foreign = {"ummanu-bus-forwarder.service", "ummanu-connect-forwarder.service"}
         config = self.instance / "instance.yaml"
@@ -820,7 +835,7 @@ class PackagedRuntimeParityTests(PortableFixture):
         self.assertEqual(baseline_code, 1, baseline)
         self.assertEqual(
             {finding["code"] for finding in baseline["findings"]},
-            {"production_runtime_provenance", "dispatcher"},
+            {"production_runtime_provenance", "dispatcher", self.WORK_TREE},
         )
         self.assertFalse(any("managed unit mismatch" in str(finding) for finding in baseline["findings"]))
         config = self.instance / "instance.yaml"
@@ -1114,7 +1129,7 @@ class StaleTransportLeftoverTests(PortableFixture):
         self.assertTrue(result.ok, result.render())
         self.assertFalse([step.name for step in result.steps if "transport" in step.name])
         self.assert_nothing_names_the_transport(result.render())
-        self.assertEqual(code, 0, report)
+        self.assert_only_the_work_tree_finding(code, report)
         self.assertNotIn(STATUS_SECTION, report["status"])
         self.assert_nothing_names_the_transport(json.dumps(report))
         self.assertEqual(status_code, 0, status_text)
@@ -1232,11 +1247,11 @@ class PortableInstallationTests(PortableFixture):
         code, report = self.run_json_cli(["doctor", "--instance", str(self.instance), "--offline", "--json"])
 
         registry = report["status"]["installation"]["head_registry"]
-        self.assertEqual(code, 0, report)
+        self.assert_only_the_work_tree_finding(code, report)
         self.assertEqual(report["status"]["installation"]["instance"], str(self.instance / "instance.yaml"))
         self.assertEqual(registry["snapshot"], str(generated_pair(self.instance).snapshot))
         self.assertEqual(registry["snapshot"], str(self.data / "heads" / "heads.yaml"))
-        self.assertIsNone(registry["legacy_source"])
+        self.assertNotIn("legacy_source", registry)
         self.assertEqual(registry["product_root"], str(self.product))
         self.assertEqual(registry["canonical_owner"], PRODUCT_ORIGIN)
         self.assertFalse(registry["error"], registry)
@@ -1252,7 +1267,7 @@ class PortableInstallationTests(PortableFixture):
 
         code, report = self.run_json_cli(["doctor", "--instance", str(self.instance), "--offline", "--json"])
 
-        self.assertEqual(code, 0, report)
+        self.assert_only_the_work_tree_finding(code, report)
         self.assertEqual(
             sorted(unit["name"] for unit in report["status"]["host"]["units"]),
             [
@@ -1274,7 +1289,7 @@ class PortableInstallationTests(PortableFixture):
                 ["doctor", "--instance", str(self.instance), "--offline", "--json"]
             )
 
-        self.assertEqual(code, 0, report)
+        self.assert_only_the_work_tree_finding(code, report)
         self.assertTrue(report["status"]["host"]["units"], report["status"]["host"])
 
     def test_the_upgrade_command_installs_the_checkout_it_was_pointed_at(self) -> None:
@@ -1387,10 +1402,10 @@ class CodexHomeMigrationTests(PortableFixture):
         code, text = self.run_cli(instance)
         json_code, report = self.run_json_cli([*instance, "--json"])
 
-        self.assertEqual(code, 0, text)
+        self.assert_only_the_work_tree_line(code, text)
         self.assertIn(f"codex home: {data_home} (data-dir home)", text)
         self.assertNotIn("error: codex home", text)
-        self.assertEqual(json_code, 0, report)
+        self.assert_only_the_work_tree_finding(json_code, report)
         self.assertEqual(report["codex_home"]["kind"], "data-dir")
         self.assertEqual(report["codex_home"]["login_missing"], "")
 
@@ -1398,7 +1413,7 @@ class CodexHomeMigrationTests(PortableFixture):
         self.run_upgrade()
         code, text = self.run_cli(["doctor", "--instance", str(self.instance), "--offline"])
 
-        self.assertEqual(code, 0, text)
+        self.assert_only_the_work_tree_line(code, text)
         self.assertIn("codex home: none, and no installed profile runs Codex", text)
 
 

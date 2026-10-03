@@ -40,9 +40,9 @@ from ummanu.runtime.paths import configured_product_root
 
 HEADS_RELATIVE = Path("src") / "ummanu" / "runtime" / "heads.toml"
 INSTANCE_HEADS_RELATIVE = Path("heads") / "heads.toml"
-# The pair's directory: below the data directory, and (legacy) below the live root. Under the data
-# directory it is also the local-pty runtime root, whose readers take only run directories, so the
-# two files sit beside them unread.
+# The pair's directory, below the data directory and never below the live root. It is also the
+# local-pty runtime root, whose readers take only run directories, so the two files sit beside them
+# unread.
 PAIR_DIRECTORY = Path("heads")
 SNAPSHOT_NAME = "heads.yaml"
 SOURCE_NAME = "source.yaml"
@@ -156,13 +156,10 @@ def render_snapshot(heads: dict[str, Any], canonical: Path) -> str:
 
 @dataclass(frozen=True)
 class RegistryPair:
-    """Where one installation's generated pair is, and whether that is the legacy live-root copy."""
+    """Where one installation's generated pair is."""
 
     snapshot: Path
     source: Path
-    # True only while `<data>/heads/heads.yaml` is absent and the live root still has the pair an
-    # older upgrade committed there: the deploy-skew fallback, which the cutover removes.
-    legacy: bool = False
 
 
 def _data_dir(instance_path: Path) -> Path:
@@ -188,37 +185,29 @@ def generated_pair(instance_path: Path, data_dir: Path | None = None) -> Registr
 
 
 def installed_pair(instance_path: Path, data_dir: Path | None = None) -> RegistryPair:
-    """The pair a reader reads: `<data>/heads/`, else the live root's legacy pair.
+    """The pair a reader reads: `<data>/heads/`, the only place it lives.
 
-    The fallback is a deploy-skew shim: new code reads `<data>/heads/` at merge, but only the next
-    `ummanu upgrade` writes it. It applies only when `<data>/heads/heads.yaml` is absent (a broken
-    file there is still that file, and fails by its own path) and the live root has one; the pair
-    then says so, and status and doctor name it. With neither present the answer is the data
-    directory's pair, so the error a reader raises names where the pair now belongs.
+    A live root's own `heads/heads.yaml`, which an upgrade before the data-directory move committed
+    there, is not read: an installation whose data directory has no pair has not been upgraded, and
+    the reader's error names `ummanu upgrade` (:func:`load_snapshot`).
     """
-    pair = generated_pair(instance_path, data_dir)
-    if _absent(pair.snapshot):
-        legacy = _instance_dir(instance_path) / PAIR_DIRECTORY
-        if not _absent(legacy / SNAPSHOT_NAME):
-            return RegistryPair(legacy / SNAPSHOT_NAME, legacy / SOURCE_NAME, legacy=True)
-    return pair
+    return generated_pair(instance_path, data_dir)
 
 
-def _absent(path: Path) -> bool:
-    """Nothing at all at ``path``: a dangling symlink or an unreadable entry is still something."""
-    try:
-        path.lstat()
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-    return False
+def missing_snapshot(instance_path: Path, path: Path) -> HeadRegistryConfigError:
+    """The one error for an installation whose `<data>/heads/` has no snapshot: it names the fix."""
+    return HeadRegistryConfigError(
+        f"installation head snapshot {path} is missing; run `ummanu upgrade --instance "
+        f"{_instance_dir(instance_path)}` to generate the pair"
+    )
 
 
 def load_snapshot(instance_path: Path, pair: RegistryPair | None = None) -> dict[str, Any]:
     path = (pair or installed_pair(instance_path)).snapshot
     try:
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise missing_snapshot(instance_path, path) from None
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         raise HeadRegistryConfigError(f"cannot load installation head snapshot {path}: {exc}") from None
     if not isinstance(loaded, dict):
@@ -363,6 +352,8 @@ def installed_heads(instance_path: Path, pair: RegistryPair | None = None) -> di
     path = pair.snapshot
     try:
         snapshot = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise missing_snapshot(instance_path, path) from None
     except (OSError, UnicodeError) as exc:
         raise HeadRegistryConfigError(f"cannot load installation head snapshot {path}: {exc}") from None
     loaded = load_snapshot(instance_path, pair)

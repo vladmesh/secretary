@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -42,12 +41,12 @@ from ummanu.broad_check import (
     usable_receipt,
 )
 from ummanu.config import ConfigError, load_config
-from ummanu.onboarding import DEFAULT_INSTANCE
 from ummanu.projects.contract import (
     ContractUnusable,
     ModuleContract,
     module_contract,
 )
+from ummanu.runtime.paths import add_instance_argument
 
 _GIT_TIMEOUT = 60
 
@@ -106,10 +105,8 @@ def add_check_subcommands(subparsers) -> None:
 
 def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", default=".", help="workspace root; the receipt lives under it")
-    parser.add_argument(
-        "--instance",
-        default=os.environ.get("UMMANU_INSTANCE", DEFAULT_INSTANCE),
-        help="registered project adapters (default: UMMANU_INSTANCE or the default instance)",
+    add_instance_argument(
+        parser, help="registered project adapters (default: UMMANU_INSTANCE or the default instance)"
     )
     # Not `required=True` any more. Since issue:8b39e60e4df361c6138e the registered project's
     # adapter can name its own broad suite, and when it does, the whole point is that a worker (or
