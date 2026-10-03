@@ -18,6 +18,7 @@ from ummanu.automations.runtime import health, production_telemetry
 from ummanu.cli import main as ummanu_main
 from ummanu.dispatch.production import record_tick_telemetry
 from ummanu.dispatch.runtime_provenance import ProductionRuntime
+from ummanu.head_registry import generated_pair
 from ummanu.runtime.role_env import runtime_env
 from ummanu.runtime.state import AgentState
 
@@ -87,7 +88,7 @@ def _install(python: Path, checkout: Path) -> None:
 
 def _instance(root: Path, product: Path, data_dir: Path) -> Path:
     instance = root / "instance"
-    (instance / "heads").mkdir(parents=True)
+    instance.mkdir(parents=True)
     (instance / "instance.yaml").write_text(
         "version: 1\n"
         "name: runtime-provenance-fixture\n"
@@ -98,9 +99,9 @@ def _instance(root: Path, product: Path, data_dir: Path) -> Path:
     )
     # Doctor uses only this installed pin. That makes the fixture prove it never falls back to a
     # developer's live checkout when it diagnoses an editable installation.
-    (instance / "heads" / "source.yaml").write_text(
-        f"product_root: {product}\n", encoding="utf-8"
-    )
+    pin = generated_pair(instance).source
+    pin.parent.mkdir(parents=True, exist_ok=True)
+    pin.write_text(f"product_root: {product}\n", encoding="utf-8")
     return instance
 
 

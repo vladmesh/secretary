@@ -3835,7 +3835,7 @@ below).
 | `products` | `ProductIssueStore.list_products` | id, label, ref, and the projects the product names |
 | `issues` | `ProductIssueStore.list_issues` | the **open** issues only, each with the product that owns it |
 | `projects` | `registered_projects` plus `sprints/active-repositories.json` | id, label, and `reserved_by`: the open sprints holding it |
-| `heads` | the installation's `heads/heads.yaml` | every profile with its model, effort, adapter and resource |
+| `heads` | the installation's generated `<data>/heads/heads.yaml` | every profile with its model, effort, adapter and resource |
 
 Only open (admissible) issues are offered. `reserved_by` is `null`, never `[]`, when the reservation
 index could not be read.
@@ -4059,7 +4059,7 @@ Pinned by `tests/test_web_sprint_protocol.py` (`SectionSeamTests`, `SourceIsolat
 | `cards` | the Pipeline, one listing with batched metadata | which column each of a sprint's cards stands in |
 | `journal` | `board/events.ndjson`, the committed audit | when the last significant event on an open sprint's cards happened, and when the current card last moved |
 | `liveness` | `dispatcher/production-state.json` | whether a head is really behind a card, and behind a sprint |
-| `heads` | the installed head registry (`heads/heads.yaml`) | which adapter, model and effort each profile a sprint names configures |
+| `heads` | the installed head registry (`<data>/heads/heads.yaml`) | which adapter, model and effort each profile a sprint names configures |
 
 The journal is its own source, read once and handed to `SprintReader.status_views`. Both documents carry
 `cards`, `journal`, `liveness` and `installation` beside their items.

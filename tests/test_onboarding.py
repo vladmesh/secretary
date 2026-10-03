@@ -14,7 +14,7 @@ import yaml
 from tests.support.git import git, make_repo
 from ummanu.cli import main
 from ummanu.config import load_config, load_schema, validate, validate_instance
-from ummanu.onboarding import IDENTITY_FIELDS, ScannerError, project_add
+from ummanu.onboarding import DRAFT_STORAGE, IDENTITY_FIELDS, OnboardingStorage, ScannerError, project_add
 
 
 def _schema_sample(spec: dict) -> object:
@@ -44,6 +44,14 @@ class OnboardingTests(unittest.TestCase):
         self.repo = make_repo(self.root)
         self.instance = self.root / "instance"
         self.instance.mkdir()
+        # Onboarding keeps its drafts, runs and locks in the data directory this file names.
+        (self.instance / "instance.yaml").write_text(
+            "version: 1\nname: test\n"
+            f"data_dir: {self.root / 'data'}\n"
+            "offsite:\n  instance_remote: git@example.invalid:instance.git\n",
+            encoding="utf-8",
+        )
+        self.storage = OnboardingStorage(self.root / "data")
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -54,7 +62,32 @@ class OnboardingTests(unittest.TestCase):
 
     @property
     def draft(self) -> Path:
-        return self.instance / "adapter-drafts" / "sample-project.yaml"
+        return self.storage.draft("sample-project")
+
+    def test_generated_onboarding_state_lives_in_the_data_directory(self):
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(code, 0, artifact)
+        self.assertEqual(self.draft, self.root / "data" / "onboarding" / "adapter-drafts" / "sample-project.yaml")
+        self.assertTrue(self.draft.is_file())
+        self.assertTrue((self.root / "data" / "locks" / "onboarding" / "sample-project.lock").is_file())
+        self.assertEqual(artifact["ownership"]["adapter"]["storage"], DRAFT_STORAGE)
+        self.assertNotIn("secretary-instance", DRAFT_STORAGE)
+        # The live root keeps the binding (configuration) and nothing onboarding generated.
+        self.assertTrue(self.binding.is_file())
+        self.assertFalse((self.instance / "adapter-drafts").exists())
+        self.assertFalse((self.instance / ".locks").exists())
+
+    def test_an_instance_without_a_usable_data_directory_writes_nothing(self):
+        (self.instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(artifact["draft"]["findings"][-1]["code"], "draft.invalid")
+        self.assertIn("onboarding storage is unavailable", artifact["draft"]["findings"][-1]["message"])
+        self.assertFalse(self.binding.exists())
+        self.assertFalse((self.root / "data").exists())
 
     def test_dry_run_is_deterministic_inventory_without_writes(self):
         first = project_add(str(self.repo), str(self.instance), dry_run=True)
@@ -212,6 +245,7 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(artifact["scanner"]["findings"][0]["code"], "scanner.failed")
         self.assertEqual(validate(artifact, "onboarding-contract", "failed"), [])
+        self.assertFalse(self.storage.drafts.exists())
         self.assertFalse((self.instance / "adapter-drafts").exists())
 
     def test_repo_without_tests_or_ci_records_findings_not_policy(self):

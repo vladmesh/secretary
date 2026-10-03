@@ -263,6 +263,25 @@ def instance_data_dir(path: Path) -> Path:
     return _configured_data_dir(instance_file, instance)
 
 
+def generated_state_dir(path: Path) -> Path:
+    """The data directory ``instance.yaml`` names, checked as that one field only.
+
+    Generated installation state (the head-registry pair, onboarding storage) is located through
+    this. An unrelated invalid setting is reported by `validate_instance` and failed closed by its own
+    reader (an unreadable ``open_sprint_limit`` keeps one sprint open); it must not also make that
+    state unreachable. ``data_dir`` itself is held to its schema: a non-empty string.
+    """
+    instance_file = _resolve_instance(path)
+    try:
+        instance = load_config(instance_file)
+    except ConfigError as exc:
+        raise DataDirError(str(exc)) from None
+    configured = instance.get("data_dir") if isinstance(instance, dict) else None
+    if not isinstance(configured, str) or not configured:
+        raise DataDirError(f"invalid instance {instance_file}: data_dir must be a non-empty string")
+    return _configured_data_dir(instance_file, instance)
+
+
 #: Where the snapshot exporter keeps its bare repository when `offsite.snapshot_repo` names none,
 #: relative to the data directory (docs/RECOVERY.md, "Writers").
 DEFAULT_SNAPSHOT_REPO = Path("backup") / "instance.git"
@@ -370,7 +389,13 @@ def validate_instance(path: Path) -> InstanceReport:
 
     projects = _validate_dir(instance_dir / "projects", "project-binding", errors)
     adapters = _validate_dir(instance_dir / "adapters", "adapter", errors)
-    adapter_drafts = _validate_dir(instance_dir / "adapter-drafts", "onboarding-contract", errors)
+    # Drafts are onboarding's generated state in the data directory; an instance that names no
+    # usable one already carries that error above.
+    adapter_drafts = 0
+    if data_dir is not None:
+        from ummanu.onboarding import OnboardingStorage
+
+        adapter_drafts = _validate_dir(OnboardingStorage(data_dir).drafts, "onboarding-contract", errors)
     bindings = _load_bindings(instance_dir / "projects")
 
     manifest_file = _find_manifest(instance_dir, data_dir)

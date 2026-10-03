@@ -66,6 +66,7 @@ from ummanu.dispatch.state import DispatcherRecord
 from ummanu.dispatch.types import DispatcherError, HostError, LegacyDispatcherRecord
 from ummanu.head_registry import (
     canonical_heads,
+    generated_pair,
     installed_heads,
     materialize_snapshot,
     record_source,
@@ -493,11 +494,12 @@ class HeadRegistrySourceContractTests(unittest.TestCase):
             + "host:\n  unit_prefix: ummanu-\n",
             encoding="utf-8",
         )
-        (root / "heads").mkdir()
         canonical = root / "heads" / "heads.toml"
         rendered = snapshot_header(canonical) + snapshot
-        (root / "heads" / "heads.yaml").write_text(rendered, encoding="utf-8")
-        (root / "heads" / "source.yaml").write_text(
+        pair = generated_pair(root)
+        pair.snapshot.parent.mkdir(parents=True)
+        pair.snapshot.write_text(rendered, encoding="utf-8")
+        pair.source.write_text(
             "canonical: " + str(canonical) + "\n"
             "canonical_owner: instance\n"
             "product_root: /fixture/product\n"
@@ -591,7 +593,7 @@ class RoleRoutingGenerationTests(unittest.TestCase):
         catalog = InstanceCatalog(self.instance)
 
         with mock.patch.dict(os.environ, {"UMMANU_INSTANCE": str(self.instance)}):
-            self.assertEqual(heads.registry_path(), self.instance / "heads" / "heads.yaml")
+            self.assertEqual(heads.registry_path(), self.instance / "data" / "heads" / "heads.yaml")
             self.assertEqual(catalog.worker_head({}), "owned-worker")
             self.assertEqual(catalog.review_head({}), "owned-reviewer")
             self.assertEqual(catalog.observer_head(), "owned-observer")
@@ -663,9 +665,16 @@ class RoleRoutingGenerationTests(unittest.TestCase):
         ):
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
                 instance = Path(tmp)
+                (instance / "instance.yaml").write_text(
+                    f"version: 1\nname: broken\ndata_dir: {instance / 'data'}\n"
+                    "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
+                    encoding="utf-8",
+                )
                 (instance / "heads").mkdir()
                 (instance / "heads" / "heads.toml").write_text(self.CANON, encoding="utf-8")
-                snapshot = instance / "heads" / "heads.yaml"
+                # Where the pair now lives; the live root has no legacy copy to fall back to.
+                snapshot = instance / "data" / "heads" / "heads.yaml"
+                snapshot.parent.mkdir(parents=True)
                 build(snapshot)
 
                 with mock.patch.dict(os.environ, {"UMMANU_INSTANCE": str(instance)}):
@@ -675,6 +684,16 @@ class RoleRoutingGenerationTests(unittest.TestCase):
                         heads.load_registry()
 
                 self.assertIn(str(snapshot), str(caught.exception))
+
+    def test_a_selected_installation_with_no_data_directory_fails_instead_of_the_default(self) -> None:
+        """An instance whose `instance.yaml` names no usable data directory has no pair to find."""
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"UMMANU_INSTANCE": str(instance)}):
+                heads._load_registry.cache_clear()
+                with self.assertRaisesRegex(heads.HeadRegistryError, "cannot locate the head registry"):
+                    heads.registry_path()
 
 
 class PackagedRoleUnitInstanceTests(unittest.TestCase):
@@ -708,7 +727,11 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         (self.instance / "heads" / "heads.toml").write_text(
             RoleRoutingGenerationTests.CANON, encoding="utf-8"
         )
-        (self.instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+        (self.instance / "instance.yaml").write_text(
+            f"version: 1\nname: other\ndata_dir: {self.root / 'data'}\n"
+            "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
+            encoding="utf-8",
+        )
         (self.instance / "runtime.env").write_text(legacy_runtime_lines(), encoding="utf-8")
         materialize_snapshot(self.instance, upgrade.running_product_root())
         record_source(self.instance, upgrade.running_product_root())
@@ -771,7 +794,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
 
                 with mock.patch.dict(os.environ, env, clear=True):
                     heads._load_registry.cache_clear()
-                    self.assertEqual(heads.registry_path(), self.instance / "heads" / "heads.yaml")
+                    self.assertEqual(heads.registry_path(), self.root / "data" / "heads" / "heads.yaml")
                     self.assertEqual(heads.default_head(), "owned-worker")
                     self.assertEqual(heads.reviewer_head(), "owned-reviewer")
 
@@ -1027,7 +1050,9 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         instance = Path(tmp.name)
         (instance / "instance.yaml").write_text(
-            "version: 1\nname: modes\ndata_dir: " + str(instance / "data") + "\n", encoding="utf-8"
+            "version: 1\nname: modes\ndata_dir: " + str(instance / "data") + "\n"
+            "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
+            encoding="utf-8",
         )
         (instance / "heads").mkdir()
 
@@ -1553,7 +1578,9 @@ class PerProfileRuntimeTests(unittest.TestCase):
         instance = Path(tmp.name) / "instance"
         (instance / "heads").mkdir(parents=True)
         (instance / "instance.yaml").write_text(
-            f"version: 1\nname: runtimes\ndata_dir: {instance / 'data'}\n", encoding="utf-8"
+            f"version: 1\nname: runtimes\ndata_dir: {instance / 'data'}\n"
+            "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
+            encoding="utf-8",
         )
 
         materialize_snapshot(instance, product)
@@ -1562,7 +1589,7 @@ class PerProfileRuntimeTests(unittest.TestCase):
 
         self.assertEqual(installed["profiles"]["supervised"].get("runtime"), LOCAL_PTY_RUNTIME)
         self.assertNotIn("runtime", installed["profiles"]["legacy"])
-        published = heads.load_registry(instance / "heads" / "heads.yaml")
+        published = heads.load_registry(generated_pair(instance).snapshot)
         self.assertEqual(
             HeadSpec.from_profile("supervised", published.profile("supervised")).runtime,
             LOCAL_PTY_RUNTIME,

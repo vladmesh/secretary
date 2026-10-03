@@ -40,8 +40,8 @@ from ummanu.head_registry import (
     PRODUCT_ORIGIN,
     canonical_heads,
     canonical_path,
+    generated_pair,
     read_source,
-    snapshot_path,
 )
 from ummanu.host import SHIPPED_PACKAGING_ROOT, LiveHostSource
 from ummanu.host_apply import HostCommandError, SystemdUnitInstaller, resolve_packaged, strict_manifest
@@ -432,7 +432,6 @@ class PackagedRuntimeParityTests(PortableFixture):
                 upgrade.step_role_skills,
                 upgrade.step_head_registry,
                 upgrade.step_instance_packing,
-                upgrade.step_publish_head_registry,
             ),
         )
         self.assertTrue(prepared.ok, prepared.render())
@@ -1153,7 +1152,7 @@ class PortableInstallationTests(PortableFixture):
         )
         self.assertEqual(origin, PRODUCT_ORIGIN)
         self.assertTrue(result.ok, result.render())
-        self.assertIn("portable-head", snapshot_path(self.instance).read_text(encoding="utf-8"))
+        self.assertIn("portable-head", generated_pair(self.instance).snapshot.read_text(encoding="utf-8"))
         self.assertEqual(pin["canonical"], str(canonical))
         self.assertEqual(pin["canonical_owner"], PRODUCT_ORIGIN)
         self.assertEqual(pin["product_root"], str(self.product))
@@ -1231,7 +1230,9 @@ class PortableInstallationTests(PortableFixture):
         registry = report["status"]["installation"]["head_registry"]
         self.assertEqual(code, 0, report)
         self.assertEqual(report["status"]["installation"]["instance"], str(self.instance / "instance.yaml"))
-        self.assertEqual(registry["snapshot"], str(snapshot_path(self.instance)))
+        self.assertEqual(registry["snapshot"], str(generated_pair(self.instance).snapshot))
+        self.assertEqual(registry["snapshot"], str(self.data / "heads" / "heads.yaml"))
+        self.assertIsNone(registry["legacy_source"])
         self.assertEqual(registry["product_root"], str(self.product))
         self.assertEqual(registry["canonical_owner"], PRODUCT_ORIGIN)
         self.assertFalse(registry["error"], registry)
@@ -1618,7 +1619,7 @@ class InstallationOwnedLayersTests(PortableFixture):
         self.assertEqual(pin["canonical"], str(self.canon))
         self.assertEqual(pin["canonical_owner"], INSTANCE_ORIGIN)
         self.assertEqual(pin["product_root"], str(self.product))
-        self.assertIn("owned-head", snapshot_path(self.instance).read_text(encoding="utf-8"))
+        self.assertIn("owned-head", generated_pair(self.instance).snapshot.read_text(encoding="utf-8"))
 
     def test_the_head_canon_survives_a_second_upgrade_unchanged(self) -> None:
         self.run_upgrade()
@@ -1633,8 +1634,9 @@ class RefusedBeforeAnyWriteTests(PortableFixture):
     """A registry the operator has to fix stops the run before the first materializing write."""
 
     def wrote_nothing(self) -> None:
-        self.assertFalse(snapshot_path(self.instance).exists(), "a head snapshot was written")
-        self.assertFalse((self.instance / "heads" / "source.yaml").exists(), "a pin was written")
+        self.assertFalse(generated_pair(self.instance).snapshot.exists(), "a head snapshot was written")
+        self.assertFalse(generated_pair(self.instance).source.exists(), "a pin was written")
+        self.assertFalse((self.instance / "heads" / "source.yaml").exists(), "a live-root pin was written")
         self.assertFalse((self.home / "shells").exists(), "a skill was delivered")
         self.assertFalse((self.home / "bin").exists(), "an entry point was linked")
         self.assertFalse((self.data / "host-managed.json").exists(), "the host manifest was written")

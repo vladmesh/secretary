@@ -16,7 +16,7 @@ from tests.support.git import git, make_repo
 from ummanu._fsutil import publish_pair_atomic
 from ummanu.cli import main
 from ummanu.config import load_config, validate
-from ummanu.onboarding import project_add
+from ummanu.onboarding import ADAPTER_STORAGE, DRAFT_STORAGE, OnboardingStorage, project_add
 from ummanu.provision import apply_provision_result, start_provision
 
 
@@ -27,6 +27,13 @@ class ProvisionTests(unittest.TestCase):
         self.repo = make_repo(self.root)
         self.instance = self.root / "instance"
         self.instance.mkdir()
+        (self.instance / "instance.yaml").write_text(
+            "version: 1\nname: test\n"
+            f"data_dir: {self.root / 'data'}\n"
+            "offsite:\n  instance_remote: git@example.invalid:instance.git\n",
+            encoding="utf-8",
+        )
+        self.storage = OnboardingStorage(self.root / "data")
         code, _ = project_add(str(self.repo), str(self.instance), dry_run=False)
         self.assertEqual(code, 0)
 
@@ -35,7 +42,7 @@ class ProvisionTests(unittest.TestCase):
 
     @property
     def draft_path(self) -> Path:
-        return self.instance / "adapter-drafts" / "sample-project.yaml"
+        return self.storage.draft("sample-project")
 
     @property
     def binding_path(self) -> Path:
@@ -53,7 +60,7 @@ class ProvisionTests(unittest.TestCase):
 
     def write_result(self, result: dict) -> Path:
         run_id = result["run_id"]
-        path = self.instance / "provision-runs" / "sample-project" / run_id / "result.yaml"
+        path = self.storage.provision_runs("sample-project") / run_id / "result.yaml"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(yaml.safe_dump(result, sort_keys=False), encoding="utf-8")
         return path
@@ -138,6 +145,23 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(draft["provision"]["status"], "drafted")
         self.assertFalse(draft["provision"]["binding"]["enabled"])
         self.assertFalse(binding["enabled"])
+        self.assertEqual(draft["ownership"]["adapter"]["storage"], ADAPTER_STORAGE)
+
+    def test_runs_and_drafts_live_in_the_data_directory(self):
+        started = self.start()
+        task_path = Path(started["task_path"])
+
+        self.assertEqual(task_path.parent.parent, self.root / "data" / "onboarding" / "provision-runs" / "sample-project")
+        self.assertTrue(task_path.is_file())
+        result_path = self.write_result(self.drafted_result(started["task"]))
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
+
+        self.assertEqual(code, 0, result)
+        self.assertEqual(Path(result["draft_path"]), self.draft_path)
+        self.assertTrue(self.draft_path.is_file())
+        self.assertEqual(Path(result["adapter_path"]), self.instance / "adapters" / "sample-project.yaml")
+        for generated in ("adapter-drafts", "provision-runs", ".locks"):
+            self.assertFalse((self.instance / generated).exists(), generated)
 
     def test_apply_publishes_adapter_owned_broad_check_contract(self):
         task = self.start()["task"]
@@ -238,7 +262,7 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(artifact["provision"]["adapter"]["status"], "unresolved")
         self.assertEqual(
             artifact["ownership"]["adapter"]["storage"],
-            "secretary-instance/adapter-drafts/<project>.yaml",
+            DRAFT_STORAGE,
         )
         stored = load_config(self.draft_path)
         self.assertEqual(stored["provision"]["status"], "pending")
@@ -400,7 +424,7 @@ class ProvisionTests(unittest.TestCase):
             },
             "findings": [],
         }
-        draft["ownership"]["adapter"]["storage"] = "secretary-instance/adapter-drafts/<project>.yaml"
+        draft["ownership"]["adapter"]["storage"] = DRAFT_STORAGE
         self.draft_path.write_text(yaml.safe_dump(draft, sort_keys=False), encoding="utf-8")
 
         code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)

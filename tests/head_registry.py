@@ -7,24 +7,27 @@ from pathlib import Path
 
 import yaml
 
-from ummanu.head_registry import snapshot_header
+from ummanu.head_registry import RegistryPair, generated_pair, snapshot_header
 
 
-def write_installed_pair(instance: Path, snapshot: str) -> Path:
+def write_installed_pair(instance: Path, snapshot: str, *, legacy: bool = False) -> Path:
     """Write a self-consistent registry pair without depending on a checkout.
 
     Fixtures that model a post-upgrade installation need the same pair that a
-    recovered installation reads.  The canonical source deliberately need not
-    exist: recovery validates the stored pair without consulting a product
-    checkout, and the test fixture owns only the installed files.
+    recovered installation reads: `<data>/heads/`, so the instance's `instance.yaml`
+    must already name its data directory.  ``legacy`` writes the pair where an
+    upgrade before ummanu-26 committed it instead, the live root's `heads/`.  The
+    canonical source deliberately need not exist: a reader validates the stored
+    pair without consulting a product checkout, and the test fixture owns only the
+    installed files.
     """
-    heads = instance / "heads"
-    heads.mkdir(parents=True, exist_ok=True)
-    canonical = heads / "heads.toml"
+    pair = legacy_pair(instance) if legacy else generated_pair(instance)
+    pair.snapshot.parent.mkdir(parents=True, exist_ok=True)
+    canonical = instance / "heads" / "heads.toml"
     rendered = snapshot_header(canonical) + snapshot
-    target = heads / "heads.yaml"
+    target = pair.snapshot
     target.write_text(rendered, encoding="utf-8")
-    (heads / "source.yaml").write_text(
+    pair.source.write_text(
         yaml.safe_dump(
             {
                 "canonical": str(canonical),
@@ -39,3 +42,9 @@ def write_installed_pair(instance: Path, snapshot: str) -> Path:
         encoding="utf-8",
     )
     return target
+
+
+def legacy_pair(instance: Path) -> RegistryPair:
+    """The live root's pair, where `ummanu upgrade` wrote and committed it before ummanu-26."""
+    heads = instance / "heads"
+    return RegistryPair(heads / "heads.yaml", heads / "source.yaml", legacy=True)

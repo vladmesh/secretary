@@ -33,7 +33,6 @@ from ummanu.board.migrate import migrate_instance
 from ummanu.board.provision import provision as provision_board_store
 from ummanu.board.provision import verify_roles as verify_board_store_roles
 from ummanu.board.store import BoardStoreError, ensure_ignored, store_path
-from ummanu.checkpoint import CheckpointPusher
 from ummanu.config import DataDirError, validate_instance
 from ummanu.dispatch import entrypoint_guard
 from ummanu.dispatch.entrypoint_guard import EntrypointMoved
@@ -42,11 +41,11 @@ from ummanu.head_registry import (
     assert_snapshot_current,
     canonical_heads,
     canonical_path,
+    generated_pair,
     installed_heads,
+    installed_pair,
     materialize_snapshot,
     record_source,
-    snapshot_path,
-    source_path,
 )
 from ummanu.host import (
     FixtureHostSource,
@@ -159,9 +158,6 @@ class UpgradeContext:
     runtime_user: str | None = None
     runtime_home: Path | None = None
     project_availability: ProjectAvailability = field(default_factory=ProjectAvailability)
-    # Recovery may finish safe local work after retaining a checkpoint whose
-    # remote publication failed. Every other caller keeps publication required.
-    publication_policy: str = "required"
     pull_result: StepResult | None = None
     handoff_before: str | None = None
     handoff_after: str | None = None
@@ -911,36 +907,39 @@ def step_head_registry(context: UpgradeContext) -> StepResult:
 
     The installation's own ``heads/heads.toml`` when it owns one, else the product's portable
     default. The pin next to the snapshot records which of the two won, plus the checkout and
-    revision, and the live tick validates the pin against the snapshot.
+    revision, and the live tick validates the pin against the snapshot. Both are generated state in
+    ``<data>/heads/``: written here, never committed or pushed (docs/RECOVERY.md).
     """
-    target = snapshot_path(context.instance_path)
     try:
+        pair = generated_pair(context.instance_path, _data_dir(context))
         canonical, _ = canonical_path(context.product_root, context.instance_path)
         changed = materialize_snapshot(
             context.instance_path,
             context.product_root,
             dry_run=context.dry_run,
+            data_dir=_data_dir(context),
         )
         repinned = record_source(
             context.instance_path,
             context.product_root,
             dry_run=context.dry_run,
+            data_dir=_data_dir(context),
         )
         if not context.dry_run:
-            # The installation account must own recovery files before it commits them.
-            _set_runtime_owner(target, context.runtime_user)
-            _set_runtime_owner(source_path(context.instance_path), context.runtime_user)
+            # A root-run upgrade may have created the directory: the installation account reads it.
+            _set_runtime_owner(pair.snapshot.parent, context.runtime_user)
     except (HeadRegistryConfigError, GitError) as exc:
         return StepResult("head-registry", "failed", str(exc))
+    target = pair.snapshot
     # The snapshot, not the pin: the pin records which canon won and where the checkout is, while
     # `heads.yaml` is the file a running process actually read and cached.
     context.head_registry_changed = bool(changed)
     if not changed and not repinned:
         return StepResult("head-registry", "unchanged", f"{target} matches {canonical}")
     verb = "would regenerate" if context.dry_run else "regenerated"
-    what = target if changed else source_path(context.instance_path)
+    what = target if changed else pair.source
     if changed and repinned:
-        what = f"{target} and {source_path(context.instance_path)}"
+        what = f"{target} and {pair.source}"
     return StepResult("head-registry", "changed", f"{verb} {what}")
 
 
@@ -958,45 +957,6 @@ def step_instance_packing(context: UpgradeContext) -> StepResult:
         "changed",
         f"{action} local Git packing controls: {', '.join(drifted)}",
     )
-
-
-def step_publish_head_registry(context: UpgradeContext) -> StepResult:
-    """Commit and publish the installed head pair as one recovery-canon update."""
-    if context.dry_run:
-        return StepResult("head-registry-checkpoint", "skipped", "--dry-run made no recovery publication")
-    try:
-        instance = state_repo.require_repo(context.instance_path)
-        with state_repo.state_repo_lock(instance):
-            commit = state_repo.commit(
-                instance,
-                state_repo.HEADS_PATHSPEC,
-                state_repo.HEADS_CHECKPOINT_MESSAGE,
-            )
-            tracked = state_repo.git(
-                instance,
-                ["ls-files", "--", *state_repo.HEADS_PATHSPEC],
-                label="inspect head registry recovery pair",
-            ).split()
-            missing = [path for path in state_repo.HEADS_PATHSPEC if path not in tracked]
-            if missing:
-                raise state_repo.StateRepoError(
-                    "head registry recovery pair is not tracked by the instance repo: " + ", ".join(missing)
-                )
-    except state_repo.StateRepoError as exc:
-        return StepResult("head-registry-checkpoint", "failed", str(exc))
-
-    outcome = CheckpointPusher(instance).push()
-    status = str(outcome.get("status") or "failed")
-    if status not in ("pushed", "unchanged"):
-        reason = str(outcome.get("reason") or "remote publication did not complete")
-        retained = f"; local checkpoint {commit}" if commit else "; local recovery pair remains committed"
-        return StepResult(
-            "head-registry-checkpoint",
-            "degraded" if context.publication_policy == "recovery-degraded" else "failed",
-            f"head registry checkpoint {status}: {reason}{retained}",
-        )
-    detail = f"published {commit or outcome.get('last_push_commit', '')[:12]}".rstrip()
-    return StepResult("head-registry-checkpoint", "changed" if commit else "unchanged", detail)
 
 
 class AgentSpecsError(RuntimeError):
@@ -1705,7 +1665,10 @@ def _product_revision(product_root: Path, error: type[ReceiptError]) -> str:
 def web_process_inputs(context: UpgradeContext, name_prefix: str) -> dict[str, str]:
     """The product and materialized state an active web process has to be bound to."""
     revision = _product_revision(context.product_root, WebProcessReceiptError)
-    snapshot = snapshot_path(context.instance_path)
+    try:
+        snapshot = installed_pair(context.instance_path, _data_dir(context)).snapshot
+    except HeadRegistryConfigError as exc:
+        raise WebProcessReceiptError(str(exc)) from None
     try:
         snapshot_bytes = snapshot.read_bytes()
     except FileNotFoundError:
@@ -2328,18 +2291,10 @@ def step_verify(context: UpgradeContext) -> StepResult:
     if not audit["ok"]:
         return StepResult("verify", "failed", "role skills are still out of sync")
     try:
-        assert_snapshot_current(context.instance_path, context.product_root)
-        installed_heads(context.instance_path)
+        assert_snapshot_current(context.instance_path, context.product_root, _data_dir(context))
+        installed_heads(context.instance_path, generated_pair(context.instance_path, _data_dir(context)))
     except HeadRegistryConfigError as exc:
         return StepResult("verify", "failed", str(exc))
-    try:
-        dirty = state_repo.status(context.instance_path, state_repo.HEADS_PATHSPEC)
-    except state_repo.StateRepoError as exc:
-        return StepResult("verify", "failed", str(exc))
-    if dirty:
-        return StepResult(
-            "verify", "failed", f"head registry recovery pair remains dirty: {dirty.splitlines()[0]}"
-        )
     detail = "host reconciled and role skills in sync"
     if web_evidence:
         detail += f"; {web_evidence}"
@@ -2476,7 +2431,6 @@ STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_po_workspace,
     step_head_registry,
     step_instance_packing,
-    step_publish_head_registry,
     step_worktrees,
     # Right after the worktrees: a recreated pipeline worktree has no untracked run journals.
     step_pipeline_state,

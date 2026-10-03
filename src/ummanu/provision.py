@@ -11,11 +11,12 @@ from typing import Any
 import yaml
 
 from ummanu._fsutil import file_lock, publish_pair_atomic, publish_state_atomic
-from ummanu.config import ConfigError, load_config, validate
+from ummanu.config import ConfigError, DataDirError, load_config, validate
 from ummanu.onboarding import (
+    ADAPTER_STORAGE,
     IDENTITY_FIELDS,
+    OnboardingStorage,
     onboarding_cycle,
-    project_lock_path,
     scan_repo,
 )
 
@@ -29,7 +30,17 @@ ENVIRONMENT_SUMMARIES = {
 
 def start_provision(instance_value: str, project_id: str) -> tuple[int, dict[str, Any]]:
     instance = _instance_dir(instance_value)
-    loaded = _load_inputs(instance, project_id)
+    try:
+        storage = OnboardingStorage.for_instance(instance)
+    except DataDirError as exc:
+        return 1, _storage_unavailable(exc)
+    return _start_provision(instance, storage, project_id)
+
+
+def _start_provision(
+    instance: Path, storage: OnboardingStorage, project_id: str
+) -> tuple[int, dict[str, Any]]:
+    loaded = _load_inputs(instance, storage, project_id)
     if loaded["status"] != "ok":
         return 1, loaded
     draft = loaded["draft"]
@@ -40,7 +51,7 @@ def start_provision(instance_value: str, project_id: str) -> tuple[int, dict[str
     errors = validate(task, "provision-task", "provision-task")
     if errors:
         return 1, _status("invalid_task", run_id=task["run_id"], errors=[str(e) for e in errors])
-    task_path = _run_dir(instance, project_id, task["run_id"]) / "task.yaml"
+    task_path = storage.provision_runs(project_id) / task["run_id"] / "task.yaml"
     if not task_path.exists():
         task_path.parent.mkdir(parents=True, exist_ok=True)
         task_path.write_text(yaml.safe_dump(task, sort_keys=False), encoding="utf-8")
@@ -53,32 +64,37 @@ def apply_provision_result(
     result_value: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     instance = _instance_dir(instance_value)
-    with file_lock(project_lock_path(instance, project_id)):
-        return _apply_provision_result_locked(instance, project_id, result_value)
+    try:
+        storage = OnboardingStorage.for_instance(instance)
+    except DataDirError as exc:
+        return 1, _storage_unavailable(exc)
+    with file_lock(storage.lock(project_id)):
+        return _apply_provision_result_locked(instance, storage, project_id, result_value)
 
 
 def _apply_provision_result_locked(
     instance: Path,
+    storage: OnboardingStorage,
     project_id: str,
     result_value: str | None,
 ) -> tuple[int, dict[str, Any]]:
-    loaded = _load_inputs(instance, project_id)
+    loaded = _load_inputs(instance, storage, project_id)
     if loaded["status"] != "ok":
         return 1, loaded
     draft = loaded["draft"]
     run_id = _run_id(draft)
-    task_path = _run_dir(instance, project_id, run_id) / "task.yaml"
+    task_path = storage.provision_runs(project_id) / run_id / "task.yaml"
     if not task_path.exists():
-        code, started = start_provision(str(instance), project_id)
+        code, started = _start_provision(instance, storage, project_id)
         if code:
             return code, started
-        loaded = _load_inputs(instance, project_id)
+        loaded = _load_inputs(instance, storage, project_id)
         if loaded["status"] != "ok":
             return 1, loaded
         draft = loaded["draft"]
         run_id = _run_id(draft)
     result_path = (
-        Path(result_value) if result_value else _run_dir(instance, project_id, run_id) / "result.yaml"
+        Path(result_value) if result_value else storage.provision_runs(project_id) / run_id / "result.yaml"
     )
     try:
         result = load_config(result_path)
@@ -102,7 +118,7 @@ def _apply_provision_result_locked(
                     attempted_status="environment_failed",
                 )
             failure = _record_provision_failure(
-                instance,
+                storage,
                 project_id,
                 draft,
                 "environment.failed",
@@ -126,8 +142,8 @@ def _apply_provision_result_locked(
 
     updated = _draft_with_adapter(draft, adapter)
     adapter_path = instance / "adapters" / f"{draft['identity']['adapter']}.yaml"
-    draft_path = instance / "adapter-drafts" / f"{project_id}.yaml"
-    latest = _load_inputs(instance, project_id)
+    draft_path = storage.draft(project_id)
+    latest = _load_inputs(instance, storage, project_id)
     if latest["status"] != "ok":
         return 1, latest
     if latest["draft"]["scanner"]["repo"]["head"] != draft["scanner"]["repo"]["head"]:
@@ -167,8 +183,12 @@ def _instance_dir(value: str) -> Path:
     return path.parent if path.name == "instance.yaml" else path
 
 
-def _load_inputs(instance: Path, project_id: str) -> dict[str, Any]:
-    draft_path = instance / "adapter-drafts" / f"{project_id}.yaml"
+def _storage_unavailable(exc: DataDirError) -> dict[str, Any]:
+    return _status("storage_unavailable", errors=[f"onboarding storage is unavailable: {exc}"])
+
+
+def _load_inputs(instance: Path, storage: OnboardingStorage, project_id: str) -> dict[str, Any]:
+    draft_path = storage.draft(project_id)
     binding_path = instance / "projects" / f"{project_id}.yaml"
     try:
         draft = load_config(draft_path)
@@ -218,10 +238,6 @@ def _run_id(draft: dict[str, Any]) -> str:
         material = f"{material}\0cycle={cycle}"
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
     return f"provision-{identity['id']}-{digest}"
-
-
-def _run_dir(instance: Path, project_id: str, run_id: str) -> Path:
-    return instance / "provision-runs" / project_id / run_id
 
 
 def _task_document(draft: dict[str, Any], binding: dict[str, Any]) -> dict[str, Any]:
@@ -298,12 +314,12 @@ def _draft_with_adapter(draft: dict[str, Any], adapter: dict[str, Any]) -> dict[
         "adapter": copy.deepcopy(adapter),
         "findings": [],
     }
-    updated["ownership"]["adapter"]["storage"] = "secretary-instance/adapters/<project>.yaml"
+    updated["ownership"]["adapter"]["storage"] = ADAPTER_STORAGE
     return updated
 
 
 def _record_provision_failure(
-    instance: Path,
+    storage: OnboardingStorage,
     project_id: str,
     draft: dict[str, Any],
     code: str,
@@ -329,7 +345,7 @@ def _record_provision_failure(
         return _status(
             "canonical_invalid", run_id=_run_id(draft), errors=["environment failure draft is invalid"]
         )
-    path = instance / "adapter-drafts" / f"{project_id}.yaml"
+    path = storage.draft(project_id)
     try:
         publish_state_atomic([(path, yaml.safe_dump(updated, sort_keys=False))])
     except OSError as exc:

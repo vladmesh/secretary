@@ -96,7 +96,7 @@ def collect_status(
             "instance": str(report.instance_path),
             "projects": report.projects,
             "heads": _heads(report.instance),
-            "head_registry": _head_registry(report.instance_path.parent),
+            "head_registry": _head_registry(report.instance_path.parent, report.data_dir),
             "cards": {
                 "total": _card_count(data_dir),
                 "active_attempts": len(_attempts(production, probe_panels=False)),
@@ -153,7 +153,7 @@ def _heads(instance: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
-def _head_registry(instance_dir: Path) -> dict[str, Any]:
+def _head_registry(instance_dir: Path, data_dir: Path | None = None) -> dict[str, Any]:
     """Where the live head registry came from: the snapshot file and the pin next to it.
 
     The dispatcher runs off the snapshot, so neither the file it was generated from nor the
@@ -162,19 +162,30 @@ def _head_registry(instance_dir: Path) -> dict[str, Any]:
     alone would credit the wrong file, and `canonical_owner` says which side owns it. An
     installation upgraded before the pin existed reads back with null source and an error naming
     what to run. Nothing here consults a checkout: the snapshot is validated on its own.
+
+    `legacy_source` names the live root's pair while the readers fall back to it because
+    `<data>/heads/` has none yet (deploy skew until the next `ummanu upgrade`); otherwise null.
     """
-    snapshot = head_registry.snapshot_path(instance_dir)
     record: dict[str, Any] = {
-        "snapshot": str(snapshot),
+        "snapshot": "",
         "canonical": None,
         "canonical_owner": None,
         "product_root": None,
         "revision": None,
+        "legacy_source": None,
         "error": None,
     }
     try:
-        source = head_registry.read_source(instance_dir)
-        head_registry.installed_heads(instance_dir)
+        pair = head_registry.installed_pair(instance_dir, data_dir)
+    except head_registry.HeadRegistryConfigError as exc:
+        record["error"] = str(exc)
+        return record
+    record["snapshot"] = str(pair.snapshot)
+    if pair.legacy:
+        record["legacy_source"] = str(pair.snapshot)
+    try:
+        source = head_registry.read_source(instance_dir, pair)
+        head_registry.installed_heads(instance_dir, pair)
     except head_registry.HeadRegistryConfigError as exc:
         record["error"] = str(exc)
         return record

@@ -14,11 +14,11 @@ from typing import Any
 import yaml
 
 from ummanu._fsutil import file_lock, publish_state_atomic
-from ummanu.config import ConfigError, load_config, validate
+from ummanu.config import ConfigError, DataDirError, load_config, validate
 from ummanu.onboarding import (
     IDENTITY_FIELDS,
+    OnboardingStorage,
     ScannerError,
-    project_lock_path,
     scan_repo,
 )
 from ummanu.provision import _instance_dir, _load_inputs, _run_id
@@ -36,13 +36,17 @@ _GIT_TIMEOUT = 60
 
 def run_gate(instance_value: str, project_id: str) -> tuple[int, dict[str, Any]]:
     instance = _instance_dir(instance_value)
-    with file_lock(project_lock_path(instance, project_id)):
-        return _run_gate_locked(instance, project_id)
+    try:
+        storage = OnboardingStorage.for_instance(instance)
+    except DataDirError as exc:
+        return 1, {"status": "storage_unavailable", "finding": _redact(f"onboarding storage is unavailable: {exc}")}
+    with file_lock(storage.lock(project_id)):
+        return _run_gate_locked(instance, storage, project_id)
 
 
-def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, Any]]:
+def _run_gate_locked(instance: Path, storage: OnboardingStorage, project_id: str) -> tuple[int, dict[str, Any]]:
     binding_path = instance / "projects" / f"{project_id}.yaml"
-    draft_path = instance / "adapter-drafts" / f"{project_id}.yaml"
+    draft_path = storage.draft(project_id)
     try:
         existing_binding = load_config(binding_path)
         existing_draft = load_config(draft_path)
@@ -59,7 +63,9 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
                 current_head = "unavailable"
             expected_head = existing_draft["scanner"]["repo"]["head"]
             if current_head != expected_head:
-                return _disable_stale_enabled(instance, project_id, existing_binding, existing_draft, None)
+                return _disable_stale_enabled(
+                    instance, storage, project_id, existing_binding, existing_draft, None
+                )
             try:
                 current_digest = "sha256:" + hashlib.sha256(adapter_path.read_bytes()).hexdigest()
             except OSError as exc:
@@ -69,7 +75,7 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
                 }
             provision_run = _run_id(existing_draft)
             expected_run = _gate_run_id(project_id, expected_head, provision_run, current_digest)
-            expected_path = instance / "gate-runs" / project_id / expected_run / "result.json"
+            expected_path = storage.gate_runs(project_id) / expected_run / "result.json"
             if expected_path.exists():
                 try:
                     previous = load_config(expected_path)
@@ -81,7 +87,7 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
                     and previous.get("adapter_digest") == current_digest
                 ):
                     return 0, previous
-            for candidate_path in (instance / "gate-runs" / project_id).glob("*/result.json"):
+            for candidate_path in storage.gate_runs(project_id).glob("*/result.json"):
                 try:
                     candidate = load_config(candidate_path)
                 except ConfigError:
@@ -93,14 +99,14 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
                     and revision.get("provision_run_id") == provision_run
                 ):
                     return _disable_stale_enabled(
-                        instance, project_id, existing_binding, existing_draft, candidate
+                        instance, storage, project_id, existing_binding, existing_draft, candidate
                     )
             return 1, {
                 "status": "conflict",
                 "finding": "enabled binding has no passed result for its current inputs",
             }
         return 1, {"status": "conflict", "finding": "enabled binding has no matching passed gate result"}
-    loaded = _load_inputs(instance, project_id)
+    loaded = _load_inputs(instance, storage, project_id)
     if loaded["status"] != "ok":
         return 1, loaded
     draft, binding = loaded["draft"], loaded["binding"]
@@ -118,7 +124,7 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
     digest = "sha256:" + hashlib.sha256(adapter_bytes).hexdigest()
     provision_run = _run_id(draft)
     run_id = _gate_run_id(project_id, draft["scanner"]["repo"]["head"], provision_run, digest)
-    result_path = instance / "gate-runs" / project_id / run_id / "result.json"
+    result_path = storage.gate_runs(project_id) / run_id / "result.json"
     if result_path.exists():
         try:
             previous = load_config(result_path)
@@ -183,7 +189,7 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
             except subprocess.TimeoutExpired:
                 pass
 
-    latest = _load_inputs(instance, project_id)
+    latest = _load_inputs(instance, storage, project_id)
     if latest["status"] != "ok" or latest["draft"]["scanner"]["repo"]["head"] != head:
         return _publish_stale(result_path, result, "scanner or provision state changed")
     try:
@@ -212,7 +218,7 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
         return _publish_result(result_path, result)
     writes = [
         (result_path, json.dumps(result, indent=2, sort_keys=True) + "\n"),
-        (instance / "adapter-drafts" / f"{project_id}.yaml", yaml.safe_dump(updated, sort_keys=False)),
+        (draft_path, yaml.safe_dump(updated, sort_keys=False)),
         (instance / "projects" / f"{project_id}.yaml", yaml.safe_dump(enabled, sort_keys=False)),
     ]
     try:
@@ -318,6 +324,7 @@ def _redact(value: str) -> str:
 
 def _disable_stale_enabled(
     instance: Path,
+    storage: OnboardingStorage,
     project_id: str,
     binding: dict[str, Any],
     draft: dict[str, Any],
@@ -342,10 +349,7 @@ def _disable_stale_enabled(
         publish_state_atomic(
             [
                 (instance / "projects" / f"{project_id}.yaml", yaml.safe_dump(disabled, sort_keys=False)),
-                (
-                    instance / "adapter-drafts" / f"{project_id}.yaml",
-                    yaml.safe_dump(updated, sort_keys=False),
-                ),
+                (storage.draft(project_id), yaml.safe_dump(updated, sort_keys=False)),
             ],
         )
     except OSError as exc:

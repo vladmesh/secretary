@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -15,7 +16,7 @@ from ummanu._fsutil import (
     publish_pair_and_remove_atomic,
     publish_pair_atomic,
 )
-from ummanu.config import ConfigError, load_config, validate
+from ummanu.config import ConfigError, DataDirError, generated_state_dir, load_config, validate
 from ummanu.runtime.paths import default_instance_path
 
 # The installation of a host that configured none. One spelling of the fallback, shared with the
@@ -30,8 +31,60 @@ REQUIRED_DECISIONS = [
 ]
 
 
+# The logical homes the onboarding contract records in `ownership.adapter.storage`: the draft is
+# generated state in the data directory, the canonical adapter is configuration in the live root.
+DRAFT_STORAGE = "<data>/onboarding/adapter-drafts/<project>.yaml"
+ADAPTER_STORAGE = "<instance>/adapters/<project>.yaml"
+
+
 class ScannerError(RuntimeError):
     """The repository could not be inspected deterministically."""
+
+
+@dataclass(frozen=True)
+class OnboardingStorage:
+    """Where onboarding, provision and the gate keep their generated state: the data directory.
+
+    Drafts, provision runs, gate runs and compatibility manifests live under `<data>/onboarding/`,
+    the per-project locks under `<data>/locks/onboarding/`. All of it is re-creatable by onboarding,
+    never exported and never restored (docs/RECOVERY.md), so nothing of it belongs in the live root.
+    This is the one place these paths are spelled.
+    """
+
+    data_dir: Path
+
+    @classmethod
+    def for_instance(cls, instance: Path) -> OnboardingStorage:
+        """The storage of the instance at ``instance`` (its directory or `instance.yaml`).
+
+        Raises :class:`ummanu.config.DataDirError` when the instance names no usable data directory.
+        """
+        return cls(generated_state_dir(instance))
+
+    @property
+    def root(self) -> Path:
+        return self.data_dir / "onboarding"
+
+    @property
+    def drafts(self) -> Path:
+        return self.root / "adapter-drafts"
+
+    def draft(self, project_id: str) -> Path:
+        return self.drafts / f"{project_id}.yaml"
+
+    def provision_runs(self, project_id: str) -> Path:
+        return self.root / "provision-runs" / project_id
+
+    def gate_runs(self, project_id: str) -> Path:
+        return self.root / "gate-runs" / project_id
+
+    @property
+    def compatibility_manifests(self) -> Path:
+        return self.root / "compatibility-manifests"
+
+    def lock(self, project_id: str) -> Path:
+        """The lock onboarding, provision and the gate serialize their draft writes on."""
+        return self.data_dir / "locks" / "onboarding" / f"{project_id}.lock"
 
 
 def project_add(
@@ -52,7 +105,13 @@ def project_add(
     instance = Path(instance_value).expanduser()
     instance_dir = instance.parent if instance.name == "instance.yaml" else instance
     binding_path = instance_dir / "projects" / f"{project_id}.yaml"
-    draft_path = instance_dir / "adapter-drafts" / f"{project_id}.yaml"
+    try:
+        storage = OnboardingStorage.for_instance(instance_dir)
+    except DataDirError as exc:
+        default_branch = _default_branch(repo) if repo.is_dir() else "main"
+        artifact = _base_artifact(repo, project_id, default_branch, _safe_scan(repo, default_branch))
+        return 1, _fail_draft(artifact, "draft.invalid", f"onboarding storage is unavailable: {exc}")
+    draft_path = storage.draft(project_id)
     if dry_run:
         return _project_add_locked(
             repo,
@@ -63,7 +122,7 @@ def project_add(
             dry_run=True,
             re_onboard=re_onboard,
         )
-    with file_lock(project_lock_path(instance_dir, project_id)):
+    with file_lock(storage.lock(project_id)):
         return _project_add_locked(
             repo,
             project_id,
@@ -218,11 +277,6 @@ def render_artifact(artifact: dict[str, Any]) -> str:
 def _project_id(name: str) -> str:
     value = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     return value or "project"
-
-
-def project_lock_path(instance_dir: Path, project_id: str) -> Path:
-    """The lock onboarding, provision and the gate serialize their draft writes on."""
-    return instance_dir / ".locks" / f"{project_id}.lock"
 
 
 def _identity(repo: Path, project_id: str, default_branch: str) -> dict[str, Any]:
@@ -527,7 +581,7 @@ def _base_artifact(repo: Path, project_id: str, branch: str, scanner: dict[str, 
             "adapter": {
                 "draft_owner": "project-add",
                 "provision_owner": "provision-agent",
-                "storage": "secretary-instance/adapter-drafts/<project>.yaml",
+                "storage": DRAFT_STORAGE,
             },
             "enable_transition": {
                 "only_when": "gate.status == passed",
@@ -558,7 +612,7 @@ def _reset_scanner_derived_state(artifact: dict[str, Any]) -> None:
         "binding": {"enabled": False},
         "findings": [],
     }
-    artifact["ownership"]["adapter"]["storage"] = "secretary-instance/adapter-drafts/<project>.yaml"
+    artifact["ownership"]["adapter"]["storage"] = DRAFT_STORAGE
 
 
 def _fail_draft(artifact: dict[str, Any], code: str, message: str) -> dict[str, Any]:

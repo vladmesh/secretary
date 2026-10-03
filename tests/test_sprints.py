@@ -536,10 +536,15 @@ class TwoOpenSprintFixture(SprintFixture):
         self.roots = Path(self.tmp.name) / "repos"
 
     def _limit(self, value: object) -> None:
-        (self.instance / "instance.yaml").write_text(
-            f"open_sprint_limit: {value}\n",
-            encoding="utf-8",
-        )
+        # Set the one line and keep the rest: the installation's `data_dir` is where its generated
+        # head registry lives (ummanu-26), so replacing the whole file would unplace it.
+        instance_file = self.instance / "instance.yaml"
+        kept = [
+            line
+            for line in instance_file.read_text(encoding="utf-8").splitlines()
+            if not line.startswith("open_sprint_limit:")
+        ]
+        instance_file.write_text("\n".join([*kept, f"open_sprint_limit: {value}"]) + "\n", encoding="utf-8")
 
     def _first(self, **kwargs) -> str:
         kwargs.setdefault("repositories", [str(self.roots / "ummanu")])

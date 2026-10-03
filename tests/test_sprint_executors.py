@@ -29,6 +29,7 @@ from ummanu.sprint_observer import (
     head_choice,
     parse_executor,
 )
+from ummanu.head_registry import generated_pair
 from ummanu.sprints import SprintReader, SprintWriter
 from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.tasks import TaskError, TaskWriter
@@ -78,7 +79,7 @@ class SprintExecutorPinTests(SprintFixture):
 
     def test_a_registry_that_cannot_be_read_is_a_refusal_and_never_a_pass(self) -> None:
         """The same rule the declared observer has: a claim nobody could check is not admitted."""
-        (self.instance / "heads" / "heads.yaml").write_text("::: not yaml", encoding="utf-8")
+        generated_pair(self.instance).snapshot.write_text("::: not yaml", encoding="utf-8")
         with self.assertRaises(TaskError) as raised:
             self._create(goal="broken registry", reference="sprint:broken", reviewer="claude-observer")
         self.assertEqual(raised.exception.code, "validation")

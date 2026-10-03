@@ -245,10 +245,17 @@ class TwoOpenSprintAdmission:
                 f"id: {project}\n",
                 encoding="utf-8",
             )
-        write_installed_pair(instance, SPRINT_HEAD_SNAPSHOT)
         # The setting is in force before either create runs: it is what the second one is
-        # admitted by, and admission reads it live.
-        (instance / "instance.yaml").write_text("open_sprint_limit: 2\n", encoding="utf-8")
+        # admitted by, and admission reads it live. The data directory it names is where the
+        # installed head pair sits.
+        (instance / "instance.yaml").write_text(
+            "version: 1\nname: two-sprints\n"
+            f"data_dir: {self.data_dir}\n"
+            "offsite:\n  instance_remote: git@example.invalid:x/y.git\n"
+            "open_sprint_limit: 2\n",
+            encoding="utf-8",
+        )
+        write_installed_pair(instance, SPRINT_HEAD_SNAPSHOT)
         self.assertEqual(instance_open_sprint_limit(instance), 2)
         self.board.add_record(
             "product:ummanu",

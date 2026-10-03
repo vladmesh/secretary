@@ -601,11 +601,14 @@ class TaskCliTests(CardStoreCase):
     def test_create_rejects_codex_mode_for_non_codex_head_before_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "heads").mkdir()
             (root / "instance.yaml").write_text(
-                "version: 1\nname: test\ndata_dir: /tmp/data\n", encoding="utf-8"
+                f"version: 1\nname: test\ndata_dir: {root / 'data'}\n"
+                "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
             )
-            (root / "heads" / "heads.yaml").write_text(
+            # The generated pair's home is the data directory (ummanu-26).
+            (root / "data" / "heads").mkdir(parents=True)
+            (root / "data" / "heads" / "heads.yaml").write_text(
                 "profiles:\n  claude-opus:\n    adapter: claude\nrole_defaults:\n  new_card: claude-opus",
                 encoding="utf-8",
             )

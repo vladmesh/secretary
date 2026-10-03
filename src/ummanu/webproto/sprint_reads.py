@@ -14,7 +14,7 @@ a new fact. Every value below is read from the source that already owns it:
 * projects from :func:`ummanu.product_issues.registered_projects`, the same set that refusal
   reads, and the reservations from `sprints/active-repositories.json`, the index the board's own
   write guard authorises against;
-* head profiles from the installation's head registry (`heads/heads.yaml`), through
+* head profiles from the installation's head registry (`<data>/heads/`), through
   :func:`ummanu.head_registry.installed_heads`, with observer eligibility decided by calling
   :func:`ummanu.sprint_observer.check_observer_profile` -- the check a create makes -- rather
   than by restating its rule here;
@@ -124,7 +124,7 @@ from ummanu.dispatch.observer import (
     delivery_evidence_summary,
     observer_snapshot,
 )
-from ummanu.head_registry import installed_heads
+from ummanu.head_registry import HeadRegistryConfigError, installed_heads, installed_pair
 from ummanu.product_issues import ProductIssueStore, registered_projects
 from ummanu.sprint_close import CLOSE_NOT_DONE
 from ummanu.sprint_observer import (
@@ -1864,7 +1864,7 @@ class SprintReadLayer(ProtocolBoundary):
                 sources.unavailable(
                     f"the head registry could not be read: {_reason(exc)}",
                     now=now,
-                    evidence=self._instance_dir() / "heads" / "heads.yaml",
+                    evidence=self._head_registry_evidence(),
                 ),
                 None,
             )
@@ -1917,6 +1917,13 @@ class SprintReadLayer(ProtocolBoundary):
             )
         except TaskError as exc:
             raise RuntimeUnavailable(f"the sprint board is not usable: {exc.message}") from exc
+
+    def _head_registry_evidence(self) -> Path:
+        """The snapshot a reader would have read, or `instance.yaml` when even its place is unknown."""
+        try:
+            return installed_pair(self.instance).snapshot
+        except HeadRegistryConfigError:
+            return self._instance_dir() / "instance.yaml"
 
     def _instance_dir(self) -> Path:
         return self.instance.parent if self.instance.is_file() else self.instance

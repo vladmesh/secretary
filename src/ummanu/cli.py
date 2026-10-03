@@ -48,7 +48,7 @@ from ummanu.head_health import (
     HeadReadiness,
     run_probe,
 )
-from ummanu.head_registry import HeadRegistryConfigError, installed_heads, read_source
+from ummanu.head_registry import HeadRegistryConfigError, installed_heads, installed_pair, read_source
 from ummanu.host import (
     KINDS,
     CollectResult,
@@ -572,6 +572,9 @@ def run_doctor(args: argparse.Namespace) -> int:
     print(f"projects: {report.projects}")
     print(f"adapters: {report.adapters}")
     print(f"adapter drafts: {report.adapter_drafts}")
+    legacy_heads = _legacy_head_registry_source(report)
+    if legacy_heads:
+        print(f"head registry source: legacy {legacy_heads} (until `ummanu upgrade` writes <data>/heads/)")
     print(f"data manifest: {'present' if report.has_manifest else 'absent'}")
     if report.manifest_path:
         print(f"data manifest path: {report.manifest_path}")
@@ -656,6 +659,15 @@ def _codex_home_status(report) -> dict[str, object]:
     }
 
 
+def _legacy_head_registry_source(report) -> str | None:
+    """The live root's legacy snapshot while the readers fall back to it, else None."""
+    try:
+        pair = installed_pair(report.instance_path.parent, report.data_dir)
+    except HeadRegistryConfigError:
+        return None
+    return str(pair.snapshot) if pair.legacy else None
+
+
 def _codex_required(instance_dir: Path) -> bool:
     """Whether an installed head profile runs on the `codex` adapter; a registry that cannot be read
     cannot rule one out, so it counts as yes."""
@@ -718,6 +730,8 @@ def run_status(args: argparse.Namespace) -> int:
     print(f"Ummanu status: {snapshot['installation']['name'] or 'unnamed'}")
     print(f"active attempts: {len(snapshot['dispatcher']['active_attempts'])}")
     canon = snapshot["installation"]["head_registry"]
+    if canon["legacy_source"]:
+        print(f"head registry source: legacy {canon['legacy_source']} (until `ummanu upgrade` writes <data>/heads/)")
     if canon["error"]:
         print(f"head registry: {canon['error']}")
     else:
