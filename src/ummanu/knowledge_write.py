@@ -213,8 +213,13 @@ def write_knowledge_directory(
     checked = check_knowledge_directory(instance_dir, directory=directory, actor=actor, source_dir=source_dir)
     instance_dir = checked.instance_dir
     target = state_repo.knowledge_dir(instance_dir) / checked.directory
+    # Named by the path below `state/knowledge`, as a document revision is: equal files written to
+    # two different directories are two different writes.
     revision = content_revision(
-        {name.as_posix(): hashlib.sha256(data).hexdigest() for name, data in checked.files}
+        {
+            (checked.directory / name).as_posix(): hashlib.sha256(data).hexdigest()
+            for name, data in checked.files
+        }
     )
     with state_repo.state_repo_lock(instance_dir):
         if target.exists() and (target.is_symlink() or not target.is_dir()):

@@ -178,7 +178,9 @@ class KnowledgeWithoutGitTests(LiveRootCase):
 
         expected = content_revision(
             {
-                name: hashlib.sha256(data if isinstance(data, bytes) else data.encode("utf-8")).hexdigest()
+                f"{REPORT}/{name}": hashlib.sha256(
+                    data if isinstance(data, bytes) else data.encode("utf-8")
+                ).hexdigest()
                 for name, data in files.items()
             }
         )
@@ -194,6 +196,24 @@ class KnowledgeWithoutGitTests(LiveRootCase):
         self.assertFalse(again.changed)
         self.assertEqual(again.commit, expected)
         self.assertEqual((self.knowledge / REPORT).stat().st_ino, inode, "an unchanged directory is not rewritten")
+
+
+    def test_equal_files_in_two_directories_give_two_revisions_and_a_rewrite_gives_the_same_one(self):
+        files = {"report.md": "# Findings\n", "data/a.csv": "1\n"}
+
+        first = write_knowledge_directory(
+            self.live, directory="reports/ummanu-24", actor="dispatcher", source_dir=self.source(files, "one")
+        )
+        other = write_knowledge_directory(
+            self.live, directory="reports/ummanu-25", actor="dispatcher", source_dir=self.source(files, "two")
+        )
+        again = write_knowledge_directory(
+            self.live, directory="reports/ummanu-24", actor="dispatcher", source_dir=self.source(files, "three")
+        )
+
+        self.assertNotEqual(first.commit, other.commit)
+        self.assertFalse(again.changed)
+        self.assertEqual(again.commit, first.commit)
 
 
 class KnowledgeDirectoryAtomicityTests(LiveRootCase):
