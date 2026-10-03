@@ -3,14 +3,15 @@
 The source installation writes its board (two cards, a Product with an Issue and a closed sprint
 they own) into one database of a throwaway `postgres:16`, and a real
 `SnapshotExporter` window cuts it into a bare repository that is pushed to a local bare remote. The
-recovery target is a second, empty database. Recovery then runs through `install()` for real: the
-bare clone, the manifest check, the live root, the secret store step, the checkpoint, the board and
-sprint import with parity, the memory reindex (only the embedding model is stood in for) and the
-head registry regeneration. Project checkouts, CODEX_HOME and the host steps other than the head
-registry are host provisioning and stay out, as in `tests/test_fresh_postgres_install.py`.
-
-`board-store.env` is a host-local file: bootstrap's provisioning writes it, never the snapshot. The
-test writes it into the live root right after the clone step, where bootstrap would have left it.
+recovery target is a second, empty database. The clean-host sequence then runs from its first step
+(docs/RECOVERY.md, "Fresh install and recovery"). `bootstrap` runs for real with the host edges and
+Compose provisioning stood in for, as in `tests/test_fresh_postgres_install.py`: its clone step lays
+the snapshot out, its provisioning writes `board-store.env` for the target database (bootstrap's
+provisioning, never the snapshot, is where that host-local file comes from) and the migration runs
+against it. Recovery then runs through `install()` for real: the reused live root, the secret store
+step, the checkpoint, the board and sprint import with parity, the memory reindex (only the
+embedding model is stood in for) and the head registry regeneration. Project checkouts, CODEX_HOME
+and the host steps other than the head registry are host provisioning and stay out.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from unittest import mock
 from tests.fakes.installation import PRODUCT_ROOT
 from tests.fakes.snapshot_remote import HEAD, exporter_remote, git
 from tests.sql_backend_fixtures import PostgresBoard
+from ummanu import bootstrap as bootstrap_module
 from ummanu import installation, upgrade
 from ummanu.board import store
 from ummanu.board.sql_cards import SqlCardClient
@@ -152,6 +154,39 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
             request_id="close-snapshot-sprint",
         )
 
+    def _bootstrap(self) -> tuple[int, list[str]]:
+        """The real `bootstrap` against the snapshot remote; returns its exit code and its output."""
+        target = self.fixture.target
+
+        def provision(instance: Path, *, allow_create: bool) -> None:
+            self.assertTrue(allow_create)
+            # The clone step brought no store credential: provisioning is where it comes from.
+            self.assertFalse(store.store_path(instance).exists())
+            _write_store_file(instance, self.target_config)
+
+        printed = mock.Mock()
+        args = SimpleNamespace(
+            instance_dir=str(target),
+            instance_remote=str(self.fixture.remote),
+            installation_user=getpass.getuser(),
+            dry_run=False,
+        )
+        with (
+            mock.patch("ummanu.bootstrap.os.geteuid", return_value=0),
+            mock.patch("ummanu.bootstrap._host_supported"),
+            mock.patch("ummanu.bootstrap._ensure_installation_user"),
+            mock.patch("ummanu.bootstrap._set_installation_owner"),
+            mock.patch("ummanu.installation._set_installation_owner"),
+            mock.patch("ummanu.bootstrap._install_platform"),
+            mock.patch("ummanu.bootstrap.provision_board_store", side_effect=provision),
+            # The database is a migrated copy, so the migration finds nothing owed. The role contract
+            # of a store bootstrap creates is `tests/test_fresh_postgres_install.py`'s.
+            mock.patch("ummanu.bootstrap.verify_board_store_roles"),
+            mock.patch("builtins.print", printed),
+        ):
+            code = bootstrap_module.bootstrap(args)
+        return code, [str(call.args[0]) for call in printed.call_args_list if call.args]
+
     def test_a_snapshot_remote_recovers_into_an_empty_store_at_parity(self) -> None:
         fixture = self.fixture
         target, data_dir = fixture.target, fixture.data_dir
@@ -166,14 +201,11 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
         # Two cards, the Product and its Issue.
         self.assertEqual(summary["card_count"], 4)
         self.assertEqual(summary["sprint_count"], 1)
-        real_checkout = installation._snapshot_checkout
-
-        def checkout_then_provision(*args, **kwargs):
-            checkout = real_checkout(*args, **kwargs)
-            # Bootstrap's provisioning, not the snapshot, is where the store credential comes from.
-            self.assertFalse((target / "board-store.env").exists())
-            _write_store_file(target, self.target_config)
-            return checkout
+        code, output = self._bootstrap()
+        self.assertEqual(code, 0, output)
+        self.assertFalse((target / ".git").exists())
+        self.assertTrue((target / ".ummanu-bootstrap").is_file())
+        self.assertEqual(store.store_path(target).stat().st_mode & 0o777, 0o600)
 
         def head_registry_only(context, steps=installation.STEPS):
             return upgrade.run_steps(
@@ -211,7 +243,6 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
         with ExitStack() as stack:
             for patch in (
                 mock.patch.object(SqlCardClient, "call_batch", autospec=True, side_effect=recording_batch),
-                mock.patch("ummanu.installation._snapshot_checkout", side_effect=checkout_then_provision),
                 mock.patch("ummanu.installation._ensure_installation_user"),
                 mock.patch("ummanu.installation._set_installation_owner"),
                 mock.patch("ummanu.installation.provision_project_checkouts", return_value=[]),
@@ -224,6 +255,9 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
 
         steps = {step.name: (step.status, step.detail) for step in result.steps}
         self.assertEqual(result.status, "ok", f"{result.render()}\nrefused store batches: {refused}")
+        # The live root bootstrap laid out is this tip's: recovery reuses it instead of cloning again.
+        self.assertEqual(steps["instance-checkout"][0], "unchanged")
+        self.assertIn(f"reused exporter snapshot {self.tip[:12]}", steps["instance-checkout"][1])
         self.assertEqual(steps["board"], ("changed", f"{summary['card_count']} card(s) at parity"))
         # Board and sprints arrived with the counts the tree's export.json declares.
         state = restore_state(data_dir)
