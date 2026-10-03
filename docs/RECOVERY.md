@@ -817,6 +817,27 @@ Recovery does not apply sprint-opening validation. Parity compares whether `prod
 reservations are present, not only their values; gaining an empty field the export lacked fails parity.
 A checkpoint without a sprints file restores as an installation without sprints.
 
+**Write order.** The import writes in the phases `src/ummanu/board/import_order.py` declares, and
+nowhere else is the order stated: exported request/audit history first, then Products, Issues and
+task cards, card comments (task, Issue and Product), closure, card order, sprints and sprint comments.
+Each phase names the schema tables it writes. The rule is that for every immediate foreign key in
+`src/ummanu/board/schema.py` between two tables the import writes, the parent's phase comes no later
+than the child's (a `DEFERRABLE INITIALLY DEFERRED` key holds at commit, whatever the order). History
+goes first because an Issue or Product comment's `[request-id:...]` stamp claims an exported request
+(`issue_comment_claims_its_request`), and a history row references no board row. The card restore
+sorts its create and initialize sweeps by the record's phase, so a Product precedes its Issue. A
+writer's own staged claim precedes its effect inside the same call, and is not a phase ordering.
+`tests/test_import_write_order.py` builds the FK graph from the schema metadata and fails on a table
+with no place in the order or an edge the order violates.
+
+**Refusals.** The import runs in one transaction, and PostgreSQL aborts it at the first refused
+statement, so no read after it can prove anything. A refused swimlane, card create,
+metadata/state, comment, closure or order batch therefore fails at once with the store's message
+(`board store refused the restored <batch>: the board store refused to apply a write: <PostgreSQL
+error>`). The import does not treat it as uncertain, and the whole import rolls back. Only
+transport loss (`backend_unavailable`), where the outcome is unknown, takes the reconcile path
+("… is uncertain …"), and the rerun resumes it.
+
 Restore-only bulk boundaries, all idempotent on rerun:
 
 - **Cards.** Task, Product and Issue creation validates the full plan and stages a deterministic

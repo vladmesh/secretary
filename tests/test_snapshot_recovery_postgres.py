@@ -1,8 +1,9 @@
 """`ummanu recover` from an exporter snapshot into a real PostgreSQL board store.
 
-The source installation writes its board (two cards, a Product with an Issue and a closed sprint
-they own, and a closed card on a retired project id as production holds it) into one database of a
-throwaway `postgres:16`, and a real `SnapshotExporter` window cuts it into a bare repository that is pushed to a local bare remote. The
+The source installation writes its board -- every record kind production holds: a Product, an Issue
+whose priority comment claims its request, a closed sprint and an open one with sprint comments, task
+cards with comments, a closed card on a retired project id, and the requests and events all of those
+leave -- into one database of a throwaway `postgres:16`, and a real `SnapshotExporter` window cuts it into a bare repository that is pushed to a local bare remote. The
 recovery target is a second, empty database. The clean-host sequence then runs from its first step
 (docs/RECOVERY.md, "Fresh install and recovery"). `bootstrap` runs for real with the host edges and
 Compose provisioning stood in for, as in `tests/test_fresh_postgres_install.py`: its clone step lays
@@ -12,6 +13,10 @@ against it. Recovery then runs through `install()` for real: the reused live roo
 step, the checkpoint, the board and sprint import with parity, the memory reindex (only the
 embedding model is stood in for) and the head registry regeneration. Project checkouts, CODEX_HOME
 and the host steps other than the head registry are host provisioning and stay out.
+
+Each kind is compared with its source after recovery. The ummanu-45 drill stopped on the issue
+comment: its `[request-id:...]` stamp claims an exported request (`issue_comment_claims_its_request`),
+which the import wrote only after every comment, and no seed here held one.
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ from tests.sql_backend_fixtures import PostgresBoard, insert_card_row
 from ummanu import bootstrap as bootstrap_module
 from ummanu import installation, upgrade
 from ummanu.board import store
+from ummanu.board.sql_audit import SqlTaskAudit
 from ummanu.board.sql_cards import SqlCardClient
 from ummanu.board.store import BoardStoreConfig
 from ummanu.checkpoint import SNAPSHOT_BASE_REF, SNAPSHOT_REF, SnapshotExporter, tick_checkpoint_writer
@@ -54,6 +60,8 @@ RETIRED_METADATA = {
     "head": "claude-sonnet",
     "task_type": "code",
 }
+CARDS = ("ummanu-1", "ummanu-2", RETIRED_CARD)
+SPRINTS = ("sprint:snapshot", "sprint:snapshot-open")
 
 
 def _write_store_file(instance: Path, config: BoardStoreConfig) -> None:
@@ -64,6 +72,15 @@ def _write_store_file(instance: Path, config: BoardStoreConfig) -> None:
         "".join(f"{key}={value}\n" for key, value in config.as_environ().items()), encoding="utf-8"
     )
     path.chmod(0o600)
+
+
+def _exported_history(data_dir: Path) -> list[dict[str, object]]:
+    """The committed requests the recovered export carries, as `restore._restore_board_history` reads them."""
+    board = data_dir / "board"
+    if (board / "audit.json").is_file():
+        return json.loads((board / "audit.json").read_text(encoding="utf-8"))["events"]
+    lines = (board / "audit.ndjson").read_text(encoding="utf-8").splitlines()
+    return [json.loads(line) for line in lines if line.strip()]
 
 
 class _Embedder:
@@ -106,12 +123,16 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
         self.tip = self.fixture.cut(stand_in=False, state_dir=state_dir)
 
     def _seed_source(self) -> None:
-        """Two cards, a Product with one Issue, and a closed sprint they own, by the source's writers;
-        and production's closed card on a retired project id, as its store holds it.
+        """Every record kind production holds, each by the writer that makes it there.
+
+        Two task cards with comments; a Product and one Issue whose priority change leaves the
+        stamped comment that claims its request; a sprint with a comment, closed, and an open one
+        with a comment after it; and production's closed card on a retired project id, as its store
+        holds it. Every writer leaves its requests and events behind.
 
         A sprint cannot exist without an owning Product, an open Issue of it and a reserved project
         (`SprintWriter._check_ownership`), so those are made the way the PO makes them, through
-        `ProductIssueStore`. The cards come first and stay outside the sprint. No writer creates a
+        `ProductIssueStore`. The cards come first and stay outside the sprints. No writer creates a
         card on an id the registry no longer has, nor an empty bag value, so that row is inserted
         the way the PostgreSQL suites seed a row (`insert_card_row`) and given its metadata through
         the client.
@@ -131,6 +152,14 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
                 reference=f"ummanu-{number}",
                 request_id=f"create-snapshot-card-{number}",
             )
+            for index in (1, 2):
+                writer.comment(
+                    role="po",
+                    actor="test",
+                    reference=f"ummanu-{number}",
+                    body=f"card {number} comment {index}",
+                    request_id=f"comment-snapshot-card-{number}-{index}",
+                )
         moved = datetime(2026, 8, 4, 9, 13, 38, tzinfo=UTC)
         with client.transaction():
             key = insert_card_row(
@@ -169,6 +198,15 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
             actor="test",
             request_id="create-snapshot-issue",
         )["ref"]
+        self.issue = issue
+        # The Issue comment that claims its request: `[issue:priority]` stamped `[request-id:...]`.
+        products.update_priority(
+            reference=issue,
+            priority="P0",
+            reason="recovery is the release blocker",
+            actor="test",
+            request_id="raise-snapshot-issue",
+        )
         sprints = sprint_client(source)
         self.addCleanup(sprints.close)
         sprint_writer = SprintWriter(sprints, data_dir=data_dir, instance=source)
@@ -184,6 +222,13 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
             reference="sprint:snapshot",
             request_id="create-snapshot-sprint",
         )["sprint"]["ref"]
+        sprint_writer.comment(
+            role="po",
+            actor="test",
+            reference=sprint,
+            body="closed sprint comment",
+            request_id="comment-snapshot-sprint",
+        )
         sprint_writer.close(
             role="po",
             actor="test",
@@ -195,6 +240,66 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
             reason="snapshot fixture closed",
             request_id="close-snapshot-sprint",
         )
+        # Production holds an open sprint beside its closed ones; the installation admits one.
+        open_sprint = sprint_writer.create(
+            role="po",
+            actor="test",
+            goal="stay open across the recovery",
+            repositories=[str(self.root / "repository-open")],
+            product="ummanu",
+            issues=[issue],
+            projects=["ummanu"],
+            observer=none_choice(),
+            reference=SPRINTS[1],
+            request_id="create-snapshot-open-sprint",
+        )["sprint"]["ref"]
+        sprint_writer.comment(
+            role="po",
+            actor="test",
+            reference=open_sprint,
+            body="open sprint comment",
+            request_id="comment-snapshot-open-sprint",
+        )
+        self.source_kinds = self._kinds(source, data_dir, self.source_config)
+
+    def _kinds(self, instance: Path, data_dir: Path, config: BoardStoreConfig) -> dict[str, object]:
+        """What each record kind holds, read by its own reader, to compare source and target."""
+        client = SqlCardClient(config.for_role("owner"), instance)
+        self.addCleanup(client.close)
+        products = ProductIssueStore(client, data_dir=data_dir, instance=instance)
+        issue = products.show_issue(self.issue)
+        history = issue.pop("history")
+        sprints = sprint_client(instance)
+        self.addCleanup(sprints.close)
+        sprint_reader = SprintReader(sprints, data_dir=data_dir)
+        tasks = TaskReader(client)
+        return {
+            "product": products.show_product("ummanu"),
+            "issue": issue,
+            "issue_comments": [comment["text"] for comment in history["comments"]],
+            "issue_requests": {event["request_id"] for event in history["audit"]},
+            "sprints": {
+                reference: (
+                    shown["status"],
+                    shown["goal"],
+                    [comment["body"] for comment in shown["comments"]],
+                )
+                for reference in SPRINTS
+                for shown in (sprint_reader.show(reference),)
+            },
+            "cards": {
+                reference: (
+                    shown["title"],
+                    shown["state"],
+                    shown["closed"],
+                    shown["project"],
+                    [comment["body"] for comment in shown["comments"]],
+                )
+                for reference in CARDS
+                for shown in (tasks.show(reference),)
+            },
+            "requests": {event["request_id"]: event for event in SqlTaskAudit(client).events()},
+        }
 
     def _bootstrap(self) -> tuple[int, list[str]]:
         """The real `bootstrap` against the snapshot remote; returns its exit code and its output."""
@@ -242,7 +347,9 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
         )
         # Two cards, the closed card on the retired id, the Product and its Issue.
         self.assertEqual(summary["card_count"], 5)
-        self.assertEqual(summary["sprint_count"], 1)
+        self.assertEqual(summary["sprint_count"], 2)
+        # The seed holds what the ummanu-45 drill stopped on: an Issue comment claiming a request.
+        self.assertIn("[request-id:raise-snapshot-issue]", self.source_kinds["issue_comments"][-1])
         code, output = self._bootstrap()
         self.assertEqual(code, 0, output)
         self.assertFalse((target / ".git").exists())
@@ -269,9 +376,8 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
             recovery_phrase_stdin=False,
             host_fixture=None,
         )
-        # The restore treats a refused batch as ambiguous and proves the outcome by a fresh read, so
-        # inside its one transaction the cause would surface only as "transaction is aborted".
-        # Keep what the store said, for the failure message.
+        # A refused batch now names the store's refusal itself; every refusal is kept anyway, so a
+        # failure message holds each one the store gave, not only the first.
         refused: list[str] = []
         real_batch = SqlCardClient.call_batch
 
@@ -325,9 +431,35 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
             ("done", True, "personal_site"),
         )
         self.assertEqual(restored["extensions"]["extra"]["swimlane"], exported["swimlane"])
-        sprints = sprint_client(target)
-        self.addCleanup(sprints.close)
-        self.assertEqual(SprintReader(sprints, data_dir=data_dir).show("sprint:snapshot")["status"], "closed")
+        # Every record kind at parity with its source.
+        restored_kinds = self._kinds(target, data_dir, self.target_config)
+        source_kinds = self.source_kinds
+        for kind in ("product", "issue", "issue_comments", "sprints", "cards"):
+            with self.subTest(kind=kind):
+                self.assertEqual(restored_kinds[kind], source_kinds[kind])
+        self.assertEqual(restored_kinds["issue"]["priority"], "P0")
+        self.assertEqual(
+            {reference: status for reference, (status, _goal, _comments) in restored_kinds["sprints"].items()},
+            {"sprint:snapshot": "closed", "sprint:snapshot-open": "open"},
+        )
+        self.assertTrue(all(comments for *_rest, comments in restored_kinds["sprints"].values()))
+        for reference in ("ummanu-1", "ummanu-2"):
+            self.assertEqual(
+                restored_kinds["cards"][reference][-1],
+                [f"[po]\ncard {reference[-1]} comment {index}" for index in (1, 2)],
+            )
+        # Audit and requests: every request the export carries is back with its record, the one the
+        # Issue comment claims included, and the target adds only the restore's own.
+        self.assertLessEqual(source_kinds["issue_requests"], restored_kinds["issue_requests"])
+        self.assertIn("raise-snapshot-issue", restored_kinds["issue_requests"])
+        exported = {event["request_id"]: event for event in _exported_history(data_dir)}
+        self.assertLessEqual(set(source_kinds["requests"]), set(exported))
+        restored_requests = restored_kinds["requests"]
+        self.assertEqual({request_id: restored_requests.get(request_id) for request_id in exported}, exported)
+        self.assertEqual(
+            {request_id for request_id in restored_requests if request_id not in exported},
+            {request_id for request_id in restored_requests if request_id.startswith("restore:")},
+        )
         # The snapshot repository, its marker and the plain live root.
         repository = data_dir / "backup" / "instance.git"
         self.assertEqual(git(repository, "rev-parse", SNAPSHOT_REF), self.tip)
