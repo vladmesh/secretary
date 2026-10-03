@@ -28,6 +28,7 @@ from ummanu.head_registry import (
     installed_heads,
     installed_pair,
 )
+from ummanu.onboarding import OnboardingStorage
 from ummanu.runtime import heads
 
 ROLES = ("new_card", "reviewer", "observer", "curator", "retro", "steward")
@@ -158,6 +159,41 @@ class DeploySkewTests(unittest.TestCase):
         self.assertEqual(pair, generated_pair(self.instance))
         with self.assertRaisesRegex(HeadRegistryConfigError, str(pair.snapshot)):
             installed_heads(self.instance)
+
+
+class LocatedByDataDirOnlyTests(unittest.TestCase):
+    """Generated state is found from `data_dir` alone, never from the rest of `instance.yaml`.
+
+    An unreadable `open_sprint_limit` is reported by `validate_instance` and fails closed to one
+    open sprint where it is read; it must not also hide the head registry from a sprint create.
+    """
+
+    def test_an_invalid_unrelated_setting_leaves_the_pair_and_onboarding_storage_reachable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = root / "instance"
+            instance.mkdir()
+            (instance / "instance.yaml").write_text(
+                instance_yaml(root / "data") + "open_sprint_limit: two\n", encoding="utf-8"
+            )
+            self.assertFalse(validate_instance(instance).ok)
+            write_installed_pair(instance, yaml.safe_dump({
+                "resources": {"acct": {"account": "acct"}},
+                "profiles": {"only-head": {"resource": "acct", "adapter": "codex", "fallback": []}},
+                "role_defaults": {"new_card": "only-head"},
+            }))
+
+            self.assertEqual(installed_pair(instance).snapshot, root / "data" / "heads" / "heads.yaml")
+            self.assertEqual(installed_heads(instance)["role_defaults"]["new_card"], "only-head")
+            self.assertEqual(OnboardingStorage.for_instance(instance).root, root / "data" / "onboarding")
+
+    def test_an_instance_naming_no_data_directory_still_fails_by_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            (instance / "instance.yaml").write_text("open_sprint_limit: 2\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(HeadRegistryConfigError, "data_dir must be a non-empty string"):
+                installed_pair(instance)
 
 
 class RecoverRegenerationTests(unittest.TestCase):

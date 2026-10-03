@@ -166,10 +166,10 @@ class RegistryPair:
 
 
 def _data_dir(instance_path: Path) -> Path:
-    from ummanu.config import DataDirError, instance_data_dir
+    from ummanu.config import DataDirError, generated_state_dir
 
     try:
-        return instance_data_dir(_instance_dir(instance_path))
+        return generated_state_dir(_instance_dir(instance_path))
     except DataDirError as exc:
         raise HeadRegistryConfigError(
             f"cannot locate the head registry of {_instance_dir(instance_path)}: {exc}"

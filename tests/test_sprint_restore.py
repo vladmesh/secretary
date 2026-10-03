@@ -377,10 +377,15 @@ class SprintRestoreTests(SprintBackendFixture, unittest.TestCase):
         return payload
 
     def _set_open_sprint_limit(self, value: int) -> None:
-        (self.instance / "instance.yaml").write_text(
-            f"open_sprint_limit: {value}\n",
-            encoding="utf-8",
-        )
+        # Set the one line and keep the rest: the installation's `data_dir` is where its generated
+        # head registry lives (ummanu-26), so replacing the whole file would unplace it.
+        instance_file = self.instance / "instance.yaml"
+        kept = [
+            line
+            for line in instance_file.read_text(encoding="utf-8").splitlines()
+            if not line.startswith("open_sprint_limit:")
+        ]
+        instance_file.write_text("\n".join([*kept, f"open_sprint_limit: {value}"]) + "\n", encoding="utf-8")
 
     def test_restore_refuses_an_export_of_open_sprints_admission_would_have_refused(self) -> None:
         """Restore reproduces rows one by one, so the set is judged once, before the first write.

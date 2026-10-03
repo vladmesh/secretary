@@ -16,7 +16,7 @@ from ummanu._fsutil import (
     publish_pair_and_remove_atomic,
     publish_pair_atomic,
 )
-from ummanu.config import ConfigError, DataDirError, instance_data_dir, load_config, validate
+from ummanu.config import ConfigError, DataDirError, generated_state_dir, load_config, validate
 from ummanu.runtime.paths import default_instance_path
 
 # The installation of a host that configured none. One spelling of the fallback, shared with the
@@ -59,7 +59,7 @@ class OnboardingStorage:
 
         Raises :class:`ummanu.config.DataDirError` when the instance names no usable data directory.
         """
-        return cls(instance_data_dir(instance))
+        return cls(generated_state_dir(instance))
 
     @property
     def root(self) -> Path:
