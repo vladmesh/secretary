@@ -11,6 +11,7 @@ from typing import Any
 
 from ummanu.board.backend import BOARD_STORE_KIND, entity_id, entity_number
 from ummanu.board.extension_bag import EXTENSION_BAG
+from ummanu.board.import_order import record_rank
 
 
 @dataclass(frozen=True)
@@ -75,14 +76,43 @@ def _restore_payload_error(item: Any, phase: str, error: Exception) -> Exception
     return TaskError("validation", f"restored-card {phase} payload for {reference}: {message}", 2)
 
 
-def _foreign_key_rank(item: RestoreCardObligation) -> int:
-    """Products before every other record: an Issue's (and a sprint's) row names its Product.
+def refused_in_transaction(client: Any, error: BaseException) -> bool:
+    """Whether a failed store call is a refusal the import's transaction cannot read past.
 
-    `issues.product_id` is an immediate foreign key, so the Product's row has to be written before
-    the Issue's, whatever order the export's (column, swimlane, position, reference) sort put them
-    in. The sort that uses this is stable, so every other record keeps its order.
+    The import runs in one transaction (`restore.import_normalized_board`), and PostgreSQL aborts
+    a transaction at its first refused statement: every statement after it, the proving read
+    included, answers only "current transaction is aborted". So a refusal there is definite, and
+    re-reading to prove what landed would replace what the store said with that echo -- the
+    ummanu-45 drill saw a foreign-key refusal as "batched comment write is uncertain". Only
+    transport loss (`backend_unavailable`, `sql_cards._driver_error`) leaves an outcome unknown,
+    and only it, or a refusal outside a transaction, takes the ambiguity path.
     """
-    return 0 if str(item.metadata.get("record_type") or "") == "product" else 1
+    from ummanu.tasks import TaskError
+
+    return (
+        isinstance(error, TaskError)
+        and error.code != "backend_unavailable"
+        and bool(getattr(client, "_depth", 0))
+    )
+
+
+def store_refusal(what: str, error: BaseException) -> Exception:
+    """The refusal of a restored batch, carrying what the store said."""
+    from ummanu.tasks import TaskError
+
+    message = getattr(error, "message", str(error))
+    return TaskError("backend_error", f"board store refused the restored {what}: {message}", 1)
+
+
+def _foreign_key_rank(item: RestoreCardObligation) -> int:
+    """The position of the record's write phase in the import order (`board.import_order`).
+
+    `issues.product_id` is an immediate foreign key, so a Product's row is written before an
+    Issue's, and both before a task card's `task_issues`, whatever order the export's (column,
+    swimlane, position, reference) sort put them in. The sort that uses this is stable, so records
+    of one kind keep their order.
+    """
+    return record_rank(str(item.metadata.get("record_type") or ""))
 
 
 def _store_placed(item: RestoreCardObligation) -> bool:
@@ -185,6 +215,8 @@ def restore_cards_batched(
         except TaskError as exc:
             if exc.code == "validation":
                 raise _restore_payload_error(missing[0], "create", exc) from None
+            if refused_in_transaction(writer.client, exc):
+                raise store_refusal("card create batch", exc) from None
             # Transport loss or a malformed/incomplete aggregate answer is genuinely ambiguous.
         _set_restore_phase(writer.client, "proof")
         existing = _restore_inventory(writer.client, board_id)
@@ -271,6 +303,8 @@ def restore_cards_batched(
         except TaskError as exc:
             if exc.code == "validation":
                 raise _restore_payload_error(write_entries[0][0], "metadata/state", exc) from None
+            if refused_in_transaction(writer.client, exc):
+                raise store_refusal("card metadata/state batch", exc) from None
             # Reconcile genuinely uncertain aggregate outcomes from fresh evidence below.
 
     _set_restore_phase(writer.client, "proof")
@@ -333,6 +367,8 @@ def close_restored_cards_batched(
     except TaskError as exc:
         if exc.code == "validation":
             raise _restore_payload_error(entries[0][0], "closure", exc) from None
+        if refused_in_transaction(client, exc):
+            raise store_refusal("card closure batch", exc) from None
         # Transport loss or an invalid aggregate answer needs an authoritative read.
     _set_restore_phase(client, "proof")
     rows = _restore_inventory(client, board_id)
@@ -575,19 +611,22 @@ def restore_comments_batched(writer: Any, occurrences: list[RestoreCommentOccurr
                 if not writes:
                     continue
                 try:
-                    answers = writer.client.call_batch(writes)
-                    if any(
-                        not isinstance(answer, int) or isinstance(answer, bool) or answer <= 0
-                        for answer in answers
-                    ):
-                        raise TaskError("backend_error", "board store rejected a batched comment write", 1)
-                except Exception:  # noqa: BLE001 - any aggregate failure makes every answer uncertain.
+                    answers: list[Any] | None = writer.client.call_batch(writes)
+                except Exception as exc:  # noqa: BLE001 - short of a refusal, every answer is uncertain.
+                    if refused_in_transaction(writer.client, exc):
+                        # The refusal aborted the import transaction: nothing after it can be proved.
+                        raise store_refusal(f"comment batch for {staged[0][0].reference}", exc) from None
+                    answers = None
+                if answers is None or any(
+                    not isinstance(answer, int) or isinstance(answer, bool) or answer <= 0
+                    for answer in answers
+                ):
                     _reconcile_uncertain_chunk(writer, grouped, positions, staged)
                     raise TaskError(
                         "audit_pending",
                         "batched comment write is uncertain; pending occurrences were reconciled",
                         4,
-                    ) from None
+                    )
                 for item, event in staged:
                     _commit_proven_comment(writer, item, event, positions[item.reference] + 1)
                     positions[item.reference] += 1
@@ -856,7 +895,9 @@ def finish_pending_restore_order(writer: Any, event: dict[str, Any]) -> None:
                 position=mismatch + 1,
                 swimlane_id=swimlane_id,
             )
-        except Exception:  # noqa: BLE001 - a lost move reply is reconciled below.
+        except Exception as exc:  # noqa: BLE001 - a lost move reply is reconciled below.
+            if refused_in_transaction(writer.client, exc):
+                raise store_refusal(f"order move for {reference}", exc) from None
             answer = None
         if answer is True:
             live.remove(reference)

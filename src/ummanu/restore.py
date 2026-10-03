@@ -167,6 +167,11 @@ def _import_normalized_board(
             existing_sprints = _existing_sprints(data_dir, client, sprints)
             prefix = _restore_request_prefix(data_dir, writer.audit, set(existing) | set(existing_sprints))
             _validate_deferred_restore_comments(writer.audit, cards, sprints, prefix)
+            # The writes follow `board.import_order.IMPORT_PHASES`, the one statement of their order:
+            # history first, so a restored row claiming an exported request finds its `requests`
+            # row (`issue_comment_claims_its_request`); the record kinds, comments, closure, order
+            # and sprints after it.
+            _restore_board_history(data_dir, writer.audit)
             ordered_cards = sorted(cards, key=_restore_card_order)
             columns, swimlanes = _ensure_restore_swimlanes(
                 client, board_id, columns, swimlanes, ordered_cards
@@ -208,7 +213,6 @@ def _import_normalized_board(
                 _update_restore_state(data_dir, board="failed", board_parity="failed")
                 raise RestoreError("board parity check failed: restored card order")
             _import_sprints(data_dir, client, sprints, existing_sprints, prefix)
-            _restore_board_history(data_dir, writer.audit)
             pending_comments = [
                 event for event in writer.audit.pending_events() if event.get("kind") == "restored_comment"
             ]
@@ -229,7 +233,11 @@ def _import_normalized_board(
 
 
 def _restore_board_history(data_dir: Path, audit: Any) -> None:
-    """Recreate portable committed request/audit history without replaying effects."""
+    """Recreate portable committed request/audit history without replaying effects.
+
+    The import's first write phase (`board.import_order`): these rows reference no board row, and
+    an exported issue or product comment claims one of them by its `[request-id:...]` stamp.
+    """
     path = data_dir / "board" / "audit.json"
     try:
         if path.is_file():
@@ -312,9 +320,12 @@ def _ensure_restore_swimlanes(
         return columns, swimlanes
     try:
         client.call_batch(("addSwimlane", {"project_id": board_id, "name": name}) for name in missing)
-    except TaskError:
+    except TaskError as exc:
+        from ummanu.task_restore import refused_in_transaction, store_refusal
+
+        if refused_in_transaction(client, exc):
+            raise store_refusal("swimlane batch", exc) from None
         # A lost aggregate answer can follow any applied subset.  The fresh map below is the proof.
-        pass
     raw = client.call("getActiveSwimlanes", project_id=board_id) or []
     refreshed = {
         identifier: str(lane.get("name") or "")
@@ -989,9 +1000,9 @@ def _restore_request_prefix(data_dir: Path, audit: SqlTaskAudit, live_refs: set[
 def _namespace_is_exported(data_dir: Path, token: str) -> bool:
     """Whether the history this recovery is about to restore already holds this namespace.
 
-    The store starts a recovery empty and gets its history back from the export afterwards
-    (`_restore_board_history`), so an earlier recovery's events are not in the audit yet when the
-    namespace is chosen -- they are in the export, beside the `restore-state.json` that names the
+    The store starts a recovery empty and gets its history back from the export after the
+    namespace is chosen (`_restore_board_history`), so an earlier recovery's events are not in the
+    audit yet at that moment -- they are in the export, beside the `restore-state.json` that names the
     same token. Reusing it would have this recovery write its own events under request ids the
     restored history is about to claim with another payload. An export that cannot be read answers
     no here; `_restore_board_history` refuses it by name later.
