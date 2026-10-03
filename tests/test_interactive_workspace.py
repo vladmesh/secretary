@@ -24,6 +24,7 @@ from ummanu.po import workspace as po_workspace
 from ummanu.role_skills import BIN_DIR_ENV, MANIFEST, sync
 from ummanu.runtime import heads as head_registry
 from ummanu.runtime import interactive_workspace as iw
+from ummanu.runtime import role_env
 
 ROOT = MANIFEST.parent.parent
 SENTINEL = "persona-sentinel-6f1c2a"
@@ -440,6 +441,62 @@ class ShellTests(Fixture):
 
         chdir.assert_called_once_with(str(self.workspace))
         execvpe.assert_called_once()
+
+
+class ShellWithoutAnExportedInstallationTests(Fixture):
+    """ummanu-34 rework: a shell that names its installation only through `--env-file`, or not at
+    all, resolves the data dir once and uses it for the cwd, the Codex trust entry and CODEX_HOME."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.home = self.root / "home"
+        self.instance = self.home / "secretary-instance"
+        self.instance.mkdir(parents=True)
+        (self.instance / "instance.yaml").write_text(instance_yaml(self.data), encoding="utf-8")
+        self.env_file = self.instance / "runtime.env"
+        self.env_file.write_text("", encoding="utf-8")
+        self.write_personal(PERSONAL)
+        self.run_step()
+        login = self.data / "codex-home" / "auth.json"
+        login.parent.mkdir(parents=True)
+        login.write_text('{"token": "fixture"}\n', encoding="utf-8")
+        # Nothing in the process env names an installation, a Codex home or a runtime env file.
+        named = ("UMMANU_INSTANCE", "UMMANU_DATA_DIR", "TA_CODEX_HOME", *role_env.RUNTIME_ENV_FILE_ENVS)
+        environ = {key: value for key, value in os.environ.items() if key not in named}
+        environ.update({"HOME": str(self.home), head_registry.REGISTRY_ENV: str(head_registry.HEADS_TOML)})
+        for patcher in (
+            mock.patch.dict(os.environ, environ, clear=True),
+            mock.patch.object(role_env, "RUNTIME_ENV_DEFAULT", str(self.env_file)),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def shell(self, *argv: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = cli.main(["shell", *argv])
+        return code, out.getvalue(), err.getvalue()
+
+    def assert_codex_launch_in_the_interactive_workspace(self, code: int, out: str, err: str) -> None:
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith(f"cd {self.workspace} && "), out)
+        self.assertIn(f'projects."{self.workspace}".trust_level="trusted"', out)
+        self.assertIn(f"CODEX_HOME={self.data / 'codex-home'} ", out)
+        self.assertNotIn("UMMANU_DATA_DIR", os.environ, "the binding outlived the launch")
+
+    def test_codex_with_only_an_env_file(self) -> None:
+        self.assert_codex_launch_in_the_interactive_workspace(
+            *self.shell("--head", "codex", "--env-file", str(self.env_file), "--print")
+        )
+
+    def test_codex_with_no_flags_uses_the_default_instance(self) -> None:
+        self.assert_codex_launch_in_the_interactive_workspace(*self.shell("--head", "codex", "--print"))
+
+    def test_the_default_head_with_no_flags_uses_the_default_instance(self) -> None:
+        code, out, err = self.shell("--print")
+
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out.startswith(f"cd {self.workspace} && "), out)
 
 
 if __name__ == "__main__":

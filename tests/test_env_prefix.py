@@ -57,7 +57,8 @@ class EnvPrefixTests(unittest.TestCase):
                 "instance": production_telemetry.instance_file(),
                 "repo": paths.configured_product_root(),
                 "runtime_env_file": role_env.runtime_env_path(),
-                "memory_data_dir": session._memory_data_dir(None, dict(os.environ)),
+                # With `--workspace` named, an installation that does not resolve leaves no data dir.
+                "memory_data_dir": session.resolve_shell_target("/w", None, dict(os.environ)).data_dir,
             }
 
     def test_the_old_prefix_is_ignored(self) -> None:
