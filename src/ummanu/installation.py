@@ -91,9 +91,12 @@ from ummanu.runtime_env import (
 )
 from ummanu.secret_recover import SecretRecovery, recover_secrets
 from ummanu.secret_store import (
+    MATERIALIZE_FILE,
     SecretStoreError,
     is_initialized,
     key_path,
+    list_secrets,
+    materialize_path,
     normalize_phrase,
 )
 from ummanu.state_repo import StateRepoError
@@ -106,6 +109,7 @@ from ummanu.upgrade import (
     _set_runtime_owner,
     default_product_root,
     run_steps,
+    step_head_registry,
     step_host,
     step_pipeline_state,
     workspaces_root,
@@ -876,6 +880,42 @@ def _open_secret_store(
         raise InstallError(f"secret store: {exc}") from None
 
 
+def _checked_file_targets(instance_dir: Path) -> frozenset[Path]:
+    """Refuse a catalog file target already in a data directory ummanu has not laid out, before the
+    store writes anything; return the targets in the data directory this run may create.
+
+    The store replaces a regular file at a target path, so once it has run nothing tells an operator's
+    file there from the one it wrote. A target that is already there while the data directory holds
+    no ummanu layout is therefore foreign and is refused by path, with no secret written. Only the
+    targets returned here, absent before the store ran, count as this run's own afterwards
+    (`_checked_data_target`). A laid-out data directory has its targets refreshed as before.
+    """
+    if not is_initialized(instance_dir):
+        return frozenset()
+    report = validate_instance(instance_dir)
+    if not report.ok or report.data_dir is None:
+        # The instance is refused right after the store step; there is no data directory to guard.
+        return frozenset()
+    data_dir = Path(report.data_dir).expanduser().resolve()
+    try:
+        targets = {
+            _named_path(materialize_path(instance_dir, entry))
+            for entry in list_secrets(instance_dir)
+            if (entry.get("materialize") or {}).get("target") == MATERIALIZE_FILE
+        }
+    except (SecretStoreError, StateRepoError) as exc:
+        raise InstallError(f"secret store: {exc}") from None
+    inside = {path for path in targets if path.is_relative_to(data_dir)}
+    present = sorted(path for path in inside if path.exists() or path.is_symlink())
+    if present and not _valid_existing_layout(data_dir):
+        raise InstallError(
+            f"data target {data_dir} is not an installation created by ummanu, and it already holds "
+            f"{', '.join(map(str, present))}, where the secret store would write; nothing was written: "
+            "choose adopt or a clean recovery target"
+        )
+    return frozenset(inside - set(present))
+
+
 def _secret_store_step(recovery: SecretRecovery) -> tuple[str, str]:
     if not recovery.store_present:
         return "skipped", "no secret store in the instance repo"
@@ -934,21 +974,53 @@ def _valid_existing_layout(data_dir: Path) -> bool:
     return actual == manifest_for(data_dir)
 
 
-def _data_target_entries(data_dir: Path, ignore: tuple[Path, ...] = ()) -> set[str]:
-    """The data target's entries, less the ones that are exactly a path of `ignore`."""
+def _data_target_entries(
+    data_dir: Path, ignore: tuple[Path, ...] = (), own: tuple[Path, ...] = ()
+) -> set[str]:
+    """The data target's entries, less the ones that are exactly a path of `ignore` and the ones
+    that hold nothing but files of `own`."""
     if not data_dir.exists():
         return set()
-    return {entry.name for entry in data_dir.iterdir() if entry not in ignore}
+    written = frozenset(_named_path(path) for path in own)
+    return {
+        entry.name
+        for entry in data_dir.iterdir()
+        if entry not in ignore and not _holds_only(_named_path(entry), written)
+    }
 
 
-def _checked_data_target(data_dir: Path, *, ignore: tuple[Path, ...] = ()) -> bool:
+def _named_path(path: Path) -> Path:
+    """`path` with its directories resolved and its own name kept, so a link is still seen as one."""
+    path = Path(path).expanduser()
+    return path.parent.resolve() / path.name
+
+
+def _holds_only(path: Path, written: frozenset[Path]) -> bool:
+    """Whether `path` is one of `written`, a regular file, or a directory holding only such files."""
+    if path.is_symlink():
+        return False
+    if path in written:
+        return path.is_file()
+    if not path.is_dir():
+        return False
+    children = list(path.iterdir())
+    return bool(children) and all(_holds_only(child, written) for child in children)
+
+
+def _checked_data_target(
+    data_dir: Path, *, ignore: tuple[Path, ...] = (), own: tuple[Path, ...] = ()
+) -> bool:
     """Refuse a non-empty data target ummanu did not create; True when it holds bootstrap evidence only.
 
     `ignore` names direct entries of the data target that are not its contents: a snapshot
-    recovery's live root `<data>/<name>` and the staging it created beside it. Nothing else is
-    left out, siblings and deeper paths included.
+    recovery's live root `<data>/<name>` and the staging it created beside it. `own` names the files
+    this recovery's own secret store step has just created there, at paths that did not exist before
+    it ran (`_checked_file_targets`; a file target such as `<data>/webfront/owner-password.env`, which
+    a legacy recovery materializes before this check runs): an entry holding only those is this
+    run's, not a foreign installation's. Nothing else is
+    left out, siblings and deeper paths included, and a foreign file beside an own one is refused.
     """
-    entries = _data_target_entries(data_dir, ignore)
+    entries = _data_target_entries(data_dir, ignore, own)
     if not entries:
         return False
     # An older bootstrap recorded its host unit in `host-managed.json` before checkpoint
@@ -957,8 +1029,8 @@ def _checked_data_target(data_dir: Path, *, ignore: tuple[Path, ...] = ()) -> bo
     bootstrap_evidence = entries == {"host-managed.json"}
     if not bootstrap_evidence and not _valid_existing_layout(data_dir):
         raise InstallError(
-            f"data target {data_dir} is not an installation created by ummanu; "
-            "choose adopt or a clean recovery target"
+            f"data target {data_dir} is not an installation created by ummanu "
+            f"(it holds {', '.join(sorted(entries))}); choose adopt or a clean recovery target"
         )
     return bootstrap_evidence
 
@@ -968,13 +1040,15 @@ def materialize_checkpoint(
     data_dir: Path,
     *,
     dry_run: bool = False,
+    own: tuple[Path, ...] = (),
 ) -> tuple[int, int]:
     """Validate the checkpoint and optionally publish it into the local layout.
 
     `instance_dir` is where `state/board` and `state/runs` are read: the checkout of a legacy
-    checkpoint, or the extracted tree of an exporter snapshot.
+    checkpoint, or the extracted tree of an exporter snapshot. `own` is what this recovery's secret
+    store step wrote into the data target before it (`_checked_data_target`).
     """
-    bootstrap_evidence = _checked_data_target(data_dir)
+    bootstrap_evidence = _checked_data_target(data_dir, own=own)
     board_source = instance_dir / "state" / "board"
     runs_source = instance_dir / "state" / "runs"
     try:
@@ -1040,7 +1114,7 @@ def materialize_checkpoint(
     if dry_run:
         return len(cards), run_count
 
-    if not data_dir.exists() or not any(data_dir.iterdir()) or bootstrap_evidence:
+    if not _data_target_entries(data_dir, own=own) or bootstrap_evidence:
         init_layout(data_dir)
 
     board_target = data_dir / "board"
@@ -1252,6 +1326,33 @@ def materialize_host(
         failed = result.steps[-1]
         raise InstallError(f"materializer {failed.name} failed: {failed.detail}")
     return result
+
+
+def materialize_head_registry(
+    instance: Path, product_root: Path, report: Any, installation_user: str | None
+) -> tuple[str, str]:
+    """Generate `<data>/heads/` before the board import, with upgrade's own head-registry step.
+
+    The import validates an open sprint's observer head against the installed pair, and on a clean
+    host nothing has written one yet: the pair is generated state, never recovery canon, and the
+    data directory it lives in (ummanu-26) is recovered empty. So recovery writes it here, from the
+    canon the recovered live root carries, as `ummanu upgrade` would; the host materializer later
+    runs the same step and finds it current. It is idempotent, so a retry passes through it again.
+    """
+    context = UpgradeContext(
+        instance_path=instance,
+        product_root=product_root,
+        base_branch="main",
+        dry_run=False,
+        units=SystemdUnitInstaller(runtime_user=installation_user),
+        pull=False,
+        report=report,
+        runtime_user=installation_user,
+    )
+    step = step_head_registry(context)
+    if step.status == "failed":
+        raise InstallError(f"head registry: {step.detail}")
+    return step.status, step.detail
 
 
 def provision_project_checkouts(
@@ -1655,6 +1756,7 @@ def _restore_without_credentials(
     result: InstallResult,
     bootstrap_credential: Path | None,
     checkpoint_root: Path | None = None,
+    written: tuple[Path, ...] = (),
 ) -> None:
     """Recover everything that does not go through the board.
 
@@ -1670,7 +1772,9 @@ def _restore_without_credentials(
     progress_path = data_dir / RECOVERY_PROGRESS_FILE
     progress = _read_recovery_progress(progress_path, identity)
     checkpoint_complete = progress.get("checkpoint") == "complete"
-    cards, runs = materialize_checkpoint(checkpoint_root, data_dir, dry_run=args.dry_run or checkpoint_complete)
+    cards, runs = materialize_checkpoint(
+        checkpoint_root, data_dir, dry_run=args.dry_run or checkpoint_complete, own=written
+    )
     if args.dry_run:
         result.add(
             "checkpoint",
@@ -1811,6 +1915,8 @@ def install(args: argparse.Namespace) -> InstallResult:
         # The store opens before anything reads runtime.env, because on a clean
         # host that file is the store's output and does not exist yet.
         runtime_env = _runtime_env_file(target, args.runtime_env)
+        # Before the store writes: which of its file targets in the data directory are new.
+        created = _checked_file_targets(target)
         secrets = _open_secret_store(
             target,
             runtime_env,
@@ -1819,6 +1925,8 @@ def install(args: argparse.Namespace) -> InstallResult:
         )
         result.add("secret-store", *_secret_store_step(secrets))
         _add_secret_steps(result, secrets)
+        # This run's own files in the data directory: the file targets it created there.
+        written = tuple(item.path for item in secrets.materialized if _named_path(item.path) in created)
 
         # Secret recovery can create a root-owned 0600 installation key. Cross
         # ownership once, before any runtime-user Git or remote consumer starts.
@@ -1850,7 +1958,7 @@ def install(args: argparse.Namespace) -> InstallResult:
             if not runtime_required:
                 values = {}
             else:
-                _restore_without_credentials(args, target, result, bootstrap, checkpoint_root)
+                _restore_without_credentials(args, target, result, bootstrap, checkpoint_root, written)
                 raise _blocked_by_secrets(exc, secrets, runtime_env) from None
         except RuntimeEnvError as exc:
             raise InstallError(str(exc)) from None
@@ -1870,7 +1978,7 @@ def install(args: argparse.Namespace) -> InstallResult:
                 - set(values)
             )
             if unavailable:
-                _restore_without_credentials(args, target, result, bootstrap, checkpoint_root)
+                _restore_without_credentials(args, target, result, bootstrap, checkpoint_root, written)
                 raise _blocked_by_secrets(
                     InstallError(f"runtime.env lacks {', '.join(unavailable)}"), secrets, runtime_env
                 ) from None
@@ -1898,7 +2006,7 @@ def install(args: argparse.Namespace) -> InstallResult:
             progress = _read_recovery_progress(progress_path, identity)
             checkpoint_complete = progress.get("checkpoint") == "complete"
             cards, runs = materialize_checkpoint(
-                checkpoint_root, data_dir, dry_run=args.dry_run or checkpoint_complete
+                checkpoint_root, data_dir, dry_run=args.dry_run or checkpoint_complete, own=written
             )
             if args.dry_run:
                 result.add(
@@ -1920,6 +2028,12 @@ def install(args: argparse.Namespace) -> InstallResult:
                 else f"{cards} board card(s), {runs} run record(s)",
             )
             _write_recovery_progress(progress_path, identity, checkpoint="complete")
+            product_root = _product_root(args)
+            # Before the board: the import checks open sprints' observer heads against this pair.
+            result.add(
+                "head-registry",
+                *materialize_head_registry(target, product_root, report, args.installation_user),
+            )
             recovered_board_completion = (
                 progress.get("board") == "started"
                 and restore_state(data_dir).get("board_parity") == "complete"
@@ -1953,7 +2067,6 @@ def install(args: argparse.Namespace) -> InstallResult:
                 )
                 result.add("memory", "changed", f"rebuilt index for {count} fact(s)")
                 _write_recovery_progress(progress_path, identity, memory="complete")
-            product_root = _product_root(args)
             project_results = provision_project_checkouts(
                 report.bindings,
                 args.installation_user,

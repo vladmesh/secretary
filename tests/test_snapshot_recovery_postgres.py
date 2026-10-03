@@ -1,8 +1,8 @@
 """`ummanu recover` from an exporter snapshot into a real PostgreSQL board store.
 
 The source installation writes its board (two cards, a Product with an Issue and a closed sprint
-they own) into one database of a throwaway `postgres:16`, and a real
-`SnapshotExporter` window cuts it into a bare repository that is pushed to a local bare remote. The
+they own, and a closed card on a retired project id as production holds it) into one database of a
+throwaway `postgres:16`, and a real `SnapshotExporter` window cuts it into a bare repository that is pushed to a local bare remote. The
 recovery target is a second, empty database. The clean-host sequence then runs from its first step
 (docs/RECOVERY.md, "Fresh install and recovery"). `bootstrap` runs for real with the host edges and
 Compose provisioning stood in for, as in `tests/test_fresh_postgres_install.py`: its clone step lays
@@ -22,13 +22,14 @@ import subprocess
 import tempfile
 import unittest
 from contextlib import ExitStack
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 from tests.fakes.installation import PRODUCT_ROOT
 from tests.fakes.snapshot_remote import HEAD, exporter_remote, git
-from tests.sql_backend_fixtures import PostgresBoard
+from tests.sql_backend_fixtures import PostgresBoard, insert_card_row
 from ummanu import bootstrap as bootstrap_module
 from ummanu import installation, upgrade
 from ummanu.board import store
@@ -42,7 +43,17 @@ from ummanu.product_issues import ProductIssueStore
 from ummanu.restore import DEFAULT_MEMORY_DIM, restore_state
 from ummanu.sprint_observer import none_choice
 from ummanu.sprints import SprintReader, SprintWriter, sprint_client
-from ummanu.tasks import TaskError, TaskWriter
+from ummanu.tasks import TaskError, TaskReader, TaskWriter
+
+#: Production's `personal_site-198` (`cards/0001/00001509.json`): closed in Done, in the lane and on
+#: the project id `personal_site` that the registry has since retired for `personal-site`, with the
+#: empty `model` its extension bag carries. It stopped the ummanu-41 drill's board import.
+RETIRED_CARD = "personal_site-198"
+RETIRED_METADATA = {
+    "claim": "personal_site-198-1782988235",
+    "head": "claude-sonnet",
+    "task_type": "code",
+}
 
 
 def _write_store_file(instance: Path, config: BoardStoreConfig) -> None:
@@ -80,6 +91,13 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
         self.source_config = board.fresh_database()
         self.target_config = board.fresh_database()
         self.fixture = exporter_remote(self.root, cut=False)
+        # The registry knows the current id only.
+        (self.fixture.source / "projects" / "personal-site.yaml").write_text(
+            (self.fixture.source / "projects" / "ummanu.yaml")
+            .read_text(encoding="utf-8")
+            .replace("id: ummanu\n", "id: personal-site\n"),
+            encoding="utf-8",
+        )
         _write_store_file(self.fixture.source, self.source_config)
         init_layout(self.fixture.source_data)
         self._seed_source()
@@ -88,11 +106,15 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
         self.tip = self.fixture.cut(stand_in=False, state_dir=state_dir)
 
     def _seed_source(self) -> None:
-        """Two cards, a Product with one Issue, and a closed sprint they own, by the source's writers.
+        """Two cards, a Product with one Issue, and a closed sprint they own, by the source's writers;
+        and production's closed card on a retired project id, as its store holds it.
 
         A sprint cannot exist without an owning Product, an open Issue of it and a reserved project
         (`SprintWriter._check_ownership`), so those are made the way the PO makes them, through
-        `ProductIssueStore`. The cards come first and stay outside the sprint.
+        `ProductIssueStore`. The cards come first and stay outside the sprint. No writer creates a
+        card on an id the registry no longer has, nor an empty bag value, so that row is inserted
+        the way the PostgreSQL suites seed a row (`insert_card_row`) and given its metadata through
+        the client.
         """
         source, data_dir = self.fixture.source, self.fixture.source_data
         client = SqlCardClient(self.source_config.for_role("owner"), source)
@@ -109,6 +131,26 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
                 reference=f"ummanu-{number}",
                 request_id=f"create-snapshot-card-{number}",
             )
+        moved = datetime(2026, 8, 4, 9, 13, 38, tzinfo=UTC)
+        with client.transaction():
+            key = insert_card_row(
+                client,
+                key=360,
+                reference=RETIRED_CARD,
+                state="done",
+                project="personal_site",
+                title="Docker hygiene",
+                description="a closed card on a retired project id",
+                closed=True,
+                position=1,
+                created=moved,
+                updated=moved,
+                moved=moved,
+                lane="personal_site",
+                bag={"model": ""},
+            )
+            client._lanes = None
+            client.call("saveTaskMetadata", task_id=key, values=RETIRED_METADATA)
         products = ProductIssueStore(client, data_dir=data_dir, instance=source)
         products.create_product(
             product_id="ummanu",
@@ -198,8 +240,8 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
                 text=True,
             ).stdout
         )
-        # Two cards, the Product and its Issue.
-        self.assertEqual(summary["card_count"], 4)
+        # Two cards, the closed card on the retired id, the Product and its Issue.
+        self.assertEqual(summary["card_count"], 5)
         self.assertEqual(summary["sprint_count"], 1)
         code, output = self._bootstrap()
         self.assertEqual(code, 0, output)
@@ -265,6 +307,24 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
         self.assertEqual(state["board_count"], summary["card_count"])
         self.assertEqual(state["sprint_parity"], "complete")
         self.assertEqual(state["sprint_count"], summary["sprint_count"])
+        # The closed card on the retired id is back as the tree exported it: placement and project.
+        exported = next(
+            card
+            for card in json.loads((data_dir / "board" / "cards.json").read_text(encoding="utf-8"))["cards"]
+            if card["reference"] == RETIRED_CARD
+        )
+        self.assertEqual(
+            (exported["column"], exported["swimlane"], exported["closed"], exported["metadata"]["model"]),
+            ("Done", "personal_site", True, ""),
+        )
+        restored_client = SqlCardClient(self.target_config.for_role("owner"), target)
+        self.addCleanup(restored_client.close)
+        restored = TaskReader(restored_client).show(RETIRED_CARD)
+        self.assertEqual(
+            (restored["state"], restored["closed"], restored["project"]),
+            ("done", True, "personal_site"),
+        )
+        self.assertEqual(restored["extensions"]["extra"]["swimlane"], exported["swimlane"])
         sprints = sprint_client(target)
         self.addCleanup(sprints.close)
         self.assertEqual(SprintReader(sprints, data_dir=data_dir).show("sprint:snapshot")["status"], "closed")

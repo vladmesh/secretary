@@ -26,6 +26,7 @@ from tests.fakes.installation import CARD, SPRINT, _checkpoint, _git
 from tests.fakes.snapshot_remote import (
     HEAD,
     REVISION,
+    canon,
     exporter_producers,
     exporter_remote,
     git,
@@ -35,7 +36,7 @@ from tests.fakes.snapshot_remote import (
     recovery_args as _args,
 )
 from ummanu import bootstrap as bootstrap_module
-from ummanu import installation, secret_store
+from ummanu import installation, restore, secret_store
 from ummanu.board import provision as provision_module
 from ummanu.board import store
 from ummanu.board.migrate import head_revision
@@ -53,6 +54,7 @@ from ummanu.head_registry import installed_heads, installed_pair
 from ummanu.infra.export_allowlist import is_exported
 from ummanu.installation import InstallError, _recovery_identity
 from ummanu.secret_words import RECOVERY_WORDS
+from ummanu.sprint_observer import head_choice
 
 PHRASE = " ".join(RECOVERY_WORDS[:16])
 SERVICE_ENV = "EXAMPLE_URL=http://127.0.0.1/rpc\nEXAMPLE_API_TOKEN=live-token\n"
@@ -906,6 +908,212 @@ class LegacyShapeTests(unittest.TestCase):
                 ):
                     installation.install(_args(SimpleNamespace(target=target, remote="remote"), **overrides))
                 probe.assert_not_called()
+
+
+#: An open sprint whose observer is a head of the recovered canon: the import refuses it unless the
+#: installed pair names that profile.
+OPEN_SPRINT = {**SPRINT, "status": "open", "current_task": "", "observer": head_choice(HEAD)}
+OWNER_PASSWORD = "OWNER_PASSWORD=from-the-store\n"
+
+
+def _observer_preflight(data_dir: Path, *, instance: Path) -> int:
+    """The board stand-in runs the import's own observer preflight over the exported sprints, against
+    the pair installed at that moment (`restore._check_restored_observers`), and writes nothing."""
+    sprints = restore._normalized_sprints(data_dir)
+    restore._check_restored_observers(sprints, instance)
+    return 1
+
+
+class CleanHostRecoverTests(unittest.TestCase):
+    """The clean-host recover of the ummanu-41 stand drill, on both remote shapes.
+
+    The data directory starts without `heads/`; the export holds an open sprint whose observer is a
+    head, so the board import needs the pair, and recover has to have written it first. The legacy
+    remote carries a secret store whose file target is in the data directory (`webfront/
+    owner-password.env` on the stand), written by recover's own secret step before the data-target
+    check.
+    """
+
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="clean-host-recover-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.board = mock.Mock(side_effect=_observer_preflight)
+
+    def steps(self, result) -> dict[str, tuple[str, str]]:
+        return {step.name: (step.status, step.detail) for step in result.steps}
+
+    def assert_pair_written_before_the_board(self, result, target: Path, data_dir: Path) -> None:
+        names = [step.name for step in result.steps]
+        self.assertLess(names.index("head-registry"), names.index("board"), names)
+        steps = self.steps(result)
+        self.assertEqual(steps["head-registry"][0], "changed")
+        self.board.assert_called_once_with(data_dir, instance=target)
+        self.assertEqual(installed_pair(target).snapshot.parent, data_dir / "heads")
+        self.assertIn(HEAD, installed_heads(target)["profiles"])
+
+    def test_a_snapshot_recover_writes_the_pair_before_the_board_import_needs_it(self):
+        fixture = exporter_remote(self.root, sprints=[OPEN_SPRINT])
+        self.assertFalse((fixture.data_dir / "heads").exists())
+
+        result = recover_snapshot(fixture, board=self.board)
+
+        self.assertEqual(result.status, "ok", result.render())
+        self.assert_pair_written_before_the_board(result, fixture.target, fixture.data_dir)
+        # The host materializer's own head-registry step then finds the pair current.
+        self.assertEqual(self.steps(result)["host"], ("unchanged", "materializer complete (0 changed step(s))"))
+
+    def test_without_the_pair_the_import_refuses_as_on_the_stand(self):
+        """The control: with recover's head-registry step taken out, the drill's failure comes back."""
+        fixture = exporter_remote(self.root, sprints=[OPEN_SPRINT])
+
+        with mock.patch.object(installation, "materialize_head_registry", return_value=("unchanged", "-")):
+            result = recover_snapshot(fixture, board=self.board)
+
+        self.assertEqual(result.status, "failed", result.render())
+        self.assertIn(
+            "sprint observer metadata cannot be validated: the head registry could not be read: "
+            f"installation head snapshot {fixture.data_dir / 'heads' / 'heads.yaml'} is missing",
+            self.steps(result)["install"][1],
+        )
+
+    def legacy_remote(self) -> tuple[Path, Path, Path, Path]:
+        """A legacy checkpoint remote with the open sprint, the heads canon and a secret store whose
+        one secret materializes into `<data>/webfront/owner-password.env`."""
+        source, target, data = self.root / "source", self.root / "instance", self.root / "data"
+        source.mkdir()
+        _checkpoint(source, data, sprints=[OPEN_SPRINT])
+        (source / "heads").mkdir()
+        (source / "heads" / "heads.toml").write_text(canon(), encoding="utf-8")
+        _git(source, "init", "-b", "main")
+        _git(source, "add", ".")
+        _git(source, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-m", "x")
+        password = self.root / "owner-password.env"
+        password.write_text(OWNER_PASSWORD, encoding="utf-8")
+        password.chmod(0o600)
+        with mock.patch.object(secret_store, "_new_key_params", side_effect=_fast_key_params):
+            secret_store.initialize_store(source, phrase=PHRASE, actor="tester")
+        materialized = data / "webfront" / "owner-password.env"
+        secret_store.import_env_file(
+            source,
+            source=password,
+            scope="installation",
+            purpose="web owner password",
+            actor="tester",
+            materialize={"target": secret_store.MATERIALIZE_FILE, "path": str(materialized)},
+        )
+        # The legacy tick commits the store's files, never the installation key.
+        _git(source, "add", "--", "secrets/catalog.yaml", "secrets/installation-key.json", "secrets/values")
+        _git(source, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-m", "store")
+        phrase = self.root / "phrase.txt"
+        phrase.write_text(PHRASE + "\n", encoding="utf-8")
+        return source, target, data, phrase
+
+    def recover_legacy(self, source: Path, target: Path, phrase: Path):
+        with (
+            mock.patch.object(installation, "check_prerequisites"),
+            mock.patch.object(installation, "import_normalized_board", self.board),
+            mock.patch.object(installation, "rebuild_memory_index", return_value=1),
+            mock.patch.object(installation, "materialize_host", return_value=SimpleNamespace(steps=[])),
+            mock.patch.object(
+                installation,
+                "materialize_pipeline_state",
+                return_value=SimpleNamespace(records=0, changed=False),
+            ),
+            mock.patch.object(installation, "provision_project_checkouts", return_value=[]),
+            mock.patch.object(installation, "provision_codex_home", return_value=0),
+            mock.patch.object(installation, "mark_reconcile_applied"),
+            mock.patch.object(installation, "restore_findings", return_value=[]),
+        ):
+            return installation.install(
+                _args(
+                    SimpleNamespace(target=target, remote=source), recovery_phrase_file=str(phrase)
+                )
+            )
+
+    def test_a_legacy_recover_onto_a_clean_host_completes_past_its_own_secret_file(self):
+        source, target, data, phrase = self.legacy_remote()
+        self.assertFalse(data.exists())
+
+        result = self.recover_legacy(source, target, phrase)
+
+        steps = self.steps(result)
+        self.assertEqual(result.status, "ok", result.render())
+        self.assertEqual(steps["instance-checkout"][1], "cloned private instance remote")
+        # The store wrote the data directory's first file, and the data-target check took it as this
+        # run's own: the layout was laid out around it.
+        self.assertEqual(steps["secret-store"], ("changed", "1 env file(s) written"))
+        password = data / "webfront" / "owner-password.env"
+        self.assertEqual(password.read_text(encoding="utf-8"), OWNER_PASSWORD)
+        self.assertEqual(password.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(steps["checkpoint"], ("changed", "1 board card(s), 0 run record(s)"))
+        self.assertTrue((data / "data-manifest.json").is_file())
+        self.assert_pair_written_before_the_board(result, target, data)
+        # A rerun passes the same steps and changes nothing it already did.
+        again = self.recover_legacy(source, target, phrase)
+        self.assertEqual(again.status, "ok", again.render())
+        for name in ("secret-store", "checkpoint", "head-registry", "board"):
+            self.assertEqual(self.steps(again)[name][0], "unchanged", (name, self.steps(again)[name]))
+
+    def test_a_foreign_file_at_the_secret_target_is_refused_before_anything_is_written(self):
+        """The reviewer's reproduction: the store would replace it, and then nothing could tell it apart."""
+        source, target, data, phrase = self.legacy_remote()
+        foreign = data / "webfront" / "owner-password.env"
+        foreign.parent.mkdir(parents=True)
+        foreign.write_bytes(b"OPERATOR_PASSWORD=foreign\n")
+
+        result = self.recover_legacy(source, target, phrase)
+
+        self.assertEqual(result.status, "failed", result.render())
+        self.assertIn(
+            f"data target {data.resolve()} is not an installation created by ummanu, and it already holds "
+            f"{foreign.resolve()}, where the secret store would write; nothing was written",
+            self.steps(result)["install"][1],
+        )
+        self.assertEqual(foreign.read_bytes(), b"OPERATOR_PASSWORD=foreign\n")
+        # The store never opened: no step, no installation key, no layout, no import.
+        self.assertNotIn("secret-store", self.steps(result))
+        self.assertFalse(secret_store.key_path(target).exists())
+        self.assertFalse((data / "data-manifest.json").exists())
+        self.board.assert_not_called()
+
+    def test_a_laid_out_data_directory_has_its_secret_target_refreshed(self):
+        source, target, data, phrase = self.legacy_remote()
+        self.assertEqual(self.recover_legacy(source, target, phrase).status, "ok")
+        password = data / "webfront" / "owner-password.env"
+        password.write_text("OWNER_PASSWORD=stale\n", encoding="utf-8")
+
+        again = self.recover_legacy(source, target, phrase)
+
+        self.assertEqual(again.status, "ok", again.render())
+        self.assertEqual(self.steps(again)["secret-store"], ("changed", "1 env file(s) written"))
+        self.assertEqual(password.read_text(encoding="utf-8"), OWNER_PASSWORD)
+
+    def test_a_foreign_file_in_the_data_directory_is_still_refused_by_name(self):
+        source, target, data, phrase = self.legacy_remote()
+        planted = {
+            # Beside the store's file, and inside its directory next to it.
+            "beside": (data / "operator-file.txt", "operator-file.txt"),
+            "inside": (data / "webfront" / "notes.txt", "webfront"),
+        }
+        for case, (path, named) in planted.items():
+            with self.subTest(case):
+                shutil.rmtree(target, ignore_errors=True)
+                shutil.rmtree(data, ignore_errors=True)
+                path.parent.mkdir(parents=True)
+                path.write_text("the operator's\n", encoding="utf-8")
+
+                result = self.recover_legacy(source, target, phrase)
+
+                self.assertEqual(result.status, "failed", result.render())
+                self.assertIn(
+                    f"data target {data} is not an installation created by ummanu (it holds {named}); "
+                    "choose adopt or a clean recovery target",
+                    self.steps(result)["install"][1],
+                )
+                self.assertEqual(path.read_text(encoding="utf-8"), "the operator's\n")
+                self.assertFalse((data / "data-manifest.json").exists())
+                self.board.assert_not_called()
 
 
 if __name__ == "__main__":

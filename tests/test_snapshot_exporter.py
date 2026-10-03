@@ -368,6 +368,43 @@ class SnapshotCutTests(SnapshotCase):
         self.assertEqual(before[segment], after[segment])
         self.assertEqual(self.committed("state/board/audit/0000/00000001.ndjson"), b'{"line": 2}\n')
 
+    def test_an_unseeded_repository_consolidates_the_audit_once_and_later_windows_only_append(self):
+        """The ummanu-41 drill's fresh-history case: no legacy segments to seed from, so the first
+        window stores the whole audit as segment 0 (88 MB on the stand). Every later window reuses
+        that blob and adds what was appended as one new segment; none rewrites segment 0."""
+        history = "".join(json.dumps({"event": index}) + "\n" for index in range(2000))
+        self.seed_board([CARD], audit=history)
+        first = self.exporter().write()
+        self.assertEqual(first.status, "committed")
+        audit = sorted(path for path in self.tree(first.commit) if path.startswith("state/board/audit/"))
+        self.assertEqual(audit, ["state/board/audit/0000/00000000.ndjson"])
+        self.assertEqual(self.committed(audit[0], first.commit), history.encode())
+
+        commits = [first.commit]
+        appended = []
+        for window in (1, 2):
+            appended.append(json.dumps({"event": f"window-{window}"}) + "\n")
+            self.seed_board([CARD], audit=history + "".join(appended))
+            result = self.exporter().write()
+            self.assertEqual(result.status, "committed")
+            commits.append(result.commit)
+
+        segments = {
+            path: oid for path, (_mode, oid) in self.tree().items() if path.startswith("state/board/audit/")
+        }
+        self.assertEqual(
+            sorted(segments),
+            [f"state/board/audit/0000/{index:08d}.ndjson" for index in range(3)],
+        )
+        # Segment 0 is the first window's blob, and each window after it only added one segment.
+        self.assertEqual(segments["state/board/audit/0000/00000000.ndjson"], self.tree(first.commit)[audit[0]][1])
+        for index, (before, after) in enumerate(zip(commits, commits[1:]), start=1):
+            changed = git(self.repo, "diff", "--name-status", before, after, "--", "state/board/audit")
+            self.assertEqual(changed.splitlines(), [f"A\tstate/board/audit/0000/{index:08d}.ndjson"])
+            self.assertEqual(
+                self.committed(f"state/board/audit/0000/{index:08d}.ndjson"), appended[index - 1].encode()
+            )
+
     def test_rewritten_audit_history_is_stored_as_one_segment(self):
         self.seed_board([CARD], audit='{"line": 1}\n')
         self.exporter().write()
