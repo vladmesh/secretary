@@ -339,20 +339,29 @@ def cmd_rebind(dry_run: bool) -> int:
             with cursor_settlement_transaction():
                 result = plan()
                 if result.changed:
+                    # The audit line is published with the state it describes, as baseline does:
+                    # `log_run` is best-effort, and a rebind without its audit could never be repaired
+                    # because the re-run is a no-op.
+                    journal = STATE.dir / "runs.jsonl"
+                    journal_text = journal.read_text(encoding="utf-8") if journal.exists() else ""
+                    if journal_text and not journal_text.endswith("\n"):
+                        journal_text += "\n"
+                    event = {"ts": datetime.now(UTC).isoformat(), "event": "rebind", **result.counts()}
+                    journal_text += json.dumps(event, ensure_ascii=False) + "\n"
                     writes = [
                         (path, text)
                         for path, text in (
                             (STATE.watermark_file, result.watermark_text),
                             (STATE.pending_file, result.pending_text),
+                            (journal, journal_text),
                         )
                         if text is not None
                     ]
                     publish_state_atomic(writes)
-                    STATE.log_run("rebind", **result.counts())
     except rebind.RebindRefused as exc:
         print(f"curator: rebind refused ({exc.reason}): {exc}; state unchanged", file=sys.stderr)
         return 1
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         print(f"curator: rebind failed: {exc}; state unchanged", file=sys.stderr)
         return 1
     for line in rebind.render(result, dry_run=dry_run):

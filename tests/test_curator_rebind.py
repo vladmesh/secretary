@@ -207,6 +207,42 @@ class CuratorRebindTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, operations)
 
+    def test_audit_write_failure_restores_state_and_a_retry_applies_once(self) -> None:
+        self._fixture()
+        before = self._snapshot()
+        journal = self.state.dir / "runs.jsonl"
+        real_replace = os.replace
+
+        def replace(source, target, *args, **kwargs):
+            if Path(target) == journal:
+                raise OSError("audit unavailable")
+            return real_replace(source, target, *args, **kwargs)
+
+        with mock.patch("ummanu.runtime.state.os.replace", side_effect=replace):
+            code, out, err = self._run()
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("curator: rebind failed: audit unavailable; state unchanged", err)
+        self.assertEqual(self._snapshot(), before)
+        self.assertFalse(journal.exists())
+
+        code, _, err = self._run()
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(self._run()[0], 0)
+        audit = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([event["event"] for event in audit], ["rebind"])
+        self.assertEqual(audit[0]["rebound"], 1)
+        self.assertEqual(audit[0]["carried"], 2)
+        harvest.read_pending(self.state, harvest.current_identity())
+
+    def test_the_audit_line_is_appended_to_an_existing_journal(self) -> None:
+        self._fixture()
+        journal = self.state.dir / "runs.jsonl"
+        journal.write_text('{"event": "precheck"}', encoding="utf-8")
+        self.assertEqual(self._run()[0], 0)
+        lines = journal.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(lines[0], '{"event": "precheck"}')
+        self.assertEqual([json.loads(line)["event"] for line in lines], ["precheck", "rebind"])
+
     def test_a_carried_cursor_never_moves_backwards(self) -> None:
         fixture = self._fixture()
         files = fixture["files"]
