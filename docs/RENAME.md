@@ -601,7 +601,7 @@ GitHub rename needs no rollback: the old URL still redirects.
   - **H:** `hermes-secretary`, `hermes-secretary-roles`, `~/.hermes/skills/secretary`, `~/.hermes/skills/secretary-roles` (only in `skills/manifest.toml`).
   - **I:** `secretary-instance` (any file).
   - **R:** card refs `\bsecretary-\d+\b`; the fixture path `tests/fixtures/local_pty_journals/secretary_1727_*.jsonl.gz`.
-  - **T:** `src/ummanu/transition/**`, `scripts/transition-from-secretary.sh`, `tests/test_transition_from_secretary.py`, `docs/RENAME.md`, and the guard test itself.
+  - **T:** `src/ummanu/transition/**`, `scripts/transition-from-secretary.sh`, `tests/test_transition_from_secretary.py`, `docs/RENAME.md`, the guard test itself and its shared matcher `src/ummanu/infra/old_name_guard.py`.
 
   Nothing else, and no per-file exemptions outside these four classes.
 - **Env:** `tests/test_env_prefix.py` sets `SECRETARY_DATA_DIR`, `SECRETARY_INSTANCE` and
@@ -611,7 +611,11 @@ GitHub rename needs no rollback: the old URL still redirects.
 - **Instance repo:** `tests/test_old_name_guard.py` in `secretary-instance` (post-transition instance
   card) with the same classes. R there covers `state/board/**`, `state/knowledge/**`, `state/runs/**`,
   `gate-runs/**`, `provision-runs/**` and `source:` lines of memory facts. External adapters/projects
-  (`secretary-supervisor*`) stay out until §9 is fixed.
+  (`secretary-supervisor*`) stay out until §9 is fixed. Since ummanu-32 that suite is retired: its
+  allowlist is ported into `src/ummanu/infra/old_name_guard.py` (`LIVE_ROOT_ALLOWLIST`, verbatim but
+  for the receipt rows, whose paths are no longer exported; the
+  matcher the product guard shares, listed under T), and `ummanu config check --instance LIVE_ROOT`
+  runs it over the live root's exported files, without Git ([Operations](OPERATIONS.md#changing-installation-config)).
 - **Live host:** the proof card checks `ls /etc/systemd/system | grep secretary` (empty),
   `docker ps -a --filter name=secretary-board-store` (only the stopped rollback copy until the owner
   removes it), `instance.yaml` name and prefix.

@@ -25,8 +25,8 @@ raised before, so each path keeps its own handling of it. A replay is safe at ev
 owed revisions are read under the lock, so a revision applied before an interrupted tick is not
 applied again, and the checkout still moves only through this function.
 
-Checkouts other than the production one (other projects, the instance repository's publication,
-a checkout of another product root) keep their plain fast-forward (`CommandHostRuntime._advance_checkout`).
+Checkouts other than the production one (other projects, a checkout of another product root) keep
+their plain fast-forward (`CommandHostRuntime._advance_checkout`).
 """
 
 from __future__ import annotations

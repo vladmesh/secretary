@@ -18,21 +18,24 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.fakes.installation import CARD, PRODUCT_ROOT, SPRINT, _checkpoint, _git
+from tests.fakes.installation import CARD, SPRINT, _checkpoint, _git
 from tests.fakes.snapshot_remote import (
     HEAD,
     REVISION,
     exporter_producers,
     exporter_remote,
     git,
+    recover_snapshot,
+)
+from tests.fakes.snapshot_remote import (
+    recovery_args as _args,
 )
 from ummanu import bootstrap as bootstrap_module
-from ummanu import installation, secret_store, upgrade
+from ummanu import installation, secret_store
 from ummanu.board import provision as provision_module
 from ummanu.board import store
 from ummanu.board.migrate import head_revision
@@ -53,33 +56,6 @@ from ummanu.secret_words import RECOVERY_WORDS
 
 PHRASE = " ".join(RECOVERY_WORDS[:16])
 SERVICE_ENV = "EXAMPLE_URL=http://127.0.0.1/rpc\nEXAMPLE_API_TOKEN=live-token\n"
-
-
-def _args(fixture, **overrides) -> SimpleNamespace:
-    values = {
-        "instance_dir": str(fixture.target),
-        "instance_remote": str(fixture.remote),
-        "installation_user": getpass.getuser(),
-        "recover": True,
-        "adopt": False,
-        "dry_run": False,
-        "runtime_env": None,
-        "product_root": str(PRODUCT_ROOT),
-        "bootstrap_credential_file": None,
-        "bootstrap_credential_stdin": False,
-        "recovery_phrase_file": None,
-        "recovery_phrase_stdin": False,
-        "host_fixture": None,
-    }
-    values.update(overrides)
-    return SimpleNamespace(**values)
-
-
-def _head_registry_only(context, steps=installation.STEPS):
-    """The recover materializer with only its head-registry step running (the host is not this test's)."""
-    return upgrade.run_steps(
-        context, steps=tuple(step for step in steps if step is upgrade.step_head_registry)
-    )
 
 
 def _fast_key_params() -> dict:
@@ -130,14 +106,6 @@ def _stood_in_bootstrap(
         return bootstrap_module.bootstrap(args)
 
 
-def _rebuilt_index(data_dir: Path, instance_dir: Path, **_kwargs) -> int:
-    """The reindex without the embedding model: one index file for the facts the live root holds."""
-    facts = sorted((instance_dir / "state" / "memory" / "facts").rglob("*.md"))
-    (data_dir / "memory").mkdir(parents=True, exist_ok=True)
-    (data_dir / "memory" / "index.sqlite").write_text("\n".join(map(str, facts)), encoding="utf-8")
-    return len(facts)
-
-
 class SnapshotRecoverCase(unittest.TestCase):
     def setUp(self) -> None:
         temporary = tempfile.TemporaryDirectory(prefix="snapshot-recover-")
@@ -148,22 +116,7 @@ class SnapshotRecoverCase(unittest.TestCase):
 
     def recover(self, *, failures: dict[str, BaseException] | None = None, **overrides):
         """One `ummanu recover`; `failures` makes the named installation callable raise instead."""
-        patches = {
-            "check_prerequisites": mock.Mock(),
-            "import_normalized_board": self.board,
-            "rebuild_memory_index": mock.Mock(side_effect=_rebuilt_index),
-            "provision_project_checkouts": mock.Mock(return_value=[]),
-            "provision_codex_home": mock.Mock(return_value=0),
-            "run_steps": mock.Mock(side_effect=_head_registry_only),
-            "mark_reconcile_applied": mock.Mock(),
-            "restore_findings": mock.Mock(return_value=[]),
-        }
-        for name, failure in (failures or {}).items():
-            patches[name] = mock.Mock(side_effect=failure)
-        with ExitStack() as stack:
-            for name, replacement in patches.items():
-                stack.enter_context(mock.patch.object(installation, name, replacement))
-            return installation.install(_args(self.fixture, **overrides))
+        return recover_snapshot(self.fixture, board=self.board, failures=failures, **overrides)
 
     def steps(self, result) -> dict[str, tuple[str, str]]:
         return {step.name: (step.status, step.detail) for step in result.steps}

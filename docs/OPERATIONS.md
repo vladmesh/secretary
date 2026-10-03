@@ -988,6 +988,10 @@ A clean run: `project add` prints an ok scanner status and pending provision; `p
 answers `task_ready` with the `task.yaml` path; `provision-apply` answers `drafted` with the binding
 disabled; `gate` answers `passed`. Exit 0 only for success; any refusal exits 1.
 
+There is no commit step. The binding (`projects/<id>.yaml`) and the canonical adapter
+(`adapters/<id>.yaml`) are written into the live root, and the next snapshot exporter window carries
+them ([Recovery](RECOVERY.md#writers)).
+
 - `project add` rescans. If HEAD changed, provision and gate state reset to pending and the stale
   canonical adapter is deleted in the same transition. Uncommitted project changes are not read.
 - `provision-start` is idempotent per run id (a digest of identity, scanner head and onboarding
@@ -1066,6 +1070,45 @@ The mechanical gate reads `validation.required_checks` from the adapter:
   or unfinished leaves it pending for the pending watchdog, a failed one makes it red, all successful
   make it green. Other checks do not matter;
 - unset: every check on the SHA counts and any failure makes it red.
+
+## Changing installation config
+
+Installation config is the live root's exported files: `instance.yaml`, `projects/`, `adapters/`,
+`heads/heads.toml`, `persona/`, `skills/manifest.toml` and the curated `state/knowledge` and
+`state/memory`. The live root is not a code project. No card branch lands in it: a card whose project
+repository resolves to the live root is refused at admission ("project 'ID' names the live root PATH
+as its repository"), before any workspace or head exists, and a release refuses it again (`nothing
+was merged: ...`). Project registration has its own commands
+([Connecting a project](#connecting-a-project-gate-and-stale-input-recovery)).
+
+Any other config change is an operation card, executed in place, then:
+
+```bash
+python3 -P -m ummanu config check --instance "$INSTANCE"
+```
+
+It needs no Git and reads the live root the same with or without `.git`. Two checks:
+
+- schema validation: `instance.yaml`, every binding, adapter and onboarding draft, and the data
+  manifest, the same read the dispatcher makes every tick;
+- the old-name guard ([Rename](RENAME.md#t5-guard)): every exported path and text file, as the next
+  cut copies it. The old product name passes only where an allowlist row covers it: the Hermes agent's
+  own spellings, `secretary-instance`, old card refs, the `source:`/`supersedes:` lines of memory
+  facts, and whole-file history (`state/knowledge`, except undated runbooks and `plans/current-*`).
+
+Files outside the export allowlist (`runtime.env`, `board-store.env`, `secrets/installation.key`,
+generated heads and onboarding state) are never opened. Each finding is one line on stdout and any
+finding exits 1:
+
+| finding | meaning |
+| --- | --- |
+| `schema: <file>: <field>: <message>` | the dispatcher would refuse this config; fix it first |
+| `<path>:<line>: '<match>' in '<text>'` | the old name in an exported file, outside the allowlist |
+| `<path>: path carries '<match>'` | the old name in an exported path |
+| `export: ...` | a symlink or non-regular entry at an exported path; the exporter would block on it too |
+
+A clean root prints `ummanu config check: ok (N exported file(s) in PATH)` on stderr and exits 0.
+There is nothing to commit: the next exporter window carries the change.
 
 ## Starting a sprint
 
@@ -1453,7 +1496,7 @@ close the other sprint; the audit records `role=po` with the observer's actor id
 
 ### Enabling it
 
-Add to `instance.yaml` and commit like any config change:
+Add to `instance.yaml` like any config change ([Changing installation config](#changing-installation-config)):
 
 ```yaml
 open_sprint_limit: 2
@@ -1516,7 +1559,7 @@ onto a limit-one installation (`restored open sprints are not admissible on this
 
 1. Close the second sprint ([Closing a sprint](#closing-a-sprint)).
 2. Confirm `python3 -P -m ummanu sprint list --status open` shows exactly one.
-3. Set `open_sprint_limit: 1` in `instance.yaml` (or delete the key) and commit.
+3. Set `open_sprint_limit: 1` in `instance.yaml` (or delete the key) and run `ummanu config check`.
 4. Verify the effective limit is `1` with the read-back command.
 5. Let one production tick write and push the checkpoint.
 
@@ -1838,9 +1881,8 @@ The push runs every 30 minutes, fast-forward only, never forced. Contract in
 [Recovery](RECOVERY.md#failure-and-divergence). A push failure does not stop work; the next window
 retries.
 
-`remote diverged` stops the push and raises the alarm. Divergence from a green publish interleaving with
-the checkpoint clears on its own on the next tick. When the remote holds history in neither the reviewed
-branch nor the local checkout, merge by hand:
+`remote diverged` stops the push and raises the alarm. No card publishes to the instance remote any
+more, so a remote holding history the local checkout lacks was pushed from elsewhere; merge it by hand:
 
 ```bash
 git -C INSTANCE fetch origin
@@ -1983,10 +2025,9 @@ On release the dispatcher:
    and its release record is removed after durable settlement.
 3. Stops the worktree's terminals and removes the worktree.
 
-For the private instance repository, publishing uses the checkpoint writer lock and publishes only the
-reviewed branch and locally known checkpoint history; foreign remote history stays a manual case. After
-publishing, the remote default branch is merged into the local instance checkout. A tick that died
-between publish and merge is repeated idempotently.
+Nothing is ever merged into the live root. A card whose project repository is the live root is refused
+at admission; one claimed before that refusal existed is refused here (`nothing was merged: ...`)
+and goes to Blocked ([Changing installation config](#changing-installation-config)).
 
 Teardown happens only on this path; parked and rework cards keep their workspace and branch.
 

@@ -6,20 +6,23 @@ historical records (R) or the transition's own files (T). There is one table and
 exemption outside those four classes, so a new mention of the old name fails here with its file,
 line and text.
 
-Class T: this file names the old name on purpose.
+Class T: this file and the matcher it shares with `ummanu config check`
+(`src/ummanu/infra/old_name_guard.py`, which holds the live root's allowlist) name the old name on
+purpose.
 """
 
 from __future__ import annotations
 
-import fnmatch
 import re
 import subprocess
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+from ummanu.infra import old_name_guard
+from ummanu.infra.old_name_guard import applies as _applies
+from ummanu.infra.old_name_guard import text_of
 
-OLD_NAME = re.compile(r"(?i)secretary")
+ROOT = Path(__file__).resolve().parent.parent
 
 #: Any tracked path.
 ANYWHERE = ("*",)
@@ -54,51 +57,18 @@ ALLOWLIST: tuple[tuple[str, re.Pattern[str] | None, tuple[str, ...]], ...] = (
             "scripts/rename_to_ummanu.py",
             "docs/RENAME.md",
             "tests/test_old_name_guard.py",
+            # The guard's matcher and the live root's allowlist, which names the old name as data.
+            "src/ummanu/infra/old_name_guard.py",
         ),
     ),
 )
 
 
-def _applies(globs: tuple[str, ...], path: str) -> bool:
-    return any(fnmatch.fnmatchcase(path, glob) for glob in globs)
-
-
 def violations(path: str, text: str | None) -> list[str]:
     """Every match of the old name in `path` and in its `text` (None for a binary file) that no
-    allowlist row covers, as `path:line: match in context`."""
-    rows = [(cls, pattern) for cls, pattern, globs in ALLOWLIST if _applies(globs, path)]
-    if any(pattern is None for _, pattern in rows):
-        return []
-    patterns = [pattern for _, pattern in rows if pattern is not None]
-    found = [f"{path}: path carries '{match}'" for match in _uncovered(path, patterns)]
-    if text is None:
-        return found
-    for number, line in enumerate(text.splitlines(), start=1):
-        found += [
-            f"{path}:{number}: '{match}' in {line.strip()[:160]!r}" for match in _uncovered(line, patterns)
-        ]
-    return found
-
-
-def _uncovered(text: str, patterns: list[re.Pattern[str]]) -> list[str]:
-    hits = list(OLD_NAME.finditer(text))
-    if not hits:
-        return []
-    allowed = [match.span() for pattern in patterns for match in pattern.finditer(text)]
-    return [
-        hit.group(0)
-        for hit in hits
-        if not any(start <= hit.start() and hit.end() <= end for start, end in allowed)
-    ]
-
-
-def text_of(data: bytes) -> str | None:
-    if b"\0" in data:
-        return None
-    try:
-        return data.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
+    allowlist row covers, as `path:line: match in context`. The matcher is the one
+    `ummanu config check` runs over the live root."""
+    return old_name_guard.violations(path, text, ALLOWLIST)
 
 
 def tracked_files() -> list[str]:

@@ -15,7 +15,7 @@ from typing import Any
 from ummanu.board.completion_evidence import has_candidate, is_po_executed, is_wait
 from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch.helpers import _worker_id, scrub_host_output
-from ummanu.dispatch.host import _blocked_actions_and_their_infrastructure_twins
+from ummanu.dispatch.host import _blocked_actions_and_their_infrastructure_twins, live_root_project_refusal
 from ummanu.dispatch.launch import (
     STAGE_CLAIM,
     WORKER_ROLE,
@@ -69,6 +69,8 @@ SPRINT_RESERVATION_BLOCKED_ACTION = "sprint-reservation-blocked"
 SPRINT_RESERVATION_RESERVED = "sprint_reserved"
 #: A `code` card outside every sprint, whose project's reservations could not be verified.
 SPRINT_RESERVATION_UNVERIFIABLE = "sprint_reservation_unverifiable"
+#: The action token of a card refused at admission because its project's repository is the live root.
+LIVE_ROOT_PROJECT_BLOCKED_ACTION = "live-root-project-blocked"
 
 
 @dataclass(frozen=True)
@@ -351,6 +353,45 @@ def _sprint_admission_blocked(
         **failure.outcome_fields(reason),
     }
 
+def _live_root_project_blocked(
+    runtime: Any,
+    task: dict[str, Any],
+    ref: str,
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    *,
+    attempt_id: str,
+    refusal: str,
+) -> dict[str, Any]:
+    """Write the live-root refusal decided before the claim, immediately after it.
+
+    The instance-repo landing is gone: a card whose project repository is the live root has no
+    path to land on, so it is refused at admission, fail-closed, before any workspace exists.
+    """
+    failure = _unclaimed_preflight_failure(attempt_id=attempt_id, detail=refusal)
+    reason = (
+        "the card was not given to a worker: it was refused at admission, so no workspace and "
+        f"no head were created. {refusal}\n{failure.clause()}"
+    )
+    _write_claim_preflight_block(runtime, 
+        task,
+        ref,
+        records,
+        payload,
+        attempt_id=attempt_id,
+        action=LIVE_ROOT_PROJECT_BLOCKED_ACTION,
+        failure=failure,
+        reason=reason,
+    )
+    return {
+        "status": "blocked",
+        "step": "live-root-project-refused",
+        "pilot_ref": ref,
+        "attempt_id": attempt_id,
+        "reason": "project repository is the live root",
+        **failure.outcome_fields(reason),
+    }
+
 def _project_git_access(runtime: Any, task: dict[str, Any]) -> ProjectGitAccess:
     """The registered project's remote Git access, asked before anything is claimed."""
     try:
@@ -544,7 +585,17 @@ def _prepare_claim(
             "sprint_reservation": sprint_refusal.evidence(),
             "reason": sprint_refusal.detail,
         }
-    contract_verdict = None if sprint_refusal is not None else _broad_check_contract_verdict(runtime, task)
+    # A project whose repository is the live root is refused next, off the registry alone, so the
+    # contract and the host are never asked about a repository no card may land in.
+    live_root_refusal = (
+        "" if sprint_refusal is not None
+        else live_root_project_refusal(runtime.catalog, str(task.get("project") or ""))
+    )
+    contract_verdict = (
+        None
+        if sprint_refusal is not None or live_root_refusal
+        else _broad_check_contract_verdict(runtime, task)
+    )
     # Project Git access is a separate preflight at the same boundary. It is asked only when the
     # contract does not already refuse the card, so that refusal stays what it was: decided off
     # the registry with the host untouched. An unanswered probe leaves the card in Ready.
@@ -602,7 +653,9 @@ def _prepare_claim(
     # attempt that creates one rather than a retry that expects the last one's checkout.
     refused_at_admission = any(
         runtime.audit.committed_event(_attempt_request_id(attempt_id, action, ref)) is not None
-        for action in _blocked_actions_and_their_infrastructure_twins(SPRINT_RESERVATION_BLOCKED_ACTION)
+        for action in _blocked_actions_and_their_infrastructure_twins(
+            SPRINT_RESERVATION_BLOCKED_ACTION, LIVE_ROOT_PROJECT_BLOCKED_ACTION
+        )
     )
     if requeued and active is not None:
         # The preempted head can still be in the workspace the next round claims, and it is
@@ -671,6 +724,16 @@ def _prepare_claim(
             head=head,
             review_head=review_head,
             refusal=sprint_refusal,
+        )
+    if live_root_refusal:
+        return _live_root_project_blocked(
+            runtime,
+            task,
+            ref,
+            records,
+            payload,
+            attempt_id=attempt_id,
+            refusal=live_root_refusal,
         )
     if contract_outcome is not None:
         failure, blocked_reason, refusal = contract_outcome

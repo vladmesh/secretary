@@ -231,6 +231,16 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--host-fixture", metavar="DIR", help="read a fixture host inventory")
     status.set_defaults(handler=run_status)
 
+    config = subparsers.add_parser("config", help="check the live root's configuration")
+    config_subcommands = config.add_subparsers(dest="config_command")
+    config_check = config_subcommands.add_parser(
+        "check",
+        help="validate the live root's schema and guard its exported files for the old name, without Git",
+    )
+    _add_instance(config_check, help="the live root: an instance dir or its instance.yaml")
+    config_check.set_defaults(handler=run_config_check)
+    config.set_defaults(handler=not_implemented("config"))
+
     add_upgrade_command(subparsers)
     add_transition_subcommands(subparsers)
     add_install_commands(subparsers)
@@ -550,6 +560,21 @@ def _add_env_instance(parser: argparse.ArgumentParser, *, help: str | None = Non
         default=os.environ.get("UMMANU_INSTANCE", DEFAULT_INSTANCE),
         help=help,
     )
+
+
+def run_config_check(args: argparse.Namespace) -> int:
+    """One finding per line on stdout and exit 1, or a summary on stderr and exit 0."""
+    from ummanu.infra.config_check import check_live_root
+
+    result = check_live_root(Path(args.instance))
+    for finding in result.findings:
+        print(finding)
+    verdict = "ok" if result.ok else f"{len(result.findings)} finding(s)"
+    print(
+        f"ummanu config check: {verdict} ({result.checked_files} exported file(s) in {result.live_root})",
+        file=sys.stderr,
+    )
+    return 0 if result.ok else 1
 
 
 def run_doctor(args: argparse.Namespace) -> int:

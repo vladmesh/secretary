@@ -207,8 +207,8 @@ failure or divergence for the next window or operator action.
 
 ## Writers
 
-Four writers touch the live root, each with its own paths. Only the tick makes Git commits; the
-other three write files and start no Git child:
+Five writers touch the live root, each with its own paths. Only the tick makes Git commits; the
+other four write files and start no Git child:
 
 - tick writer: `state/board`, `state/runs` (and, in legacy mode, the files the Git-free writers
   leave uncommitted; below), at the cadence above, under the tick lock;
@@ -219,6 +219,17 @@ other three write files and start no Git child:
 - secret writer: `secrets/`, on `secret init/set/import/remove`, `secret checkpoint-github set` and
   every re-encryption of a value (`list` and `materialize` write no store file); it writes files
   only and makes no Git call (below).
+- onboarding writer: `projects/<id>.yaml` and `adapters/<id>.yaml`, on `project add`,
+  `provision-apply` and `gate`; each stage replaces its files atomically and makes no Git call. Its
+  drafts, provision runs and gate receipts live in `<data>/onboarding/` and are never exported.
+  Nobody commits a registration: the next exporter window carries it. While the live root is still a
+  work tree, the legacy tick leaves config paths alone (below), so a registration made then reaches
+  the remote with the first exporter cut after the cutover, which copies the whole allowlist.
+
+No card lands in the live root. The dispatcher's instance-repository landing (a card branch merged
+into the live checkout) is gone; a card whose project repository resolves to the live root is
+refused at admission, naming it. Configuration changes through an operation card checked with
+`ummanu config check` ([Operations](OPERATIONS.md#changing-installation-config)).
 
 The head-registry pair is not a live-root path: `ummanu upgrade` and `recover` write `heads.yaml` and
 `source.yaml` into `<data>/heads/` and make no Git call for them.

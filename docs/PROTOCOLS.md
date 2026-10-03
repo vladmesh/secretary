@@ -2216,8 +2216,8 @@ the matching resume. Delivery never polls the board or calls an observer-facing 
 #### Post-merge CI
 
 After a release, the observer is woken on the post-merge CI result, not on the merge. When a release
-merges a card (any of the three merge paths: the GitHub pull request, the instance repository, the
-fast-forward push of a local-CI project), the dispatcher records a post-merge watch in its own
+merges a card (either merge path: the GitHub pull request or the fast-forward push of a local-CI
+project), the dispatcher records a post-merge watch in its own
 production state (`post_merge_watches`: card ref, project, integration base, the commit that actually
 landed on the base, start time) before the Done move, and the Done carries a `release_merge` marker.
 The watch survives a restart and holds no claim: the card is Done and is not active for claims or for
@@ -3377,6 +3377,13 @@ ids derive from the adapter. An enabled one still refuses.
 A takedown opens a new onboarding cycle, recorded in the draft as `onboarding_cycle`; the provision run
 id derives from it, so provision results and gate receipts from an earlier cycle cannot be reused on an
 unchanged scanner head.
+
+Registration needs no commit. `project add`, `provision-apply` and `gate` write `projects/<id>.yaml`
+and `adapters/<id>.yaml` straight into the live root, and the next snapshot exporter window carries
+them to the snapshot repository ([Recovery](RECOVERY.md#writers)); drafts, provision runs and gate
+receipts stay in `<data>/onboarding/` and are not exported. The live root itself is never a project:
+a card whose project repository resolves to it is refused at admission
+([Operations](OPERATIONS.md#changing-installation-config)).
 
 Diagnosis, stale draft recovery, re-onboarding and verification:
 [Operations](OPERATIONS.md#connecting-a-project-gate-and-stale-input-recovery).

@@ -21,7 +21,7 @@ from typing import Any
 
 import yaml
 
-from ummanu import _proc, state_repo
+from ummanu import _proc
 from ummanu._fsutil import write_text_atomic
 from ummanu.board.completion_evidence import (
     RESEARCH_REPORT_DIR,
@@ -367,6 +367,29 @@ def _same_repo(first: Path, second: Path) -> bool:
         return first.expanduser().resolve() == second.expanduser().resolve()
     except OSError:
         return first.expanduser().absolute() == second.expanduser().absolute()
+
+
+def live_root_project_refusal(catalog: Any, project: str) -> str:
+    """Why `project` may not run a card because its repository is the live root, or "" when it may.
+
+    The live root is configuration the exporter cuts, not a code project: no card branch lands in
+    it (docs/OPERATIONS.md, "Changing installation config"). A project the catalog cannot look up
+    is not answered here; the preflights that need the binding fail on it in their own words.
+    """
+    instance_dir = getattr(catalog, "instance_dir", None)
+    if not project or instance_dir is None:
+        return ""
+    try:
+        repo = catalog.binding(project).get("repo")
+    except HostError:
+        return ""
+    if not isinstance(repo, str) or not repo or not _same_repo(Path(repo), Path(instance_dir)):
+        return ""
+    return (
+        f"project {project!r} names the live root {Path(instance_dir).expanduser()} as its repository; "
+        "the live root is configuration, not a code project, and no card lands in it. Change it "
+        "through an operation card and `ummanu config check`"
+    )
 
 
 @dataclass(frozen=True)
@@ -2044,66 +2067,6 @@ class CommandHostRuntime:
             "reviewed_paths": len(paths),
         }
 
-    def is_instance_publish_recovery(
-        self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
-        reviewed_commit: str,
-        current_commit: str,
-    ) -> bool:
-        if self.mode == "noop" or not record.workspace:
-            return False
-        try:
-            repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
-        except (KeyError, HostError):
-            return False
-        if not _same_repo(repo, Path(self.catalog.instance_dir)):
-            return False
-        base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
-        try:
-            self._remote_git_checked(
-                task["project"], record.workspace, ["fetch", "origin", base], "review recovery fetch"
-            )
-            remote_head = self._run(
-                ["git", "-C", record.workspace, "rev-parse", f"origin/{base}"],
-                "review recovery remote head",
-            ).stdout.strip()
-            parents = self._run(
-                ["git", "-C", record.workspace, "rev-list", "--parents", "-n", "1", current_commit],
-                "review recovery parents",
-            ).stdout.split()
-            local_head = self._run(
-                ["git", "-C", str(repo), "rev-parse", "HEAD"],
-                "review recovery local head",
-            ).stdout.strip()
-            self._run(
-                [
-                    "git",
-                    "-C",
-                    record.workspace,
-                    "merge-base",
-                    "--is-ancestor",
-                    reviewed_commit,
-                    current_commit,
-                ],
-                "review recovery ancestry",
-            )
-        except HostError:
-            return False
-        if not (
-            remote_head
-            and remote_head == current_commit
-            and reviewed_commit in parents[1:]
-            and len(parents) > 2
-        ):
-            return False
-        for parent in parents[1:]:
-            if parent == reviewed_commit:
-                continue
-            if not self._commit_is_ancestor(str(repo), parent, local_head):
-                return False
-        return True
-
     def gate_check(self, task: dict[str, Any], record: DispatcherRecord) -> GateResult:
         self._require_production_runtime("candidate-gate-before")
         if record.workspace:
@@ -2239,6 +2202,9 @@ class CommandHostRuntime:
         """Refuse before any project-dependent workspace or head activation."""
         if self.mode == "noop":
             return
+        refusal = live_root_project_refusal(self.catalog, project)
+        if refusal:
+            raise HostError(refusal)
         availability_probe = getattr(self.catalog, "project_availability", None)
         if callable(availability_probe):
             availability = availability_probe(project)
@@ -2254,7 +2220,7 @@ class CommandHostRuntime:
     def complete_green(self, task: dict[str, Any], record: DispatcherRecord) -> MergeLanding | None:
         """Land the reviewed branch on the card's integration base and say what landed.
 
-        Returns the `MergeLanding` of each of the three merge paths, which the release turns into a
+        Returns the `MergeLanding` of each of the two merge paths, which the release turns into a
         post-merge CI watch, or None when nothing was merged (noop mode, no workspace, automerge off):
         a release that merged nothing wakes the observer on its Done as before.
         """
@@ -2264,6 +2230,10 @@ class CommandHostRuntime:
         self._decide_workspace_environment_ownership(record.workspace)
         if os.environ.get("UMMANU_DISPATCHER_AUTOMERGE", "on").strip().lower() == "off":
             return None
+        # Admission refuses such a card; one claimed before that refusal existed lands nowhere.
+        refusal = live_root_project_refusal(self.catalog, str(task.get("project") or ""))
+        if refusal:
+            raise HostError(f"nothing was merged: {refusal}")
         branch = _legacy_worker_branch(task["ref"])
         base = self.catalog.integration_base(task["project"], task.get("workspace", {}).get("base_branch"))
         ci = _validation_ci(self, task)
@@ -2289,12 +2259,6 @@ class CommandHostRuntime:
                 branch=branch,
             )
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
-        if _same_repo(repo, Path(self.catalog.instance_dir)):
-            self._complete_green_instance_repo(record, branch, base, repo, project=task["project"])
-            self._require_production_runtime("release-after")
-            return MergeLanding(
-                sha=self._pushed_branch_head(record, branch), base=base, path="instance-repo", ci=ci
-            )
         # Publish onto the card's integration base (a non-fast-forward push is rejected, never
         # force-landed), then fast-forward the checkout: that is how a merged self-modification
         # reaches the next oneshot tick. The base is read from the card rather than hard-coded to
@@ -2338,80 +2302,6 @@ class CommandHostRuntime:
             ).stdout.strip()
         except HostError:
             return ""
-
-    def _complete_green_instance_repo(
-        self,
-        record: DispatcherRecord,
-        branch: str,
-        base: str,
-        repo: Path,
-        *,
-        project: str,
-    ) -> None:
-        """Publish an instance-repo card without racing checkpoint commits."""
-        with state_repo.state_repo_lock(repo):
-            self._remote_git_checked(
-                project, record.workspace, ["fetch", "origin", base], "merge preflight fetch"
-            )
-            branch_head = self._run(
-                ["git", "-C", record.workspace, "rev-parse", branch],
-                "merge preflight branch head",
-            ).stdout.strip()
-            local_head = self._run(
-                ["git", "-C", str(repo), "rev-parse", "HEAD"],
-                "merge preflight local head",
-            ).stdout.strip()
-            remote_head = self._run(
-                ["git", "-C", record.workspace, "rev-parse", f"origin/{base}"],
-                "merge preflight remote head",
-            ).stdout.strip()
-            if not self._commit_is_ancestor(record.workspace, remote_head, branch_head):
-                if not self._commit_is_ancestor(str(repo), remote_head, local_head):
-                    raise HostError(
-                        f"merge preflight failed: origin/{base} contains unreviewed remote history"
-                    )
-                self._run(
-                    ["git", "-C", record.workspace, "fetch", str(repo), "HEAD"],
-                    "merge preflight fetch local checkpoint",
-                )
-                self._run(
-                    [
-                        "git",
-                        *state_repo.commit_identity(Path(record.workspace)),
-                        "-C",
-                        record.workspace,
-                        "merge",
-                        "--no-edit",
-                        "FETCH_HEAD",
-                    ],
-                    "merge preflight checkpoint sync",
-                )
-            self._remote_git_checked(
-                project, record.workspace, ["push", "origin", f"{branch}:{base}"], "merge push"
-            )
-            self._remote_git_checked(project, repo, ["fetch", "origin", base], "post-merge fetch")
-            self._run(
-                [
-                    "git",
-                    *state_repo.commit_identity(repo),
-                    "-C",
-                    str(repo),
-                    "merge",
-                    "--no-edit",
-                    f"origin/{base}",
-                ],
-                "post-merge reconcile",
-            )
-
-    def _commit_is_ancestor(self, repo: str, ancestor: str, descendant: str) -> bool:
-        try:
-            self._run(
-                ["git", "-C", repo, "merge-base", "--is-ancestor", ancestor, descendant],
-                "merge ancestry check",
-            )
-        except HostError:
-            return False
-        return True
 
     def _require_pr_base(self, record: DispatcherRecord, branch: str, base: str) -> None:
         """Refuse the merge unless the open pull request for `branch` targets `base`.

@@ -59,8 +59,6 @@ def review_drift(runtime: Any, task: dict[str, Any], record: DispatcherRecord) -
     current = runtime.host.head_commit(record)
     if not current or current == record.review_commit:
         return ""
-    if runtime.host.is_instance_publish_recovery(task, record, record.review_commit, current):
-        return ""
     reconciliation = runtime.host.reconcile_reviewed_base_move(
         task, record, record.review_commit, current
     )
