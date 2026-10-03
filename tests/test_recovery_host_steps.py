@@ -484,12 +484,12 @@ class DisabledBindingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             binding = {
-                "id": "secretary-instance",
-                "repo": str(root / "secretary-instance"),
-                "remote": "https://github.com/example/secretary-instance.git",
+                "id": "retired-instance",
+                "repo": str(root / "retired-instance"),
+                "remote": "https://github.com/example/retired-instance.git",
                 "default_branch": "main",
                 "enabled": False,
-                "adapter": "secretary",
+                "adapter": "retired",
             }
             with mock.patch("ummanu.installation.RemoteExecution") as remote:
                 [result] = installation.provision_project_checkouts([binding], None, instance_dir=root)
@@ -498,7 +498,7 @@ class DisabledBindingTests(unittest.TestCase):
             self.assertEqual(
                 result,
                 ProjectProvisionResult(
-                    "secretary-instance",
+                    "retired-instance",
                     "not-inspected",
                     "not-contacted",
                     "disabled",
@@ -507,7 +507,7 @@ class DisabledBindingTests(unittest.TestCase):
                     False,
                 ),
             )
-            self.assertFalse((root / "secretary-instance").exists())
+            self.assertFalse((root / "retired-instance").exists())
             recovered = installation.InstallResult(projects=[result])
             self.assertEqual(recovered.status, "ok")
 
