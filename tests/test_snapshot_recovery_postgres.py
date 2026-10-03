@@ -1,6 +1,6 @@
 """`ummanu recover` from an exporter snapshot into a real PostgreSQL board store.
 
-The source installation writes its board into one database of a throwaway `postgres:16`, and a real
+The source installation writes its board (two cards and a closed sprint) into one database of a throwaway `postgres:16`, and a real
 `SnapshotExporter` window cuts it into a bare repository that is pushed to a local bare remote. The
 recovery target is a second, empty database. Recovery then runs through `install()` for real: the
 bare clone, the manifest check, the live root, the secret store step, the checkpoint, the board and
@@ -38,7 +38,7 @@ from ummanu.memory_journal import export_memory_snapshot, verify_memory_journal
 from ummanu.restore import DEFAULT_MEMORY_DIM, restore_state
 from ummanu.sprint_observer import none_choice
 from ummanu.sprints import SprintReader, SprintWriter, sprint_client
-from ummanu.tasks import TaskWriter
+from ummanu.tasks import TaskError, TaskWriter
 
 
 def _write_store_file(instance: Path, config: BoardStoreConfig) -> None:
@@ -84,43 +84,14 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
         self.tip = self.fixture.cut(stand_in=False, state_dir=state_dir)
 
     def _seed_source(self) -> None:
-        """A product, an issue, two cards and a closed sprint, written by the source's own writers."""
+        """Two cards and a closed sprint, written by the source's own writers.
+
+        The shapes are the ones the PostgreSQL restore suites already prove restorable (plain task
+        cards, a closed sprint entity); this test is about the snapshot path that carries them.
+        """
         source, data_dir = self.fixture.source, self.fixture.source_data
         client = SqlCardClient(self.source_config.for_role("owner"), source)
         self.addCleanup(client.close)
-        with client.transaction():
-            product = client.call("createTask", project_id=1, title="Ummanu", reference="product:ummanu")
-            client.call(
-                "saveTaskMetadata",
-                task_id=product,
-                values={"record_type": "product", "product_id": "ummanu", "product_projects": '["ummanu"]'},
-            )
-            issue = client.call("createTask", project_id=1, title="Recovery", reference="issue:recovery")
-            client.call(
-                "saveTaskMetadata",
-                task_id=issue,
-                values={
-                    "record_type": "issue",
-                    "issue_product": "ummanu",
-                    "issue_kind": "feature",
-                    "issue_priority": "P1",
-                },
-            )
-        sprints = sprint_client(source)
-        self.addCleanup(sprints.close)
-        sprint_writer = SprintWriter(sprints, data_dir=data_dir, instance=source)
-        sprint = sprint_writer.create(
-            role="po",
-            actor="test",
-            goal="recover from the snapshot",
-            repositories=[str(self.root / "repository")],
-            product="ummanu",
-            issues=["issue:recovery"],
-            projects=["ummanu"],
-            observer=none_choice(),
-            reference="sprint:snapshot",
-            request_id="create-snapshot-sprint",
-        )["sprint"]["ref"]
         writer = TaskWriter(client, data_dir=data_dir)
         for number in (1, 2):
             writer.create(
@@ -131,38 +102,25 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
                 title=f"Recovered card {number}",
                 target="ready",
                 reference=f"ummanu-{number}",
-                sprint=sprint,
-                sprint_override=True,
-                sprint_override_reason="integration fixture",
                 request_id=f"create-snapshot-card-{number}",
             )
-        writer.move(
+        sprints = sprint_client(source)
+        self.addCleanup(sprints.close)
+        sprint_writer = SprintWriter(sprints, data_dir=data_dir, instance=source)
+        sprint = sprint_writer.create(
             role="po",
             actor="test",
-            reference="ummanu-1",
-            target="done",
-            reason="snapshot fixture complete",
-            request_id="complete-snapshot-card",
-            sprint_override=True,
-            sprint_override_reason="integration fixture",
-        )
-        writer.archive(
-            role="po",
-            actor="test",
-            reference="ummanu-1",
-            reason="retain archived snapshot evidence",
-            request_id="archive-snapshot-card",
-        )
+            goal="recover from the snapshot",
+            repositories=[str(self.root / "repository")],
+            observer=none_choice(),
+            reference="sprint:snapshot",
+            request_id="create-snapshot-sprint",
+        )["sprint"]["ref"]
         sprint_writer.close(
             role="po",
             actor="test",
             reference=sprint,
-            decisions={
-                "issues": [
-                    {"ref": "issue:recovery", "verdict": "open", "reason": "recovery stays supported"}
-                ],
-                "cards": [{"ref": "ummanu-2", "verdict": "drop", "reason": "fixture closes with work left"}],
-            },
+            decisions={"issues": [], "cards": []},
             reason="snapshot fixture closed",
             request_id="close-snapshot-sprint",
         )
@@ -178,7 +136,7 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
                 text=True,
             ).stdout
         )
-        self.assertGreaterEqual(summary["card_count"], 4)
+        self.assertEqual(summary["card_count"], 2)
         self.assertEqual(summary["sprint_count"], 1)
         real_checkout = installation._snapshot_checkout
 
@@ -209,8 +167,22 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
             recovery_phrase_stdin=False,
             host_fixture=None,
         )
+        # The restore treats a refused batch as ambiguous and proves the outcome by a fresh read, so
+        # inside its one transaction the cause would surface only as "transaction is aborted".
+        # Keep what the store said, for the failure message.
+        refused: list[str] = []
+        real_batch = SqlCardClient.call_batch
+
+        def recording_batch(client, calls):
+            try:
+                return real_batch(client, calls)
+            except TaskError as exc:
+                refused.append(exc.message)
+                raise
+
         with ExitStack() as stack:
             for patch in (
+                mock.patch.object(SqlCardClient, "call_batch", autospec=True, side_effect=recording_batch),
                 mock.patch("ummanu.installation._snapshot_checkout", side_effect=checkout_then_provision),
                 mock.patch("ummanu.installation._ensure_installation_user"),
                 mock.patch("ummanu.installation._set_installation_owner"),
@@ -223,7 +195,7 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
             result = installation.install(args)
 
         steps = {step.name: (step.status, step.detail) for step in result.steps}
-        self.assertEqual(result.status, "ok", result.render())
+        self.assertEqual(result.status, "ok", f"{result.render()}\nrefused store batches: {refused}")
         self.assertEqual(steps["board"], ("changed", f"{summary['card_count']} card(s) at parity"))
         # Board and sprints arrived with the counts the tree's export.json declares.
         state = restore_state(data_dir)
