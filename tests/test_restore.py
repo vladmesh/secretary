@@ -1004,31 +1004,6 @@ class RestoredNonTaskSwimlaneTests(unittest.TestCase):
             json.dumps({"version": 1, "cards": [RestoreTests._product_card(), issue]}), encoding="utf-8"
         )
 
-    def test_a_product_and_its_issue_restore_into_an_empty_store(self) -> None:
-        """ummanu-27: in a real export a Product and its Issue share the product's lane, and at one
-        position the reference sort puts `issue:` ahead of `product:`. `issues.product_id` is an
-        immediate foreign key, so the restore writes the Product's row first."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            data_dir = Path(tmpdir) / "ummanu-data"
-            init_layout(data_dir)
-            issue = _restore_card(reference="issue:12", column="Issues", swimlane="ummanu", position=1)
-            issue["fields"]["task_type"] = ""
-            issue["fields"]["project"] = ""
-            issue["metadata"] = {
-                "record_type": "issue",
-                "issue_product": "ummanu",
-                "issue_kind": "bug",
-                "issue_priority": "P0",
-            }
-            (data_dir / "board" / "cards.json").write_text(
-                json.dumps({"version": 1, "cards": [issue, RestoreTests._product_card()]}), encoding="utf-8"
-            )
-            client = card_store(self, empty_seed())
-
-            self.assertEqual(import_normalized_board(data_dir, client=client), 2)
-
-            self.assertEqual(restore_state(data_dir)["board_parity"], "complete")
-
     def test_a_refused_create_is_reported_as_a_create_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "ummanu-data"

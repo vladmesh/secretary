@@ -85,6 +85,12 @@ def _foreign_key_rank(item: RestoreCardObligation) -> int:
     return 0 if str(item.metadata.get("record_type") or "") == "product" else 1
 
 
+def _store_placed(item: RestoreCardObligation) -> bool:
+    """Whether the store places this record itself: a Product or Issue lives in the Issues column of
+    its product's lane by construction, and the store refuses to move one (`moveTaskPosition`)."""
+    return str(item.metadata.get("record_type") or "") in {"product", "issue"}
+
+
 def _discard_pending_obligation(writer: Any, item: RestoreCardObligation) -> None:
     event = writer.audit.pending_event(item.request_id)
     if event is not None:
@@ -238,8 +244,9 @@ def restore_cards_batched(
             write_entries.append((item, "saveTaskMetadata", {"task_id": task_id, "values": item.metadata}))
         # createTask does not accept an initial position.  Run the exported placement
         # once for every fresh obligation.  Overlapping archived positions are intentionally
-        # reconciled after closure, when the active-only order is knowable.
-        if not initialized or not _restore_placement_matches(row, item):
+        # reconciled after closure, when the active-only order is knowable.  A Product or Issue
+        # is placed by the store, which refuses to move one; the proof below still checks it.
+        if not _store_placed(item) and (not initialized or not _restore_placement_matches(row, item)):
             write_entries.append(
                 (
                     item,
