@@ -8,14 +8,17 @@ exporter's own tests do) into a bare snapshot repository, which is pushed to the
 
 from __future__ import annotations
 
+import getpass
 import json
 import subprocess
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
-from tests.fakes.installation import CARD, SPRINT
+from tests.fakes.installation import CARD, PRODUCT_ROOT, SPRINT
+from ummanu import installation, upgrade
 from ummanu.board.migrate import head_revision
 from ummanu.checkpoint import SNAPSHOT_REF, CheckpointWriter, SnapshotExporter
 from ummanu.data import DataExport
@@ -192,3 +195,67 @@ def exporter_remote(
     if cut:
         fixture.cut()
     return fixture
+
+
+def recovery_args(fixture, **overrides) -> SimpleNamespace:
+    """`ummanu recover` arguments for `fixture`'s remote into its target."""
+    values = {
+        "instance_dir": str(fixture.target),
+        "instance_remote": str(fixture.remote),
+        "installation_user": getpass.getuser(),
+        "recover": True,
+        "adopt": False,
+        "dry_run": False,
+        "runtime_env": None,
+        "product_root": str(PRODUCT_ROOT),
+        "bootstrap_credential_file": None,
+        "bootstrap_credential_stdin": False,
+        "recovery_phrase_file": None,
+        "recovery_phrase_stdin": False,
+        "host_fixture": None,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _head_registry_only(context, steps=installation.STEPS):
+    """The recover materializer with only its head-registry step running (the host is not this test's)."""
+    return upgrade.run_steps(
+        context, steps=tuple(step for step in steps if step is upgrade.step_head_registry)
+    )
+
+
+def _rebuilt_index(data_dir: Path, instance_dir: Path, **_kwargs) -> int:
+    """The reindex without the embedding model: one index file for the facts the live root holds."""
+    facts = sorted((instance_dir / "state" / "memory" / "facts").rglob("*.md"))
+    (data_dir / "memory").mkdir(parents=True, exist_ok=True)
+    (data_dir / "memory" / "index.sqlite").write_text("\n".join(map(str, facts)), encoding="utf-8")
+    return len(facts)
+
+
+def recover_snapshot(
+    fixture: ExporterRemote,
+    *,
+    board: mock.Mock,
+    failures: dict[str, BaseException] | None = None,
+    **overrides,
+):
+    """One `ummanu recover` from `fixture`'s remote, with only the board store, the memory model,
+    project checkouts and the host steps other than the head registry stood in for; `failures`
+    makes the named installation callable raise instead."""
+    patches = {
+        "check_prerequisites": mock.Mock(),
+        "import_normalized_board": board,
+        "rebuild_memory_index": mock.Mock(side_effect=_rebuilt_index),
+        "provision_project_checkouts": mock.Mock(return_value=[]),
+        "provision_codex_home": mock.Mock(return_value=0),
+        "run_steps": mock.Mock(side_effect=_head_registry_only),
+        "mark_reconcile_applied": mock.Mock(),
+        "restore_findings": mock.Mock(return_value=[]),
+    }
+    for name, failure in (failures or {}).items():
+        patches[name] = mock.Mock(side_effect=failure)
+    with ExitStack() as stack:
+        for name, replacement in patches.items():
+            stack.enter_context(mock.patch.object(installation, name, replacement))
+        return installation.install(recovery_args(fixture, **overrides))

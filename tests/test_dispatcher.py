@@ -21,13 +21,12 @@ from unittest import mock
 
 from ummanu._fsutil import file_lock, try_file_lock
 from ummanu.board.models import Actor, AttemptUsageOutcome, EntityKind, Event, EventKind
-from ummanu.checkpoint import CheckpointPusher, CheckpointResult, CheckpointWriter
+from ummanu.checkpoint import CheckpointResult
 from ummanu.cli import main as task_main
 from ummanu.dispatch import assessment_decision as dispatcher_assessment_decision
 from ummanu.dispatch import attempt_accounting
 from ummanu.dispatch import attempt_usage as attempt_usage_module
 from ummanu.dispatch import host as dispatcher_host_module
-from ummanu.dispatch import review_verdict as dispatcher_review_verdict
 from ummanu.dispatch import runtime as dispatcher_module
 from ummanu.dispatch import wait_vitality as dispatcher_wait_vitality
 from ummanu.dispatch import worker_continuation as dispatcher_worker_continuation
@@ -6563,8 +6562,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertIn("continuation: replacement", comments[-1]["body"])
 
     def test_green_verdict_for_a_descendant_checkout_is_not_merged_by_default(self) -> None:
-        """A descendant can contain new commits after review; only the instance publish recovery
-        path is allowed to finish from a moved checkout."""
+        """A descendant can contain new commits after review; a moved checkout finishes only as a
+        reconciled base move, which this one is not."""
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.tick()
@@ -6584,30 +6583,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(bounced["action"], "review-freeze-red-rework")
         self.assertEqual(self.reader.show("ummanu-510")["state"], "in_progress")
         self.assertEqual(self.host.completed, [])
-        self.assertIn(("is_instance_publish_recovery"), self.host.calls)
+        self.assertIn("reconcile_reviewed_base_move", self.host.calls)
         self.assertEqual(reviewed, "c0ffee1234567890")
-
-    def test_green_verdict_for_instance_publish_recovery_can_finish_from_published_descendant(self) -> None:
-        self.start_dispatcher()
-        self._run_worker_to_validate()
-        self.tick()
-        reviewed = self.host.commit
-        self.host.commit = "2222222222222222"
-        self.host.instance_publish_recoveries.add((reviewed, self.host.commit))
-        self.writer.verdict(
-            role="reviewer",
-            actor="reviewer",
-            reference="ummanu-510",
-            kind="green",
-            body="looks good",
-            request_id="review-green-instance-recovery",
-        )
-
-        done = self._park_and_decide("release")
-
-        self.assertEqual(done["to"], "done")
-        self.assertEqual(self.host.completed, ["ummanu-510"])
-        self.assertEqual(self.reader.show("ummanu-510")["state"], "done")
 
     def test_green_verdict_for_the_reviewed_checkout_merges_and_tears_down(self) -> None:
         self.start_dispatcher()
@@ -7102,6 +7079,36 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.host.calls, [], "no workspace was created and no head brought up")
         self.assertEqual(self.host.prepared, [])
         self.assertFalse((self.data_dir / "workspaces").exists())
+
+    def test_a_card_whose_project_repo_is_the_live_root_is_refused_at_admission(self) -> None:
+        """The instance-repo landing is gone, so such a card has nowhere to land: it is blocked at
+        admission, naming the live root, before the contract or the host is asked anything."""
+        self._watch_the_preflight()
+        live_root = Path(self.catalog.binding("ummanu")["repo"])
+        self.catalog.instance_dir = live_root
+        self.start_dispatcher()
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["step"], "live-root-project-refused")
+        self.assertEqual(blocked["failure_class"], FAILURE_CLASS_INFRASTRUCTURE)
+        task = self.reader.show(CARD_REF)
+        self.assertEqual(task["state"], "blocked")
+        reason = task["comments"][-1]["body"]
+        self.assertIn(f"names the live root {live_root}", reason)
+        self.assertIn("refused at admission", reason)
+        self.assertTrue(reason.endswith(blocked["failure_reason"]))
+        self.assertEqual(self._events_between_claim_and_block(), [])
+        self.assertEqual(self.asked_while, [], "the contract was never asked")
+        self.assertEqual(self.host.calls, [], "the host was never asked for anything")
+        self.assertEqual(self.host.prepared, [])
+        self.assertFalse((self.data_dir / "workspaces").exists())
+
+        again = self.tick()
+
+        self.assertEqual(again["action"], "terminal-state")
+        self.assertEqual(self.host.prepared, [])
 
     def test_the_preflight_block_is_the_infrastructure_class_the_budget_reads(self) -> None:
         """AC2: not a new branch — the class is in the transition, where the budget already looks."""
@@ -12071,313 +12078,38 @@ class DispatcherLauncherTests(unittest.TestCase):
             self.assertEqual(git(repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
             self.assertEqual(git(repo, "rev-parse", "HEAD"), unrelated)
 
-    def test_instance_repo_merge_preserves_local_checkpoint_commit(self) -> None:
+    def test_complete_green_refuses_a_card_whose_repo_is_the_live_root(self) -> None:
+        """The instance-repo landing is gone: nothing is pushed to the remote or merged into the live root."""
         from types import SimpleNamespace
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            remote, instance, workspace = _instance_repo_fixture(root, "ummanu-669")
-            checkpoint = _commit_file(instance, "state/board/cards.ndjson", "checkpoint\n", "checkpoint")
-            feature = _commit_file(workspace, "result.txt", "green result\n", "feature")
-            host = CommandHostRuntime(
-                _InstanceRepoCatalog(instance),
-                root,
-                mode="real",
-            )
+            remote, instance, workspace = _live_root_project_fixture(root, "ummanu-669")
+            published = git(remote, "rev-parse", "refs/heads/main")
+            local = git(instance, "rev-parse", "HEAD")
+            _commit_file(workspace, "result.txt", "green result\n", "feature")
+            host = CommandHostRuntime(_LiveRootProjectCatalog(instance), root, mode="real")
 
-            host.complete_green(
-                {"ref": "ummanu-669", "project": "ummanu_instance"},
-                SimpleNamespace(workspace=str(workspace)),
-            )
-
-            local_head = git(instance, "rev-parse", "HEAD")
-            self.assertTrue(_is_ancestor(instance, checkpoint, local_head))
-            self.assertTrue(_is_ancestor(instance, feature, local_head))
-            self.assertEqual(git(instance, "show", "HEAD:state/board/cards.ndjson"), "checkpoint")
-            self.assertEqual(git(instance, "show", "HEAD:result.txt"), "green result")
-            # The merge commit is local until the checkpoint pusher's next ff-only window.
-            self.assertEqual(git(remote, "rev-parse", "refs/heads/main"), feature)
-
-            state = CheckpointPusher(instance).push(
-                {
-                    "status": "diverged",
-                    "remote_diverged": True,
-                    "failures": 2,
-                    "attempted_epoch": time.time(),
-                    "attempted_at": "2026-07-20T21:00:00Z",
-                }
-            )
-
-            self.assertEqual(state["status"], "pushed")
-            self.assertFalse(state["remote_diverged"])
-            self.assertEqual(git(remote, "rev-parse", "refs/heads/main"), local_head)
-            self.assertEqual(git(remote, "show", "HEAD:state/board/cards.ndjson"), "checkpoint")
-            self.assertEqual(git(remote, "show", "HEAD:result.txt"), "green result")
-
-    def test_instance_repo_merge_recovers_after_remote_publish_before_local_checkout(self) -> None:
-        from types import SimpleNamespace
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _, instance, workspace = _instance_repo_fixture(root, "ummanu-669")
-            checkpoint = _commit_file(instance, "state/runs/runs.ndjson", "checkpoint\n", "checkpoint")
-            feature = _commit_file(workspace, "result.txt", "green result\n", "feature")
-            git(workspace, "push", "origin", "pipeline/ummanu-669:main")
-            host = CommandHostRuntime(
-                _InstanceRepoCatalog(instance),
-                root,
-                mode="real",
-            )
-
-            host.complete_green(
-                {"ref": "ummanu-669", "project": "ummanu_instance"},
-                SimpleNamespace(workspace=str(workspace)),
-            )
-
-            local_head = git(instance, "rev-parse", "HEAD")
-            self.assertTrue(_is_ancestor(instance, checkpoint, local_head))
-            self.assertTrue(_is_ancestor(instance, feature, local_head))
-            self.assertEqual(git(instance, "show", "HEAD:state/runs/runs.ndjson"), "checkpoint")
-            self.assertEqual(git(instance, "show", "HEAD:result.txt"), "green result")
-
-    def test_instance_repo_merge_preserves_checkpoint_already_pushed_to_remote(self) -> None:
-        from types import SimpleNamespace
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            remote, instance, workspace = _instance_repo_fixture(root, "ummanu-669")
-            checkpoint = _commit_file(instance, "state/runs/runs.ndjson", "checkpoint\n", "checkpoint")
-            git(instance, "push", "--quiet", "origin", "main")
-            feature = _commit_file(workspace, "result.txt", "green result\n", "feature")
-            host = CommandHostRuntime(
-                _InstanceRepoCatalog(instance),
-                root,
-                mode="real",
-            )
-
-            host.complete_green(
-                {"ref": "ummanu-669", "project": "ummanu_instance"},
-                SimpleNamespace(workspace=str(workspace)),
-            )
-
-            remote_head = git(remote, "rev-parse", "refs/heads/main")
-            local_head = git(instance, "rev-parse", "HEAD")
-            self.assertEqual(local_head, remote_head)
-            self.assertTrue(_is_ancestor(remote, checkpoint, remote_head))
-            self.assertTrue(_is_ancestor(remote, feature, remote_head))
-            self.assertEqual(git(remote, "show", "HEAD:state/runs/runs.ndjson"), "checkpoint")
-            self.assertEqual(git(remote, "show", "HEAD:result.txt"), "green result")
-
-    def test_instance_publish_recovery_rejects_linear_unreviewed_descendant(self) -> None:
-        from types import SimpleNamespace
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            _, instance, workspace = _instance_repo_fixture(root, "ummanu-669")
-            reviewed = _commit_file(workspace, "result.txt", "green result\n", "feature")
-            current = _commit_file(workspace, "unreviewed.txt", "not reviewed\n", "unreviewed")
-            git(workspace, "push", "--quiet", "origin", "pipeline/ummanu-669:main")
-            host = CommandHostRuntime(
-                _InstanceRepoCatalog(instance),
-                root,
-                mode="real",
-            )
-
-            recovered = host.is_instance_publish_recovery(
-                {"ref": "ummanu-669", "project": "ummanu_instance"},
-                SimpleNamespace(workspace=str(workspace)),
-                reviewed,
-                current,
-            )
-
-            self.assertFalse(recovered)
-
-    def test_instance_publish_recovery_rejects_foreign_merge_parent(self) -> None:
-        from types import SimpleNamespace
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            remote, instance, workspace = _instance_repo_fixture(root, "ummanu-669")
-            foreign = root / "foreign"
-            git(root, "clone", "--quiet", str(remote), str(foreign))
-            _configure_git_user(foreign)
-            foreign_commit = _commit_file(foreign, "foreign.txt", "not reviewed\n", "foreign")
-            reviewed = _commit_file(workspace, "result.txt", "green result\n", "feature")
-            git(workspace, "fetch", "--quiet", str(foreign), "HEAD")
-            git(workspace, "merge", "--quiet", "--no-edit", "FETCH_HEAD")
-            current = git(workspace, "rev-parse", "HEAD")
-            git(workspace, "push", "--quiet", "origin", "pipeline/ummanu-669:main")
-            host = CommandHostRuntime(
-                _InstanceRepoCatalog(instance),
-                root,
-                mode="real",
-            )
-
-            recovered = host.is_instance_publish_recovery(
-                {"ref": "ummanu-669", "project": "ummanu_instance"},
-                SimpleNamespace(workspace=str(workspace)),
-                reviewed,
-                current,
-            )
-
-            self.assertFalse(recovered)
-            self.assertFalse(_is_ancestor(instance, foreign_commit, git(instance, "rev-parse", "HEAD")))
-            self.assertEqual(git(remote, "show", "HEAD:foreign.txt"), "not reviewed")
-
-    def test_instance_repo_publish_rejects_foreign_remote_history(self) -> None:
-        from types import SimpleNamespace
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            remote, instance, workspace = _instance_repo_fixture(root, "ummanu-669")
-            foreign = root / "foreign"
-            git(root, "clone", "--quiet", str(remote), str(foreign))
-            _configure_git_user(foreign)
-            foreign_commit = _commit_file(foreign, "foreign.txt", "not reviewed\n", "foreign")
-            git(foreign, "push", "--quiet", "origin", "main")
-            feature = _commit_file(workspace, "result.txt", "green result\n", "feature")
-            host = CommandHostRuntime(
-                _InstanceRepoCatalog(instance),
-                root,
-                mode="real",
-            )
-
-            with self.assertRaisesRegex(HostError, "unreviewed remote history"):
+            with self.assertRaisesRegex(HostError, "nothing was merged: .*names the live root") as raised:
                 host.complete_green(
                     {"ref": "ummanu-669", "project": "ummanu_instance"},
                     SimpleNamespace(workspace=str(workspace)),
                 )
 
-            self.assertEqual(git(remote, "rev-parse", "refs/heads/main"), foreign_commit)
-            self.assertFalse(_is_ancestor(remote, feature, foreign_commit))
-            self.assertFalse((instance / "foreign.txt").exists())
+            self.assertIn(str(instance), str(raised.exception))
+            self.assertIn("ummanu config check", str(raised.exception))
+            self.assertEqual(git(remote, "rev-parse", "refs/heads/main"), published)
+            self.assertEqual(git(instance, "rev-parse", "HEAD"), local)
             self.assertFalse((instance / "result.txt").exists())
 
-    def test_finish_green_recovers_after_worker_side_checkpoint_merge_was_published(self) -> None:
-        from types import SimpleNamespace
-
+    def test_no_workspace_is_prepared_for_a_project_whose_repo_is_the_live_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            remote, instance, workspace = _instance_repo_fixture(root, "ummanu-510")
-            checkpoint = _commit_file(instance, "state/runs/runs.ndjson", "checkpoint\n", "checkpoint")
-            git(instance, "push", "--quiet", "origin", "main")
-            feature = _commit_file(workspace, "result.txt", "green result\n", "feature")
-            first_host = _CrashAfterMergePushHost(_InstanceRepoCatalog(instance), root, mode="real")  # type: ignore[arg-type]
-            with self.assertRaisesRegex(HostError, "simulated crash after merge push"):
-                first_host.complete_green(
-                    {"ref": "ummanu-510", "project": "ummanu"},
-                    SimpleNamespace(workspace=str(workspace)),
-                )
-            published = git(remote, "rev-parse", "refs/heads/main")
-            self.assertTrue(_is_ancestor(workspace, checkpoint, published))
-            self.assertTrue(_is_ancestor(workspace, feature, published))
+            instance = Path(tmp) / "instance"
+            instance.mkdir()
+            host = CommandHostRuntime(_LiveRootProjectCatalog(instance), Path(tmp), mode="real")
 
-            board = card_store(self, dispatcher_seed(), instance_dir=root)
-            board.move(12, "validate")
-            data_dir = root / "data"
-            writer = TaskWriter(board, data_dir=data_dir, workspace=data_dir)  # type: ignore[arg-type]
-            runtime = DispatcherRuntime(
-                TaskReader(board),  # type: ignore[arg-type]
-                writer,
-                writer.audit,
-                data_dir,
-                _InstanceRepoCatalog(instance),  # type: ignore[arg-type]
-                CommandHostRuntime(
-                    _InstanceRepoCatalog(instance), root, mode="real", audit=writer.audit
-                ),  # type: ignore[arg-type]
-                owner="ummanu-pilot",
-            )
-            record = DispatcherRecord(
-                worker="ummanu-510-pilot",
-                workspace=str(workspace),
-                handle="term:ummanu-510-pilot",
-                head="codex",
-                review_head="codex-reviewer",
-                attempt_id="attempt-1",
-                comment_baseline=0,
-                review_baseline=0,
-                state="reviewing",
-                claimed_at=time.time(),
-                gate_state="green",
-                review_commit=feature,
-            )
-            records = {"ummanu-510": record}
-
-            # The card carries no sprint, so the green verdict merges on its own tick: the
-            # entry point moved with the seam, what it does on this path did not.
-            result = dispatcher_review_verdict.park_green_verdict(
-                runtime,
-                TaskReader(board).show("ummanu-510"),  # type: ignore[arg-type]
-                record,
-                records,
-                {"version": 1, "mode": "production", "phase": "production"},
-                "attempt-1",
-            )
-
-            self.assertEqual(result["to"], "done")
-            self.assertEqual(TaskReader(board).show("ummanu-510")["state"], "done")  # type: ignore[arg-type]
-            self.assertEqual(records, {})
-            local_head = git(instance, "rev-parse", "HEAD")
-            self.assertEqual(local_head, published)
-            self.assertTrue(_is_ancestor(instance, checkpoint, local_head))
-            self.assertTrue(_is_ancestor(instance, feature, local_head))
-            state = CheckpointPusher(instance, interval_seconds=0).push(
-                {"status": "diverged", "remote_diverged": True}
-            )
-            self.assertEqual(state["status"], "unchanged")
-            self.assertFalse(state["remote_diverged"])
-
-    def test_instance_repo_merge_uses_fallback_identity_without_global_git_identity(self) -> None:
-        from types import SimpleNamespace
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            empty_global = root / "empty-gitconfig"
-            empty_global.write_text("", encoding="utf-8")
-            with mock.patch.dict(os.environ):
-                os.environ["GIT_CONFIG_GLOBAL"] = str(empty_global)
-                os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
-                for key in (
-                    "EMAIL",
-                    "GIT_AUTHOR_EMAIL",
-                    "GIT_AUTHOR_NAME",
-                    "GIT_COMMITTER_EMAIL",
-                    "GIT_COMMITTER_NAME",
-                ):
-                    os.environ.pop(key, None)
-                _, instance, workspace = _instance_repo_fixture(root, "ummanu-669")
-                git(instance, "config", "--unset", "user.name")
-                git(instance, "config", "--unset", "user.email")
-
-                (instance / "state" / "board" / "cards.ndjson").write_text(
-                    "checkpoint\n",
-                    encoding="utf-8",
-                )
-                checkpoint_result = CheckpointWriter(root / "data", instance)._commit_locked(
-                    board_cards=1,
-                    run_records=0,
-                )
-                self.assertEqual(checkpoint_result.status, "committed")
-                checkpoint = checkpoint_result.commit
-
-                feature = _commit_file(workspace, "result.txt", "green result\n", "feature")
-                git(workspace, "push", "origin", "pipeline/ummanu-669:main")
-                host = CommandHostRuntime(
-                    _InstanceRepoCatalog(instance),
-                    root,
-                    mode="real",
-                )
-
-                host.complete_green(
-                    {"ref": "ummanu-669", "project": "ummanu_instance"},
-                    SimpleNamespace(workspace=str(workspace)),
-                )
-
-                local_head = git(instance, "rev-parse", "HEAD")
-                self.assertTrue(_is_ancestor(instance, checkpoint, local_head))
-                self.assertTrue(_is_ancestor(instance, feature, local_head))
-                self.assertEqual(git(instance, "show", "HEAD:state/board/cards.ndjson"), "checkpoint")
-                self.assertEqual(git(instance, "show", "HEAD:result.txt"), "green result")
+            with self.assertRaisesRegex(HostError, "names the live root"):
+                host._require_project_available("ummanu_instance")
 
     def test_worker_command_is_wrapped_in_role_env(self) -> None:
         wrapped = wrap_role_command(
@@ -12667,7 +12399,9 @@ class WorkspaceResumeTests(unittest.TestCase):
                     )
 
 
-class _InstanceRepoCatalog:
+class _LiveRootProjectCatalog:
+    """A catalog whose one project names the live root itself as its repository."""
+
     def __init__(self, instance_dir: Path) -> None:
         self.instance_dir = instance_dir
 
@@ -12689,15 +12423,8 @@ class _InstanceRepoCatalog:
         return {}
 
 
-class _CrashAfterMergePushHost(CommandHostRuntime):
-    def _run(self, args, label, *, cwd=None):  # type: ignore[override]
-        completed = super()._run(args, label, cwd=cwd)
-        if label == "merge push":
-            raise HostError("simulated crash after merge push")
-        return completed
-
-
-def _instance_repo_fixture(root: Path, ref: str) -> tuple[Path, Path, Path]:
+def _live_root_project_fixture(root: Path, ref: str) -> tuple[Path, Path, Path]:
+    """A live root that is still a work tree with a remote, and a card branch cloned from it."""
     remote = root / "remote.git"
     instance = root / "secretary-instance"
     workspace = root / "workspace"
@@ -12726,17 +12453,6 @@ def _commit_file(repo: Path, relative: str, text: str, message: str) -> str:
     git(repo, "add", relative)
     git(repo, "commit", "--quiet", "-m", message)
     return git(repo, "rev-parse", "HEAD")
-
-
-def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
-    result = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    return result.returncode == 0
 
 
 def git(cwd: Path, *args: str) -> str:

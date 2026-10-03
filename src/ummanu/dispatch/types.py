@@ -156,7 +156,7 @@ class MergeLanding:
 
     sha: str
     base: str
-    path: str  # "github-pr" | "instance-repo" | "push"
+    path: str  # "github-pr" | "push"
     ci: str = "none"
     branch: str = ""
 

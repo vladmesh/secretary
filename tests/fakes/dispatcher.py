@@ -661,7 +661,6 @@ class FakeHost:
         self.stopped_reviews: list[str] = []
         self.review_stop_initiators: list[str] = []
         self.commit = "c0ffee1234567890"
-        self.instance_publish_recoveries: set[tuple[str, str]] = set()
         # The retained checkout a headless recovery binds (secretary-1544): bound and clean on the
         # card's own branch by default; a test that models a lost or foreign checkout sets the
         # refusal reason, and one that models a worker stopped mid-edit sets `dirty`.
@@ -1670,12 +1669,6 @@ class FakeHost:
     def head_commit(self, record) -> str:
         self.calls.append("head_commit")
         return self.commit
-
-    def is_instance_publish_recovery(
-        self, task: dict, record, reviewed_commit: str, current_commit: str
-    ) -> bool:
-        self.calls.append("is_instance_publish_recovery")
-        return (reviewed_commit, current_commit) in self.instance_publish_recoveries
 
     def reconcile_reviewed_base_move(
         self, task: dict, record, reviewed_commit: str, current_commit: str

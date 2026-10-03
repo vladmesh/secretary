@@ -1362,6 +1362,12 @@ class SnapshotExporter(CheckpointWriter):
             raise CheckpointBlocked(f"secret detected in snapshot: {', '.join(hits)}")
 
 
+def exported_files(live_root: Path) -> list[str]:
+    """Every live-root file the next cut copies, as sorted relative paths, read as the exporter reads
+    them: nothing is followed, and a symlink or non-regular entry raises `CheckpointBlocked`."""
+    return _allowlisted_files(live_root)
+
+
 def _allowlisted_files(live_root: Path) -> list[str]:
     """Every live-root file `SNAPSHOT_ALLOWLIST` names, as sorted relative paths."""
     root = _open_live_root(live_root)

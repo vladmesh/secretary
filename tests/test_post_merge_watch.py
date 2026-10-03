@@ -698,7 +698,7 @@ class WakeTextTests(unittest.TestCase):
 
 
 class _MergeHost(CommandHostRuntime):
-    """`complete_green`'s three merge paths with every command recorded, none run."""
+    """`complete_green`'s two merge paths with every command recorded, none run."""
 
     def __init__(self, root: Path, *, ci: str, instance_repo: bool = False) -> None:
         catalog = SimpleNamespace(
@@ -720,9 +720,6 @@ class _MergeHost(CommandHostRuntime):
     def _remote_git_checked(self, project, checkout, args, label):  # type: ignore[override]
         self.runs.append(["git", *args])
 
-    def _complete_green_instance_repo(self, record, branch, base, repo, *, project):  # type: ignore[override]
-        self.runs.append(["instance-publish", branch, base])
-
     def _run(self, args, label, *, cwd=None):  # type: ignore[override]
         self.runs.append(list(args))
         if args[:3] == ["gh", "pr", "view"] and "baseRefName" in args:
@@ -735,12 +732,11 @@ class _MergeHost(CommandHostRuntime):
 
 
 class MergePathLandingTests(unittest.TestCase):
-    """Each of the three merge paths hands the release a landing, so each reaches the predicate."""
+    """Each of the two merge paths hands the release a landing, so each reaches the predicate."""
 
     def test_every_merge_path_reports_what_landed(self) -> None:
         table = [
             ("github pull request", "github", False, MergeLanding(SHA, "main", "github-pr", "github", BRANCH)),
-            ("instance repository", "local", True, MergeLanding(OTHER_SHA, "main", "instance-repo", "local")),
             ("local-CI push", "local", False, MergeLanding(OTHER_SHA, "main", "push", "local")),
         ]
         for label, ci, instance, expected in table:
@@ -752,6 +748,18 @@ class MergePathLandingTests(unittest.TestCase):
                 record = SimpleNamespace(workspace=str(root / "ws"))
                 landing = host.complete_green({"ref": REF, "project": "sample", "workspace": {}}, record)
                 self.assertEqual(landing, expected)
+
+    def test_a_card_on_the_live_root_lands_nothing(self) -> None:
+        """The instance-repository landing was the third path; it is gone, on either CI mode."""
+        for ci in ("local", "github"):
+            with self.subTest(ci), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                (root / "instance").mkdir()
+                host = _MergeHost(root, ci=ci, instance_repo=True)
+                record = SimpleNamespace(workspace=str(root / "ws"))
+                with self.assertRaisesRegex(HostError, "nothing was merged: .*names the live root"):
+                    host.complete_green({"ref": REF, "project": "sample", "workspace": {}}, record)
+                self.assertEqual(host.runs, [])
 
     def test_automerge_off_lands_nothing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
