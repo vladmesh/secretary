@@ -319,8 +319,8 @@ def rename_env_keys(text: str, old: Names, new: Names) -> str:
 # -- Claude and Codex (step 9) -------------------------------------------------------------------
 
 
-def claude_moves(home: Path, sprint: str) -> list[tuple[str, str]]:
-    """The Claude project directories that carry live memory and sessions (§T4), old key to new."""
+def claude_move_paths(home: Path, sprint: str) -> list[tuple[Path, Path]]:
+    """The cwds whose Claude project directories carry live memory and sessions (§T4), old to new."""
     data_old, data_new = home / OLD.data_dir, home / NEW.data_dir
     pairs = [
         (data_old / "po", data_new / "po"),
@@ -334,7 +334,12 @@ def claude_moves(home: Path, sprint: str) -> list[tuple[str, str]]:
         pairs.append((data_old / "workspaces" / "observers" / slug, data_new / "workspaces" / "observers" / slug))
     workspaces = home / "orca" / "workspaces"
     pairs += [(workspaces / OLD.role_workspaces / role, workspaces / NEW.role_workspaces / role) for role in ROLES]
-    return [(claude_key(old), claude_key(new)) for old, new in pairs]
+    return pairs
+
+
+def claude_moves(home: Path, sprint: str) -> list[tuple[str, str]]:
+    """The Claude project directories that carry live memory and sessions (§T4), old key to new."""
+    return [(claude_key(old), claude_key(new)) for old, new in claude_move_paths(home, sprint)]
 
 
 def move_dir(source: Path, target: Path) -> str:
@@ -385,6 +390,7 @@ def drop_claude_trust(path: Path, keys: Iterable[str]) -> list[str]:
 __all__ = [
     "backup",
     "claude_key",
+    "claude_move_paths",
     "claude_moves",
     "copy_claude_trust",
     "data_plane_prefixes",

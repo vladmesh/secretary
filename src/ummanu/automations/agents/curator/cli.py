@@ -17,7 +17,8 @@ identity or the `batch_id` of the one matching pending batch.  Baseline writes n
 Two-phase so a crash before the memory commit re-harvests instead of dropping turns.
 `harvest --json` emits the structured batch; `backlog [--project <canonical-id|unknown|review:po>] [--json]`
 reports metadata only without changing state; `sessions` lists discovered sources;
-`status` shows the watermark; `precheck` exits PRECHECK_SKIP (100) when there is nothing new, so
+`status` shows the watermark; `rebind [--dry-run]` carries a pending record and the transcript
+cursors across a known role-workspace move (OPERATIONS "role route"); `precheck` exits PRECHECK_SKIP (100) when there is nothing new, so
 the systemd gate can skip the run without spinning up a head.
 """
 
@@ -34,7 +35,7 @@ from pathlib import Path
 from ummanu.runtime.redact import looks_like_credential, scrub_secrets
 from ummanu.runtime.state import PRECHECK_DEFERRED, PRECHECK_SKIP, AgentState, publish_state_atomic
 
-from . import discover, harvest
+from . import discover, harvest, rebind
 from .memory_protocol import (
     MemoryProtocolError,
     MemoryWriteRequest,
@@ -324,6 +325,41 @@ def cmd_precheck() -> int:
     return PRECHECK_SKIP
 
 
+def cmd_rebind(dry_run: bool) -> int:
+    """Rebind the pending identity and carry moved transcript cursors; audited, idempotent."""
+    def plan() -> rebind.RebindPlan:
+        return rebind.plan_rebind(
+            STATE, home=Path.home(), projects=discover.CLAUDE_PROJECTS, current=harvest.current_identity()
+        )
+
+    try:
+        if dry_run:
+            result = plan()
+        else:
+            with cursor_settlement_transaction():
+                result = plan()
+                if result.changed:
+                    writes = [
+                        (path, text)
+                        for path, text in (
+                            (STATE.watermark_file, result.watermark_text),
+                            (STATE.pending_file, result.pending_text),
+                        )
+                        if text is not None
+                    ]
+                    publish_state_atomic(writes)
+                    STATE.log_run("rebind", **result.counts())
+    except rebind.RebindRefused as exc:
+        print(f"curator: rebind refused ({exc.reason}): {exc}; state unchanged", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"curator: rebind failed: {exc}; state unchanged", file=sys.stderr)
+        return 1
+    for line in rebind.render(result, dry_run=dry_run):
+        print(line)
+    return 0
+
+
 def cmd_sessions() -> int:
     for s in discover.all_sessions():
         print(f"{s['head']:8} {s['session_id']}  {s['cwd']}  {s['path']}")
@@ -464,6 +500,13 @@ def main(argv=None) -> int:
             cutoff_id=ns.cutoff_id,
             batch_id=ns.batch_id,
         )
+    if cmd == "rebind":
+        import argparse
+
+        parser = argparse.ArgumentParser(prog="python3 -P -m ummanu automations curator rebind")
+        parser.add_argument("--dry-run", action="store_true")
+        ns = parser.parse_args(argv[1:])
+        return cmd_rebind(ns.dry_run)
     if cmd == "precheck":
         return cmd_precheck()
     if cmd == "sessions":

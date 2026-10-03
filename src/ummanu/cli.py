@@ -638,6 +638,8 @@ def run_doctor(args: argparse.Namespace) -> int:
     for finding in inspection.findings:
         if finding["code"] in {"root_disk_low", "root_disk_unavailable"}:
             print(f"root filesystem: {finding['message']}")
+        elif finding["code"] == "automation_busy_without_advance":
+            print(f"{finding['agent']}: {finding['message']}")
 
     print("host changes: none")
     if inspection.unavailable:
@@ -857,6 +859,7 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
             disk_unavailable = disk_finding["code"] == "root_disk_unavailable"
     restore = _restore_findings(report)
     findings.extend({"code": "restore_problem", "message": finding} for finding in restore)
+    findings.extend(automation_busy_findings(report.data_dir))
     inspect_host = not args.offline and (not args.dry_run or args.host or args.host_fixture)
     collected: CollectResult | None = None
     expected = None
@@ -946,6 +949,19 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         diffs,
         board_schema,
     )
+
+
+def automation_busy_findings(data_dir: Path | None) -> list[dict[str, object]]:
+    """A curator head busy past its threshold with no advance or memory write (issue:db32299c8).
+
+    Read from the data directory's `automation-state`, where the packaged units' `AgentState` writes.
+    """
+    from ummanu.automations.agents.curator.busy import busy_without_advance
+
+    if data_dir is None:
+        return []
+    finding = busy_without_advance(data_dir / "automation-state" / "curator" / "runs.jsonl")
+    return [finding] if finding is not None else []
 
 
 def root_disk_finding(data_dir: Path) -> dict[str, object] | None:
