@@ -749,8 +749,10 @@ upgrade`'s instance packing step skips a live root that is not a work tree.
 1. Opens the secret store, if present, before reading `runtime.env`. With `--recovery-phrase-file`,
    `--recovery-phrase-stdin`, or a TTY prompt when the key is not on disk, it rebuilds the installation
    key and materialises values into the files the catalog names, `runtime.env` and every file target,
-   one in the data directory included (`<data>/webfront/owner-password.env`). Without the phrase it
-   writes nothing, reports locked/missing, and `runtime.env` stays as it is.
+   one in the data directory included (`<data>/webfront/owner-password.env`). Before it writes, a file
+   target already present in a data directory ummanu has not laid out (no data manifest) is refused
+   by path and no secret is written; in a laid-out one it is refreshed. Without the phrase it writes
+   nothing, reports locked/missing, and `runtime.env` stays as it is.
 2. Crosses the recovery ownership barrier: the instance checkout, secrets, locks and declared data root
    are handed to `--installation-user` before that user's Git or remote child can consume a restored
    key. A present key must be a regular non-symlink mode-`0600` file owned by that user.
@@ -758,9 +760,10 @@ upgrade`'s instance packing step skips a live root that is not a work tree.
    manager is required.
 4. Materialises `state/board` and `state/runs` (from the checkout, or from the extracted snapshot
    tree) into a new local data plane, builds derived JSON from the NDJSON and verifies counters
-   before any live write. The data target must be empty or laid out by ummanu: the files step 1 has
-   just written there are this run's own and do not count, and every other entry of a data target
-   ummanu did not lay out (a foreign file beside or inside one of them included) is refused by name.
+   before any live write. The data target must be empty or laid out by ummanu: the files step 1
+   created there, at paths absent before it ran, are this run's own and do not count, and every
+   other entry of a data target ummanu did not lay out (a foreign file beside or inside one of them
+   included) is refused by name.
    On a legacy remote this is where the data directory is laid out; a snapshot remote's bootstrap or
    clone step laid it out already.
 5. Generates the installed head snapshot and source pin into `<data>/heads/` with upgrade's own

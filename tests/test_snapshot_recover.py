@@ -1055,6 +1055,40 @@ class CleanHostRecoverTests(unittest.TestCase):
         for name in ("secret-store", "checkpoint", "head-registry", "board"):
             self.assertEqual(self.steps(again)[name][0], "unchanged", (name, self.steps(again)[name]))
 
+    def test_a_foreign_file_at_the_secret_target_is_refused_before_anything_is_written(self):
+        """The reviewer's reproduction: the store would replace it, and then nothing could tell it apart."""
+        source, target, data, phrase = self.legacy_remote()
+        foreign = data / "webfront" / "owner-password.env"
+        foreign.parent.mkdir(parents=True)
+        foreign.write_bytes(b"OPERATOR_PASSWORD=foreign\n")
+
+        result = self.recover_legacy(source, target, phrase)
+
+        self.assertEqual(result.status, "failed", result.render())
+        self.assertIn(
+            f"data target {data.resolve()} is not an installation created by ummanu, and it already holds "
+            f"{foreign.resolve()}, where the secret store would write; nothing was written",
+            self.steps(result)["install"][1],
+        )
+        self.assertEqual(foreign.read_bytes(), b"OPERATOR_PASSWORD=foreign\n")
+        # The store never opened: no step, no installation key, no layout, no import.
+        self.assertNotIn("secret-store", self.steps(result))
+        self.assertFalse(secret_store.key_path(target).exists())
+        self.assertFalse((data / "data-manifest.json").exists())
+        self.board.assert_not_called()
+
+    def test_a_laid_out_data_directory_has_its_secret_target_refreshed(self):
+        source, target, data, phrase = self.legacy_remote()
+        self.assertEqual(self.recover_legacy(source, target, phrase).status, "ok")
+        password = data / "webfront" / "owner-password.env"
+        password.write_text("OWNER_PASSWORD=stale\n", encoding="utf-8")
+
+        again = self.recover_legacy(source, target, phrase)
+
+        self.assertEqual(again.status, "ok", again.render())
+        self.assertEqual(self.steps(again)["secret-store"], ("changed", "1 env file(s) written"))
+        self.assertEqual(password.read_text(encoding="utf-8"), OWNER_PASSWORD)
+
     def test_a_foreign_file_in_the_data_directory_is_still_refused_by_name(self):
         source, target, data, phrase = self.legacy_remote()
         planted = {

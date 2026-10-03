@@ -91,9 +91,12 @@ from ummanu.runtime_env import (
 )
 from ummanu.secret_recover import SecretRecovery, recover_secrets
 from ummanu.secret_store import (
+    MATERIALIZE_FILE,
     SecretStoreError,
     is_initialized,
     key_path,
+    list_secrets,
+    materialize_path,
     normalize_phrase,
 )
 from ummanu.state_repo import StateRepoError
@@ -877,6 +880,42 @@ def _open_secret_store(
         raise InstallError(f"secret store: {exc}") from None
 
 
+def _checked_file_targets(instance_dir: Path) -> frozenset[Path]:
+    """Refuse a catalog file target already in a data directory ummanu has not laid out, before the
+    store writes anything; return the targets in the data directory this run may create.
+
+    The store replaces a regular file at a target path, so once it has run nothing tells an operator's
+    file there from the one it wrote. A target that is already there while the data directory holds
+    no ummanu layout is therefore foreign and is refused by path, with no secret written. Only the
+    targets returned here, absent before the store ran, count as this run's own afterwards
+    (`_checked_data_target`). A laid-out data directory has its targets refreshed as before.
+    """
+    if not is_initialized(instance_dir):
+        return frozenset()
+    report = validate_instance(instance_dir)
+    if not report.ok or report.data_dir is None:
+        # The instance is refused right after the store step; there is no data directory to guard.
+        return frozenset()
+    data_dir = Path(report.data_dir).expanduser().resolve()
+    try:
+        targets = {
+            _named_path(materialize_path(instance_dir, entry))
+            for entry in list_secrets(instance_dir)
+            if (entry.get("materialize") or {}).get("target") == MATERIALIZE_FILE
+        }
+    except (SecretStoreError, StateRepoError) as exc:
+        raise InstallError(f"secret store: {exc}") from None
+    inside = {path for path in targets if path.is_relative_to(data_dir)}
+    present = sorted(path for path in inside if path.exists() or path.is_symlink())
+    if present and not _valid_existing_layout(data_dir):
+        raise InstallError(
+            f"data target {data_dir} is not an installation created by ummanu, and it already holds "
+            f"{', '.join(map(str, present))}, where the secret store would write; nothing was written: "
+            "choose adopt or a clean recovery target"
+        )
+    return frozenset(inside - set(present))
+
+
 def _secret_store_step(recovery: SecretRecovery) -> tuple[str, str]:
     if not recovery.store_present:
         return "skipped", "no secret store in the instance repo"
@@ -975,9 +1014,10 @@ def _checked_data_target(
 
     `ignore` names direct entries of the data target that are not its contents: a snapshot
     recovery's live root `<data>/<name>` and the staging it created beside it. `own` names the files
-    this recovery's own secret store step has just written there (a file target such as
-    `<data>/webfront/owner-password.env`, which a legacy recovery materializes before this check
-    runs): an entry holding only those is this run's, not a foreign installation's. Nothing else is
+    this recovery's own secret store step has just created there, at paths that did not exist before
+    it ran (`_checked_file_targets`; a file target such as `<data>/webfront/owner-password.env`, which
+    a legacy recovery materializes before this check runs): an entry holding only those is this
+    run's, not a foreign installation's. Nothing else is
     left out, siblings and deeper paths included, and a foreign file beside an own one is refused.
     """
     entries = _data_target_entries(data_dir, ignore, own)
@@ -1875,6 +1915,8 @@ def install(args: argparse.Namespace) -> InstallResult:
         # The store opens before anything reads runtime.env, because on a clean
         # host that file is the store's output and does not exist yet.
         runtime_env = _runtime_env_file(target, args.runtime_env)
+        # Before the store writes: which of its file targets in the data directory are new.
+        created = _checked_file_targets(target)
         secrets = _open_secret_store(
             target,
             runtime_env,
@@ -1883,8 +1925,8 @@ def install(args: argparse.Namespace) -> InstallResult:
         )
         result.add("secret-store", *_secret_store_step(secrets))
         _add_secret_steps(result, secrets)
-        # The files that step wrote, file targets in the data directory among them: this run's own.
-        written = tuple(item.path for item in secrets.materialized)
+        # This run's own files in the data directory: the file targets it created there.
+        written = tuple(item.path for item in secrets.materialized if _named_path(item.path) in created)
 
         # Secret recovery can create a root-owned 0600 installation key. Cross
         # ownership once, before any runtime-user Git or remote consumer starts.
