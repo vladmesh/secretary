@@ -1,6 +1,7 @@
 """`ummanu recover` from an exporter snapshot into a real PostgreSQL board store.
 
-The source installation writes its board (two cards and a closed sprint) into one database of a throwaway `postgres:16`, and a real
+The source installation writes its board (two cards, a Product with an Issue and a closed sprint
+they own) into one database of a throwaway `postgres:16`, and a real
 `SnapshotExporter` window cuts it into a bare repository that is pushed to a local bare remote. The
 recovery target is a second, empty database. Recovery then runs through `install()` for real: the
 bare clone, the manifest check, the live root, the secret store step, the checkpoint, the board and
@@ -35,6 +36,7 @@ from ummanu.checkpoint import SNAPSHOT_BASE_REF, SNAPSHOT_REF, SnapshotExporter,
 from ummanu.data import init_layout
 from ummanu.head_registry import installed_heads, installed_pair
 from ummanu.memory_journal import export_memory_snapshot, verify_memory_journal
+from ummanu.product_issues import ProductIssueStore
 from ummanu.restore import DEFAULT_MEMORY_DIM, restore_state
 from ummanu.sprint_observer import none_choice
 from ummanu.sprints import SprintReader, SprintWriter, sprint_client
@@ -84,10 +86,11 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
         self.tip = self.fixture.cut(stand_in=False, state_dir=state_dir)
 
     def _seed_source(self) -> None:
-        """Two cards and a closed sprint, written by the source's own writers.
+        """Two cards, a Product with one Issue, and a closed sprint they own, by the source's writers.
 
-        The shapes are the ones the PostgreSQL restore suites already prove restorable (plain task
-        cards, a closed sprint entity); this test is about the snapshot path that carries them.
+        A sprint cannot exist without an owning Product, an open Issue of it and a reserved project
+        (`SprintWriter._check_ownership`), so those are made the way the PO makes them, through
+        `ProductIssueStore`. The cards come first and stay outside the sprint.
         """
         source, data_dir = self.fixture.source, self.fixture.source_data
         client = SqlCardClient(self.source_config.for_role("owner"), source)
@@ -104,6 +107,24 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
                 reference=f"ummanu-{number}",
                 request_id=f"create-snapshot-card-{number}",
             )
+        products = ProductIssueStore(client, data_dir=data_dir, instance=source)
+        products.create_product(
+            product_id="ummanu",
+            projects=["ummanu"],
+            title="Ummanu",
+            description="the recovered product",
+            actor="test",
+            request_id="create-snapshot-product",
+        )
+        issue = products.create_issue(
+            product="ummanu",
+            issue_kind="feature",
+            priority="P1",
+            title="Recover from the snapshot",
+            description="the sprint's issue",
+            actor="test",
+            request_id="create-snapshot-issue",
+        )["ref"]
         sprints = sprint_client(source)
         self.addCleanup(sprints.close)
         sprint_writer = SprintWriter(sprints, data_dir=data_dir, instance=source)
@@ -112,6 +133,9 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
             actor="test",
             goal="recover from the snapshot",
             repositories=[str(self.root / "repository")],
+            product="ummanu",
+            issues=[issue],
+            projects=["ummanu"],
             observer=none_choice(),
             reference="sprint:snapshot",
             request_id="create-snapshot-sprint",
@@ -120,7 +144,10 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
             role="po",
             actor="test",
             reference=sprint,
-            decisions={"issues": [], "cards": []},
+            decisions={
+                "issues": [{"ref": issue, "verdict": "open", "reason": "recovery stays supported"}],
+                "cards": [],
+            },
             reason="snapshot fixture closed",
             request_id="close-snapshot-sprint",
         )
@@ -136,7 +163,8 @@ class SnapshotRecoveryPostgresTests(unittest.TestCase):
                 text=True,
             ).stdout
         )
-        self.assertEqual(summary["card_count"], 2)
+        # Two cards, the Product and its Issue.
+        self.assertEqual(summary["card_count"], 4)
         self.assertEqual(summary["sprint_count"], 1)
         real_checkout = installation._snapshot_checkout
 
