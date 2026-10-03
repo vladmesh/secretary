@@ -228,7 +228,7 @@ def restore_cards_batched(
         committed = writer.audit.committed_event(item.request_id)
         row = existing[str(item.card["reference"])]
         if committed is not None:
-            if metadata != item.metadata or not _restore_placement_matches(row, item):
+            if not _metadata_holds(metadata, item.metadata) or not _restore_placement_matches(row, item):
                 raise TaskError(
                     "backend_error",
                     f"committed restored card no longer matches normalized data: {item.card['reference']}",
@@ -240,7 +240,7 @@ def restore_cards_batched(
             isinstance(pending, dict)
             and str(pending.get("backend", {}).get("revision") or "").startswith("initialized")
         )
-        if metadata != item.metadata:
+        if not _metadata_holds(metadata, item.metadata):
             write_entries.append((item, "saveTaskMetadata", {"task_id": task_id, "values": item.metadata}))
         # createTask does not accept an initial position.  Run the exported placement
         # once for every fresh obligation.  Overlapping archived positions are intentionally
@@ -281,7 +281,7 @@ def restore_cards_batched(
         ("getTaskMetadata", {"task_id": task_id}) for task_id in proved_ids
     )
     for item, task_id, answer in zip(obligations, proved_ids, proved_metadata, strict=True):
-        if _metadata_map(answer) != item.metadata or not _restore_placement_matches(
+        if not _metadata_holds(_metadata_map(answer), item.metadata) or not _restore_placement_matches(
             proved_rows[str(item.card["reference"])], item
         ):
             if definite_initialization_failure:
@@ -461,6 +461,20 @@ def _restore_placement_matches(row: dict[str, Any], item: RestoreCardObligation)
         )
     except (TypeError, ValueError):
         return False
+
+
+def _metadata_holds(live: dict[str, str], expected: dict[str, str]) -> bool:
+    """Whether a row holds the exported metadata, read in the store's vocabulary.
+
+    In that vocabulary an empty value is no value: `saveTaskMetadata` clears a key it is handed
+    empty, and a key only the extension bag carries then reads back absent. An export can still
+    spell one as `""` (production's `personal_site-198` carries `"model": ""`, a bag the cutover
+    import wrote verbatim), and comparing spellings called that card's initialization incomplete
+    after the store had taken every write. Every non-empty value still has to match exactly.
+    """
+    return {key: value for key, value in live.items() if value} == {
+        key: value for key, value in expected.items() if value
+    }
 
 
 def _metadata_map(answer: Any) -> dict[str, str]:

@@ -398,12 +398,18 @@ def insert_card_row(
     updated: datetime,
     moved: datetime | None = None,
     lane: str | None = None,
+    bag: dict[str, str] | None = None,
 ) -> int:
-    """One card row, under `key` as its `board_key`, and the project row it refers to."""
+    """One card row, under `key` as its `board_key`, and the project row it refers to.
+
+    `bag` goes into the row's extension bag as it stands, an empty value included, as production's
+    store holds values its PostgreSQL cutover took over; `saveTaskMetadata` would clear an empty one.
+    """
     try:
         position_value = max(int(position), 0)
     except (TypeError, ValueError):
         position_value = 0
+    extra = {**(bag or {}), **({"swimlane": lane} if lane else {})}
     if project:
         client._execute(
             "INSERT INTO projects (project_id, enabled, registry_present) VALUES (%s, true, true) "
@@ -428,7 +434,7 @@ def insert_card_row(
             created,
             updated,
             moved,
-            json.dumps({"extra": {"swimlane": lane}} if lane else {}),
+            json.dumps({"extra": extra} if extra else {}),
         ),
     )
     client._execute(

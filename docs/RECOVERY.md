@@ -649,7 +649,7 @@ only what `bootstrap` leaves in `INSTANCE` differs:
 | --- | --- | --- |
 | 1. `sudo ummanu bootstrap ...` | clones a Git checkout ([Checkout](#checkout)), writes `.ummanu-bootstrap` and adds it and `/runtime.env` to `.git/info/exclude` | lays out the plain live root and the snapshot repository with its takeover marker ([Snapshot recovery](#snapshot-recovery) steps 1-7; the data directory is laid out when the repository or the live root is in it), writes `.ummanu-bootstrap`; no `.git` is written |
 | 2. same run | provisions, migrates and role-verifies the board store; `board-store.env` (0600) in `INSTANCE`; everything handed to `--installation-user` | the same; the data directory is handed over too |
-| 3. `sudo ummanu recover ... --recovery-phrase-file PHRASE_FILE` | fetches and fast-forwards the checkout, then runs the [sequence](#sequence) | finds the live root of the same tip (the stamp and `board-store.env` are host-local, not a divergence) and the repository at the tip, so nothing is cloned again; then runs the [sequence](#sequence) on the extracted tree: phrase, board and sprint parity, memory reindex, heads in `<data>/heads/`, the exporter on the first tick |
+| 3. `sudo ummanu recover ... --recovery-phrase-file PHRASE_FILE` | fetches and fast-forwards the checkout, then runs the [sequence](#sequence) | finds the live root of the same tip (the stamp and `board-store.env` are host-local, not a divergence) and the repository at the tip, so nothing is cloned again; then runs the [sequence](#sequence) on the extracted tree: phrase, checkpoint, heads in `<data>/heads/`, board and sprint parity, memory reindex, the exporter on the first tick |
 
 For a snapshot remote this is the documented flow: `bootstrap`, then `recover` with the phrase. A
 rerun of either is idempotent: the same tip, no second board import, the store credentials kept.
@@ -748,8 +748,9 @@ upgrade`'s instance packing step skips a live root that is not a work tree.
 
 1. Opens the secret store, if present, before reading `runtime.env`. With `--recovery-phrase-file`,
    `--recovery-phrase-stdin`, or a TTY prompt when the key is not on disk, it rebuilds the installation
-   key and materialises values into the files the catalog names. Without the phrase it writes nothing,
-   reports locked/missing, and `runtime.env` stays as it is.
+   key and materialises values into the files the catalog names, `runtime.env` and every file target,
+   one in the data directory included (`<data>/webfront/owner-password.env`). Without the phrase it
+   writes nothing, reports locked/missing, and `runtime.env` stays as it is.
 2. Crosses the recovery ownership barrier: the instance checkout, secrets, locks and declared data root
    are handed to `--installation-user` before that user's Git or remote child can consume a restored
    key. A present key must be a regular non-symlink mode-`0600` file owned by that user.
@@ -757,24 +758,32 @@ upgrade`'s instance packing step skips a live root that is not a work tree.
    manager is required.
 4. Materialises `state/board` and `state/runs` (from the checkout, or from the extracted snapshot
    tree) into a new local data plane, builds derived JSON from the NDJSON and verifies counters
-   before any live write.
-5. Idempotently imports the board and rebuilds the memory export and index from `state/memory/facts`
+   before any live write. The data target must be empty or laid out by ummanu: the files step 1 has
+   just written there are this run's own and do not count, and every other entry of a data target
+   ummanu did not lay out (a foreign file beside or inside one of them included) is refused by name.
+   On a legacy remote this is where the data directory is laid out; a snapshot remote's bootstrap or
+   clone step laid it out already.
+5. Generates the installed head snapshot and source pin into `<data>/heads/` with upgrade's own
+   head-registry step, from the canon (the live root's `heads/heads.toml`, else the product default).
+   The board import needs it: it validates every open sprint's observer head against this pair, and a
+   clean host has none until this step. It is idempotent and runs on every retry.
+6. Idempotently imports the board and rebuilds the memory export and index from `state/memory/facts`
    (see [Board import](#board-import)).
-6. Attempts every missing project checkout from the registry through the same remote-execution
+7. Attempts every missing project checkout from the registry through the same remote-execution
    boundary as the instance checkout, and creates the non-secret managed runtime-home files for agent
    CLIs. Provider authentication stays manual.
-7. Runs the pre-host materialiser: regenerates the installed head snapshot and source pin into
-   `<data>/heads/` from the canon (the checkout's `heads/heads.toml`, else the product default),
-   whether the checkpoint is a legacy one that still tracks `heads/heads.yaml` or an exporter cut
-   that has none; it commits and publishes nothing. It then synchronises role skills and recreates
-   role worktrees (owned by `--installation-user` under `sudo`).
-8. Rebuilds the pipeline worktree's live run journal from the checkpoint, before any dispatcher unit is
+8. Runs the pre-host materialiser. Its head-registry step finds the pair step 5 wrote current
+   (whether the checkpoint is a legacy one that still tracks `heads/heads.yaml` or an exporter cut
+   that has none, the pair is generated, never read from the remote); it commits and publishes
+   nothing. It then synchronises role skills and recreates role worktrees (owned by
+   `--installation-user` under `sudo`).
+9. Rebuilds the pipeline worktree's live run journal from the checkpoint, before any dispatcher unit is
    installed or started.
-9. Applies host units, performs any required memory recovery and
+10. Applies host units, performs any required memory recovery and
    verifies restore status. Dispatch refuses an unavailable binding before starting
    its worker, reviewer or project worktree. Observers use the dedicated observer repository and are
-   unaffected by unavailable reserved projects. Heads are connected afterwards as a separate step.
-10. Re-enters the ownership barrier on every partial or successful exit, handing root-created instance
+    unaffected by unavailable reserved projects. Heads are connected afterwards as a separate step.
+11. Re-enters the ownership barrier on every partial or successful exit, handing root-created instance
     Git locks, recovery progress and restored dispatcher run-state to the installation user. A cleanup
     error is reported separately and does not replace an earlier failure.
 
@@ -811,7 +820,15 @@ Restore-only bulk boundaries, all idempotent on rerun:
   per-card audit obligation before the first backend mutation. Every create, metadata/state and closure
   batch is reconciled against a fresh board inventory, and only individually proved rows commit. A
   retry writes only absent or incomplete obligations. Duplicate references, conflicting
-  title/description, or a committed card that no longer matches fail closed.
+  title/description, or a committed card that no longer matches fail closed. The metadata proof reads
+  in the store's vocabulary, where an empty value is no value: `saveTaskMetadata` clears a bag key it
+  is handed empty, so an exported `"model": ""` reads back absent and still proves; a non-empty value
+  the row lacks does not.
+- **History on retired ids.** A card's lane, column, position, closed state and project id are
+  restored as exported, also when the project id is no longer in the registry (production holds closed
+  `personal_site` cards beside the current `personal-site`). An exported lane is matched by its exact
+  name before any look-alike. The registry is checked only for an open Product's project set; a task
+  card's project id is not checked against it, open or closed.
 - **Comments.** Card and sprint history is read in bounded batches and written in ordered waves with at
   most one next occurrence per entity per batch. Each occurrence is staged under a stable restore
   request id; a fresh history read proves applied occurrences before audit append, and only unproved
