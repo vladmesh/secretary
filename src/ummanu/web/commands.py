@@ -93,9 +93,9 @@ def health_layers(
 
 
 def run_web_serve(args: argparse.Namespace) -> int:
-    # The board store's git-exclusion guard, run once here and not on every request: from now on a
-    # read resolves the store without a `git` call, and no request can write `.gitignore`. A
-    # refusal is held too, and every store read of this process answers with it.
+    # The board store's exclusion guard, run once here and not on every request: from now on a
+    # read resolves the store without running it again. A refusal is held too, and every store
+    # read of this process answers with it.
     refused = hold_store_exclusion(args.instance)
     if refused is not None:
         print(f"board store: {refused}", file=sys.stderr)

@@ -154,8 +154,9 @@ def transfer_research_report(
     """Move a research card's report directory into knowledge and link it; None when done.
 
     `<workspace>/.ummanu-report/` replaces `state/knowledge/reports/<ref>/` through the knowledge
-    directory writer, then one `[completion:research]` comment keyed on the report generation is
-    written, so a replayed tick commits nothing new and writes no second link. A refused or failed
+    directory writer (files only, no Git; the next checkpoint carries them), then one
+    `[completion:research]` comment keyed on the report generation is written, so a replayed tick
+    writes nothing new and no second link. A refused or failed
     transfer Blocks the card with the cause named, keeps the workspace and writes no link. Any
     other kind answers None at once.
     """
@@ -175,10 +176,6 @@ def transfer_research_report(
                 directory=research_report_path(ref),
                 actor="dispatcher",
                 source_dir=source,
-                message=(
-                    f"knowledge: research report of {ref}, report generation {generation}\n\n"
-                    f"Principal: dispatcher\nDocument: {research_report_path(ref)}\n"
-                ),
             )
         except KnowledgeValidationError as exc:
             refusal, message = exc.reason or "refused", str(exc)

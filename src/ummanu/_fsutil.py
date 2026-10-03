@@ -10,7 +10,7 @@ import shutil
 import stat as stat_module
 import subprocess
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -394,3 +394,33 @@ def sha256_stream(source: BinaryIO) -> str:
     for chunk in iter(lambda: source.read(1024 * 1024), b""):
         digest.update(chunk)
     return digest.hexdigest()
+
+
+REVISION_PREFIX = "sha256:"
+
+
+def content_revision(digests: Mapping[str, str]) -> str:
+    """The content revision of a set of named contents: sha256 over the sorted names and per-name sha256.
+
+    The same set gives the same revision wherever it is computed, and any changed byte, added or
+    removed name, or renamed entry changes it. It stands where a Git commit id used to, for every
+    live-root writer that makes no commit (memory, knowledge, the secret store).
+    """
+    digest = hashlib.sha256()
+    for name in sorted(digests):
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(digests[name].encode("ascii"))
+        digest.update(b"\n")
+    return f"{REVISION_PREFIX}{digest.hexdigest()}"
+
+
+def files_revision(root: Path, relatives: list[str] | tuple[str, ...]) -> str:
+    """:func:`content_revision` of the files `relatives` (POSIX paths below `root`), by their bytes."""
+    digests: dict[str, str] = {}
+    for relative in relatives:
+        try:
+            digests[relative] = hashlib.sha256((root / relative).read_bytes()).hexdigest()
+        except OSError as exc:
+            raise RuntimeError(f"could not read {relative}: {exc}") from None
+    return content_revision(digests)

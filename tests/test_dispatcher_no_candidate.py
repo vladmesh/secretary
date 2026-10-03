@@ -7,7 +7,6 @@ reviewer for any kind; a code card with it still runs the gate and merges.
 
 from __future__ import annotations
 
-import subprocess
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -36,10 +35,6 @@ INFRA_REPORT = "## What was done\nRotated the relay key.\n\n## How to verify\n`s
 CANDIDATE_CALLS = ("gate_check", "complete_green", "rerun_failed_ci")
 REPORT_DIR = f"state/knowledge/reports/{CARD_REF}"
 LEAKED = "token sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWX\n"
-
-
-def _git(repo: Path, *args: str) -> str:
-    return subprocess.run(["git", "-C", str(repo), *args], text=True, capture_output=True, check=True).stdout
 
 
 def setUpModule() -> None:
@@ -72,13 +67,11 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.host.completed, [])
 
     def _instance_repo(self) -> None:
-        """The fixture's instance directory as the git repository the knowledge writer commits into."""
-        _git(self.data_dir, "init", "--quiet", "--initial-branch", "main")
-        _git(self.data_dir, "config", "user.name", "operator")
-        _git(self.data_dir, "config", "user.email", "operator@example.invalid")
+        """The fixture's instance directory as the live root the knowledge writer writes into.
+
+        A plain directory: the writer makes no Git call, so nothing here is a work tree.
+        """
         (self.data_dir / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
-        _git(self.data_dir, "add", "instance.yaml")
-        _git(self.data_dir, "commit", "--quiet", "-m", "config")
 
     def _write_report(self, files: dict[str, str]) -> None:
         """The worker's `.ummanu-report/`, replaced wholesale, and the report writer pointed at it."""
@@ -94,10 +87,15 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.writer.workspace = workspace
 
     def _committed_report(self) -> list[str]:
-        return sorted(_git(self.data_dir, "ls-tree", "-r", "--name-only", "HEAD", "--", REPORT_DIR).split())
+        """Every file of the transferred report directory, by live-root path."""
+        report = self.data_dir / REPORT_DIR
+        return sorted(
+            path.relative_to(self.data_dir).as_posix() for path in report.rglob("*") if path.is_file()
+        )
 
-    def _report_commits(self) -> list[str]:
-        return _git(self.data_dir, "log", "--format=%H", "--", REPORT_DIR).split()
+    def _report_identity(self) -> int:
+        """The inode of the report directory: a write swaps in a new one, a no-op keeps it."""
+        return (self.data_dir / REPORT_DIR).stat().st_ino
 
     def _no_transfer(self):
         """A release whose transfer produced nothing: the evidence check alone decides."""
@@ -222,7 +220,7 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
             c for c in self.reader.show(CARD_REF)["comments"] if "[completion:research]" in c["body"]
         ]
         self.assertEqual([c["marker"] for c in dispatcher], ["dispatcher"])
-        self.assertIn(CARD_REF, _git(self.data_dir, "log", "-1", "--format=%B", "--", REPORT_DIR))
+        self.assertFalse((self.data_dir / ".git").exists(), "the transfer makes no Git call")
 
     def test_research_in_a_parking_sprint_is_transferred_and_linked_before_the_release_decision(self) -> None:
         self._instance_repo()
@@ -236,12 +234,13 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self.tick()["to"], "assessment")
         self.assertEqual(self._committed_report(), [f"{REPORT_DIR}/report.md"])
         self.assertEqual(len(self._comments("[completion:research]")), 1)
+        transferred = self._report_identity()
         self._decide("release")
 
         self.assertEqual(self.tick()["to"], "done")
         self.assertEqual(self.reader.show(CARD_REF)["state"], "done")
         self._assert_no_candidate_calls()
-        self.assertEqual(len(self._report_commits()), 1, "the release repeats the transfer as a no-op")
+        self.assertEqual(self._report_identity(), transferred, "the release repeats the transfer as a no-op")
         self.assertEqual(len(self._comments("[completion:research]")), 1)
 
     def test_a_research_rework_round_replaces_the_report_directory(self) -> None:
@@ -263,8 +262,7 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.assertEqual(released["to"], "done")
         self.assertEqual(self._committed_report(), [f"{REPORT_DIR}/report.md"])
-        self.assertEqual(len(self._report_commits()), 2)
-        self.assertEqual(_git(self.data_dir, "show", f"HEAD:{REPORT_DIR}/report.md"), "second\n")
+        self.assertEqual((self.data_dir / REPORT_DIR / "report.md").read_text(encoding="utf-8"), "second\n")
         self.assertEqual(len(self._comments("[completion:research]")), 2)
 
     def test_a_research_done_report_without_its_report_file_is_refused(self) -> None:
@@ -291,7 +289,6 @@ class NoCandidateLifecycleTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(card["state"], "blocked")
         self.assertIn(f"research report transfer refused ({refusal})", card["comments"][-1]["body"])
         self.assertEqual(self._comments("[completion:research]"), [])
-        self.assertEqual(self._report_commits(), [])
         self.assertFalse((self.data_dir / REPORT_DIR).exists())
         self.assertNotIn("teardown", self.host.calls, "a refused transfer keeps the workspace")
         self._assert_no_candidate_calls()

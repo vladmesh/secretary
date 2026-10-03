@@ -44,6 +44,17 @@ MEMORY_MODULES = (
     "memory_reindex.py",
     "data.py",
 )
+# The other live-root writers that make no Git call (ummanu-24): the knowledge writer, the secret
+# store and its commands and recovery, and the readers that decide a local file is excluded.
+LIVE_ROOT_WRITER_MODULES = (
+    "knowledge_write.py",
+    "secret_store.py",
+    "secret_commands.py",
+    "secret_recover.py",
+    "runtime_env.py",
+    "board/store.py",
+    "infra/export_allowlist.py",
+)
 # What a module on the memory path may not use: the instance repository's Git surface, a child
 # process runner, or a `git` argv.
 BANNED_STATE_REPO = frozenset(
@@ -91,10 +102,17 @@ def git_findings(relative: str, source: str) -> list[str]:
 
 
 class MemoryPathHasNoGitTests(unittest.TestCase):
-    """Acceptance 1: the one place that enforces a Git-free memory path."""
+    """The one place that enforces a Git-free memory path, and the Git-free knowledge writer, secret
+    store and local-file exclusion beside it."""
 
     def test_no_memory_module_can_start_a_git_child(self):
         for relative in MEMORY_MODULES:
+            with self.subTest(module=relative):
+                source = (SOURCE / relative).read_text(encoding="utf-8")
+                self.assertEqual(git_findings(relative, source), [])
+
+    def test_no_knowledge_secret_or_exclusion_module_can_start_a_git_child(self):
+        for relative in LIVE_ROOT_WRITER_MODULES:
             with self.subTest(module=relative):
                 source = (SOURCE / relative).read_text(encoding="utf-8")
                 self.assertEqual(git_findings(relative, source), [])

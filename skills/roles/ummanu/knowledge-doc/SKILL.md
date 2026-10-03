@@ -29,8 +29,9 @@ python3 -P -m ummanu knowledge list --instance <instance dir>
 ```
 
 **Do not run raw `git add` or `git commit` in the instance repository.** The dispatcher's tick writer
-commits `state/board` and `state/runs` into the same repository every minute, and a manual commit races
-it. `knowledge write` takes the shared writer lock and commits only `state/knowledge`.
+commits `state/board`, `state/runs` and `state/knowledge` into the same repository, and a manual commit
+races it. `knowledge write` takes the shared writer lock and writes only `state/knowledge`; the next
+tick carries the document out.
 
 - `--path` is relative, inside `state/knowledge`, and must end in `.md`. Choose the section by document
   type: `brainstorms/`, `decisions/`, `incidents/`.
@@ -38,6 +39,6 @@ it. `knowledge write` takes the shared writer lock and commits only `state/knowl
   appending. When editing a document, keep a working copy (for example in `/tmp`), edit that and write it
   again.
 - The format is free; no frontmatter or metadata is required.
-- Writing the same content a second time returns `changed: false` and makes no commit.
+- Writing the same content a second time returns `changed: false` and writes nothing.
 - A document containing a secret is rejected (a validation error, exit code 2) and never reaches disk.
   Remove the token from the text rather than working around the check.

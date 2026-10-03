@@ -9,10 +9,11 @@ changed. The dispatcher invokes it at most once in a five-minute cadence window,
 remote recovery window, under `tick_lock`; it also takes the instance repo writer lock so
 checkpoint writes cannot overlap a green-card publish against the same checkout.
 
-Knowledge (`state/knowledge`) is written and committed by its own writer directly into the same
-repo, so it is deliberately outside this pathspec; `state_repo_lock` keeps the index operations
-from overlapping. Memory (`state/memory`) is written by its writer without Git, so in this legacy
-mode the tick stages and commits it with board and runs, after the same secret scan.
+Memory (`state/memory`), knowledge (`state/knowledge`) and the secret store's exported files
+(`secrets/catalog.yaml`, `secrets/installation-key.json`, `secrets/values/*.enc.json`) are written
+by their writers without Git, so in this legacy mode the tick stages and commits them with board and
+runs (`LEGACY_LIVE_PATHS`), after the same secret scan; `state_repo_lock` keeps every writer's files
+from being half-written while it does.
 
 `SnapshotExporter` grows the same staging and validation into the writer for a live root that is
 not a Git work tree: one cut per changed window (the export, `SNAPSHOT_ALLOWLIST` copied from the
@@ -73,6 +74,8 @@ from ummanu.data import (
     export_board,
     export_runs,
 )
+from ummanu.infra.export_allowlist import SNAPSHOT_ALLOWLIST, matches
+from ummanu.infra.export_allowlist import is_exported as is_exported
 from ummanu.infra.github_credential import (
     CredentialError,
     RemoteExecution,
@@ -82,7 +85,7 @@ from ummanu.product_issues import (
     registered_projects,
 )
 from ummanu.runtime.redact import redact
-from ummanu.state_repo import BOARD_RUNS_PATHSPEC, MEMORY_PATHSPEC
+from ummanu.state_repo import BOARD_RUNS_PATHSPEC
 from ummanu.tasks import TaskError, task_audit_for
 
 # Canonical checkpoint entries per component. `events.ndjson` is stored history: the
@@ -126,6 +129,18 @@ BOARD_IGNORE = (
 RUNS_IGNORE = ("cards.json",)
 
 STAGED_PATHSPEC = BOARD_RUNS_PATHSPEC
+
+# What the legacy tick commits beside board and runs: the live-root paths the Git-free writers (memory,
+# knowledge, secret store) leave uncommitted, each as its Git pathspec and the allowlist pattern it
+# stands for. The secret store's three are exactly its exported paths, so `secrets/installation.key`
+# and the store's undo area are never staged. Nothing else joins (docs/RECOVERY.md, "Writers").
+LEGACY_LIVE_PATHS = (
+    ("state/memory", "state/memory/**"),
+    ("state/knowledge", "state/knowledge/**"),
+    ("secrets/catalog.yaml", "secrets/catalog.yaml"),
+    ("secrets/installation-key.json", "secrets/installation-key.json"),
+    (":(glob)secrets/values/*.enc.json", "secrets/values/*.enc.json"),
+)
 
 # Commit runs on every tick, push on its own window. 30 minutes is the durable
 # RPO the contract promises.
@@ -474,7 +489,7 @@ class CheckpointWriter:
     def _write(self) -> CheckpointResult:
         self._collect_abandoned_staging()
         board, runs, secret_values = self._open_window(self.instance_dir / "state" / "runs" / "runs.ndjson")
-        self._scan_memory(secret_values)
+        self._scan_live_paths(secret_values)
         self._publish(
             "board",
             BOARD_ENTRIES,
@@ -694,34 +709,57 @@ class CheckpointWriter:
     def _commit(self, *, board_cards: int, run_records: int) -> CheckpointResult:
         return self._commit_locked(board_cards=board_cards, run_records=run_records)
 
-    def _scan_memory(self, secret_values: tuple[str, ...]) -> None:
-        """`state/memory` leaves the host with this commit, so every file in it passes the scan.
+    def _scan_live_paths(self, secret_values: tuple[str, ...]) -> None:
+        """Every live-root file this commit takes beside board and runs passes the scan.
 
-        The memory writer scans what it writes; this catches anything else left there, such as a
-        secret pasted into a fact file by hand. A hit blocks the tick by path before anything is
+        `state/memory`, `state/knowledge` and the exported secret-store files leave the host with
+        this commit. Their writers scan what they write; this catches anything else left there, such
+        as a secret pasted into a document by hand. A hit blocks the tick by path before anything is
         published or staged.
         """
-        root = self.instance_dir.joinpath(*MEMORY_PATHSPEC[0].split("/"))
         runtime_env = self.instance_dir / "runtime.env"
         hits: list[str] = []
-        for directory, dirnames, filenames in os.walk(root):
-            dirnames.sort()
-            for name in sorted(filenames):
-                path = Path(directory) / name
-                try:
-                    info = path.lstat()
-                    if stat.S_ISLNK(info.st_mode):
-                        text = os.readlink(path)
-                    elif stat.S_ISREG(info.st_mode):
-                        text = path.read_bytes().decode("utf-8", errors="replace")
-                    else:
-                        continue
-                except OSError as exc:
-                    raise CheckpointBlocked(f"could not read {path.relative_to(self.instance_dir)}: {exc}") from None
-                if redact(text, env_files=[runtime_env], secret_values=secret_values) != text:
-                    hits.append(path.relative_to(self.instance_dir).as_posix())
+        for relative in self._live_files():
+            path = self.instance_dir / relative
+            try:
+                info = path.lstat()
+                if stat.S_ISLNK(info.st_mode):
+                    text = os.readlink(path)
+                elif stat.S_ISREG(info.st_mode):
+                    text = path.read_bytes().decode("utf-8", errors="replace")
+                else:
+                    continue
+            except OSError as exc:
+                raise CheckpointBlocked(f"could not read {relative}: {exc}") from None
+            if redact(text, env_files=[runtime_env], secret_values=secret_values) != text:
+                hits.append(relative)
         if hits:
             raise CheckpointBlocked(f"secret detected in {', '.join(hits)}")
+
+    def _live_files(self) -> list[str]:
+        """Every non-directory entry of the live root `LEGACY_LIVE_PATHS` names, as sorted relative paths."""
+        found: set[str] = set()
+        for _spec, pattern in LEGACY_LIVE_PATHS:
+            *directories, last = pattern.split("/")
+            base = self.instance_dir.joinpath(*directories)
+            if not base.is_dir() or base.is_symlink():
+                continue
+            if last == "**":
+                for directory, dirnames, filenames in os.walk(base):
+                    dirnames.sort()
+                    names = filenames + [name for name in dirnames if (Path(directory) / name).is_symlink()]
+                    for name in names:
+                        found.add((Path(directory) / name).relative_to(self.instance_dir).as_posix())
+                continue
+            try:
+                names = os.listdir(base)
+            except OSError as exc:
+                raise CheckpointBlocked(f"could not list {'/'.join(directories)}: {exc}") from None
+            for name in names:
+                relative = "/".join([*directories, name])
+                if matches(pattern, relative) and not (base / name).is_dir():
+                    found.add(relative)
+        return sorted(found)
 
     def _commit_locked(self, *, board_cards: int, run_records: int) -> CheckpointResult:
         try:
@@ -731,7 +769,7 @@ class CheckpointWriter:
             self._require_tracked()
             raise
         self._require_tracked()
-        pathspec = ["--", *STAGED_PATHSPEC, *self._stage_memory()]
+        pathspec = ["--", *STAGED_PATHSPEC, *self._stage_live_paths()]
         status = self._git(["status", "--porcelain", *pathspec], "checkpoint status")
         if not status.stdout.strip():
             return CheckpointResult(
@@ -753,18 +791,23 @@ class CheckpointWriter:
             run_records=run_records,
         )
 
-    def _stage_memory(self) -> tuple[str, ...]:
-        """Stage `state/memory`; returns its pathspec when Git knows a file there, else nothing.
+    def _stage_live_paths(self) -> tuple[str, ...]:
+        """Stage `LEGACY_LIVE_PATHS`; returns the pathspecs that hold a file on disk or in Git.
 
-        Only `state/memory` joins board and runs: config and every other path stay out of the
-        tick's commit. A pathspec Git knows no file under would fail the commit, so a live root
-        without memory commits as before.
+        Only these join board and runs: config and every other path stay out of the tick's commit,
+        and the secret store joins by its exported files alone. A pathspec that matches nothing
+        would fail the commit, so a live root without memory, knowledge or a store commits as
+        before; one whose files were all removed still stages the removal.
         """
-        memory = self.instance_dir.joinpath(*MEMORY_PATHSPEC[0].split("/"))
-        if memory.is_dir():
-            self._git(["add", "--", *MEMORY_PATHSPEC], "checkpoint stage memory")
-        known = self._git(["ls-files", "--", *MEMORY_PATHSPEC], "checkpoint memory tracked").stdout
-        return MEMORY_PATHSPEC if known.strip() else ()
+        specs = [spec for spec, _pattern in LEGACY_LIVE_PATHS]
+        tracked = self._git(["ls-files", "-z", "--", *specs], "checkpoint live paths tracked").stdout.split("\0")
+        present = [*self._live_files(), *(name for name in tracked if name)]
+        staged = tuple(
+            spec for spec, pattern in LEGACY_LIVE_PATHS if any(matches(pattern, name) for name in present)
+        )
+        if staged:
+            self._git(["add", "--", *staged], "checkpoint stage live paths")
+        return staged
 
     def _require_tracked(self) -> None:
         """An ignored `state/` stages nothing, which otherwise reads as unchanged."""
@@ -810,24 +853,8 @@ SNAPSHOT_MANIFEST_VERSION = 1
 # the same ref transaction as that first commit; doctor checks every commit after it.
 SNAPSHOT_BASE_REF = "refs/ummanu/snapshot-base"
 SNAPSHOT_BASE_ROOT = "root"
-# The closed set of live-root paths a cut copies, byte for byte and at the same relative path. `*`
-# matches within one path segment, a trailing `**` everything below a directory. Everything else in
-# the live root stays out of the snapshot: generated heads files, onboarding and gate drafts, locks,
-# `state/board` and `state/runs` (a cut takes those from the export), and above all
-# `secrets/installation.key`, `runtime.env` and `board-store.env`.
-SNAPSHOT_ALLOWLIST = (
-    "instance.yaml",
-    "projects/*.yaml",
-    "adapters/*.yaml",
-    "heads/heads.toml",
-    "persona/**",
-    "skills/manifest.toml",
-    "secrets/catalog.yaml",
-    "secrets/installation-key.json",
-    "secrets/values/*.enc.json",
-    "state/knowledge/**",
-    "state/memory/**",
-)
+# The closed set of live-root paths a cut copies is `SNAPSHOT_ALLOWLIST`, kept in `infra.export_allowlist`
+# with `is_exported`, the one answer to whether a live-root path leaves the host.
 _REGULAR_MODE = "100644"
 _EXECUTABLE_MODE = "100755"
 

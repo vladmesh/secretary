@@ -1784,7 +1784,7 @@ class InstallationTests(unittest.TestCase):
 
             self.assertEqual(
                 [call.args[1] for call in git.call_args_list],
-                [["remote", "get-url", "origin"], ["status", "--porcelain"]],
+                [["remote", "get-url", "origin"], ["status", "--porcelain", "-z", "--untracked-files=all"]],
             )
 
     @unittest.skipUnless(os.geteuid() == 0, "requires a root clean-host fixture")

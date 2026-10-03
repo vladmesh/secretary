@@ -1,21 +1,22 @@
 """Writer for long recoverable documents in `state/knowledge`.
 
-Contract: docs/ARCHITECTURE.md, "Knowledge planes". Knowledge holds the long
-reasoning behind a decision: brainstorms, decision logs, incident write-ups.
-It is plain tracked markdown, so a document written here rides to the remote
-with the rest of the checkpoint and survives a move to another machine.
+Contract: docs/ARCHITECTURE.md, "Knowledge planes", and docs/RECOVERY.md, "Writers". Knowledge holds
+the long reasoning behind a decision: brainstorms, decision logs, incident write-ups. It is plain
+markdown in the live root, and `state/knowledge/**` is in the snapshot export allowlist, so a
+document written here leaves the host with the next checkpoint (the legacy tick commits it, the
+snapshot exporter copies it) and survives a move to another machine.
 
-The writer exists so the role keeping a document does not have to reach for raw
-`git`. A bare `git commit` in the instance repo races the tick writer, which
-commits `state/board` and `state/runs` in the same repo on its five-minute
-periodic cadence. This
-writer owns `state/knowledge` alone, takes the same `state_repo_lock` the other
-writers take, and never runs `git add -A`.
+The writer starts no Git child. It writes files only, under `state_repo_lock`, the live-root writer
+lock the tick holds while it commits or cuts, so neither ever sees half a write. A document is one
+atomic file replace; a directory is swapped in whole through `state/.knowledge-swap` and put back on
+failure. Where a commit id used to be, the result carries the content revision of what was written
+(`_fsutil.content_revision`): the same content gives the same revision.
 """
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import shutil
 import stat
@@ -24,9 +25,9 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from ummanu import state_repo
+from ummanu._fsutil import content_revision
 from ummanu._fsutil import write_text_atomic as _write_text_atomic
 from ummanu.runtime.redact import redact
-from ummanu.state_repo import KNOWLEDGE_PATHSPEC
 
 
 class KnowledgeError(RuntimeError):
@@ -46,12 +47,12 @@ class KnowledgeValidationError(KnowledgeError):
 
 
 # The whole of one directory write, in bytes. A report directory holds a write-up and the scripts and
-# data behind it, not a dataset; anything larger belongs outside the instance repository.
+# data behind it, not a dataset; anything larger belongs outside the live root.
 KNOWLEDGE_DIRECTORY_CAP_BYTES = 20 * 1024 * 1024
 
 # Where a directory write stages the new contents and parks the previous ones. It is beside
-# `state/knowledge`, on the same filesystem so the swap is a rename, and outside every commit
-# pathspec, so a crash mid-swap leaves nothing a knowledge commit can pick up.
+# `state/knowledge`, on the same filesystem so the swap is a rename, and outside the export allowlist
+# and the legacy tick's pathspecs, so a crash mid-swap leaves nothing a checkpoint can pick up.
 KNOWLEDGE_SWAP_RELATIVE = Path("state") / ".knowledge-swap"
 _SWAP_TARGET = "target"
 
@@ -61,8 +62,8 @@ class KnowledgeDocument:
     """One knowledge write that has passed every check this writer makes before it writes.
 
     The product of :func:`check_knowledge_document`, and what :func:`write_knowledge_document`
-    writes: the cleaned actor, the path relative to `state/knowledge`, the body, and the instance
-    repository the write lands in.
+    writes: the cleaned actor, the path relative to `state/knowledge`, the body, and the live root
+    the write lands in.
     """
 
     actor: str
@@ -73,6 +74,10 @@ class KnowledgeDocument:
 
 @dataclass(frozen=True)
 class KnowledgeWriteResult:
+    """One knowledge write. `commit` holds the content revision of what was written (the document, or
+    every file of the directory, by its path below `state/knowledge`), not a Git commit: the writer
+    makes none. An unchanged write answers the same revision as the write that put the content there."""
+
     document: str
     path: Path
     commit: str
@@ -103,7 +108,9 @@ def check_knowledge_document(
     # the tick and memory writers apply.
     if redact(body) != body:
         raise KnowledgeValidationError(f"secret detected in state/knowledge/{relative}")
-    return KnowledgeDocument(actor, relative, body, state_repo.require_repo(instance_dir))
+    root = _live_root(instance_dir)
+    _check_parents(root, relative)
+    return KnowledgeDocument(actor, relative, body, root)
 
 
 def write_knowledge_document(
@@ -113,12 +120,10 @@ def write_knowledge_document(
     actor: str,
     text: str | None = None,
     source_file: Path | None = None,
-    message: str | None = None,
 ) -> KnowledgeWriteResult:
-    """Write one document under `state/knowledge` and commit it.
+    """Write one document under `state/knowledge` in one atomic replace.
 
-    `changed=False` means the document on disk already had this content; the
-    commit is then the current HEAD and nothing was added to the history.
+    `changed=False` means the document on disk already had this content and nothing was written.
     """
     checked = check_knowledge_document(
         instance_dir, document=document, actor=actor, text=text, source_file=source_file
@@ -126,30 +131,24 @@ def write_knowledge_document(
     actor, relative, body = checked.actor, checked.document, checked.text
     instance_dir = checked.instance_dir
     target = state_repo.knowledge_dir(instance_dir) / relative
+    payload = body.encode("utf-8")
+    revision = content_revision({str(relative): hashlib.sha256(payload).hexdigest()})
     with state_repo.state_repo_lock(instance_dir):
         _recover_interrupted_swaps(instance_dir)
+        if _current_bytes(target) == payload:
+            return KnowledgeWriteResult(
+                document=str(relative), path=target, commit=revision, actor=actor, changed=False
+            )
+        created = _missing_parents(target, instance_dir)
         try:
             _write_text_atomic(target, body)
         except RuntimeError as exc:
+            _remove_empty(created)
             raise KnowledgeError(f"could not write state/knowledge/{relative}: {exc}") from None
-        commit = state_repo.commit(
-            instance_dir,
-            KNOWLEDGE_PATHSPEC,
-            message or _commit_message(str(relative), actor),
-        )
-        if commit is None:
-            head = state_repo.head(instance_dir) or ""
-            return KnowledgeWriteResult(
-                document=str(relative),
-                path=target,
-                commit=head,
-                actor=actor,
-                changed=False,
-            )
     return KnowledgeWriteResult(
         document=str(relative),
         path=target,
-        commit=commit,
+        commit=revision,
         actor=actor,
         changed=True,
     )
@@ -191,7 +190,9 @@ def check_knowledge_directory(
             raise KnowledgeValidationError(
                 f"secret detected in {name} (target state/knowledge/{relative}/{name})", "secret"
             )
-    return KnowledgeDirectory(actor, relative, files, state_repo.require_repo(instance_dir))
+    root = _live_root(instance_dir)
+    _check_parents(root, relative)
+    return KnowledgeDirectory(actor, relative, files, root)
 
 
 def write_knowledge_directory(
@@ -200,54 +201,46 @@ def write_knowledge_directory(
     directory: str,
     actor: str,
     source_dir: Path,
-    message: str | None = None,
 ) -> KnowledgeWriteResult:
-    """Replace one directory under `state/knowledge` with the source directory and commit it.
+    """Replace one directory under `state/knowledge` with the source directory, all or nothing.
 
     Under one `state_repo_lock` the target's whole contents become the source's (a file the source no
-    longer has disappears from the target), and only that directory's pathspec is committed.
-    `changed=False` means the committed directory already had this content. If the commit fails the
-    previous contents are put back.
+    longer has disappears from the target). `changed=False` means the directory already held exactly
+    this content and nothing was written. A failure at any point leaves `state/knowledge`
+    byte-identical to before: the previous directory is put back and any parent the write created
+    is removed.
     """
     checked = check_knowledge_directory(instance_dir, directory=directory, actor=actor, source_dir=source_dir)
     instance_dir = checked.instance_dir
     target = state_repo.knowledge_dir(instance_dir) / checked.directory
-    pathspec = (str(state_repo.KNOWLEDGE_RELATIVE / checked.directory),)
+    # Named by the path below `state/knowledge`, as a document revision is: equal files written to
+    # two different directories are two different writes.
+    revision = content_revision(
+        {
+            (checked.directory / name).as_posix(): hashlib.sha256(data).hexdigest()
+            for name, data in checked.files
+        }
+    )
     with state_repo.state_repo_lock(instance_dir):
         if target.exists() and (target.is_symlink() or not target.is_dir()):
             raise KnowledgeValidationError(
                 f"state/knowledge/{checked.directory} exists and is not a directory", "path"
             )
         _recover_interrupted_swaps(instance_dir)
-        swap = _replace_directory(instance_dir, target, checked.files)
-        previous = swap / "old"
-        try:
-            commit = state_repo.commit(
-                instance_dir,
-                pathspec,
-                message or _commit_message(f"{checked.directory}/", checked.actor),
-            )
-        except BaseException:
-            _restore_directory(target, previous if previous.is_dir() else None)
-            if not os.path.lexists(previous):
-                shutil.rmtree(swap, ignore_errors=True)
-            # The original failure is the one to report; the index is only put back when git answers.
-            with contextlib.suppress(Exception):
-                state_repo.git(instance_dir, ["add", "--", *pathspec], label="restore staged state")
-            raise
-        shutil.rmtree(swap, ignore_errors=True)
-        if commit is None:
+        if _directory_holds(target, checked.files):
             return KnowledgeWriteResult(
                 document=f"{checked.directory}/",
                 path=target,
-                commit=state_repo.head(instance_dir) or "",
+                commit=revision,
                 actor=checked.actor,
                 changed=False,
             )
+        swap = _replace_directory(instance_dir, target, checked.files)
+        shutil.rmtree(swap, ignore_errors=True)
     return KnowledgeWriteResult(
         document=f"{checked.directory}/",
         path=target,
-        commit=commit,
+        commit=revision,
         actor=checked.actor,
         changed=True,
     )
@@ -259,6 +252,69 @@ def list_knowledge_documents(instance_dir: Path) -> tuple[str, ...]:
     if not root.is_dir():
         return ()
     return tuple(sorted(str(path.relative_to(root)) for path in root.rglob("*.md") if path.is_file()))
+
+
+def _live_root(instance_dir: Path) -> Path:
+    """The live root a write lands in: an existing directory, Git work tree or not."""
+    root = Path(instance_dir).expanduser().resolve()
+    if not root.is_dir():
+        raise KnowledgeError(f"instance directory not found: {root}")
+    return root
+
+
+def _check_parents(root: Path, relative: PurePosixPath) -> None:
+    """Refuse a target whose way down from the live root passes something that is not a directory."""
+    path = root
+    for part in (*state_repo.KNOWLEDGE_RELATIVE.parts, *relative.parent.parts):
+        path = path / part
+        if os.path.lexists(path) and not path.is_dir():
+            raise KnowledgeValidationError(f"{path.relative_to(root).as_posix()} exists and is not a directory", "path")
+
+
+def _current_bytes(path: Path) -> bytes | None:
+    try:
+        if path.is_symlink() or not path.is_file():
+            return None
+        return path.read_bytes()
+    except OSError:
+        return None
+
+
+def _directory_holds(target: Path, files: tuple[tuple[PurePosixPath, bytes], ...]) -> bool:
+    """Whether `target` is a plain directory holding exactly `files`, byte for byte, and nothing else."""
+    if target.is_symlink() or not target.is_dir():
+        return False
+    expected = {name.as_posix(): data for name, data in files}
+    seen = 0
+    for root, dirnames, filenames in os.walk(target):
+        for name in [*dirnames, *filenames]:
+            path = Path(root) / name
+            if path.is_symlink():
+                return False
+            if path.is_dir():
+                continue
+            relative = path.relative_to(target).as_posix()
+            if expected.get(relative) != _current_bytes(path):
+                return False
+            seen += 1
+    return seen == len(expected)
+
+
+def _missing_parents(path: Path, stop: Path) -> list[Path]:
+    """The ancestors of `path` below `stop` that do not exist yet, deepest first."""
+    missing = []
+    parent = path.parent
+    while parent != stop and stop in parent.parents and not os.path.lexists(parent):
+        missing.append(parent)
+        parent = parent.parent
+    return missing
+
+
+def _remove_empty(directories: list[Path]) -> None:
+    """Remove directories a failed write created, deepest first, while they are still empty."""
+    for directory in directories:
+        with contextlib.suppress(OSError):
+            directory.rmdir()
 
 
 def _clean_actor(actor: str) -> str:
@@ -379,43 +435,46 @@ def _replace_directory(instance_dir: Path, target: Path, files: tuple[tuple[Pure
     written first so :func:`_recover_interrupted_swaps` can put `old` back after a crash.
     """
     swap_root = Path(instance_dir) / KNOWLEDGE_SWAP_RELATIVE
+    created = _missing_parents(target, Path(instance_dir))
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         swap_root.mkdir(parents=True, exist_ok=True)
         swap = Path(tempfile.mkdtemp(prefix="swap.", dir=swap_root))
         (swap / _SWAP_TARGET).write_text(str(target.relative_to(instance_dir)), encoding="utf-8")
     except (OSError, ValueError) as exc:
+        _remove_empty(created)
         raise KnowledgeError(f"could not write {target}: {exc}") from None
     staging = swap / "new"
-    previous: Path | None = None
+    previous = swap / "old"
+    moved_aside = False
     try:
         for name, data in files:
             path = staging / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
         staging.mkdir(exist_ok=True)
-        if target.exists():
-            previous = swap / "old"
+        if os.path.lexists(target):
             os.replace(target, previous)
+            moved_aside = True
         os.replace(staging, target)
-    except OSError as exc:
-        if previous is not None and not target.exists():
-            _restore_directory(target, previous)
-        if previous is None or not os.path.lexists(previous):
+    except Exception as exc:
+        # A failure at any step leaves the knowledge tree as it was: the previous directory comes
+        # back and parents this write created are removed. A crash that kills the process instead
+        # is finished by the next writer (`_recover_interrupted_swaps`).
+        if moved_aside:
+            with contextlib.suppress(OSError):
+                os.replace(previous, target)
+        if not os.path.lexists(previous):
             shutil.rmtree(swap, ignore_errors=True)
-        raise KnowledgeError(f"could not write {target}: {exc}") from None
+        _remove_empty(created)
+        if isinstance(exc, OSError):
+            raise KnowledgeError(f"could not write {target}: {exc}") from None
+        raise
     return swap
 
 
-def _restore_directory(target: Path, previous: Path | None) -> None:
-    shutil.rmtree(target, ignore_errors=True)
-    if previous is not None:
-        with contextlib.suppress(OSError):
-            os.replace(previous, target)
-
-
 def _recover_interrupted_swaps(instance_dir: Path) -> None:
-    """Finish every swap a crashed directory write left behind, before anything is committed.
+    """Finish every swap a crashed directory write left behind, before anything else is written.
 
     Called under `state_repo_lock`, so no swap is in flight. A swap whose previous directory was moved
     aside and whose target is gone has that directory put back; everything else in the swap root is
@@ -464,17 +523,3 @@ def _document_text(*, text: str | None, source_file: Path | None) -> str:
     if not text.strip():
         raise KnowledgeValidationError("document is empty")
     return text if text.endswith("\n") else text + "\n"
-
-
-def _commit_message(document: str, actor: str) -> str:
-    return (
-        "\n".join(
-            [
-                f"knowledge: {document}",
-                "",
-                f"Principal: {actor}",
-                f"Document: {document}",
-            ]
-        )
-        + "\n"
-    )

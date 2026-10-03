@@ -20,20 +20,21 @@ import os
 import shutil
 import stat
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import yaml
 
+from ummanu._fsutil import REVISION_PREFIX as REVISION_PREFIX
+from ummanu._fsutil import content_revision as content_revision
 from ummanu._fsutil import regular_files_under, write_bytes_atomic, write_text_atomic
 from ummanu.memory import access as memory_access
 
 UNDO_DIR = ".undo"
 UNDO_JOURNAL = "journal.json"
 UNDO_VERSION = 1
-REVISION_PREFIX = "sha256:"
 
 
 # ── The fact set and its revision ─────────────────────────────────────────────
@@ -68,21 +69,6 @@ def fact_digests(facts_dir: Path) -> dict[str, str]:
 def text_digest(text: str) -> str:
     """The digest a fact whose bytes are `text` in UTF-8 has in `fact_digests`."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def content_revision(digests: Mapping[str, str]) -> str:
-    """The content revision of a fact set: sha256 over the sorted `id` and per-fact sha256.
-
-    The same fact set gives the same revision wherever it is computed, and any changed byte, added
-    or removed fact, or renamed id changes it. It stands where a Git commit id used to.
-    """
-    digest = hashlib.sha256()
-    for fact_id in sorted(digests):
-        digest.update(fact_id.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(digests[fact_id].encode("ascii"))
-        digest.update(b"\n")
-    return f"{REVISION_PREFIX}{digest.hexdigest()}"
 
 
 def canon_revision(facts_dir: Path) -> str:
@@ -144,8 +130,9 @@ def fact_content_hash(fact: dict) -> str:
 class CanonTransaction:
     """Replace and remove files under one canon root, keeping each path's prior state first."""
 
-    def __init__(self, memory_dir: Path, root: Path) -> None:
+    def __init__(self, memory_dir: Path, root: Path, *, label: str = "memory canon") -> None:
         self.undo = memory_dir / UNDO_DIR
+        self.label = label
         self.root = Path(root).expanduser().resolve()
         self._entries: list[dict[str, Any]] = []
         self._guarded: set[str] = set()
@@ -172,7 +159,7 @@ class CanonTransaction:
             _restore(self.root, self.undo, self._entries)
         except (OSError, RuntimeError) as exc:
             raise RuntimeError(
-                f"memory canon rollback failed: {exc}; the undo at {self.undo} is kept for the next writer"
+                f"{self.label} rollback failed: {exc}; the undo at {self.undo} is kept for the next writer"
             ) from None
         _discard(self.undo)
 
@@ -182,7 +169,11 @@ class CanonTransaction:
             _discard(self.undo, strict=True)
         except OSError as exc:
             self.rollback()
-            raise RuntimeError(f"could not finish the memory canon write: {exc}") from None
+            raise RuntimeError(f"could not finish the {self.label} write: {exc}") from None
+
+    def guard(self, path: Path) -> None:
+        """Keep the prior state of `path` before a caller changes it by its own means."""
+        self._guard(path)
 
     def _guard(self, path: Path) -> None:
         relative = self._relative(path)
@@ -199,12 +190,12 @@ class CanonTransaction:
         except FileNotFoundError:
             info = None
         except OSError as exc:
-            raise RuntimeError(f"could not inspect memory canon path {relative}: {exc}") from None
+            raise RuntimeError(f"could not inspect {self.label} path {relative}: {exc}") from None
         if not self._entries:
             try:
                 self.undo.mkdir(parents=True)
             except OSError as exc:
-                raise RuntimeError(f"could not create memory undo area {self.undo}: {exc}") from None
+                raise RuntimeError(f"could not create the {self.label} undo area {self.undo}: {exc}") from None
         if info is None:
             entry["state"] = "absent"
         elif stat.S_ISLNK(info.st_mode):
@@ -215,13 +206,13 @@ class CanonTransaction:
             try:
                 payload = path.read_bytes()
             except OSError as exc:
-                raise RuntimeError(f"could not keep memory canon path {relative}: {exc}") from None
+                raise RuntimeError(f"could not keep {self.label} path {relative}: {exc}") from None
             write_bytes_atomic(self.undo / saved, payload)
             entry.update(
                 state="file", saved=saved, mode=stat.S_IMODE(info.st_mode), owner=[info.st_uid, info.st_gid]
             )
         else:
-            raise RuntimeError(f"memory canon path is not a regular file: {relative}")
+            raise RuntimeError(f"{self.label} path is not a regular file: {relative}")
         self._entries.append(entry)
         # The journal names a path only after its prior state is kept, and the path changes only
         # after the journal names it: a crash anywhere in between restores bytes that are current.
@@ -232,21 +223,24 @@ class CanonTransaction:
         try:
             relative = Path(path).relative_to(self.root)
         except ValueError:
-            raise RuntimeError(f"memory canon write outside its root: {path}") from None
+            raise RuntimeError(f"{self.label} write outside its root: {path}") from None
         if not relative.parts or ".." in relative.parts:
-            raise RuntimeError(f"memory canon write outside its root: {path}")
+            raise RuntimeError(f"{self.label} write outside its root: {path}")
         return relative.as_posix()
 
 
 @contextmanager
-def canon_transaction(memory_dir: Path, root: Path) -> Iterator[CanonTransaction]:
+def canon_transaction(
+    memory_dir: Path, root: Path, *, label: str = "memory canon"
+) -> Iterator[CanonTransaction]:
     """One all-or-nothing canon write under `root` (`state/memory` of the live root).
 
     The caller holds the memory lock and the live-root writer lock. An undo a crashed writer left
-    is restored first; a failure inside the block restores every path the block touched.
+    is restored first; a failure inside the block restores every path the block touched. The secret
+    store uses the same transaction over `secrets/`, with its undo area in `secrets/.undo`.
     """
     recover_canon_undo(memory_dir)
-    transaction = CanonTransaction(memory_dir, root)
+    transaction = CanonTransaction(memory_dir, root, label=label)
     try:
         yield transaction
     except BaseException:

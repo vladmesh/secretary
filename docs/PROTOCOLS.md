@@ -182,12 +182,12 @@ reason `completion evidence missing` naming the absent marker, and its workspace
   After the report is accepted and the review, if required, is done, and before the card parks in
   Assessment or is released outside a parking sprint, the dispatcher copies `.ummanu-report/` to
   `state/knowledge/reports/<card ref>/` through the knowledge directory writer (`knowledge write
-  --dir`, actor `dispatcher`, one commit naming the card and the report generation), then writes one
-  `[completion:research]` comment whose request id is keyed on the report generation. The observer
-  therefore decides with the report already in knowledge, and a replayed tick commits and comments
-  nothing new. An observer release repeats the transfer, a no-op for a card parked green and the
-  transfer itself for a card parked by a red verdict. A rework round's next report replaces the
-  directory's whole contents and writes a fresh link; git keeps the earlier rounds.
+  --dir`, actor `dispatcher`; files only, no Git), then writes one `[completion:research]` comment
+  whose request id is keyed on the report generation. The observer therefore decides with the report
+  already in knowledge, and a replayed tick writes and comments nothing new. An observer release
+  repeats the transfer, a no-op for a card parked green and the transfer itself for a card parked by
+  a red verdict. A rework round's next report replaces the directory's whole contents and writes a
+  fresh link; the checkpoint history keeps the earlier rounds.
 
   If the transfer is refused or fails, the card goes to Blocked with the reason `research report
   transfer refused (<cause>)`, where the cause is `report_missing`, `path`, `source_missing`,
@@ -4545,15 +4545,17 @@ python3 -P -m ummanu knowledge list --instance INSTANCE
 ```
 
 Path segments are ASCII letters, digits, `.`, `_` and `-`; an imported non-ASCII filename is renamed.
-`write` replaces a document wholesale and commits only `state/knowledge` under the shared writer lock (no
-manual `git commit`). A document containing a secret is rejected with code 2 and nothing reaches disk.
-Rewriting identical content reports `changed: false` and makes no commit.
+`write` replaces a document wholesale under the shared writer lock and starts no Git child; the next
+checkpoint (the legacy tick's commit or the exporter's cut) carries it out (no manual `git commit`).
+A document containing a secret is rejected with code 2 and nothing reaches disk. Rewriting identical
+content reports `changed: false` and writes nothing. The answer's `commit` is the content revision
+of what was written (`sha256:...`), not a Git commit ([Recovery](RECOVERY.md#writers)).
 
 `write` takes exactly one of `--file` and `--dir`. With `--dir`, `--path` names a directory below
 `state/knowledge` (same segment rules, no `..`, not absolute), and under one writer lock its whole
-contents are replaced by the source directory's, so a file the source no longer has disappears, and
-only that directory's pathspec is committed, in one commit. It is how the dispatcher moves a research
-report into `state/knowledge/reports/<card ref>/`.
+contents are replaced by the source directory's, so a file the source no longer has disappears; a
+directory that already holds exactly the source's files is left as it is. It is how the dispatcher
+moves a research report into `state/knowledge/reports/<card ref>/`.
 
 ```bash
 python3 -P -m ummanu knowledge write --instance INSTANCE --actor ACTOR \
@@ -4564,12 +4566,13 @@ Refused with code 2 before anything is written: a missing source or one with no 
 special file or an entry whose name starts with `.git` (`.git`, `.gitignore`, `.gitattributes`,
 `.gitmodules`) anywhere in it; a text file (UTF-8 without NUL bytes) that contains a secret; a total
 size over 20 MiB. Binary files are copied unchanged and are **not** secret-scanned. Empty
-subdirectories are not kept. If the commit fails the previous directory is put back.
+subdirectories are not kept. If the write fails at any step the previous directory is put back and
+`state/knowledge` is byte-identical to before.
 
 The swap is staged outside `state/knowledge`, in `state/.knowledge-swap/` on the same filesystem: the
 new contents are written there, the previous directory is moved beside them, and a file names the
-target. A crash mid-swap therefore leaves nothing under `state/knowledge` for a knowledge commit to
-pick up. Every knowledge write (`--file` or `--dir`) first recovers interrupted swaps under the state
+target. A crash mid-swap therefore leaves nothing under `state/knowledge` for a checkpoint to pick
+up. Every knowledge write (`--file` or `--dir`) first recovers interrupted swaps under the state
 repository lock: a previous directory whose target is gone is moved back, and the rest is removed.
 
 ## Secrets
@@ -4594,9 +4597,12 @@ value is internal API only.
 recovery phrase is generated. The phrase is printed once to stderr, the operator confirms, screen and
 scrollback are cleared, and `init` asks for a few words back before creating the store.
 
-`init`, `set`, `import` and `remove` take the instance repository lock and commit their own pathspec in
-one commit. `list` takes no lock and commits nothing. `materialize` takes the lock, writes only the
-materialisation targets outside `secrets/`, and commits nothing. Catalog metadata passes the same
+`init`, `set`, `import`, `remove` and `checkpoint-github set` take the live-root writer lock and write
+`secrets/` all or nothing, starting no Git child; the next checkpoint carries the exported store files
+out, and the answer's `commit` is the store's content revision ([Recovery](RECOVERY.md#writers)). An
+unchanged value is never re-encrypted. `list` takes no lock and writes nothing. `materialize` takes
+the lock, writes only the materialisation targets outside `secrets/`, and refuses a target inside the
+live root that the export allowlist would copy. Catalog metadata passes the same
 redaction gate as `state/`; a secret pasted into `purpose` stops the write.
 
 The installation key belongs to the installation user. The store does not isolate workers: no broker or

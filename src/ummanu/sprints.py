@@ -3114,6 +3114,7 @@ class SprintWriter:
             )
         except KnowledgeError as exc:
             raise TaskError("backend_error", f"sprint close could not write its closeout: {exc}", 1) from None
+        # The knowledge writer's content revision of the closeout, where a Git commit id used to be.
         step["payload"]["commit"] = written.commit
         step["payload"]["changed"] = bool(written.changed)
         self.audit.stage(step_request_id, step)

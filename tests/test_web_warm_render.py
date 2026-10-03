@@ -193,7 +193,6 @@ class WarmDashboardRenderTests(unittest.TestCase):
         self,
     ) -> None:
         app = self.app()
-        gitignore = (self.instance / ".gitignore").read_text(encoding="utf-8")
 
         cold_page, cold, cold_statements = self.counted(app)
         warm_page, warm, warm_statements = self.counted(app)
@@ -211,8 +210,9 @@ class WarmDashboardRenderTests(unittest.TestCase):
         for page in (cold_page, warm_page):
             self.assertIn("sprint:7", page)
             self.assertIn("cards on the board", page)
-        # Neither request touched the exclusion `web-serve` established before serving.
-        self.assertEqual((self.instance / ".gitignore").read_text(encoding="utf-8"), gitignore)
+        # Neither request wrote an exclusion: the one `web-serve` checked before serving is the export
+        # allowlist, which writes nothing, `.gitignore` included.
+        self.assertFalse((self.instance / ".gitignore").exists())
 
     def test_the_same_web_app_reads_cards_after_its_board_session_is_terminated(self) -> None:
         app = self.app()

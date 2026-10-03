@@ -1,8 +1,9 @@
 """Non-secret, local PostgreSQL connection configuration for the board store.
 
 Installation configuration, not a secret (§5.4 of ``docs/BOARD_STORE.md``): a ``KEY=VALUE``
-file at ``<instance>/board-store.env``, mode 0600, git-ignored, refused rather than repaired
-when it is partial.  It is not a secret-store value: a database password is regenerable by
+file at ``<instance>/board-store.env``, mode 0600, never exported (the snapshot export allowlist
+does not match it, `infra.export_allowlist.is_exported`), refused rather than repaired when it is
+partial.  It is not a secret-store value: a database password is regenerable by
 recreating the role, is meaningless without the volume it guards, and is needed by
 ``docker compose up`` before the instance repository is necessarily in a state where the store
 can be opened — exactly the argument that kept the old board API token out of the store.
@@ -25,8 +26,8 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from ummanu import state_repo
 from ummanu._fsutil import stage_text
+from ummanu.infra.export_allowlist import is_exported
 from ummanu.runtime.paths import instance_dir as normalize_instance_dir
 
 STORE_FILE = "board-store.env"
@@ -151,7 +152,8 @@ def fresh_config() -> BoardStoreConfig:
 def materialize_fresh(instance_dir: Path | str) -> BoardStoreConfig:
     """Atomically create the complete private file, never replacing credentials.
 
-    The ignore is installed before credentials exist.  The temporary is mode 0600 before its
+    The exclusion is checked before credentials exist: a file the snapshot export would copy is
+    refused before a password is generated.  The temporary is mode 0600 before its
     rename, so neither a watcher nor a failing process can observe a permissive or partial file.
     """
     directory = normalize_instance_dir(instance_dir)
@@ -232,13 +234,13 @@ def parse(path: Path, *, require_private: bool = True) -> BoardStoreConfig:
 
 
 def resolve(instance_dir: Path | str) -> BoardStoreConfig:
-    """The whole configuration of one installation, behind the git-exclusion enforcement.
+    """The whole configuration of one installation, behind the exclusion enforcement.
 
     Every path to a *configured* store goes through here — `resolve_role`, the migration runner,
     `env.py`, and every consumer a later card adds — which is why the enforcement lives here and
-    not in the upgrade step alone.  A `board-store.env` that the instance repository **tracks**
+    not in the upgrade step alone.  A `board-store.env` at a path the snapshot export copies
     refuses with that reason (`enforce_exclusion`), because these are database credentials and
-    migrating on top of a tracked credential file would make the tracking permanent.
+    migrating on top of an exported credential file would publish it with every checkpoint.
     """
     return resolve_with_lifecycle(instance_dir)[0]
 
@@ -273,12 +275,10 @@ def _held_key(instance_dir: Path | str) -> Path:
 def hold_exclusion(instance_dir: Path | str) -> StoreOutcome:
     """Run the exclusion guard once for this process, so its reads do not run it again.
 
-    A long-lived reader -- `web-serve` -- calls this at start-up, before it serves anything. Its
-    requests then resolve the store without a `git` call, and none of them can write `.gitignore`:
-    only this call can, and it is not on a request's path. What it found holds for the life of the
-    process. A refusal holds too: a tracked, missing or unguardable file keeps refusing with the
-    same reason rather than being retried -- and possibly repaired -- by a read. A store that
-    appears or is repaired later is picked up by restarting the process.
+    A long-lived reader -- `web-serve` -- calls this at start-up, before it serves anything. What it
+    found holds for the life of the process. A refusal holds too: an exported or missing file keeps
+    refusing with the same reason rather than being retried by a read. A store that appears or is
+    repaired later is picked up by restarting the process.
     """
     key = _held_key(instance_dir)
     path = store_path(instance_dir)
@@ -300,63 +300,55 @@ def resolve_role(instance_dir: Path | str, role: str) -> BoardStoreCredentials:
 
 @dataclass(frozen=True)
 class StoreOutcome:
-    """Independent lifecycle actions taken for one store-configuration reconciliation."""
+    """Independent lifecycle actions taken for one store-configuration reconciliation.
 
-    ignore_added: bool = False
+    The exclusion itself takes no action any more: it is a property of the export allowlist, not an
+    entry this product writes, so only a mode repair could be reported here.
+    """
+
     mode_repaired: bool = False
 
     @property
     def changed(self) -> bool:
-        return self.ignore_added or self.mode_repaired
+        return self.mode_repaired
 
     def render(self, *, dry_run: bool = False) -> str:
-        actions: list[str] = []
-        if self.ignore_added:
-            actions.append("would add board store ignore" if dry_run else "added board store ignore")
         if self.mode_repaired:
-            actions.append("would secure board store mode" if dry_run else "secured board store mode")
-        return "; ".join(actions) if actions else "unchanged"
+            return "would secure board store mode" if dry_run else "secured board store mode"
+        return "unchanged"
+
+
+def _exported_refusal() -> str:
+    return (
+        f"board store configuration {STORE_FILE} is a live-root path the snapshot export copies; "
+        "it must stay out of the export allowlist before it can hold credentials"
+    )
 
 
 def enforce_exclusion(instance_dir: Path | str, *, dry_run: bool = False) -> StoreOutcome:
-    """The git half of `ensure_ignored`, and the gate every read of a configured store passes.
+    """The exclusion half of `ensure_ignored`, and the gate every read of a configured store passes.
 
-    Two things happen and one of them is a refusal: a `board-store.env` that is **tracked** in the
-    instance repository raises, naming why, and an untracked one gets the durable
-    `/board-store.env` exclusion.  Nothing else — in particular no mode repair, which is
-    `ensure_ignored`'s and deliberately not on the read path: a credential file that was
-    world-readable has already been exposed, so `parse` refuses it rather than quietly chmodding
-    it mid-read.
+    A `board-store.env` the snapshot export would copy (`infra.export_allowlist.is_exported`) raises,
+    naming why; otherwise nothing happens. It writes nothing and starts no process, so `dry_run`
+    changes nothing either. In particular there is no mode repair here: a credential file that was
+    world-readable has already been exposed, so `parse` refuses it rather than quietly chmodding it
+    mid-read.
     """
-    path = store_path(instance_dir)
-    if state_repo.is_tracked(path.parent, f"/{STORE_FILE}"):
-        raise BoardStoreError(
-            "board store configuration is tracked in the instance repository; "
-            "remove it from tracked history before it can be excluded"
-        )
-    try:
-        ignore_added = (
-            state_repo.ensure_ignored(path.parent, f"/{STORE_FILE}", dry_run=dry_run)
-            if (path.parent / ".git").exists()
-            else False
-        )
-    except state_repo.StateRepoError as exc:
-        raise BoardStoreError(f"board store ignore lifecycle failed: {exc}") from exc
-    return StoreOutcome(ignore_added=ignore_added)
+    if is_exported(store_path(instance_dir).name):
+        raise BoardStoreError(_exported_refusal())
+    return StoreOutcome()
 
 
 def ensure_ignored(instance_dir: Path | str, *, dry_run: bool = False) -> StoreOutcome:
-    """The durable git exclusion of this file.
+    """The exclusion of this file from everything that leaves the host.
 
-    It adds the `/board-store.env` entry to the instance repository's exclusions. A file already
-    in the index is not something an exclusion can fix, so it refuses rather than pretending; a
-    symlink or permissive mode also refuses. Credentials that may already have been exposed are
-    never made healthy by a silent chmod.
+    It refuses a file at a path the snapshot export allowlist matches; a symlink or permissive mode
+    also refuses. Credentials that may already have been exposed are never made healthy by a silent
+    chmod. Nothing is written: exclusion is a property of the allowlist, not a `.gitignore` entry.
 
     It **never creates the file**. The passwords are generated once, by the bootstrap or reconcile
     path that materializes `board-store.env`, and that owner calls this before it writes — which
-    is the order that keeps a generated credential from ever being a tracked one. This card ships
-    the operation and does not run it against any live installation.
+    is the order that keeps a generated credential from ever being an exported one.
     """
     path = store_path(instance_dir)
     try:
@@ -369,30 +361,20 @@ def ensure_ignored(instance_dir: Path | str, *, dry_run: bool = False) -> StoreO
         raise BoardStoreError("board store configuration must be a regular file, not a symlink")
     if mode & 0o077:
         raise BoardStoreError("board store configuration permissions are too broad; run chmod 0600")
-    ignore_added = enforce_exclusion(instance_dir, dry_run=dry_run).ignore_added
-    return StoreOutcome(ignore_added=ignore_added)
+    return enforce_exclusion(instance_dir, dry_run=dry_run)
 
 
 def findings(instance_dir: Path | str) -> list[str]:
     """Public, non-secret store health evidence for status and doctor.
 
-    Read-only by construction: it reports a tracked or unreadable file, it never creates the
-    ignore entry or the file itself.  A checkout with no lifecycle marker yet — no file and no
-    ignore entry — is a pre-store installation, not an unhealthy one, so it reports nothing.
+    Read-only by construction: it reports an exported or unreadable file and never creates the
+    file. An installation with no file is a pre-store installation, not an unhealthy one, so it
+    reports nothing.
     """
     path = store_path(instance_dir)
-    if state_repo.is_tracked(path.parent, f"/{STORE_FILE}"):
-        return [
-            (
-                "board store configuration is tracked in the instance repository; "
-                "remove it from tracked history and rerun upgrade"
-            )
-        ]
-    if (
-        not path.exists()
-        and not path.is_symlink()
-        and not state_repo.is_ignored(path.parent, f"/{STORE_FILE}")
-    ):
+    if is_exported(path.name):
+        return [_exported_refusal()]
+    if not path.exists() and not path.is_symlink():
         return []
     try:
         parse(path)

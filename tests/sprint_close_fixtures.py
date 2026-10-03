@@ -66,11 +66,11 @@ CLOSEOUT_BODY = (
 
 
 def init_state_repo(instance: Any) -> Any:
-    """Make a fixture instance directory the git repository `state/knowledge` needs.
+    """Make a fixture instance directory a legacy live root: a Git work tree.
 
-    The knowledge writer commits into the instance repo, so a close that writes its closeout needs
-    one. A fixture that never writes a closeout needs none, which is why this is called by the tests
-    that do rather than by every sprint fixture.
+    The knowledge writer no longer commits (docs/RECOVERY.md, "Writers"), so a close that writes its
+    closeout needs no repository; the tests that write one keep a work tree so they run against the
+    shape production's live root still has, and so the writer's not touching it stays visible.
     """
     import subprocess
     from pathlib import Path

@@ -5,7 +5,7 @@ from __future__ import annotations
 import stat
 from pathlib import Path
 
-from ummanu import state_repo
+from ummanu.infra.export_allowlist import is_exported
 
 
 class RuntimeEnvError(RuntimeError):
@@ -26,7 +26,11 @@ def read_runtime_env(
     *,
     require_ignored: bool = True,
 ) -> dict[str, str]:
-    """Read the supported ``KEY=VALUE`` dialect, after private-file checks."""
+    """Read the supported ``KEY=VALUE`` dialect, after private-file checks.
+
+    `require_ignored` refuses a file inside the live root at a path the snapshot export allowlist
+    matches (`infra.export_allowlist.is_exported`); a file outside the live root is never exported.
+    """
     path = instance_runtime_env_path(instance_dir, override)
     try:
         mode = path.lstat().st_mode
@@ -41,17 +45,17 @@ def read_runtime_env(
     if mode & 0o077:
         raise RuntimeEnvError("runtime.env permissions are too broad; run chmod 0600")
     if require_ignored:
+        # Excluded means "not exported": the snapshot export allowlist is the one boundary between
+        # the live root and what leaves the host, whether or not the live root is a Git work tree.
         try:
             relative = path.resolve().relative_to(instance_dir.resolve())
         except ValueError:
             relative = None
-        if relative is not None:
-            try:
-                ignored = state_repo.is_ignored(instance_dir, str(relative))
-            except OSError:
-                raise RuntimeEnvError("could not verify that runtime.env is gitignored") from None
-            if not ignored:
-                raise RuntimeEnvError("runtime.env is inside the instance checkout but is not gitignored")
+        if relative is not None and is_exported(relative.as_posix()):
+            raise RuntimeEnvError(
+                f"runtime.env is at {relative.as_posix()}, a live-root path the snapshot export copies; "
+                "move it out of the export allowlist"
+            )
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, UnicodeError):

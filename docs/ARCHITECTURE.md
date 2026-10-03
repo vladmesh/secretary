@@ -115,7 +115,7 @@ The instance repository holds persona, project bindings, adapters, policies and 
 `state/` in it holds the recovery canon: board, runs, memory facts and knowledge documents.
 `secrets/` holds a metadata catalog and sealed values. The raw installation key and the recovery
 phrase are never stored there ([Recovery](RECOVERY.md#secrets)). The host `runtime.env` is a separate
-`0600` file, gitignored and outside every checkpoint and archive; a value registered in the store
+`0600` file, outside the export allowlist and every checkpoint and archive; a value registered in the store
 makes the file a materialised copy.
 
 The data directory holds dispatcher state, derived exports and indexes, search
@@ -474,8 +474,8 @@ repository carries contracts and code; the reasoning behind its development is i
 
 Knowledge is not indexed, not returned by `memory_search` and never loaded wholesale into a head's
 context. Format is free markdown. Writes go through `ummanu knowledge write`, which owns only
-`state/knowledge`, takes the shared instance-repository writer lock and refuses documents containing
-secrets ([Protocols](PROTOCOLS.md#knowledge)).
+`state/knowledge`, takes the shared live-root writer lock, starts no Git child and refuses documents
+containing secrets ([Protocols](PROTOCOLS.md#knowledge)).
 
 ## Ownership and security
 

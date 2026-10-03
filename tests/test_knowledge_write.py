@@ -14,12 +14,12 @@ from ummanu.checkpoint import CheckpointWriter
 from ummanu.cli import main as cli_main
 from ummanu.data import DataExport
 from ummanu.knowledge_write import (
+    KnowledgeError,
     KnowledgeValidationError,
     list_knowledge_documents,
     write_knowledge_directory,
     write_knowledge_document,
 )
-from ummanu.state_repo import StateRepoError
 
 
 def git(repo: Path, *args: str) -> str:
@@ -40,7 +40,10 @@ BODY = "# Sprint 1\n\nWhat we decided and why.\n"
 
 
 class KnowledgeRepoCase(unittest.TestCase):
-    """An instance repo with both writers pointed at it."""
+    """A live root that is still a Git work tree (legacy mode), with both writers pointed at it.
+
+    The knowledge writer makes no Git call: it writes files, and the legacy tick commits them.
+    """
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -108,6 +111,8 @@ class KnowledgeRepoCase(unittest.TestCase):
             lines = (Path(data_dir) / "runs" / "runs.ndjson").read_text(encoding="utf-8")
             return DataExport(path=Path(data_dir), count=len(lines.splitlines()), source="test")
 
+        if getattr(self, "checkpoint_client", None) is None:
+            self.checkpoint_client = card_store(self, empty_seed(), instance_dir=self.instance_dir)
         with mock.patch("ummanu.checkpoint.export_board", side_effect=board_export):
             with mock.patch("ummanu.checkpoint.export_runs", side_effect=runs_export):
                 return CheckpointWriter(
@@ -120,24 +125,34 @@ class KnowledgeRepoCase(unittest.TestCase):
     def head_files(self) -> list[str]:
         return git(self.instance_dir, "ls-tree", "-r", "--name-only", "HEAD").split()
 
+    def head(self) -> str:
+        return git(self.instance_dir, "rev-parse", "HEAD").strip()
+
+    def staged(self) -> str:
+        return git(self.instance_dir, "diff", "--cached", "--name-only").strip()
+
 
 class KnowledgeWriteTests(KnowledgeRepoCase):
-    def test_document_lands_in_state_knowledge_as_its_own_commit(self):
+    def test_document_lands_in_state_knowledge_as_a_file_and_no_commit(self):
+        head = self.head()
+
         result = self.write()
 
         self.assertTrue(result.changed)
         self.assertEqual(result.document, DOCUMENT)
-        self.assertIn(f"state/knowledge/{DOCUMENT}", self.head_files())
         self.assertEqual(
             (self.instance_dir / "state" / "knowledge" / DOCUMENT).read_text(encoding="utf-8"),
             BODY,
         )
-        self.assertEqual(git(self.instance_dir, "rev-parse", "HEAD").strip(), result.commit)
-        message = git(self.instance_dir, "log", "-1", "--format=%B")
-        self.assertIn(f"knowledge: {DOCUMENT}", message)
-        self.assertIn("Principal: po", message)
+        self.assertTrue(result.commit.startswith("sha256:"), result.commit)
+        self.assertEqual(self.head(), head, "the writer makes no commit; the tick does")
+        self.assertEqual(self.staged(), "")
+        self.assertIn(
+            f"?? state/knowledge/{DOCUMENT}",
+            git(self.instance_dir, "status", "--porcelain", "--untracked-files=all"),
+        )
 
-    def test_commit_touches_only_the_knowledge_pathspec(self):
+    def test_the_write_touches_only_the_document(self):
         self.seed_board([CARD])
         stray = self.instance_dir / "state" / "board"
         stray.mkdir(parents=True, exist_ok=True)
@@ -145,29 +160,31 @@ class KnowledgeWriteTests(KnowledgeRepoCase):
 
         self.write()
 
-        files = self.head_files()
-        self.assertIn(f"state/knowledge/{DOCUMENT}", files)
-        self.assertNotIn("state/board/cards.ndjson", files)
+        self.assertEqual((stray / "cards.ndjson").read_text(encoding="utf-8"), "uncommitted tick output\n")
+        self.assertEqual(self.staged(), "")
 
-    def test_rewriting_the_same_content_adds_no_commit(self):
+    def test_rewriting_the_same_content_writes_nothing_and_answers_the_same_revision(self):
         first = self.write()
+        written = (self.instance_dir / "state" / "knowledge" / DOCUMENT).stat()
         again = self.write()
 
         self.assertFalse(again.changed)
         self.assertEqual(again.commit, first.commit)
+        self.assertEqual((self.instance_dir / "state" / "knowledge" / DOCUMENT).stat().st_ino, written.st_ino)
 
-    def test_editing_a_document_commits_the_new_revision(self):
-        self.write()
+    def test_editing_a_document_writes_the_new_revision(self):
+        first = self.write()
         updated = self.write(text=BODY + "\nAnd a later revision.\n")
 
         self.assertTrue(updated.changed)
+        self.assertNotEqual(updated.commit, first.commit)
         self.assertIn(
             "And a later revision.",
             (self.instance_dir / "state" / "knowledge" / DOCUMENT).read_text(encoding="utf-8"),
         )
 
-    def test_secret_in_the_document_is_rejected_before_any_commit(self):
-        head_before = git(self.instance_dir, "rev-parse", "HEAD").strip()
+    def test_secret_in_the_document_is_rejected_before_anything_is_written(self):
+        head_before = self.head()
         leaked = "# Notes\n\ntoken sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWX\n"
 
         with self.assertRaises(KnowledgeValidationError) as caught:
@@ -176,7 +193,7 @@ class KnowledgeWriteTests(KnowledgeRepoCase):
         self.assertIn("secret detected", str(caught.exception))
         self.assertIn(f"state/knowledge/{DOCUMENT}", str(caught.exception))
         self.assertFalse((self.instance_dir / "state" / "knowledge" / DOCUMENT).exists())
-        self.assertEqual(git(self.instance_dir, "rev-parse", "HEAD").strip(), head_before)
+        self.assertEqual(self.head(), head_before)
 
     def test_path_outside_state_knowledge_is_rejected(self):
         for bad in ("../instance.yaml", "/etc/passwd.md", "decisions/../../escape.md", "note.txt"):
@@ -197,11 +214,17 @@ class KnowledgeWriteTests(KnowledgeRepoCase):
             )
         self.assertIn("absent.md", str(caught.exception))
 
-    def test_write_outside_a_git_repo_fails_loudly(self):
+    def test_a_live_root_without_git_takes_the_write_and_a_missing_one_fails_loudly(self):
         plain = Path(self.tmpdir.name) / "not-a-repo"
         plain.mkdir()
-        with self.assertRaises(StateRepoError):
-            write_knowledge_document(plain, document=DOCUMENT, actor="po", text=BODY)
+
+        result = write_knowledge_document(plain, document=DOCUMENT, actor="po", text=BODY)
+
+        self.assertTrue(result.changed)
+        self.assertEqual((plain / "state" / "knowledge" / DOCUMENT).read_text(encoding="utf-8"), BODY)
+        self.assertFalse((plain / ".git").exists())
+        with self.assertRaises(KnowledgeError):
+            write_knowledge_document(Path(self.tmpdir.name) / "absent", document=DOCUMENT, actor="po", text=BODY)
 
     def test_existing_documents_are_listed_without_migration(self):
         legacy = self.instance_dir / "state" / "knowledge" / "brainstorms" / "old.md"
@@ -255,14 +278,16 @@ class KnowledgeCheckpointRaceTests(KnowledgeRepoCase):
         self.assertEqual(results["checkpoint"].status, "committed")
         self.assertTrue(results["knowledge"].changed)
 
-        # Both writers landed, each in its own commit, and neither left the index
-        # holding the other's paths.
+        # Whichever took the writer lock first, the document is whole on disk and the next tick
+        # commits it with board and runs; nothing is left half-staged.
+        self.assertEqual(self.checkpoint().status in {"committed", "unchanged"}, True)
         files = self.head_files()
         self.assertIn(f"state/knowledge/{DOCUMENT}", files)
         self.assertIn("state/board/cards/0000/00000000.json", files)
         self.assertIn("state/runs/runs.ndjson", files)
+        self.assertEqual(git(self.instance_dir, "show", f"HEAD:state/knowledge/{DOCUMENT}"), BODY)
         self.assertEqual(git(self.instance_dir, "status", "--porcelain").strip(), "")
-        self.assertEqual(len(git(self.instance_dir, "log", "--format=%H").split()), 3)
+        self.assertEqual(self.staged(), "")
 
     def test_repeated_interleavings_never_drop_a_side(self):
         for round_index in range(5):
@@ -305,6 +330,7 @@ class KnowledgeCheckpointRaceTests(KnowledgeRepoCase):
 
         with self.subTest(round=round_index):
             self.assertEqual(errors, [])
+            self.assertIn(self.checkpoint().status, {"committed", "unchanged"})
             self.assertIn(f"state/knowledge/{document}", self.head_files())
             self.assertEqual(git(self.instance_dir, "status", "--porcelain").strip(), "")
             board = open_checkpoint_board(self.instance_dir / "state" / "board").read_text("cards.ndjson")
@@ -337,16 +363,18 @@ class KnowledgeDirectoryWriteTests(KnowledgeRepoCase):
         )
 
     def report_files(self) -> list[str]:
-        return git(
-            self.instance_dir, "ls-tree", "-r", "--name-only", "HEAD", "--", f"state/knowledge/{REPORT}"
-        ).split()
+        """Every file of the report directory on disk, by live-root path."""
+        report = self.instance_dir / "state" / "knowledge" / REPORT
+        return sorted(
+            path.relative_to(self.instance_dir).as_posix() for path in report.rglob("*") if path.is_file()
+        )
 
     def assert_refused(self, source: Path, reason: str, *, directory: str = REPORT) -> None:
-        head_before = git(self.instance_dir, "rev-parse", "HEAD").strip()
+        head_before = self.head()
         with self.assertRaises(KnowledgeValidationError) as caught:
             self.write_dir(source, directory=directory)
         self.assertEqual(caught.exception.reason, reason, str(caught.exception))
-        self.assertEqual(git(self.instance_dir, "rev-parse", "HEAD").strip(), head_before)
+        self.assertEqual(self.head(), head_before)
         self.assertFalse((self.instance_dir / "state" / "knowledge" / "reports").exists())
 
     def test_the_directory_lands_with_subdirectories_and_binary_files_unchanged(self):
@@ -367,10 +395,13 @@ class KnowledgeDirectoryWriteTests(KnowledgeRepoCase):
         )
         target = self.instance_dir / "state" / "knowledge" / REPORT
         self.assertEqual((target / "data" / "blob.bin").read_bytes(), binary)
-        self.assertEqual(git(self.instance_dir, "rev-parse", "HEAD").strip(), result.commit)
-        self.assertEqual(git(self.instance_dir, "status", "--porcelain", "--", "state/knowledge").strip(), "")
+        self.assertTrue(result.commit.startswith("sha256:"), result.commit)
+        self.assertEqual(self.staged(), "")
+        # The next legacy tick commits the directory with board and runs.
+        self.assertEqual(self.checkpoint().status, "committed")
+        self.assertIn(f"state/knowledge/{REPORT}/data/blob.bin", self.head_files())
 
-    def test_a_rewrite_replaces_the_whole_directory_and_identical_content_adds_no_commit(self):
+    def test_a_rewrite_replaces_the_whole_directory_and_identical_content_writes_nothing(self):
         first = self.write_dir(self.source({"report.md": "one\n", "old.txt": "gone soon\n"}))
         second = self.write_dir(self.source({"report.md": "two\n"}))
         again = self.write_dir(self.source({"report.md": "two\n"}))
@@ -381,17 +412,16 @@ class KnowledgeDirectoryWriteTests(KnowledgeRepoCase):
         self.assertFalse((self.instance_dir / "state" / "knowledge" / REPORT / "old.txt").exists())
         self.assertFalse(again.changed)
         self.assertEqual(again.commit, second.commit)
-        history = git(self.instance_dir, "log", "--format=%H", "--", f"state/knowledge/{REPORT}").split()
-        self.assertEqual(len(history), 2)
 
-    def test_the_commit_touches_only_the_directory_pathspec(self):
+    def test_the_write_touches_only_the_directory(self):
         (self.instance_dir / "state" / "knowledge").mkdir(parents=True)
         stray = self.instance_dir / "state" / "knowledge" / "loose.md"
         stray.write_text("uncommitted\n", encoding="utf-8")
 
         self.write_dir(self.source({"report.md": "one\n"}))
 
-        self.assertNotIn("state/knowledge/loose.md", self.head_files())
+        self.assertEqual(stray.read_text(encoding="utf-8"), "uncommitted\n")
+        self.assertEqual(self.staged(), "")
 
     def test_a_symlink_in_the_source_is_refused(self):
         source = self.source({"report.md": "one\n"})
@@ -408,7 +438,7 @@ class KnowledgeDirectoryWriteTests(KnowledgeRepoCase):
         self.assert_refused(source, "special_file")
 
     def swap_leftovers(self) -> list[str]:
-        """Every swap-shaped name under `state/knowledge`, where a knowledge commit would find it."""
+        """Every swap-shaped name under `state/knowledge`, where a checkpoint would find it."""
         knowledge = self.instance_dir / "state" / "knowledge"
         return sorted(
             str(path.relative_to(knowledge))
@@ -416,7 +446,7 @@ class KnowledgeDirectoryWriteTests(KnowledgeRepoCase):
             if path.name.endswith((".old", ".new")) or path.name.startswith("swap.")
         )
 
-    def test_a_crash_during_the_swap_leaves_nothing_a_knowledge_commit_picks_up(self):
+    def test_a_crash_during_the_swap_leaves_nothing_a_checkpoint_picks_up(self):
         """Staging lives outside `state/knowledge`; the next write under the lock puts the swap right.
 
         The crash is simulated as a `BaseException` between moving the previous directory aside and
@@ -451,11 +481,11 @@ class KnowledgeDirectoryWriteTests(KnowledgeRepoCase):
 
         self.assertTrue(result.changed)
         self.assertEqual((target / "report.md").read_text(encoding="utf-8"), "one\n", "put back, not lost")
-        self.assertEqual(sorted(self.report_files()), committed, "the commit neither dropped nor added")
-        self.assertFalse(any(name.startswith("state/.knowledge-swap") for name in self.head_files()))
+        self.assertEqual(sorted(self.report_files()), committed, "the recovery neither dropped nor added")
         self.assertEqual(self.swap_leftovers(), [])
         self.assertEqual(list(swap_root.iterdir()), [])
-        self.assertEqual(git(self.instance_dir, "status", "--porcelain", "--", "state/knowledge").strip(), "")
+        self.assertEqual(self.checkpoint().status, "committed")
+        self.assertFalse(any(name.startswith("state/.knowledge-swap") for name in self.head_files()))
 
     def test_a_target_path_that_escapes_is_refused(self):
         source = self.source({"report.md": "one\n"})

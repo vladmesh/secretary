@@ -1671,9 +1671,10 @@ class CheckpointPusherTests(unittest.TestCase):
         self.assertIn("no remote", state["reason"])
         self.assertEqual(state["failures"], 0)
 
-    def test_a_secret_store_commit_rides_the_same_push_as_the_rest_of_the_canon(self):
-        """secretary-777: the store's own writer commits separately, but there is
-        only one HEAD and one push; nothing routes a secret commit around it."""
+    def test_a_secret_store_change_rides_the_tick_commit_and_the_same_push(self):
+        """secretary-777, after ummanu-24: the store writes files and makes no commit of its own; the
+        legacy tick commits its exported files with the rest of the canon, so there is still one
+        HEAD and one push, and nothing routes a secret around it."""
         from ummanu.secret_store import initialize_store, set_secret
 
         fast_params = {
@@ -1689,9 +1690,9 @@ class CheckpointPusherTests(unittest.TestCase):
             params["kdf"]["salt"] = secret_store._b64(b"0123456789abcdef")
             return params
 
+        before_secret = git(self.instance_dir, "rev-parse", "HEAD").strip()
         with mock.patch("ummanu.secret_store._new_key_params", side_effect=fast_key_params):
             initialize_store(self.instance_dir, phrase="one two three four", actor="tester")
-            before_secret = git(self.instance_dir, "rev-parse", "HEAD").strip()
             set_secret(
                 self.instance_dir,
                 secret_id="service.api-token",
@@ -1700,8 +1701,36 @@ class CheckpointPusherTests(unittest.TestCase):
                 purpose="board api",
                 actor="tester",
             )
+        self.assertEqual(git(self.instance_dir, "rev-parse", "HEAD").strip(), before_secret)
+
+        self.data_dir = self.root / "ummanu-data"
+        CheckpointWriterTests.seed_board(self, [CARD])
+        CheckpointWriterTests.seed_runs(self, [])
+
+        class Settled:
+            def status(self) -> dict:
+                return {"ok": True, "pending": 0}
+
+        def exported(name: str):
+            def export(data_dir, **_kwargs):
+                lines = (Path(data_dir) / name).read_text(encoding="utf-8")
+                return DataExport(path=Path(data_dir), count=len(lines.splitlines()), source="test")
+
+            return export
+
+        with (
+            mock.patch.object(CheckpointWriter, "_audit_owner", return_value=(None, Settled())),
+            mock.patch("ummanu.checkpoint.export_board", side_effect=exported("board/cards.ndjson")),
+            mock.patch("ummanu.checkpoint.export_runs", side_effect=exported("runs/runs.ndjson")),
+        ):
+            result = CheckpointWriter(self.data_dir, self.instance_dir).write()
+
+        self.assertEqual(result.status, "committed", result.reason)
         head = git(self.instance_dir, "rev-parse", "HEAD").strip()
-        self.assertNotEqual(head, before_secret)
+        touched = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
+        self.assertIn("secrets/values/service.api-token.enc.json", touched)
+        self.assertIn("state/runs/runs.ndjson", touched)
+        self.assertNotIn("secrets/installation.key", touched)
 
         snapshot_before_push = checkpoint_snapshot(self.instance_dir)
         self.assertGreaterEqual(snapshot_before_push["lag_commits"], 1)

@@ -51,6 +51,7 @@ from ummanu.host_apply import (
     SystemdUnitInstaller,
     resolve_runtime_owner,
 )
+from ummanu.infra.export_allowlist import is_exported
 from ummanu.infra.github_credential import (
     CredentialError,
     RemoteExecution,
@@ -329,7 +330,7 @@ def _clone_or_reuse(
             "separate adopt workflow"
         )
     try:
-        dirty = state_repo.git(target, ["status", "--porcelain"], label="inspect instance checkout")
+        dirty = _checkout_changes(target, label="inspect instance checkout")
     except state_repo.StateRepoError as exc:
         raise InstallError(str(exc)) from None
     if dirty:
@@ -411,13 +412,25 @@ def _reconcile_recovery_head_registry(target: Path) -> str:
     )
 
 
+def _checkout_changes(target: Path, *, label: str) -> str:
+    """The instance checkout's local changes, one porcelain entry per line; empty when clean.
+
+    An untracked file the export allowlist does not match (`secrets/installation.key`,
+    `runtime.env`, `board-store.env`) is the host's own and never a checkpoint change, so it is not
+    one here: no product code keeps a `.gitignore` entry for it any more (docs/RECOVERY.md,
+    "Local-file exclusion"). Every other change, tracked or untracked, still counts.
+    """
+    output = state_repo.git(target, ["status", "--porcelain", "-z", "--untracked-files=all"], label=label)
+    return "\n".join(
+        entry
+        for entry in output.split("\0")
+        if entry and not (entry.startswith("?? ") and not is_exported(entry[3:]))
+    )
+
+
 def _recovery_reconciliation_preflight(target: Path) -> RecoveryReconciliationPreflight:
     """Return bounded reconciliation evidence or refuse without changing the checkout."""
-    dirty = state_repo.git(
-        target,
-        ["status", "--porcelain", "--untracked-files=all"],
-        label="recheck recovery checkout",
-    )
+    dirty = _checkout_changes(target, label="recheck recovery checkout")
     if dirty:
         raise state_repo.StateRepoError("checkout changed while recovery was inspecting it")
     branch = state_repo.git(
@@ -559,11 +572,7 @@ def _abort_recovery_reconciliation(target: Path, before: RecoveryReconciliationP
     state_repo.run_git(target, ["merge", "--abort"], label="abort recovery reconciliation")
     head = state_repo.git(target, ["rev-parse", "HEAD"], label="verify restored recovery head").strip()
     tree = state_repo.git(target, ["write-tree"], label="verify restored recovery index").strip()
-    dirty = state_repo.git(
-        target,
-        ["status", "--porcelain", "--untracked-files=all"],
-        label="verify restored recovery checkout",
-    )
+    dirty = _checkout_changes(target, label="verify restored recovery checkout")
     if head != before.head or tree != before.tree or dirty or _recovery_merge_state_present(target):
         raise state_repo.StateRepoError(
             "recovery merge cleanup could not prove the original clean checkout; preserve it and stop"
@@ -574,11 +583,7 @@ def _verify_recovery_reconciliation(target: Path, before: RecoveryReconciliation
     after = state_repo.git(
         target, ["rev-list", "--parents", "-n", "1", "HEAD"], label="verify recovery merge"
     ).split()
-    dirty = state_repo.git(
-        target,
-        ["status", "--porcelain", "--untracked-files=all"],
-        label="verify reconciled recovery checkout",
-    )
+    dirty = _checkout_changes(target, label="verify reconciled recovery checkout")
     metadata = (
         state_repo.git(
             target,
