@@ -945,6 +945,11 @@ def step_head_registry(context: UpgradeContext) -> StepResult:
 
 def step_instance_packing(context: UpgradeContext) -> StepResult:
     """Keep the private instance repo's packing controls bounded and local."""
+    from ummanu.checkpoint import live_root_is_work_tree
+
+    if not live_root_is_work_tree(context.instance_path):
+        # An exporter-mode live root has no repository to pack; the snapshot repository is bare.
+        return StepResult("instance-packing", "skipped", "the live root is not a Git work tree")
     try:
         drifted = state_repo.configure_packing_controls(context.instance_path, dry_run=context.dry_run)
     except state_repo.StateRepoError as exc:

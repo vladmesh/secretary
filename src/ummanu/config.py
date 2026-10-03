@@ -294,7 +294,22 @@ def instance_snapshot_repo(path: Path, data_dir: Path) -> Path:
     value rooted at ``data_dir``; without it, ``<data_dir>/backup/instance.git``. Only the exporter,
     recovery and doctor read this setting.
     """
-    instance_file = _resolve_instance(path)
+    return _snapshot_repo_for(_validated_instance_config(_resolve_instance(path)), data_dir)
+
+
+def recovered_instance_locations(instance_file: Path, live_root: Path) -> tuple[Path, Path]:
+    """``(data_dir, snapshot_repo)`` of an ``instance.yaml`` read out of a snapshot tree.
+
+    Recovery reads the file before the live root exists, so a relative ``data_dir`` is rooted at the
+    live root it will be materialised into (``live_root/instance.yaml``), not where it was extracted;
+    the snapshot repository then follows `instance_snapshot_repo`'s rule.
+    """
+    instance = _validated_instance_config(Path(instance_file))
+    data_dir = _configured_data_dir(Path(live_root).expanduser().resolve() / "instance.yaml", instance)
+    return data_dir, _snapshot_repo_for(instance, data_dir)
+
+
+def _validated_instance_config(instance_file: Path) -> dict[str, Any]:
     try:
         instance = load_config(instance_file)
     except ConfigError as exc:
@@ -303,6 +318,10 @@ def instance_snapshot_repo(path: Path, data_dir: Path) -> Path:
     if errors:
         raise DataDirError(f"invalid instance {instance_file}: " + "; ".join(map(str, errors)))
     assert isinstance(instance, dict)
+    return instance
+
+
+def _snapshot_repo_for(instance: dict[str, Any], data_dir: Path) -> Path:
     configured = instance["offsite"].get("snapshot_repo")
     candidate = Path(configured).expanduser() if configured else DEFAULT_SNAPSHOT_REPO
     if not candidate.is_absolute():

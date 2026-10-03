@@ -75,6 +75,22 @@ def _restore_payload_error(item: Any, phase: str, error: Exception) -> Exception
     return TaskError("validation", f"restored-card {phase} payload for {reference}: {message}", 2)
 
 
+def _foreign_key_rank(item: RestoreCardObligation) -> int:
+    """Products before every other record: an Issue's (and a sprint's) row names its Product.
+
+    `issues.product_id` is an immediate foreign key, so the Product's row has to be written before
+    the Issue's, whatever order the export's (column, swimlane, position, reference) sort put them
+    in. The sort that uses this is stable, so every other record keeps its order.
+    """
+    return 0 if str(item.metadata.get("record_type") or "") == "product" else 1
+
+
+def _store_placed(item: RestoreCardObligation) -> bool:
+    """Whether the store places this record itself: a Product or Issue lives in the Issues column of
+    its product's lane by construction, and the store refuses to move one (`moveTaskPosition`)."""
+    return str(item.metadata.get("record_type") or "") in {"product", "issue"}
+
+
 def _discard_pending_obligation(writer: Any, item: RestoreCardObligation) -> None:
     event = writer.audit.pending_event(item.request_id)
     if event is not None:
@@ -113,7 +129,9 @@ def restore_cards_batched(
         )
 
     _validate_restore_inventory(existing, obligations)
-    missing = [item for item in obligations if str(item.card["reference"]) not in existing]
+    missing = sorted(
+        (item for item in obligations if str(item.card["reference"]) not in existing), key=_foreign_key_rank
+    )
     create_entries = [(item, "createTask", _restore_create_payload(item, board_id)) for item in missing]
 
     _set_restore_phase(writer.client, "audit")
@@ -226,8 +244,9 @@ def restore_cards_batched(
             write_entries.append((item, "saveTaskMetadata", {"task_id": task_id, "values": item.metadata}))
         # createTask does not accept an initial position.  Run the exported placement
         # once for every fresh obligation.  Overlapping archived positions are intentionally
-        # reconciled after closure, when the active-only order is knowable.
-        if not initialized or not _restore_placement_matches(row, item):
+        # reconciled after closure, when the active-only order is knowable.  A Product or Issue
+        # is placed by the store, which refuses to move one; the proof below still checks it.
+        if not _store_placed(item) and (not initialized or not _restore_placement_matches(row, item)):
             write_entries.append(
                 (
                     item,
@@ -241,6 +260,7 @@ def restore_cards_batched(
                     },
                 )
             )
+    write_entries.sort(key=lambda entry: _foreign_key_rank(entry[0]))
     definite_initialization_failure = False
     if write_entries:
         writes = [(method, payload) for _item, method, payload in write_entries]

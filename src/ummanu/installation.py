@@ -1,4 +1,4 @@
-"""Supported fresh-install and Git-checkpoint recovery flow.
+"""Supported fresh-install and recovery flow, from a legacy Git checkpoint or an exporter snapshot.
 
 The private instance repository is the only portable input. This module turns its normalized
 checkpoint into a new local data plane and then calls the same materializer ``ummanu upgrade``
@@ -45,12 +45,19 @@ from ummanu._fsutil import (
 )
 from ummanu.board.backend import CARD, board_client
 from ummanu.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
-from ummanu.config import validate_instance
+from ummanu.checkpoint import SNAPSHOT_BASE_REF, SNAPSHOT_BRANCH, SNAPSHOT_REF
+from ummanu.config import (
+    DataDirError,
+    instance_offsite_remote,
+    recovered_instance_locations,
+    validate_instance,
+)
 from ummanu.data import init_layout, manifest_for
 from ummanu.host_apply import (
     SystemdUnitInstaller,
     resolve_runtime_owner,
 )
+from ummanu.infra import snapshot_tree
 from ummanu.infra.export_allowlist import is_exported
 from ummanu.infra.github_credential import (
     CredentialError,
@@ -447,6 +454,308 @@ def _validate_initial_clone(staging: Path, remote: str) -> None:
         raise InstallError("validate shallow clone: bounded history was not established")
 
 
+@dataclass(frozen=True)
+class SnapshotCheckout:
+    """The clone step's result for a remote whose tip is an exporter snapshot."""
+
+    tip: str
+    repository: Path
+    # The extracted tree: `state/board` and `state/runs` are read here, never from the live root.
+    checkpoint_root: Path
+    # Private staging beside the live root that holds `checkpoint_root`; the caller removes it.
+    scratch: Path
+    changed: bool
+    detail: str
+
+
+def _snapshot_checkout(
+    remote: str,
+    target: Path,
+    *,
+    dry_run: bool,
+    bootstrap_credential: Path | None = None,
+    installation_user: str | None = None,
+) -> SnapshotCheckout | None:
+    """The clone step for a snapshot remote, or None when the remote tip is a legacy checkpoint.
+
+    The shape decision reads the remote tip from a depth-1 bare clone in private staging: a tree
+    with `snapshot-manifest.json` at its root is an exporter snapshot. Its tree is extracted and
+    checked against the manifest, and the live root is checked against the tree, before anything
+    outside the staging is written. Then the bare clone becomes the snapshot repository (or an
+    existing one there is fast-forwarded to the tip), the takeover marker names the tip, and the
+    live root is laid out in staging and moved into place. A dry run writes none of that.
+    """
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        scratch = Path(tempfile.mkdtemp(prefix=f".{target.name}.snapshot-", dir=target.parent))
+    except OSError as exc:
+        raise InstallError(f"could not stage the instance remote: {exc}") from None
+    keep = False
+    try:
+        staging = scratch / "instance.git"
+        RemoteExecution(remote, "initial-clone", bootstrap_file=bootstrap_credential).run_clone(
+            staging,
+            label="clone instance remote",
+            timeout=300,
+            clone_args=["--bare", "--depth=1", "--single-branch", "--no-tags", "--no-local"],
+        )
+        branch, tip = _validate_snapshot_clone(staging, remote)
+        payload = snapshot_tree.manifest_payload(staging, tip)
+        if payload is None:
+            return None
+        manifest = snapshot_tree.parse_manifest(payload)
+        if branch != SNAPSHOT_BRANCH:
+            raise InstallError(
+                f"snapshot remote's default branch is {branch}, but the exporter publishes {SNAPSHOT_BRANCH}"
+            )
+        tree = snapshot_tree.extract(staging, tip, scratch / "tree", manifest)
+        snapshot_tree.require_known_schema(manifest, _board_schema_lineage())
+        try:
+            data_dir, repository = recovered_instance_locations(tree.root / "instance.yaml", target)
+            offsite_remote = instance_offsite_remote(tree.root / "instance.yaml")
+        except DataDirError as exc:
+            raise InstallError(f"snapshot instance.yaml: {exc}") from None
+        live_root_in_data = _snapshot_layout(target, data_dir, repository)
+        live = snapshot_tree.live_root_state(target, tree)
+        # Shape (b): the live root `<data>/<name>` and this staging beside it, exactly, are not data.
+        not_data = (target, scratch) if live_root_in_data else ()
+        bootstrap_evidence = _checked_data_target(data_dir, ignore=not_data)
+        existing = _existing_snapshot_tip(repository)
+        if dry_run:
+            keep = True
+            return SnapshotCheckout(
+                tip, repository, tree.root, scratch, True, f"would recover exporter snapshot {tip[:12]}"
+            )
+        changed = live != "same" or existing != tip
+        inside_data = repository.is_relative_to(data_dir) or live_root_in_data
+        if inside_data and (not _data_target_entries(data_dir, not_data) or bootstrap_evidence):
+            # The checkpoint step accepts a data root only empty or laid out by ummanu, so lay it out
+            # before the snapshot repository or the live root becomes one of its entries.
+            init_layout(data_dir)
+        if not existing:
+            _adopt_snapshot_repository(staging, repository, installation_user)
+        elif existing != tip:
+            _fast_forward_snapshot_repository(
+                repository, remote, existing, tip, target=target, bootstrap_credential=bootstrap_credential
+            )
+        _point_snapshot_remote(repository, offsite_remote)
+        _mark_recovered_tip(repository, tip)
+        if live != "same":
+            _materialize_live_root(tree, target, scratch / "live", installation_user)
+        keep = True
+        verb = "recovered" if changed else "reused"
+        return SnapshotCheckout(
+            tip, repository, tree.root, scratch, changed, f"{verb} exporter snapshot {tip[:12]} into {repository}"
+        )
+    except CredentialError as exc:
+        raise InstallError(str(exc)) from None
+    except snapshot_tree.SnapshotTreeError as exc:
+        raise InstallError(f"snapshot recovery refused: {exc}") from None
+    except OSError as exc:
+        raise InstallError(f"snapshot recovery failed: {exc}") from None
+    finally:
+        if not keep:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _snapshot_layout(target: Path, data_dir: Path, repository: Path) -> bool:
+    """The one layout check of a snapshot recovery; True for shape (b), False for (a), else refused.
+
+    Accepted (docs/RECOVERY.md, "Snapshot recovery"):
+    (a) the live root and the data directory are disjoint, neither containing the other;
+    (b) the live root is a direct child of the data directory, `<data>/<name>` (`data_dir: ..`).
+    In both the snapshot repository lies outside the live root. Anything inside the live root
+    would be written before the live root is laid out, which then could no longer be absent or
+    empty; a live root deeper in the data directory would make its parents look like data.
+    """
+    for location, label in ((data_dir, "data directory"), (repository, "snapshot repository")):
+        if location == target or location.is_relative_to(target):
+            raise InstallError(
+                f"snapshot instance.yaml puts the {label} {location} inside the live root {target}; "
+                "this layout is not supported, nothing was written"
+            )
+    if not target.is_relative_to(data_dir):
+        return False
+    if target.parent != data_dir:
+        raise InstallError(
+            f"the live root {target} lies inside the data directory {data_dir} but is not a direct "
+            "child of it; this layout is not supported, nothing was written"
+        )
+    return True
+
+
+def _validate_snapshot_clone(staging: Path, remote: str) -> tuple[str, str]:
+    """Prove the bounded bare clone is the remote's default-branch tip; returns (branch, tip)."""
+
+    def inspect(args: list[str], label: str) -> str:
+        return _run(["git", "--git-dir", str(staging), *args], label=label)
+
+    if inspect(["rev-parse", "--is-bare-repository"], "validate cloned repository") != "true":
+        raise InstallError("validate cloned repository: not a bare Git repository")
+    if inspect(["remote", "get-url", "origin"], "validate cloned origin") != remote:
+        raise InstallError("validate cloned origin: remote identity mismatch")
+    try:
+        branch = inspect(["symbolic-ref", "--quiet", "--short", "HEAD"], "validate cloned branch")
+        tip = inspect(["rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}"], "validate cloned branch")
+    except InstallError:
+        raise InstallError("validate cloned branch: remote default branch is unavailable") from None
+    if not branch or inspect(["rev-parse", "HEAD"], "validate cloned revision") != tip:
+        raise InstallError("validate cloned branch: remote default branch is unavailable")
+    if inspect(["rev-parse", "--is-shallow-repository"], "validate shallow clone") != "true":
+        raise InstallError("validate shallow clone: bounded history was not established")
+    return branch, tip
+
+
+def _board_schema_lineage() -> tuple[str, ...]:
+    from ummanu.board.migrate import lineage
+    from ummanu.board.store import BoardStoreError
+
+    try:
+        return lineage()
+    except (BoardStoreError, ImportError, OSError) as exc:
+        raise InstallError(f"could not read this product's board schema lineage: {exc}") from None
+
+
+def _snapshot_git(repository: Path, args: list[str], label: str, *, input: str | None = None) -> str:
+    try:
+        completed = state_repo.run_git(repository, ["--git-dir", str(repository), *args], label=label, input=input)
+    except StateRepoError as exc:
+        raise InstallError(str(exc)) from None
+    if completed.returncode:
+        detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+        raise InstallError(f"{label}: {detail[-1] if detail else f'exited {completed.returncode}'}")
+    return (completed.stdout or "").strip()
+
+
+def _existing_snapshot_tip(repository: Path) -> str:
+    """The snapshot branch tip of a repository already at the location; "" when there is none yet."""
+    if repository.is_symlink() or (repository.exists() and not repository.is_dir()):
+        raise InstallError(f"snapshot repository {repository} is not a directory; no files were overwritten")
+    if not repository.exists() or not any(repository.iterdir()):
+        return ""
+    try:
+        bare = _snapshot_git(repository, ["rev-parse", "--is-bare-repository"], "inspect snapshot repository")
+    except InstallError:
+        bare = ""
+    if bare != "true":
+        raise InstallError(
+            f"snapshot repository {repository} exists but is not a bare Git repository; no files were overwritten"
+        )
+    try:
+        return _snapshot_git(
+            repository, ["rev-parse", "--verify", f"{SNAPSHOT_REF}^{{commit}}"], "inspect snapshot repository"
+        )
+    except InstallError:
+        return ""
+
+
+def _adopt_snapshot_repository(staging: Path, repository: Path, installation_user: str | None) -> None:
+    first_created: Path | None = None
+    parent = repository.parent
+    while not parent.exists():
+        first_created, parent = parent, parent.parent
+    repository.parent.mkdir(parents=True, exist_ok=True)
+    # The exporter stages its cuts beside the repository, so a parent recovery created is the user's too.
+    if first_created is not None:
+        _set_installation_owner(first_created, installation_user)
+    _set_installation_owner(staging, installation_user)
+    if repository.exists() and any(repository.iterdir()):
+        raise InstallError(f"snapshot repository {repository} changed during recovery; no files were overwritten")
+    os.replace(staging, repository)
+
+
+def _fast_forward_snapshot_repository(
+    repository: Path,
+    remote: str,
+    existing: str,
+    tip: str,
+    *,
+    target: Path,
+    bootstrap_credential: Path | None,
+) -> None:
+    """Move an existing snapshot repository to the remote tip, fast-forward only."""
+    remote_git = RemoteExecution(remote, "recovery-reuse", instance_dir=target, bootstrap_file=bootstrap_credential)
+    fetched = remote_git.run_instance(
+        repository,
+        ["--git-dir", str(repository), "fetch", "--quiet", "--no-tags", remote, SNAPSHOT_REF],
+        label="fetch snapshot remote",
+        timeout=300,
+    )
+    if fetched.returncode:
+        detail = (fetched.stderr or fetched.stdout or "").strip().splitlines()
+        raise InstallError(f"fetch snapshot remote: {detail[-1] if detail else f'exited {fetched.returncode}'}")
+    if _snapshot_git(repository, ["rev-parse", "FETCH_HEAD"], "inspect fetched snapshot") != tip:
+        raise InstallError("the snapshot remote moved during recovery; rerun the same command")
+    try:
+        ancestry = state_repo.run_git(
+            repository,
+            ["--git-dir", str(repository), "merge-base", "--is-ancestor", existing, tip],
+            label="snapshot ancestry",
+        )
+    except StateRepoError as exc:
+        raise InstallError(str(exc)) from None
+    if ancestry.returncode == 1:
+        raise InstallError(
+            f"snapshot repository {repository} is at {existing[:12]}, which the remote tip {tip[:12]} does "
+            "not extend; preserve and inspect it, no files were overwritten"
+        )
+    if ancestry.returncode:
+        detail = (ancestry.stderr or "").strip().splitlines()
+        raise InstallError(f"snapshot ancestry: {detail[-1] if detail else 'git error'}")
+    _snapshot_git(
+        repository,
+        ["update-ref", "-m", "recover: fast-forward to the remote tip", SNAPSHOT_REF, tip, existing],
+        "fast-forward snapshot repository",
+    )
+
+
+def _point_snapshot_remote(repository: Path, remote: str) -> None:
+    """Set `origin` to `offsite.instance_remote`, the remote the snapshot pusher publishes to."""
+    if remote:
+        _snapshot_git(repository, ["config", "--replace-all", "remote.origin.url", remote], "set snapshot remote")
+
+
+def _mark_recovered_tip(repository: Path, tip: str) -> None:
+    """Make the recovered tip the takeover base: doctor's foreign-commit walk starts after it."""
+    try:
+        marker = _snapshot_git(repository, ["cat-file", "blob", SNAPSHOT_BASE_REF], "read takeover marker")
+    except InstallError:
+        marker = ""
+    if marker == tip:
+        return
+    blob = _snapshot_git(repository, ["hash-object", "-w", "--stdin"], "write takeover marker", input=f"{tip}\n")
+    _snapshot_git(
+        repository, ["update-ref", "-m", "recover: takeover base", SNAPSHOT_BASE_REF, blob], "write takeover marker"
+    )
+
+
+def _materialize_live_root(
+    tree: snapshot_tree.SnapshotTree, target: Path, staging: Path, installation_user: str | None
+) -> None:
+    """Lay the live root out in staging and move it into place; an absent or empty target only."""
+    snapshot_tree.stage_live_root(tree, staging)
+    _set_installation_owner(staging, installation_user)
+    claimed_target = False
+    try:
+        if not target.exists():
+            target.mkdir(mode=0o700)
+            claimed_target = True
+        elif not target.is_dir() or any(target.iterdir()):
+            raise InstallError(
+                f"target {target} changed during recovery; choose a fresh --instance-dir, no files were overwritten"
+            )
+        os.replace(staging, target)
+        claimed_target = False
+    except OSError as exc:
+        raise InstallError("adopt the recovered live root: atomic replacement failed") from exc
+    finally:
+        if claimed_target:
+            try:
+                target.rmdir()
+            except OSError:
+                pass
+
+
 def _bootstrap_credential(args: argparse.Namespace, target: Path) -> tuple[Path | None, Path | None]:
     """Return external bootstrap material and a disposable file to remove afterwards."""
     source = getattr(args, "bootstrap_credential_file", None)
@@ -597,25 +906,47 @@ def _valid_existing_layout(data_dir: Path) -> bool:
     return actual == manifest_for(data_dir)
 
 
+def _data_target_entries(data_dir: Path, ignore: tuple[Path, ...] = ()) -> set[str]:
+    """The data target's entries, less the ones that are exactly a path of `ignore`."""
+    if not data_dir.exists():
+        return set()
+    return {entry.name for entry in data_dir.iterdir() if entry not in ignore}
+
+
+def _checked_data_target(data_dir: Path, *, ignore: tuple[Path, ...] = ()) -> bool:
+    """Refuse a non-empty data target ummanu did not create; True when it holds bootstrap evidence only.
+
+    `ignore` names direct entries of the data target that are not its contents: a snapshot
+    recovery's live root `<data>/<name>` and the staging it created beside it. Nothing else is
+    left out, siblings and deeper paths included.
+    """
+    entries = _data_target_entries(data_dir, ignore)
+    if not entries:
+        return False
+    # An older bootstrap recorded its host unit in `host-managed.json` before checkpoint
+    # materialization so the first full reconcile could prove ownership. That one evidence
+    # file is compatible with an otherwise empty data root.
+    bootstrap_evidence = entries == {"host-managed.json"}
+    if not bootstrap_evidence and not _valid_existing_layout(data_dir):
+        raise InstallError(
+            f"data target {data_dir} is not an installation created by ummanu; "
+            "choose adopt or a clean recovery target"
+        )
+    return bootstrap_evidence
+
+
 def materialize_checkpoint(
     instance_dir: Path,
     data_dir: Path,
     *,
     dry_run: bool = False,
 ) -> tuple[int, int]:
-    """Validate the checkpoint and optionally publish it into the local layout."""
-    bootstrap_evidence = False
-    if data_dir.exists() and any(data_dir.iterdir()):
-        # An older bootstrap recorded its host unit in `host-managed.json` before checkpoint
-        # materialization so the first full reconcile could prove ownership. That one evidence
-        # file is compatible with an otherwise empty data root.
-        entries = {entry.name for entry in data_dir.iterdir()}
-        bootstrap_evidence = entries == {"host-managed.json"}
-        if not bootstrap_evidence and not _valid_existing_layout(data_dir):
-            raise InstallError(
-                f"data target {data_dir} is not an installation created by ummanu; "
-                "choose adopt or a clean recovery target"
-            )
+    """Validate the checkpoint and optionally publish it into the local layout.
+
+    `instance_dir` is where `state/board` and `state/runs` are read: the checkout of a legacy
+    checkpoint, or the extracted tree of an exporter snapshot.
+    """
+    bootstrap_evidence = _checked_data_target(data_dir)
     board_source = instance_dir / "state" / "board"
     runs_source = instance_dir / "state" / "runs"
     try:
@@ -1061,12 +1392,20 @@ def _recovery_identity_entry(digest: Any, *, path: bytes, entry_type: bytes, con
         digest.update(component)
 
 
-def _recovery_identity(instance_dir: Path, bindings: list[dict[str, object]]) -> str:
+def _recovery_identity(
+    instance_dir: Path, bindings: list[dict[str, object]], *, checkpoint_root: Path | None = None
+) -> str:
+    """The identity of one recovery's inputs: board, runs, memory facts and project bindings.
+
+    Board and runs are read below `checkpoint_root` (the extracted tree of an exporter snapshot),
+    by default the instance checkout; the facts always come from the live root.
+    """
     digest = hashlib.sha256()
+    checkpoint_root = instance_dir if checkpoint_root is None else checkpoint_root
     # The board is hashed by its logical files, read through the checkpoint reader, so the same
     # board has the same identity whether a flat or a split checkpoint carries it.
     try:
-        board: CheckpointBoard | None = open_checkpoint_board(instance_dir / "state" / "board")
+        board: CheckpointBoard | None = open_checkpoint_board(checkpoint_root / "state" / "board")
         board_error = b""
     except CheckpointLayoutError as exc:
         board, board_error = None, str(exc).encode()
@@ -1075,7 +1414,7 @@ def _recovery_identity(instance_dir: Path, bindings: list[dict[str, object]]) ->
         *(f"state/runs/{name}" for name in CHECKPOINT_RUNS),
     ]
     for relative in checkpoint_inputs:
-        path = instance_dir / relative
+        path = checkpoint_root / relative
         name = relative.removeprefix("state/board/")
         if name in CHECKPOINT_BOARD:
             if board is None:
@@ -1287,6 +1626,7 @@ def _restore_without_credentials(
     target: Path,
     result: InstallResult,
     bootstrap_credential: Path | None,
+    checkpoint_root: Path | None = None,
 ) -> None:
     """Recover everything that does not go through the board.
 
@@ -1297,11 +1637,12 @@ def _restore_without_credentials(
     report = _validated_instance(target)
     assert report.data_dir is not None
     data_dir = report.data_dir
-    identity = _recovery_identity(target, report.bindings)
+    checkpoint_root = target if checkpoint_root is None else checkpoint_root
+    identity = _recovery_identity(target, report.bindings, checkpoint_root=checkpoint_root)
     progress_path = data_dir / RECOVERY_PROGRESS_FILE
     progress = _read_recovery_progress(progress_path, identity)
     checkpoint_complete = progress.get("checkpoint") == "complete"
-    cards, runs = materialize_checkpoint(target, data_dir, dry_run=args.dry_run or checkpoint_complete)
+    cards, runs = materialize_checkpoint(checkpoint_root, data_dir, dry_run=args.dry_run or checkpoint_complete)
     if args.dry_run:
         result.add(
             "checkpoint",
@@ -1356,6 +1697,7 @@ def install(args: argparse.Namespace) -> InstallResult:
     bootstrap: Path | None = None
     recovery_data_dir: Path | None = None
     recovery_runtime_paths: list[Path] = []
+    snapshot: SnapshotCheckout | None = None
     if args.adopt:
         result.add("mode", "failed", "full live-host adoption is not supported by this flow")
         return result
@@ -1399,19 +1741,45 @@ def install(args: argparse.Namespace) -> InstallResult:
             or getattr(args, "bootstrap_credential_stdin", False)
         ):
             bootstrap, disposable_bootstrap = _bootstrap_credential(args, target)
-        detail = _clone_or_reuse(
-            args.instance_remote,
-            target,
-            recovery=recovery,
-            dry_run=args.dry_run,
-            bootstrap_credential=bootstrap,
-            installation_user=args.installation_user,
-        )
-        result.add(
-            "instance-checkout",
-            "unchanged" if detail.startswith("reused") else ("would-change" if args.dry_run else "changed"),
-            detail,
-        )
+        # The one shape decision (docs/RECOVERY.md, "Two remote shapes"): a recovery into an absent
+        # or empty target, or into a live root an earlier snapshot recovery laid out (it has an
+        # `instance.yaml` and no `.git`), reads the remote tip first. An exporter snapshot takes the
+        # snapshot path; a legacy checkpoint, a work-tree target, any other non-empty target and a
+        # fresh install take the clone step below unchanged. A dry run against an absent target
+        # stays offline, as before.
+        snapshot_live_root = (target / "instance.yaml").is_file() and not (target / ".git").exists()
+        if recovery and (needs_clone or snapshot_live_root) and not (args.dry_run and needs_clone):
+            snapshot = _snapshot_checkout(
+                args.instance_remote,
+                target,
+                dry_run=args.dry_run,
+                bootstrap_credential=bootstrap,
+                installation_user=args.installation_user,
+            )
+        if snapshot is not None:
+            detail = snapshot.detail
+            result.add(
+                "instance-checkout",
+                "would-change" if args.dry_run else ("changed" if snapshot.changed else "unchanged"),
+                detail,
+            )
+            recovery_runtime_paths.append(snapshot.repository)
+        else:
+            detail = _clone_or_reuse(
+                args.instance_remote,
+                target,
+                recovery=recovery,
+                dry_run=args.dry_run,
+                bootstrap_credential=bootstrap,
+                installation_user=args.installation_user,
+            )
+            result.add(
+                "instance-checkout",
+                "unchanged" if detail.startswith("reused") else ("would-change" if args.dry_run else "changed"),
+                detail,
+            )
+        # Board and runs: the checkout of a legacy checkpoint, or the snapshot's extracted tree.
+        checkpoint_root = snapshot.checkpoint_root if snapshot is not None else target
         if args.dry_run and not target.exists():
             result.add("secret-store", "skipped", "available only after clone")
             result.add("runtime-env", "skipped", "available only after clone")
@@ -1458,7 +1826,7 @@ def install(args: argparse.Namespace) -> InstallResult:
             if not runtime_required:
                 values = {}
             else:
-                _restore_without_credentials(args, target, result, bootstrap)
+                _restore_without_credentials(args, target, result, bootstrap, checkpoint_root)
                 raise _blocked_by_secrets(exc, secrets, runtime_env) from None
         except RuntimeEnvError as exc:
             raise InstallError(str(exc)) from None
@@ -1478,7 +1846,7 @@ def install(args: argparse.Namespace) -> InstallResult:
                 - set(values)
             )
             if unavailable:
-                _restore_without_credentials(args, target, result, bootstrap)
+                _restore_without_credentials(args, target, result, bootstrap, checkpoint_root)
                 raise _blocked_by_secrets(
                     InstallError(f"runtime.env lacks {', '.join(unavailable)}"), secrets, runtime_env
                 ) from None
@@ -1501,12 +1869,12 @@ def install(args: argparse.Namespace) -> InstallResult:
             assert report.data_dir is not None
             data_dir = report.data_dir
             recovery_data_dir = data_dir
-            identity = _recovery_identity(target, report.bindings)
+            identity = _recovery_identity(target, report.bindings, checkpoint_root=checkpoint_root)
             progress_path = data_dir / RECOVERY_PROGRESS_FILE
             progress = _read_recovery_progress(progress_path, identity)
             checkpoint_complete = progress.get("checkpoint") == "complete"
             cards, runs = materialize_checkpoint(
-                target, data_dir, dry_run=args.dry_run or checkpoint_complete
+                checkpoint_root, data_dir, dry_run=args.dry_run or checkpoint_complete
             )
             if args.dry_run:
                 result.add(
@@ -1590,7 +1958,7 @@ def install(args: argparse.Namespace) -> InstallResult:
                 state_path = pipeline_state_path(context.runtime_home or Path.home())
                 recovery_runtime_paths.append(state_path.parent)
                 restored = materialize_pipeline_state(
-                    target,
+                    checkpoint_root,
                     state_path,
                     dry_run=False,
                 )
@@ -1659,6 +2027,8 @@ def install(args: argparse.Namespace) -> InstallResult:
                     result.add("install", "failed", str(exc))
         if disposable_bootstrap is not None:
             disposable_bootstrap.unlink(missing_ok=True)
+        if snapshot is not None:
+            shutil.rmtree(snapshot.scratch, ignore_errors=True)
     return result
 
 

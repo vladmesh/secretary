@@ -151,7 +151,8 @@ file.
 one line: the parent of the exporter's first commit on this branch (a seeded legacy tip), or `root`
 when that commit was a root commit. The exporter creates it once, in the same `update-ref --stdin`
 transaction as that first commit, and only when the tip it builds on is not its own (empty, or
-seeded). Nothing else writes it. It is a local ref and is not pushed.
+seeded). Apart from the exporter, only a snapshot recovery writes it: it points it at the recovered
+tip (see [Snapshot recovery](#snapshot-recovery)). It is a local ref and is not pushed.
 
 **Doctor `snapshot.foreign_commit` (red).** For every commit in `<base>..<tip>` of the snapshot
 branch (the whole branch when the base is `root`), doctor checks the exporter's author and committer
@@ -611,6 +612,22 @@ sudo ummanu recover --instance-remote REMOTE --instance-dir INSTANCE --installat
   --bootstrap-credential-file TOKEN_FILE --recovery-phrase-file PHRASE_FILE
 ```
 
+### Two remote shapes
+
+`recover` reads the remote tip before it decides how to clone, whenever the `--instance-dir` target
+is not a Git work tree (absent, empty, or a live root an earlier snapshot recovery laid out). It
+clones the default branch depth 1, bare, into a private sibling staging directory and looks for
+`snapshot-manifest.json` at the root of the tip's tree:
+
+- **With a manifest** the tip is an exporter snapshot, and recovery takes the
+  [snapshot path](#snapshot-recovery).
+- **Without one** the tip is a legacy checkpoint. The staging is removed and recovery takes the
+  [checkout path](#checkout) below, unchanged. That path stays for every checkpoint without a
+  manifest.
+
+A target that is already a Git work tree, a fresh `install` and a `--dry-run` against an absent
+target do not read the shape and take the checkout path, as before.
+
 ### Checkout
 
 The clone takes only the current default-branch checkpoint: depth 1, one branch, no tags. Git clones
@@ -633,6 +650,51 @@ untracked file the allowlist does not match (`secrets/installation.key`, `runtim
 `board-store.env`) is host-local and does not count as a local change of the checkout; every other
 change, tracked or untracked, does.
 
+### Snapshot recovery
+
+For a remote whose tip is an exporter snapshot, the clone step does this, in this order, and writes
+nothing outside its staging until the checks have passed:
+
+1. **Bare clone.** The staging clone is validated before anything is adopted: a bare repository,
+   `origin` the given remote, the default branch resolvable and equal to `HEAD`, the history shallow.
+   The branch must be `main`, the one the exporter publishes.
+2. **Manifest check.** The manifest must be format `ummanu.instance-snapshot`, version 1, with a map
+   of path to sha256, `board_schema_head` and `product_revision`; a malformed manifest or another
+   version is refused by name. Every blob of the tree is extracted into the staging and hashed on
+   the way: every file except the manifest must be listed with a matching digest, and nothing may be
+   listed that the tree lacks. The manifest's `board_schema_head` must be in this product's migration
+   lineage; a newer (or unknown) head is refused naming both heads.
+3. **Locations.** The extracted `instance.yaml` names the data directory (a relative value is rooted
+   at the live root) and `offsite.snapshot_repo`, resolved as the exporter resolves it, by default
+   `<data>/backup/instance.git`. One layout check runs before anything is written. It accepts
+   exactly two shapes, and the snapshot repository lies outside the live root in both:
+   - (a) the live root and the data directory are disjoint, neither containing the other;
+   - (b) the live root is a direct child of the data directory, `<data>/<name>` (`data_dir: ..`).
+   Every other layout is refused with a message naming the paths. A non-empty data directory
+   ummanu did not lay out is refused too. In shape (b), only the live root entry itself and the
+   staging recovery created beside it are not counted as data-directory contents.
+4. **Live root rule.** The `--instance-dir` must be absent, empty, or already the live root of this
+   same tip: every exported path the tree's, byte for byte and with its executable bit, and no
+   exported path extra. A file the allowlist does not match (`secrets/installation.key`,
+   `runtime.env`, `board-store.env`, a bootstrap stamp) is the host's own and does not count. Any
+   other non-empty live root is refused and nothing in it is overwritten.
+5. **Snapshot repository.** The staging clone becomes the snapshot repository. An existing
+   repository there is reused only if its tip is the remote tip or an ancestor of it (it is fetched
+   and fast-forwarded); anything else is refused. `origin` is set to `offsite.instance_remote`, as
+   the pusher expects.
+6. **Takeover marker.** `refs/ummanu/snapshot-base` is set to the recovered tip, so doctor's
+   `snapshot.foreign_commit` walk covers only commits made after the recovery.
+7. **Live root.** Exactly the tree's paths the export allowlist matches are laid out in staging, with
+   their bytes and modes, handed to `--installation-user` and moved into place atomically. The live
+   root has no `.git`, no `state/board`, no `state/runs` and no manifest. Host-local files come only
+   from bootstrap, the recovery phrase and the secret store, never from the tree.
+
+The rest of the [sequence](#sequence) then runs on the plain live root. `state/board` and
+`state/runs` are read from the extracted tree, not from the live root; the recovery identity hashes
+them from there and the memory facts from the live root. On the first tick the live root is not a
+work tree, so the exporter commits on top of the recovered tip and the pusher publishes it. `ummanu
+upgrade`'s instance packing step skips a live root that is not a work tree.
+
 ### Sequence
 
 `recover` runs one sequence:
@@ -646,8 +708,9 @@ change, tracked or untracked, does.
    key. A present key must be a regular non-symlink mode-`0600` file owned by that user.
 3. Checks the remote and checkout, materialised credentials and board reachability. No session
    manager is required.
-4. Materialises `state/board` and `state/runs` into a new local data plane, builds derived JSON from
-   the NDJSON and verifies counters before any live write.
+4. Materialises `state/board` and `state/runs` (from the checkout, or from the extracted snapshot
+   tree) into a new local data plane, builds derived JSON from the NDJSON and verifies counters
+   before any live write.
 5. Idempotently imports the board and rebuilds the memory export and index from `state/memory/facts`
    (see [Board import](#board-import)).
 6. Attempts every missing project checkout from the registry through the same remote-execution
@@ -738,7 +801,9 @@ refused with both tips preserved; nothing is reset, rebased, merged or force-pus
 ### Retry
 
 Rerunning the same `ummanu recover` command is the only supported retry. The checkout is
-fast-forward only; completed board import and memory indexing are skipped while the board, run,
+fast-forward only; a snapshot recovery interrupted after the bare clone reuses that repository and
+lays the live root out, and one interrupted after the live root reuses both, by the live-root rule
+above; completed board import and memory indexing are skipped while the board, run,
 memory-fact and binding identity still matches; successful checkouts are untouched; only
 missing/failed checkouts and their dependent host resources are retried. The identity length-delimits
 every canonical path, entry type and content value before hashing.

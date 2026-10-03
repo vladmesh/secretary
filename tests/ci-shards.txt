@@ -203,6 +203,8 @@ integration-board tests/test_sprints.py
 integration-board tests/test_sprint_guard_outside_sprint.py
 unit tests/test_state_repo.py
 component tests/test_snapshot_exporter.py
+component tests/test_snapshot_recover.py
+integration-recovery tests/test_snapshot_recovery_postgres.py
 unit tests/test_instance_maintenance.py
 component tests/test_owned_cleanup.py
 integration-board tests/test_status.py
