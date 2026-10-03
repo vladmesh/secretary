@@ -198,6 +198,8 @@ class BootstrapThenRecoveryTests(FreshStoreCase):
                 mock.patch("ummanu.installation.provision_project_checkouts", return_value=[]),
                 mock.patch("ummanu.installation.provision_codex_home", return_value=0),
                 mock.patch("ummanu.installation.rebuild_memory_index", return_value=1),
+                # The fixture enables the web front; the host's Caddy is not this test's (ummanu-49 P4).
+                mock.patch("ummanu.installation.caddy_installed", return_value=True),
                 mock.patch(
                     "ummanu.installation.materialize_host",
                     return_value=SimpleNamespace(steps=[SimpleNamespace(status="changed")]),

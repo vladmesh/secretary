@@ -136,7 +136,8 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(
                 steps.mock_calls,
                 [
-                    mock.call.install_platform(dry_run=False, runtime_user="dev"),
+                    # The cloned instance has a unit prefix, so its web front wants Caddy.
+                    mock.call.install_platform(dry_run=False, runtime_user="dev", web_front=True),
                     mock.call.provision(target, allow_create=True),
                     mock.call.migrate(target),
                     mock.call.verify(target),
@@ -194,7 +195,8 @@ class BootstrapTests(unittest.TestCase):
             self.assertEqual(
                 steps.mock_calls,
                 [
-                    mock.call.install_platform(dry_run=False, runtime_user="dev"),
+                    # `version: 1` alone declares no unit prefix, so no web-front unit.
+                    mock.call.install_platform(dry_run=False, runtime_user="dev", web_front=False),
                     mock.call.provision(target, allow_create=True),
                     mock.call.migrate(target),
                     mock.call.verify(target),

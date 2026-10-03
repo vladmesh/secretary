@@ -429,7 +429,7 @@ def _production_tick_work(
     observer_errors: list[dict[str, str]] = []
     # Fence unhealthy sprint observers before advancing any reserved cards.
     try:
-        fence = observer_fence(runtime, payload)
+        fence = observer_fence(runtime, payload, pause_mode=str(pause.get("mode") or ""))
     except Exception as exc:
         # An unfinished fence authorizes no downstream work.
         return _fence_failed_tick(runtime, payload, exc, usage_outcomes + outcome_outcomes)

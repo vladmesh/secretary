@@ -217,9 +217,15 @@ def _git(root: Path, args: list[str], timeout: int = 120) -> str:
     except OSError:
         raise GitError(f"git {args[0]} could not run") from None
     if result.returncode != 0:
-        reason = (result.stderr or result.stdout).strip().splitlines()
-        raise GitError(f"git {args[0]}: {reason[0] if reason else 'failed'}")
+        raise GitError(f"git {args[0]}: {_git_failure_reason(result.stderr or result.stdout)}")
     return (result.stdout or "").strip()
+
+
+def _git_failure_reason(output: str) -> str:
+    """Git's `fatal:` line, else its last line: the first is often progress (`Preparing worktree`)."""
+    lines = [line.strip() for line in (output or "").splitlines() if line.strip()]
+    fatal = next((line for line in lines if line.startswith("fatal:")), None)
+    return fatal or (lines[-1] if lines else "failed")
 
 
 def require_entrypoint(root: Path, target: str) -> None:
@@ -916,6 +922,11 @@ def step_role_skills(context: UpgradeContext) -> StepResult:
     except (OSError, ValueError) as exc:
         return StepResult("role-skills", "failed", str(exc))
     if before["ok"]:
+        if not context.dry_run:
+            try:
+                _hand_role_skill_dirs_to_runtime_user(context, manifest)
+            except (GitError, OSError, ValueError) as exc:
+                return StepResult("role-skills", "failed", str(exc))
         return StepResult("role-skills", "unchanged", f"{len(before['targets'])} targets in sync")
     pending = len(before["missing"]) + len(before["drift"]) + len(before["entry_points"])
     pending += len(before.get("retired", []))
@@ -936,7 +947,49 @@ def step_role_skills(context: UpgradeContext) -> StepResult:
         return StepResult("role-skills", "failed", str(exc))
     if not after["after"]["ok"]:
         return StepResult("role-skills", "failed", "sync ran but the audit is still red")
+    try:
+        _hand_role_skill_dirs_to_runtime_user(context, manifest)
+    except (GitError, OSError, ValueError) as exc:
+        return StepResult("role-skills", "failed", str(exc))
     return StepResult("role-skills", "changed", f"synced {pending} skill copies")
+
+
+def _hand_role_skill_dirs_to_runtime_user(context: UpgradeContext, manifest: Path) -> None:
+    """Give the runtime user every skill root, and the directories above it a root sync created.
+
+    Under sudo, `sync` creates `~/.claude/skills`, `~/.hermes/skills`, the Codex runtime home and the
+    entry points' directory as root. Each root is handed over whole; its ancestors one by one, up to
+    the home or data directory that contains them and never that directory itself.
+    """
+    if not context.runtime_user or os.geteuid() != 0:
+        return
+    registry = role_skills.load_registry(context.instance_path, product_manifest=manifest)
+    data_dir = role_skills.resolve_data_dir(registry, context.instance_path, _data_dir(context))
+    home = context.runtime_home or Path.home()
+    bounds = tuple(Path(bound) for bound in (home, data_dir) if bound is not None)
+    roots = {
+        root for root in role_skills.target_roots(registry, context.runtime_home, data_dir).values() if root
+    }
+    for root in sorted(roots):
+        _set_runtime_owner(root, context.runtime_user)
+        _set_runtime_ancestors_owner(root, bounds, context.runtime_user)
+    for command in role_skills.iter_expected_commands(registry, context.runtime_home):
+        _set_runtime_ancestors_owner(command.dest, bounds, context.runtime_user)
+
+
+def _set_runtime_ancestors_owner(path: Path, bounds: tuple[Path, ...], runtime_user: str) -> None:
+    """Assign the real directories between `path` and the innermost bound containing it."""
+    bound = max(
+        (bound for bound in bounds if bound in path.parents), key=lambda b: len(b.parts), default=None
+    )
+    if bound is None:
+        return
+    for parent in path.parents:
+        if parent == bound:
+            return
+        if parent.is_symlink() or not parent.is_dir():
+            continue
+        _set_runtime_directory_owner(parent, runtime_user)
 
 
 def step_head_registry(context: UpgradeContext) -> StepResult:
@@ -1140,6 +1193,17 @@ def _workspace_owner_dirs(worktree: Path) -> tuple[Path, ...]:
     return tuple(roots)
 
 
+def _registered_worktree(product_root: Path, worktree: Path) -> bool:
+    """Whether the product's Git already has a linked worktree registered at `worktree`."""
+    listing = _git(product_root, ["worktree", "list", "--porcelain"])
+    wanted = worktree.resolve(strict=False)
+    return any(
+        Path(line.removeprefix("worktree ")).resolve(strict=False) == wanted
+        for line in listing.splitlines()
+        if line.startswith("worktree ")
+    )
+
+
 def _worktree_git_dir(worktree: Path) -> Path | None:
     """Return the linked-worktree administrative directory named by its .git file."""
     try:
@@ -1189,9 +1253,13 @@ def step_worktrees(context: UpgradeContext) -> StepResult:
                 worktree.parent.mkdir(parents=True, exist_ok=True)
                 for parent in _workspace_owner_dirs(worktree):
                     _set_runtime_directory_owner(parent, context.runtime_user)
+                # A registration whose directory is gone (a lost workspace root, a host rebuilt
+                # from a backup) makes a plain add refuse; one `--force` replaces exactly that
+                # registration. A locked one still refuses, and git's `fatal:` line says why.
+                force = ["--force"] if _registered_worktree(context.product_root, worktree) else []
                 _git(
                     context.product_root,
-                    ["worktree", "add", "--detach", str(worktree), "HEAD"],
+                    ["worktree", "add", *force, "--detach", str(worktree), "HEAD"],
                     timeout=300,
                 )
                 _set_runtime_owner(worktree, context.runtime_user)

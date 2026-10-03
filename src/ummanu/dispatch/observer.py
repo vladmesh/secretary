@@ -122,6 +122,9 @@ STATE_STOP_PENDING = "stop-pending"
 STATE_PAUSE_STOP_PENDING = "pause-stop-pending"
 STATE_STOPPED_BY_PAUSE = "stopped-by-pause"
 PENDING_STOP_STATES = (STATE_STOP_PENDING, STATE_PAUSE_STOP_PENDING)
+# The deferral a drain writes on an open sprint's record. Nothing failed: the launch waits for the
+# resume, and the fence reads exactly this reason to tell that apart from a failed bring-up.
+DRAIN_DEFERRED_REASON = "pipeline is draining"
 
 
 def observer_pid_file(reference: str) -> str:
@@ -962,7 +965,7 @@ def _reconcile_open_sprint(
             ref,
             record,
             head=_observer_head_or_blank(runtime, sprint),
-            reason="pipeline is draining",
+            reason=DRAIN_DEFERRED_REASON,
             action="observer-launch-skipped",
             # An intent nobody could resolve stays an intent through the drain: the resume then
             # closes what it may have started instead of opening a head beside it.

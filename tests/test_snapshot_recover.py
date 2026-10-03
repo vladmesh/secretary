@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -22,6 +23,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from tests.fakes import snapshot_remote
 from tests.fakes.installation import CARD, SPRINT, _checkpoint, _git
 from tests.fakes.snapshot_remote import (
     HEAD,
@@ -53,6 +55,8 @@ from ummanu.config import validate_instance
 from ummanu.head_registry import installed_heads, installed_pair
 from ummanu.infra.export_allowlist import is_exported
 from ummanu.installation import InstallError, _recovery_identity
+from ummanu.memory.canon import fact_content_hash, fact_files, parse_fact_text
+from ummanu.memory_journal import verify_memory_journal
 from ummanu.secret_words import RECOVERY_WORDS
 from ummanu.sprint_observer import head_choice
 
@@ -106,6 +110,35 @@ def _stood_in_bootstrap(
         mock.patch("builtins.print"),
     ):
         return bootstrap_module.bootstrap(args)
+
+
+def _service_index(data_dir: Path, instance_dir: Path, **_kwargs) -> int:
+    """The reindex without the embedding model, in the service's schema, so `memory verify` can read it."""
+    index = data_dir / "memory" / "index.sqlite"
+    index.parent.mkdir(parents=True, exist_ok=True)
+    facts = fact_files(instance_dir / "state" / "memory" / "facts")
+    with sqlite3.connect(index) as conn:
+        conn.execute(
+            "CREATE TABLE memories(id INTEGER PRIMARY KEY AUTOINCREMENT, fact_id TEXT UNIQUE, "
+            "content_hash TEXT, text TEXT, scope TEXT, tags TEXT, source TEXT, created_at TEXT)"
+        )
+        for fact_id, path in facts:
+            fact = parse_fact_text(path.read_text(encoding="utf-8"), f"{fact_id}.md", fact_id=fact_id)
+            conn.execute(
+                "INSERT INTO memories(fact_id, content_hash, text, scope, tags, source, created_at) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    fact["id"],
+                    fact_content_hash(fact),
+                    fact["text"],
+                    fact["scope"],
+                    fact["tags"],
+                    fact["source"],
+                    fact["created_at"],
+                ),
+            )
+        conn.commit()
+    return len(facts)
 
 
 class SnapshotRecoverCase(unittest.TestCase):
@@ -219,6 +252,30 @@ class SnapshotRecoveryTests(SnapshotRecoverCase):
         writer = tick_checkpoint_writer(self.fixture.data_dir, self.fixture.target)
         self.assertIsInstance(writer, SnapshotExporter)
         self.assertEqual(writer.snapshot_repo, repo.resolve())
+
+    def test_memory_verifies_right_after_recover_with_the_export_handed_to_the_user(self):
+        """ummanu-48 P3: the rebuild writes only the index, so recover publishes the export too."""
+        with mock.patch.object(snapshot_remote, "_rebuilt_index", _service_index):
+            result = self.recover()
+
+        self.assertEqual(result.status, "ok", result.render())
+        self.assertEqual(self.steps(result)["memory"], ("changed", "rebuilt index for 1 fact(s)"))
+        verified = verify_memory_journal(self.fixture.data_dir, self.fixture.target)
+        self.assertTrue(verified.ok, verified.findings)
+        self.assertEqual((verified.fact_count, verified.export_count, verified.index_count), (1, 1, 1))
+
+    def test_a_retry_past_the_rebuild_still_publishes_a_missing_export(self):
+        with mock.patch.object(snapshot_remote, "_rebuilt_index", _service_index):
+            self.recover()
+            (self.fixture.data_dir / "memory" / "export.ndjson").unlink()
+            again = self.recover()
+
+        self.assertEqual(again.status, "ok", again.render())
+        self.assertEqual(
+            self.steps(again)["memory"],
+            ("changed", "checkpoint index already rebuilt; published the memory export"),
+        )
+        self.assertTrue(verify_memory_journal(self.fixture.data_dir, self.fixture.target).ok)
 
     def test_the_recovery_identity_is_the_live_roots_facts_and_the_trees_board_and_runs(self):
         self.recover()
@@ -692,7 +749,7 @@ class SnapshotBootstrapTests(SnapshotRecoverCase):
         self.assertEqual(
             self.store_steps.mock_calls[-3:],
             [
-                mock.call.install_platform(dry_run=False, runtime_user=getpass.getuser()),
+                mock.call.install_platform(dry_run=False, runtime_user=getpass.getuser(), web_front=True),
                 mock.call.migrate(target),
                 mock.call.verify(target),
             ],

@@ -14,6 +14,13 @@ import time
 from pathlib import Path
 from typing import Any
 
+# Every process that builds the embedder imports this module first: the memory service, the reindex
+# and recover's memory step. huggingface_hub reads this once, when it is imported (`constants.py`),
+# so it is set before fastembed pulls the hub in. Shared blobs put `model.onnx` and
+# `model.onnx_data` in different directories, and onnxruntime refuses that on a fresh cache
+# ("External data path escapes model directory").
+os.environ["HF_HUB_DISABLE_SHARED_BLOBS"] = "1"
+
 import numpy as np
 import sqlite_vec
 from fastembed import TextEmbedding

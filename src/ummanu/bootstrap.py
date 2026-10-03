@@ -1,7 +1,8 @@
 """Bootstrap the host-owned PostgreSQL board store and its Docker prerequisites.
 
 The checkpoint deliberately does not carry these services or their credentials. They are
-reproducible host state: this module installs Docker and Compose, provisions the
+reproducible host state: this module installs Docker and Compose (and the distribution's Caddy when
+the installation enables the web-front component), provisions the
 PostgreSQL board store (`board/provision.py`), migrates it to this build's schema
 (`board/migrate.py`) and verifies its role contract. That empty, migrated store is the whole board a fresh installation starts from:
 cards come later from `task create` or from install recovery restoring a checkpoint into it.
@@ -34,6 +35,8 @@ from ummanu.installation import (
     _run,
     _set_installation_owner,
     _snapshot_checkout,
+    caddy_installed,
+    web_front_wanted,
 )
 
 BOOTSTRAP_STAMP = ".ummanu-bootstrap"
@@ -54,12 +57,14 @@ def _host_supported(os_release: Path = Path("/etc/os-release")) -> None:
         raise BootstrapError("bootstrap supports Ubuntu 24.04 only")
 
 
-def _install_platform(*, dry_run: bool, runtime_user: str | None = None) -> None:
+def _install_platform(*, dry_run: bool, runtime_user: str | None = None, web_front: bool = False) -> None:
+    """Install Docker and Compose, and the distribution's Caddy when the web-front component is enabled."""
     if dry_run:
         return
     needs_docker = shutil.which("docker") is None
     needs_compose = not _docker_compose_available()
-    if needs_docker or needs_compose:
+    needs_caddy = web_front and not caddy_installed()
+    if needs_docker or needs_compose or needs_caddy:
         if os.geteuid() != 0:
             raise BootstrapError("host prerequisites are absent; rerun bootstrap as root")
         _run(["apt-get", "update"], label="refresh apt")
@@ -68,9 +73,14 @@ def _install_platform(*, dry_run: bool, runtime_user: str | None = None) -> None
             packages.append("docker.io")
         if needs_compose:
             packages.append(_compose_package())
+        if needs_caddy:
+            # Masked before the package exists, so its own `caddy.service` never starts an
+            # unconfigured public listener; `ummanu-web-front.service` is the only Caddy that runs.
+            _run(["systemctl", "mask", "caddy.service"], label="mask the distribution's caddy.service")
+            packages.append("caddy")
         _run(
             ["apt-get", "install", "--yes", *packages],
-            label="install Docker prerequisites",
+            label="install host prerequisites" if needs_caddy else "install Docker prerequisites",
         )
     _ensure_docker_ready()
 
@@ -164,7 +174,9 @@ def bootstrap(args: argparse.Namespace) -> int:
             )
         if not args.dry_run:
             _mark_bootstrap_checkout(target, work_tree=snapshot is None)
-            _install_platform(dry_run=False, runtime_user=args.installation_user)
+            _install_platform(
+                dry_run=False, runtime_user=args.installation_user, web_front=web_front_wanted(target)
+            )
             provision_board_store(target, allow_create=True)
             migrate_instance(target)
             verify_board_store_roles(target)
