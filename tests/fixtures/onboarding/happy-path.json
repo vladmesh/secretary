@@ -68,7 +68,7 @@
     "adapter": {
       "draft_owner": "project-add",
       "provision_owner": "provision-agent",
-      "storage": "secretary-instance/adapters/<project>.yaml"
+      "storage": "<instance>/adapters/<project>.yaml"
     },
     "enable_transition": {
       "only_when": "gate.status == passed",

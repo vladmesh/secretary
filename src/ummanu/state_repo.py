@@ -1,11 +1,11 @@
 """The live root's writer lock and the private instance repository as a commit target.
 
-Contract: docs/RECOVERY.md, sections "Layout" and "Writers". Only two writers still commit to the
+Contract: docs/RECOVERY.md, sections "Layout" and "Writers". Only one writer still commits to the
 instance repository: the legacy tick (`state/board`, `state/runs`, and in legacy mode the live-root
-paths the Git-free writers leave uncommitted, `checkpoint.LEGACY_LIVE_PATHS`) and the head-registry
-pair of `upgrade`. They own disjoint pathspecs and never `git add -A`. The memory writer, the
-knowledge writer and the secret store make no Git call: they write files under `state_repo_lock`,
-the live-root writer lock, which is all they take from this module. What leaves the host is decided
+paths the Git-free writers leave uncommitted, `checkpoint.LEGACY_LIVE_PATHS`). It owns its
+pathspecs and never `git add -A`. The memory writer, the knowledge writer and the secret store make
+no Git call: they write files under `state_repo_lock`, the live-root writer lock, which is all they
+take from this module. What leaves the host is decided
 by the snapshot export allowlist (`infra.export_allowlist`), not by `.gitignore`, which no writer
 here maintains any more.
 """
@@ -30,12 +30,6 @@ FALLBACK_IDENTITY = ("ummanu checkpoint", "ummanu-checkpoint@localhost")
 # Pathspec each committing writer owns. Disjoint by construction; see the module docstring.
 BOARD_RUNS_PATHSPEC = ("state/board", "state/runs")
 MEMORY_PATHSPEC = ("state/memory",)
-# The installed head registry is a recovery-canon pair.  Keep the two files in
-# one writer's deliberately narrow ownership: no checkpoint or configuration
-# writer may pick either one up by accident.
-HEADS_PATHSPEC = ("heads/heads.yaml", "heads/source.yaml")
-HEADS_CHECKPOINT_MESSAGE = "checkpoint(heads): publish installed head registry"
-RECOVERY_RECONCILIATION_MESSAGE = "recovery(instance): reconcile retained head registry checkpoint"
 
 # These are deliberately repository-local controls for the private instance
 # checkout. They reduce Git's peak packing appetite; they are not a process RSS

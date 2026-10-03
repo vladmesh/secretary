@@ -370,7 +370,13 @@ def validate_instance(path: Path) -> InstanceReport:
 
     projects = _validate_dir(instance_dir / "projects", "project-binding", errors)
     adapters = _validate_dir(instance_dir / "adapters", "adapter", errors)
-    adapter_drafts = _validate_dir(instance_dir / "adapter-drafts", "onboarding-contract", errors)
+    # Drafts are onboarding's generated state in the data directory; an instance that names no
+    # usable one already carries that error above.
+    adapter_drafts = 0
+    if data_dir is not None:
+        from ummanu.onboarding import OnboardingStorage
+
+        adapter_drafts = _validate_dir(OnboardingStorage(data_dir).drafts, "onboarding-contract", errors)
     bindings = _load_bindings(instance_dir / "projects")
 
     manifest_file = _find_manifest(instance_dir, data_dir)

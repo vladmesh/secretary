@@ -1133,6 +1133,13 @@ ROLE_ENV_HOME = "ummanu/runtime/role_env.py"
 # resolves it through `head_health.resource_health_path`.
 HEAD_HEALTH_HOME = "ummanu/head_health.py"
 RESOURCE_HEALTH_FILE = "resource_health.json"
+# Generated state that left the live root for the data directory (ummanu-26). Each class has one
+# resolver, and only its module spells the paths: `head_registry.installed_pair`/`generated_pair`
+# for the head-registry pair, `onboarding.OnboardingStorage` for onboarding's drafts, runs and locks.
+HEAD_REGISTRY_HOME = "ummanu/head_registry.py"
+HEAD_PAIR_FILES = ("heads.yaml", "source.yaml")
+ONBOARDING_STORAGE_HOME = "ummanu/onboarding.py"
+ONBOARDING_STORAGE_NAMES = ("adapter-drafts", "gate-runs", "provision-runs", "compatibility-manifests", ".locks")
 SINGLE_HOME_ASSIGNMENTS = {
     "ROLE_ALLOWLIST": ROLE_ENV_HOME,
     "SENSITIVE_ENV_NAME_RE": ROLE_ENV_HOME,
@@ -1160,6 +1167,13 @@ def _names_resource_health_file(text: str) -> bool:
     return text == RESOURCE_HEALTH_FILE or (
         text.endswith("/" + RESOURCE_HEALTH_FILE) and not any(ch.isspace() for ch in text)
     )
+
+
+def _names_path_part(text: str, name: str) -> bool:
+    """A string that is `name` or a path with `name` as one of its parts; prose that mentions it is not."""
+    if any(ch.isspace() for ch in text):
+        return False
+    return name in text.replace("\\", "/").split("/")
 
 
 def _second_copies(sources: dict[str, str]) -> list[str]:
@@ -1194,20 +1208,36 @@ def _second_copies(sources: dict[str, str]) -> list[str]:
                 and path != HEAD_HEALTH_HOME
             ):
                 offenders.append(f"{path}:{node.lineno}: resource-health file")
+            elif (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and any(_names_path_part(node.value, name) for name in HEAD_PAIR_FILES)
+                and path != HEAD_REGISTRY_HOME
+            ):
+                offenders.append(f"{path}:{node.lineno}: head-registry pair path")
+            elif (
+                isinstance(node, ast.Constant)
+                and isinstance(node.value, str)
+                and any(_names_path_part(node.value, name) for name in ONBOARDING_STORAGE_NAMES)
+                and path != ONBOARDING_STORAGE_HOME
+            ):
+                offenders.append(f"{path}:{node.lineno}: onboarding storage path")
     return offenders
 
 
 class SingleHomeTests(unittest.TestCase):
     """The role environment, the sensitive-name pattern, the Codex effort table, the board
-    transport and the resource-health cache (its file and its status vocabulary) each have one
-    definition under `src/`; a second one anywhere fails here."""
+    transport, the resource-health cache (its file and its status vocabulary), the head-registry
+    pair's path and onboarding's storage paths each have one definition under `src/`; a second one
+    anywhere fails here."""
 
     def test_nothing_under_src_defines_a_second_copy(self) -> None:
         src = ROOT / "src"
         sources = {
             path.relative_to(src).as_posix(): path.read_text(encoding="utf-8") for path in _source_modules()
         }
-        for home in {ROLE_ENV_HOME, *SINGLE_HOME_ASSIGNMENTS.values(), *SINGLE_HOME_FUNCTIONS.values()}:
+        homes = {ROLE_ENV_HOME, HEAD_REGISTRY_HOME, ONBOARDING_STORAGE_HOME}
+        for home in {*homes, *SINGLE_HOME_ASSIGNMENTS.values(), *SINGLE_HOME_FUNCTIONS.values()}:
             self.assertIn(home, sources)
         self.assertEqual(_second_copies(sources), [])
 
@@ -1239,12 +1269,23 @@ class SingleHomeTests(unittest.TestCase):
                 "ummanu/board/kanboard.py",
                 "class Client:\n    def call_batch(self, calls):\n        return []\n",
             ),
+            # The shapes the readers had before ummanu-26: each built the live root's pair itself.
+            "head-registry pair path": (
+                "ummanu/task_commands.py",
+                'from pathlib import Path\nHEADS = Path("i") / "heads" / "heads.yaml"\n',
+            ),
+            "head-registry pair path ": ("ummanu/po/runner.py", 'PIN = "heads/source.yaml"\n'),
+            "onboarding storage path": (
+                "ummanu/gate.py",
+                'from pathlib import Path\nRUNS = Path("i") / "gate-runs"\n',
+            ),
+            "onboarding storage path ": ("ummanu/config.py", 'DRAFTS = "instance/adapter-drafts"\n'),
         }
         for label, (path, text) in probes.items():
             with self.subTest(label):
                 offenders = _second_copies({path: text})
                 self.assertEqual(len(offenders), 1, offenders)
-                self.assertTrue(offenders[0].startswith(path) and offenders[0].endswith(label), offenders)
+                self.assertTrue(offenders[0].startswith(path) and offenders[0].endswith(label.strip()), offenders)
         # The homes themselves are not second copies.
         self.assertEqual(
             _second_copies(
@@ -1257,6 +1298,9 @@ class SingleHomeTests(unittest.TestCase):
                     ),
                     # A reader that mentions the file in prose is not a writer.
                     "ummanu/automations/agents/steward/signals.py": '"""Reads the resource_health.json cache."""\n',
+                    HEAD_REGISTRY_HOME: 'SNAPSHOT_NAME = "heads.yaml"\nSOURCE_NAME = "source.yaml"\n',
+                    ONBOARDING_STORAGE_HOME: 'def gate_runs(root):\n    return root / "gate-runs"\n',
+                    "ummanu/dispatch/host.py": 'MESSAGE = "a head that left `heads.yaml` stops the attempt"\n',
                 }
             ),
             [],

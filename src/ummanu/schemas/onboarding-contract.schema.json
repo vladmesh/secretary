@@ -46,7 +46,7 @@
             "properties": {
               "adapter": {
                 "properties": {
-                  "storage": {"const": "secretary-instance/adapter-drafts/<project>.yaml"}
+                  "storage": {"const": "<data>/onboarding/adapter-drafts/<project>.yaml"}
                 },
                 "required": ["storage"]
               }
@@ -328,7 +328,7 @@
           "properties": {
             "draft_owner": {"const": "project-add"},
             "provision_owner": {"const": "provision-agent"},
-            "storage": {"enum": ["secretary-instance/adapter-drafts/<project>.yaml", "secretary-instance/adapters/<project>.yaml"]}
+            "storage": {"enum": ["<data>/onboarding/adapter-drafts/<project>.yaml", "<instance>/adapters/<project>.yaml"]}
           }
         },
         "enable_transition": {

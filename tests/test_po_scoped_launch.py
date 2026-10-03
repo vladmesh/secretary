@@ -25,15 +25,23 @@ class PoScopedLaunchTests(unittest.TestCase):
     def test_service_runner_uses_its_installation_profile(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             instance = Path(temp) / "instance"
-            (instance / "heads").mkdir(parents=True)
-            (instance / "heads" / "heads.yaml").touch()
+            instance.mkdir()
+            (instance / "instance.yaml").write_text(
+                f"version: 1\nname: po\ndata_dir: {Path(temp) / 'data'}\n"
+                "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+            snapshot = Path(temp) / "data" / "heads" / "heads.yaml"
+            snapshot.parent.mkdir(parents=True)
+            snapshot.touch()
             registry = Registry({}, {"po-claude": {
                 "adapter": "claude", "model": "opus", "effort": "high", "memory_limit_mib": 3072,
             }})
             with (mock.patch("ummanu.po.runner.PoStore.for_instance", return_value=SimpleNamespace()),
                   mock.patch("ummanu.po.runner.load_registry", return_value=registry) as load):
                 runner = PoRunner.for_instance(instance, Path(temp) / "data")
-            load.assert_called_once_with(instance / "heads" / "heads.yaml")
+            # The generated pair in the instance's data directory, not the live root's legacy copy.
+            load.assert_called_once_with(snapshot)
             spec = runner._head_spec(SimpleNamespace(cli="claude", model="opus", effort="high"))
             self.assertEqual((spec.profile_id, spec.memory_limit_mib), ("po-claude", 3072))
 

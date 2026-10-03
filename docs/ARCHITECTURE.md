@@ -111,7 +111,7 @@ board store            live cards, sprints, products, issues and their audit
 The product repository holds no real project bindings, credentials, cards or host-local state. No
 product path names a user or a checkout.
 
-The instance repository holds persona, project bindings, adapters, policies and head profiles.
+The instance repository holds persona, project bindings, adapters and the head canon.
 `state/` in it holds the recovery canon: board, runs, memory facts and knowledge documents.
 `secrets/` holds a metadata catalog and sealed values. The raw installation key and the recovery
 phrase are never stored there ([Recovery](RECOVERY.md#secrets)). The host `runtime.env` is a separate
@@ -129,11 +129,14 @@ does not read ORM rows. It asks the board client for normalised state and the `b
 resolver for the owner connection; dump/restore runs in `board/postgres_recovery.py`.
 
 Product configuration reaches an installation one way. `ummanu upgrade` generates
-`heads/heads.yaml` from the installation's head canon (its own `heads/heads.toml`, else the product
-default), writes `heads/source.yaml` recording the canon, its owner, checkout, revision and snapshot
-digest, and commits and pushes both. A live tick reads only that installed pair, so editing a product
-working tree changes nothing until the next `upgrade`. The gap shows in `ummanu status` under
-`installation.head_registry`.
+`<data>/heads/heads.yaml` from the installation's head canon (its own `heads/heads.toml`, else the
+product default) and writes `<data>/heads/source.yaml` recording the canon, its owner, checkout,
+revision and snapshot digest. The pair is generated state in the data directory: neither file is
+committed or pushed, and `recover` regenerates both. A live tick reads only that installed pair,
+through `head_registry.installed_pair`, so editing a product working tree changes nothing until the
+next `upgrade`. The gap shows in `ummanu status` under `installation.head_registry`. Until a host's
+first `upgrade` writes `<data>/heads/`, readers fall back to the pair an older upgrade committed into
+the live root, and status and doctor name it ([Recovery](RECOVERY.md#fresh-install-and-recovery)).
 
 An installation is named by `--instance` or `UMMANU_INSTANCE`, the checkout by `--product-root`.
 Every other path (skill targets, shell entry points, role worktrees, runtime env file) hangs off the
@@ -143,8 +146,7 @@ home of the account that owns the installation: the owner of the instance direct
 
 A fresh instance checkout is a depth-1, single-branch, no-tags snapshot of the remote default-branch
 tip, validated in a private stage and adopted atomically. Recovery then fetches only new history and
-fast-forwards. The one accepted local divergence is a head-registry checkpoint commit kept by an
-earlier degraded recovery, which is merged with upstream without pushing. Details:
+fast-forwards; a checkout with local-only history is refused, never merged. Details:
 [Operations](OPERATIONS.md#recovery) and [Recovery](RECOVERY.md#fresh-install-and-recovery). A manual
 cold archive is optional and plays no part in recovery readiness.
 
@@ -368,7 +370,7 @@ A stop the host rejected is not a stop: the record stays `stop-pending` with its
 relaunch waits until the old terminal is closed.
 
 The head profile is the sprint's declared `sprint_observer`, resolved against the installed
-`heads/heads.yaml` without fallback; an unknown profile fences the sprint's projects.
+`heads.yaml` without fallback to another profile; an unknown profile fences the sprint's projects.
 `role_defaults.observer` never chooses it. The profile is interactive (one session per sprint). Launch
 passes the same resource-readiness gate as a card claim, uses the ordinary head-command renderer and
 role environment wrapper, and gets only role-scoped environment, not the whole `runtime.env`.

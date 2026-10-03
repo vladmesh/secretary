@@ -7,8 +7,8 @@ becomes a shell command. The dependency runs one way — this module imports the
 the reverse — which keeps a head operation runnable with no registry.
 
 Which heads exist is installation configuration, not product code, so an upgraded installation
-reads its own `<instance>/heads/heads.yaml` snapshot and the shipped `heads.toml` is the portable
-default. Both go through the same validator.
+reads its own generated snapshot (located by `ummanu.head_registry.installed_pair`) and the
+shipped `heads.toml` is the portable default. Both go through the same validator.
 
 Pure and I/O-light (`load_registry` caches its read per process): no board, no orca, no
 subprocess.
@@ -36,7 +36,6 @@ HEADS_TOML = Path(__file__).with_name("heads.toml")
 # installation must keep reading the product default, or every test about the shipped registry
 # would silently assert against the developer's own heads.
 INSTANCE_ENV = "UMMANU_INSTANCE"
-INSTANCE_SNAPSHOT_RELATIVE = Path("heads") / "heads.yaml"
 # Point one process at another registry without moving its installation. Tests use it; so does an
 # operator diffing a candidate registry against the live one.
 REGISTRY_ENV = "TA_HEADS_REGISTRY"
@@ -45,17 +44,21 @@ REGISTRY_ENV = "TA_HEADS_REGISTRY"
 def installed_registry_path() -> Path | None:
     """The configured installation's own snapshot, or None when there is no installation here.
 
-    Whether that snapshot exists is deliberately not asked: a missing, unreadable or dangling
-    snapshot is a broken installation and the load below fails by that path. Answering "no
-    installation" instead would route a selected non-default instance off a mutable product checkout.
+    Where it sits is `ummanu.head_registry`'s answer (`<data>/heads/heads.yaml`, or the legacy
+    live-root copy while the data directory has none). Whether that snapshot exists is otherwise not
+    asked: a missing, unreadable or dangling snapshot is a broken installation and the load below
+    fails by that path. Answering "no installation" instead would route a selected non-default
+    instance off a mutable product checkout.
     """
     configured = os.environ.get(INSTANCE_ENV)
     if not configured:
         return None
-    base = Path(configured).expanduser()
-    if base.name == "instance.yaml":
-        base = base.parent
-    return base / INSTANCE_SNAPSHOT_RELATIVE
+    from ummanu.head_registry import HeadRegistryConfigError, installed_pair
+
+    try:
+        return installed_pair(Path(configured).expanduser()).snapshot
+    except HeadRegistryConfigError as exc:
+        raise HeadRegistryError(str(exc)) from None
 
 
 def registry_path() -> Path:

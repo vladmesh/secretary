@@ -40,6 +40,7 @@ from ummanu._fsutil import content_revision
 from ummanu.board.audit_contract import PROTOCOL_EVENT_RECORD_TYPE
 from ummanu.cli import main
 from ummanu.config import validate
+from ummanu.head_registry import generated_pair
 from ummanu.knowledge_write import list_knowledge_documents
 from ummanu.runtime.head.identity import publish_heartbeat
 from ummanu.sprint_close import CLOSE_NOT_DONE
@@ -477,7 +478,7 @@ class OptionsTests(SprintProtocolFixture):
         self.assertEqual(marked, {OBSERVER_PROFILE: True, WORKER_PROFILE: False, REVIEWER_PROFILE: False})
 
     def test_an_unreadable_head_registry_blanks_its_own_section_only(self) -> None:
-        (self.instance / "heads" / "heads.yaml").write_text("{", encoding="utf-8")
+        generated_pair(self.instance).snapshot.write_text("{", encoding="utf-8")
         options = self.reads().sprint_options()
         self.assertEqual(options["heads"]["source"]["state"], "unavailable")
         # `null` and not `[]`: an empty catalogue is the claim that this installation runs off no
@@ -577,7 +578,7 @@ class SprintStateTests(SprintProtocolFixture):
 
     def test_a_head_registry_nobody_can_read_blanks_only_the_profiles(self) -> None:
         reference = self.reference_of(self.create())
-        (self.instance / "heads" / "heads.yaml").write_text("{", encoding="utf-8")
+        generated_pair(self.instance).snapshot.write_text("{", encoding="utf-8")
 
         document = self.reads().sprint_state(reference)
 

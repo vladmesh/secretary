@@ -964,7 +964,7 @@ gate publishes a stale result with a `stale.input` finding. The gate reports a c
 desyncs: provisioning not drafted, an unreadable or invalid canonical adapter, or an enabled binding
 with no matching passed result.
 
-To tell them apart, compare the scanner head in `adapter-drafts/<id>.yaml` with the tip of the
+To tell them apart, compare the scanner head in `<data>/onboarding/adapter-drafts/<id>.yaml` with the tip of the
 default branch. Different: stale, recover below. Equal and still refused: the named artifact is at
 fault; do not loosen the guard, schema or policy.
 
@@ -1032,12 +1032,13 @@ A refusal or I/O error restores every touched file. After a crash or kill, rerun
 
 ### Verifying the result
 
-Read the three artifacts:
+Read the three artifacts. Drafts, provision runs and gate runs are generated state under the data
+directory (`$DATA`, `instance.yaml` `data_dir`); the binding is configuration in the instance:
 
 ```bash
-cat "$INSTANCE/gate-runs/<project>/<run-id>/result.json"
+cat "$DATA/onboarding/gate-runs/<project>/<run-id>/result.json"
 cat "$INSTANCE/projects/<project>.yaml"
-cat "$INSTANCE/adapter-drafts/<project>.yaml"
+cat "$DATA/onboarding/adapter-drafts/<project>.yaml"
 ```
 
 A passed result has empty findings, the four identity fields, scanner head and provision run id, the
@@ -2522,7 +2523,7 @@ $EDITOR ~/secretary-instance/heads/heads.toml
 cd ~/ummanu && python3 -P -m ummanu upgrade --instance ~/secretary-instance --no-pull
 ```
 
-Never edit `heads/heads.yaml`: it is a generated snapshot pinned by `heads/source.yaml`, and an edited one
+Never edit `<data>/heads/heads.yaml`: it is a generated snapshot pinned by `<data>/heads/source.yaml`, and an edited one
 is rejected by the tick. The web process caches the registry, so a regenerated snapshot is a `web` step
 restart reason (`the head registry snapshot changed`). If the upgrade stopped before its `web` step, restart
 by hand:
@@ -2652,7 +2653,7 @@ Restart reasons, from repository-relative changed paths:
 | `product code or dependencies changed` | `src/` (`ummanu`, the background agents' `ummanu.automations` included), `pyproject.toml`/`uv.lock`/`requirements.txt`, or a reinstall by `dependencies` |
 | `bundled schemas changed` | `src/ummanu/schemas/` |
 | `a web unit file changed` | `ummanu-web.service` or the front unit |
-| `the head registry snapshot changed` | `heads/heads.yaml` regenerated |
+| `the head registry snapshot changed` | `<data>/heads/heads.yaml` regenerated |
 
 | line | meaning |
 | --- | --- |
@@ -2723,7 +2724,7 @@ systemctl show -p ExecMainStartTimestamp ummanu-web.service   # when the process
 The process start (UTC) must be later than the reflog time (local time with offset). If the reflog has no
 entry, ask the running process for a route only the expected code has, for example
 `curl -s -o /dev/null -w '%{http_code}\n' localhost:8787/sprints/new`. The head-registry pin in
-`heads/source.yaml` (printed by `ummanu status`) is written early in the upgrade and never proves the
+`<data>/heads/source.yaml` (printed by `ummanu status`) is written early in the upgrade and never proves the
 upgrade finished or the process was replaced; a pin ahead of the checkout indicates a `git switch` rollback
 without `upgrade`.
 
@@ -2897,9 +2898,8 @@ Each step prints `changed`, `unchanged`, `skipped` or `failed`; the first failur
 | `board-store-roles` | verify owner/app/read credentials, attributes and privilege boundaries |
 | `memory-clients` | reconcile the `po_memory` MCP entries (Claude, `~/.codex`, the legacy Codex home and an existing `DATA_DIR/codex-home`, seeding what it lacks) without touching provider login state |
 | `codex-home` | seed `AGENTS.md` and `config.toml` copy-once into `DATA_DIR/codex-home`; never `auth.json`, never the legacy Orca home ([Codex home](#codex-home-codex_home)) |
-| `head-registry` | generate `heads/heads.yaml` and `heads/source.yaml` from the canon |
+| `head-registry` | generate `<data>/heads/heads.yaml` and `<data>/heads/source.yaml` from the canon; no Git call |
 | `instance-packing` | keep the instance repository's local Git packing controls bounded, with implicit `gc --auto` off (`gc.auto=0`, `maintenance.auto=false`); packing runs from `ummanu-instance-maintenance.timer` ([Recovery](RECOVERY.md#local-git-packing-controls)) |
-| `head-registry-checkpoint` | commit only the generated pair under the writer lock and publish it fast-forward; an unavailable or diverged remote stops the upgrade naming the retained commit |
 | `role-worktrees` | fast-forward role worktrees onto the base branch |
 | `role-skills` | `role_skills sync` into shell skill directories |
 | `host` | `reconcile apply`: units from `packaging/systemd` |
@@ -2958,26 +2958,31 @@ No absolute product path is shipped. First hit wins:
 | the checkout an install or upgrade materializes | `--product-root`, else `UMMANU_REPO`, else `$HOME/ummanu` |
 | the product skill manifest | `--product-root`, else `UMMANU_ROLE_SKILLS_MANIFEST`, else the configured checkout's |
 | the checkout a launcher starts a role out of | `TA_RUNTIME_PYTHONPATH`, else `UMMANU_REPO`, else `$HOME/ummanu` |
-| the packaged units a plan or a doctor run compares against | the checkout named by the command, else the one `heads/source.yaml` recorded, else `UMMANU_REPO`, else `$HOME/ummanu` |
+| the packaged units a plan or a doctor run compares against | the checkout named by the command, else the one `<data>/heads/source.yaml` recorded, else `UMMANU_REPO`, else `$HOME/ummanu` |
 | the account an upgrade materializes for | `--runtime-user`, else the owner of the instance directory |
 | a skill's shell root | the manifest's `root`, expanded against the installation owner's home |
 | a skill's command link | `UMMANU_BIN_DIR`, else `<owner home>/bin` |
 | a role worktree | `TA_WORKSPACES_ROOT`, else `<owner home>/orca/workspaces` |
 | the role runtime env file | `UMMANU_RUNTIME_ENV_FILE`, else `TA_RUNTIME_ENV_FILE`, else `<instance>/runtime.env` |
-| the head registry a tick reads | `TA_HEADS_REGISTRY`, else `<instance>/heads/heads.yaml`, else the running checkout's default |
+| the head registry a tick reads | `TA_HEADS_REGISTRY`, else the selected instance's `<data>/heads/heads.yaml` (the live root's legacy `heads/heads.yaml` while that is absent), else the running checkout's default |
 
 `~` in a shipped manifest and `$HOME` in a shipped entry point mean the installation owner's home, resolved
 once per upgrade, so a repair run as root writes under the owner rather than `/root`. Skill sources resolve
 beside their manifest. `ummanu role-skills sync` run by hand uses the caller's home. Nothing falls back
 to the checkout the running module was imported from; an offline `doctor` compares against the checkout
-recorded in `heads/source.yaml`.
+recorded in `<data>/heads/source.yaml`.
 
 ### The installation's head registry
 
-A live tick reads only the installation's `heads/heads.yaml` and matching `heads/source.yaml` (canon,
+A live tick reads only the installation's `<data>/heads/heads.yaml` and matching `source.yaml` (canon,
 checkout, revision, snapshot digest); a stale or incomplete pair fails before routing. Only `ummanu
-upgrade` moves and checkpoint-publishes that pair, so editing a product checkout's canon does not affect a
-running installation.
+upgrade` (and `recover`) writes that pair, as generated state in the data directory that is never
+committed or pushed, so editing a product checkout's canon does not affect a running installation.
+
+On a host that runs this code but has not yet run `ummanu upgrade`, `<data>/heads/heads.yaml` is absent
+and every reader falls back to the live root's legacy `heads/heads.yaml` and `heads/source.yaml`;
+`ummanu status` and `doctor` print `head registry source: legacy <path>` while it does. The next
+upgrade ends it ([Recovery](RECOVERY.md#fresh-install-and-recovery)).
 
 An installation owns its registry by keeping `heads/heads.toml`; otherwise it materialises from the
 product's small shipped default (a Claude and an OpenAI subscription, cross-family fallbacks, one default
@@ -3157,7 +3162,7 @@ import is "not usable". `load_receipt` also refuses result combinations no run c
 ### Head readiness
 
 Before a worker, reviewer or observer launch the dispatcher probes the profile's resource from
-`heads/heads.yaml`. Verdicts are cached in the data directory for 300 seconds:
+the installed `heads.yaml`. Verdicts are cached in the data directory for 300 seconds:
 
 ```bash
 ummanu dispatcher resource-health --instance <dir>

@@ -150,7 +150,8 @@ class WebProcessReceiptTests(unittest.TestCase):
         self.assertEqual(unit.status, "changed", unit.detail)
         self.assertIn("receipt inputs do not match", unit.detail)
 
-        heads = self.instance / "heads" / "heads.yaml"
+        # The installed snapshot the receipt binds: the generated pair in the data directory.
+        heads = self.data / "heads" / "heads.yaml"
         heads.parent.mkdir(parents=True, exist_ok=True)
         heads.write_text("profiles: {}\n", encoding="utf-8")
         registry = upgrade.step_web(self.context)

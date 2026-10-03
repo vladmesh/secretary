@@ -37,6 +37,7 @@ from ummanu.dispatch.observer_fence import (
 )
 from ummanu.dispatch.production import _reconcile_production
 from ummanu.dispatch.runtime import DispatcherRuntime
+from ummanu.head_registry import generated_pair
 from ummanu.sprint_observer import (
     REASON_HISTORICAL,
     REASON_MALFORMED,
@@ -202,13 +203,13 @@ class SprintDeclarationTests(SprintFixture):
         self.assertEqual(self.writer.reader.show(reference, include_cards=False)["status"], "closed")
 
     def test_an_unreadable_registry_refuses_rather_than_accepting_the_declaration(self) -> None:
-        (self.instance / "heads" / "heads.yaml").write_text("profiles: []\n", encoding="utf-8")
+        generated_pair(self.instance).snapshot.write_text("profiles: []\n", encoding="utf-8")
 
         with self.assertRaisesRegex(TaskError, "head registry"):
             self._create(goal="no registry", observer=head_choice("codex-observer"))
 
     def test_none_needs_no_profile(self) -> None:
-        (self.instance / "heads" / "heads.yaml").unlink()
+        generated_pair(self.instance).snapshot.unlink()
 
         result = self._create(goal="unobserved", observer=none_choice())
 

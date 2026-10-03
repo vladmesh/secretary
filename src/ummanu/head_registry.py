@@ -1,10 +1,14 @@
 """The installation head registry: materialized from a TOML canon, read by the tick.
 
-Two files live side by side under the installation's ``heads/`` directory. ``heads.yaml`` is the
-registry the running installation uses; ``source.yaml`` records which canonical file, product
-checkout and revision ``ummanu upgrade`` generated it from, and fingerprints the snapshot, so
-a live tick accepts only a matching installed pair. It reads no product checkout: only an upgrade
-moves the installation, and it durably publishes the pair before reporting success.
+Two generated files live side by side under ``<data>/heads/``, the installation's data directory,
+never its live root. ``heads.yaml`` is the registry the running installation uses; ``source.yaml``
+records which canonical file, product checkout and revision ``ummanu upgrade`` generated it from,
+and fingerprints the snapshot, so a live tick accepts only a matching installed pair. It reads no
+product checkout: only an upgrade (or a recover) moves the installation, and neither commits the
+pair: it is regenerated from the canon, so it is not recovery canon (docs/RECOVERY.md).
+
+Every reader and writer finds the pair through :func:`installed_pair` or :func:`generated_pair`;
+no other module spells its path.
 
 An installation may own ``heads/heads.toml`` in its instance directory, and that file is then the
 canon; one that owns no such file falls back to the product's small default registry. A canon
@@ -18,6 +22,7 @@ import hashlib
 import stat
 import subprocess
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -35,8 +40,12 @@ from ummanu.runtime.paths import configured_product_root
 
 HEADS_RELATIVE = Path("src") / "ummanu" / "runtime" / "heads.toml"
 INSTANCE_HEADS_RELATIVE = Path("heads") / "heads.toml"
-SNAPSHOT_RELATIVE = Path("heads") / "heads.yaml"
-SOURCE_RELATIVE = Path("heads") / "source.yaml"
+# The pair's directory: below the data directory, and (legacy) below the live root. Under the data
+# directory it is also the local-pty runtime root, whose readers take only run directories, so the
+# two files sit beside them unread.
+PAIR_DIRECTORY = Path("heads")
+SNAPSHOT_NAME = "heads.yaml"
+SOURCE_NAME = "source.yaml"
 SOURCE_HEADER = (
     "# The canonical registry, checkout and revision `ummanu upgrade` generated heads.yaml from.\n"
     "# Do not edit this pin by hand.\n"
@@ -145,12 +154,69 @@ def render_snapshot(heads: dict[str, Any], canonical: Path) -> str:
     )
 
 
-def snapshot_path(instance_path: Path) -> Path:
-    return _instance_dir(instance_path) / SNAPSHOT_RELATIVE
+@dataclass(frozen=True)
+class RegistryPair:
+    """Where one installation's generated pair is, and whether that is the legacy live-root copy."""
+
+    snapshot: Path
+    source: Path
+    # True only while `<data>/heads/heads.yaml` is absent and the live root still has the pair an
+    # older upgrade committed there: the deploy-skew fallback, which the cutover removes.
+    legacy: bool = False
 
 
-def load_snapshot(instance_path: Path) -> dict[str, Any]:
-    path = snapshot_path(instance_path)
+def _data_dir(instance_path: Path) -> Path:
+    from ummanu.config import DataDirError, instance_data_dir
+
+    try:
+        return instance_data_dir(_instance_dir(instance_path))
+    except DataDirError as exc:
+        raise HeadRegistryConfigError(
+            f"cannot locate the head registry of {_instance_dir(instance_path)}: {exc}"
+        ) from None
+
+
+def generated_pair(instance_path: Path, data_dir: Path | None = None) -> RegistryPair:
+    """Where `ummanu upgrade` and `recover` write the pair: `<data>/heads/`, never the live root.
+
+    ``data_dir`` is the caller's already resolved data directory; without it, the instance's
+    configured ``data_dir`` is read.
+    """
+    root = Path(data_dir).expanduser() if data_dir is not None else _data_dir(instance_path)
+    heads = root / PAIR_DIRECTORY
+    return RegistryPair(heads / SNAPSHOT_NAME, heads / SOURCE_NAME)
+
+
+def installed_pair(instance_path: Path, data_dir: Path | None = None) -> RegistryPair:
+    """The pair a reader reads: `<data>/heads/`, else the live root's legacy pair.
+
+    The fallback is a deploy-skew shim: new code reads `<data>/heads/` at merge, but only the next
+    `ummanu upgrade` writes it. It applies only when `<data>/heads/heads.yaml` is absent (a broken
+    file there is still that file, and fails by its own path) and the live root has one; the pair
+    then says so, and status and doctor name it. With neither present the answer is the data
+    directory's pair, so the error a reader raises names where the pair now belongs.
+    """
+    pair = generated_pair(instance_path, data_dir)
+    if _absent(pair.snapshot):
+        legacy = _instance_dir(instance_path) / PAIR_DIRECTORY
+        if not _absent(legacy / SNAPSHOT_NAME):
+            return RegistryPair(legacy / SNAPSHOT_NAME, legacy / SOURCE_NAME, legacy=True)
+    return pair
+
+
+def _absent(path: Path) -> bool:
+    """Nothing at all at ``path``: a dangling symlink or an unreadable entry is still something."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def load_snapshot(instance_path: Path, pair: RegistryPair | None = None) -> dict[str, Any]:
+    path = (pair or installed_pair(instance_path)).snapshot
     try:
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
@@ -158,10 +224,6 @@ def load_snapshot(instance_path: Path) -> dict[str, Any]:
     if not isinstance(loaded, dict):
         raise HeadRegistryConfigError(f"installation head snapshot {path} has an unsupported shape")
     return loaded
-
-
-def source_path(instance_path: Path) -> Path:
-    return _instance_dir(instance_path) / SOURCE_RELATIVE
 
 
 def product_revision(product_root: Path) -> str:
@@ -178,9 +240,9 @@ def product_revision(product_root: Path) -> str:
     return (result.stdout or "").strip() or UNKNOWN_REVISION
 
 
-def read_source(instance_path: Path) -> dict[str, Any] | None:
+def read_source(instance_path: Path, pair: RegistryPair | None = None) -> dict[str, Any] | None:
     """The recorded canon source, or None when this installation has never been upgraded."""
-    path = source_path(instance_path)
+    path = (pair or installed_pair(instance_path)).source
     try:
         loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -196,18 +258,18 @@ def _snapshot_sha256(snapshot: str) -> str:
     return hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
 
 
-def _validated_source_pair(instance_path: Path, snapshot: str) -> dict[str, Any]:
-    """Validate the source pin that makes an installed snapshot recoverable.
+def _validated_source_pair(instance_path: Path, pair: RegistryPair, snapshot: str) -> dict[str, Any]:
+    """Validate the source pin that makes an installed snapshot trustworthy.
 
-    The pin records the exact source checkout and fingerprint of the generated file, so a restore
+    The pin records the exact source checkout and fingerprint of the generated file, so a reader
     cannot combine a new snapshot with an old pin or accept one copied from an unrelated checkout.
     """
-    path = source_path(instance_path)
-    source = read_source(instance_path)
+    path = pair.source
+    source = read_source(instance_path, pair)
     if source is None:
         raise HeadRegistryConfigError(
             f"installation head registry source pin {path} is missing; run `ummanu upgrade --instance "
-            f"{_instance_dir(instance_path)}` to regenerate the recovery pair"
+            f"{_instance_dir(instance_path)}` to regenerate the pair"
         )
     missing = [
         key for key in SOURCE_REQUIRED_FIELDS if not isinstance(source.get(key), str) or not source[key]
@@ -215,23 +277,23 @@ def _validated_source_pair(instance_path: Path, snapshot: str) -> dict[str, Any]
     if missing:
         raise HeadRegistryConfigError(
             f"head registry source pin {path} is incomplete ({', '.join(missing)}); run `ummanu upgrade --instance "
-            f"{_instance_dir(instance_path)}` to regenerate the recovery pair"
+            f"{_instance_dir(instance_path)}` to regenerate the pair"
         )
     if source["canonical_owner"] not in (PRODUCT_ORIGIN, INSTANCE_ORIGIN):
         raise HeadRegistryConfigError(
             f"head registry source pin {path} has an invalid canonical_owner; run `ummanu upgrade --instance "
-            f"{_instance_dir(instance_path)}` to regenerate the recovery pair"
+            f"{_instance_dir(instance_path)}` to regenerate the pair"
         )
     try:
         expected_header = snapshot_header(Path(source["canonical"]))
     except (TypeError, ValueError):
         raise HeadRegistryConfigError(
             f"head registry source pin {path} has an invalid canonical path; run `ummanu upgrade --instance "
-            f"{_instance_dir(instance_path)}` to regenerate the recovery pair"
+            f"{_instance_dir(instance_path)}` to regenerate the pair"
         ) from None
     if not snapshot.startswith(expected_header) or source["snapshot_sha256"] != _snapshot_sha256(snapshot):
         raise HeadRegistryConfigError(
-            f"head registry recovery pair {snapshot_path(instance_path)} and {path} is stale or mismatched; "
+            f"head registry pair {pair.snapshot} and {path} is stale or mismatched; "
             f"run `ummanu upgrade --instance {_instance_dir(instance_path)}` to regenerate it"
         )
     return source
@@ -254,9 +316,11 @@ def pinned_product_root(instance_path: Path) -> Path:
     return configured_product_root()
 
 
-def record_source(instance_path: Path, product_root: Path, *, dry_run: bool = False) -> bool:
+def record_source(
+    instance_path: Path, product_root: Path, *, dry_run: bool = False, data_dir: Path | None = None
+) -> bool:
     """Write which canon, checkout and revision the snapshot came from. Returns whether it moved."""
-    target = source_path(instance_path)
+    target = generated_pair(instance_path, data_dir).source
     canonical, origin = canonical_path(product_root, instance_path)
     canonical = canonical.expanduser().resolve(strict=False)
     snapshot = render_snapshot(canonical_heads(product_root, instance_path), canonical)
@@ -288,27 +352,30 @@ def record_source(instance_path: Path, product_root: Path, *, dry_run: bool = Fa
     return True
 
 
-def installed_heads(instance_path: Path) -> dict[str, Any]:
-    """The registry this installation runs off, validated as a recovery pair.
+def installed_heads(instance_path: Path, pair: RegistryPair | None = None) -> dict[str, Any]:
+    """The registry this installation runs off, validated as a matching pair.
 
     This is what a live tick reads. It deliberately does not compare against any checkout's
     ``heads.toml``: the installation moves when `ummanu upgrade` moves it and at no other time. A
     snapshot that is itself broken still stops the caller, by name.
     """
-    path = snapshot_path(instance_path)
+    pair = pair or installed_pair(instance_path)
+    path = pair.snapshot
     try:
         snapshot = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         raise HeadRegistryConfigError(f"cannot load installation head snapshot {path}: {exc}") from None
-    loaded = load_snapshot(instance_path)
+    loaded = load_snapshot(instance_path, pair)
     registry = _validated_registry(loaded, path)
-    _validated_source_pair(instance_path, snapshot)
+    _validated_source_pair(instance_path, pair, snapshot)
     return registry
 
 
-def materialize_snapshot(instance_path: Path, product_root: Path, *, dry_run: bool = False) -> bool:
-    """Write the canonical snapshot. Returns whether the target differs."""
-    target = snapshot_path(instance_path)
+def materialize_snapshot(
+    instance_path: Path, product_root: Path, *, dry_run: bool = False, data_dir: Path | None = None
+) -> bool:
+    """Write the canonical snapshot into `<data>/heads/`. Returns whether the target differs."""
+    target = generated_pair(instance_path, data_dir).snapshot
     canonical, _ = canonical_path(product_root, instance_path)
     canonical = canonical.expanduser().resolve(strict=False)
     desired = render_snapshot(canonical_heads(product_root, instance_path), canonical)
@@ -328,11 +395,14 @@ def materialize_snapshot(instance_path: Path, product_root: Path, *, dry_run: bo
     return True
 
 
-def assert_snapshot_current(instance_path: Path, product_root: Path) -> dict[str, Any]:
+def assert_snapshot_current(
+    instance_path: Path, product_root: Path, data_dir: Path | None = None
+) -> dict[str, Any]:
     canonical = canonical_heads(product_root, instance_path)
-    snapshot = load_snapshot(instance_path)
+    pair = generated_pair(instance_path, data_dir)
+    snapshot = load_snapshot(instance_path, pair)
     if snapshot != canonical:
-        target = snapshot_path(instance_path)
+        target = pair.snapshot
         raise HeadRegistryConfigError(
             f"installation head snapshot {target} is stale; run `ummanu upgrade --instance "
             f"{instance_path}` to regenerate it"

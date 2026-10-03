@@ -17,7 +17,7 @@ from unittest import mock
 
 from tests.fakes.upgrade import FakeUnitInstaller
 from tests.retired_board import STALE_FILE, legacy_runtime_lines, write_stale_leftovers
-from ummanu import installation, state_repo, status, upgrade
+from ummanu import _proc, installation, state_repo, status, upgrade
 from ummanu.board import provision as board_provision
 from ummanu.config import DataDirError
 from ummanu.head_health import HeadReadiness, resolve_head_chain
@@ -28,11 +28,11 @@ from ummanu.head_registry import (
     assert_snapshot_current,
     canonical_heads,
     canonical_path,
+    generated_pair,
     installed_heads,
     load_snapshot,
     product_revision,
     read_source,
-    snapshot_path,
 )
 from ummanu.host import (
     CollectResult,
@@ -523,6 +523,15 @@ class UpgradeStepTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.memory_probe.stop()
+
+    def registry_instance(self, root: Path) -> Path:
+        """An instance whose `instance.yaml` names this test's data directory, where the pair goes."""
+        (root / "instance.yaml").write_text(
+            f"version: 1\nname: upgrade\ndata_dir: {self.data_dir}\n"
+            "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
+            encoding="utf-8",
+        )
+        return root
 
     def context(self, units: FakeUnitInstaller, **overrides) -> upgrade.UpgradeContext:
         report = _Report()
@@ -1193,8 +1202,7 @@ class UpgradeStepTests(unittest.TestCase):
 
     def test_head_registry_step_materializes_the_product_canon_idempotently(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            instance = Path(tmpdir)
-            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+            instance = self.registry_instance(Path(tmpdir))
             context = self.context(FakeUnitInstaller(), instance_path=instance)
 
             result = upgrade.step_head_registry(context)
@@ -1207,20 +1215,19 @@ class UpgradeStepTests(unittest.TestCase):
 
     def test_head_registry_dry_run_reports_drift_without_writing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            instance = Path(tmpdir)
-            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+            instance = self.registry_instance(Path(tmpdir))
             context = self.context(FakeUnitInstaller(), instance_path=instance, dry_run=True)
 
             result = upgrade.step_head_registry(context)
 
             self.assertEqual(result.status, "changed")
-            self.assertFalse((instance / "heads" / "heads.yaml").exists())
-            self.assertFalse((instance / "heads" / "source.yaml").exists())
+            self.assertFalse(generated_pair(instance).snapshot.exists())
+            self.assertFalse(generated_pair(instance).source.exists())
+            self.assertFalse((instance / "heads").exists())
 
     def test_head_registry_step_pins_the_checkout_the_snapshot_came_from(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            instance = Path(tmpdir)
-            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+            instance = self.registry_instance(Path(tmpdir))
             context = self.context(FakeUnitInstaller(), instance_path=instance)
 
             upgrade.step_head_registry(context)
@@ -1231,8 +1238,7 @@ class UpgradeStepTests(unittest.TestCase):
 
     def test_root_materialization_hands_the_recovery_pair_to_the_runtime_user(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            instance = Path(tmpdir)
-            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+            instance = self.registry_instance(Path(tmpdir))
             context = self.context(FakeUnitInstaller(), instance_path=instance, runtime_user="operator")
             account = SimpleNamespace(pw_uid=123, pw_gid=456)
 
@@ -1245,17 +1251,17 @@ class UpgradeStepTests(unittest.TestCase):
 
             owned = {Path(call.args[0]) for call in chown.call_args_list}
             self.assertEqual(result.status, "changed")
-            self.assertIn(instance / "heads" / "heads.yaml", owned)
-            self.assertIn(instance / "heads" / "source.yaml", owned)
+            self.assertIn(self.data_dir / "heads", owned)
+            self.assertIn(self.data_dir / "heads" / "heads.yaml", owned)
+            self.assertIn(self.data_dir / "heads" / "source.yaml", owned)
 
     def test_head_registry_step_repins_a_moved_checkout_without_snapshot_drift(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            instance = Path(tmpdir)
-            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+            instance = self.registry_instance(Path(tmpdir))
             context = self.context(FakeUnitInstaller(), instance_path=instance)
             upgrade.step_head_registry(context)
             snapshot_before = load_snapshot(instance)
-            (instance / "heads" / "source.yaml").write_text(
+            generated_pair(instance).source.write_text(
                 "product_root: /somewhere/else\nrevision: deadbeef\n", encoding="utf-8"
             )
 
@@ -1322,10 +1328,10 @@ class UpgradeStepTests(unittest.TestCase):
 
     def test_stale_head_snapshot_fails_the_upgrade_verify(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            instance = Path(tmpdir)
-            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
-            (instance / "heads").mkdir()
-            (instance / "heads" / "heads.yaml").write_text(
+            instance = self.registry_instance(Path(tmpdir))
+            stale = generated_pair(instance).snapshot
+            stale.parent.mkdir()
+            stale.write_text(
                 "profiles:\n  codex:\n    model: gpt-5.5\n",
                 encoding="utf-8",
             )
@@ -1496,30 +1502,38 @@ class UpgradeStepTests(unittest.TestCase):
             self.assertNotIn(linked, owned)
 
 
-class HeadRegistryCheckpointTests(unittest.TestCase):
-    """The generated registry is a pair in the private recovery repository."""
+class HeadRegistryPairTests(unittest.TestCase):
+    """The generated registry is a pair in the data directory, never committed or pushed (ummanu-26)."""
 
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.remote = self.root / "instance-remote.git"
         self.instance = self.root / "instance"
+        self.data_dir = self.root / "data"
         self.instance.mkdir()
         self._git(self.root, "init", "--quiet", "--bare", "--initial-branch", "main", str(self.remote))
         self._git(self.instance, "init", "--quiet", "--initial-branch", "main")
         self._git(self.instance, "config", "user.name", "test operator")
         self._git(self.instance, "config", "user.email", "test@example.invalid")
-        (self.instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+        (self.instance / "instance.yaml").write_text(
+            f"version: 1\nname: pair\ndata_dir: {self.data_dir}\n"
+            f"offsite:\n  instance_remote: {self.remote}\n",
+            encoding="utf-8",
+        )
         self._git(self.instance, "add", "instance.yaml")
         self._git(self.instance, "commit", "--quiet", "-m", "instance config")
         self._git(self.instance, "remote", "add", "origin", str(self.remote))
+        self._git(self.instance, "push", "--quiet", "origin", "main")
+        report = _Report()
+        report.data_dir = self.data_dir
         self.context = upgrade.UpgradeContext(
             instance_path=self.instance,
             product_root=upgrade.running_product_root(),
             base_branch="main",
             dry_run=False,
             units=FakeUnitInstaller(),
-            report=_Report(),
+            report=report,
         )
 
     def tearDown(self) -> None:
@@ -1531,9 +1545,6 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
             ["git", "-C", str(root), *args], check=True, capture_output=True, text=True
         ).stdout.strip()
 
-    def _publish(self) -> tuple[upgrade.StepResult, upgrade.StepResult]:
-        return upgrade.step_head_registry(self.context), upgrade.step_publish_head_registry(self.context)
-
     def test_lifecycle_sets_only_the_local_instance_packing_controls_idempotently(self) -> None:
         first = upgrade.step_instance_packing(self.context)
         second = upgrade.step_instance_packing(self.context)
@@ -1542,39 +1553,39 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
         self.assertEqual(second.status, "unchanged")
         self.assertEqual(state_repo.packing_controls(self.instance), dict(state_repo.PACKING_CONTROLS))
 
-    def test_changed_pair_is_scoped_committed_published_and_cleanly_restored(self):
-        # These are deliberately all outside the registry writer's pathspec.
-        for relative in (
-            "state/board/foreign.ndjson",
-            "state/memory/facts/foreign.md",
-            "state/knowledge/foreign.md",
-            "secrets/foreign.age",
-            "operator-note.txt",
+    def test_the_pair_is_written_to_the_data_directory_and_never_to_git(self):
+        head = self._git(self.instance, "rev-parse", "HEAD")
+        remote = self._git(self.remote, "rev-parse", "main")
+        calls: list[list[str]] = []
+        real_run, real_isolated = _proc.run, _proc.run_isolated
+
+        def recording(real):
+            def run(argv, *args, **kwargs):
+                calls.append([str(part) for part in argv])
+                return real(argv, *args, **kwargs)
+
+            return run
+
+        refused = AssertionError("the head-registry step reached the instance repository")
+        with (
+            mock.patch.object(_proc, "run", side_effect=recording(real_run)),
+            mock.patch.object(_proc, "run_isolated", side_effect=recording(real_isolated)),
+            mock.patch.object(state_repo, "git", side_effect=refused),
+            mock.patch.object(state_repo, "run_git", side_effect=refused),
         ):
-            path = self.instance / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("foreign\n", encoding="utf-8")
+            generated = upgrade.step_head_registry(self.context)
 
-        generated, published = self._publish()
-
-        self.assertEqual(generated.status, "changed")
-        self.assertEqual(published.status, "changed", published.detail)
-        changed = self._git(self.instance, "show", "--format=", "--name-only", "HEAD").splitlines()
-        self.assertEqual(changed, ["heads/heads.yaml", "heads/source.yaml"])
-        self.assertEqual(self._git(self.instance, "diff", "--cached", "--name-only"), "")
-        self.assertEqual(
-            self._git(self.instance, "status", "--porcelain", "--untracked-files=all").splitlines(),
-            [
-                "?? operator-note.txt",
-                "?? secrets/foreign.age",
-                "?? state/board/foreign.ndjson",
-                "?? state/knowledge/foreign.md",
-                "?? state/memory/facts/foreign.md",
-            ],
-        )
-        remote_files = self._git(self.remote, "show", "--format=", "--name-only", "main").splitlines()
-        self.assertIn("heads/heads.yaml", remote_files)
-        self.assertIn("heads/source.yaml", remote_files)
+        self.assertEqual(generated.status, "changed", generated.detail)
+        pair = generated_pair(self.instance)
+        self.assertEqual(pair.snapshot, self.data_dir / "heads" / "heads.yaml")
+        self.assertTrue(pair.snapshot.is_file())
+        self.assertTrue(pair.source.is_file())
+        self.assertFalse((self.instance / "heads").exists())
+        # No Git call names the live root: the only one is the product checkout's revision.
+        self.assertEqual([argv for argv in calls if str(self.instance) in " ".join(argv)], [])
+        self.assertEqual(self._git(self.instance, "rev-parse", "HEAD"), head)
+        self.assertEqual(self._git(self.remote, "rev-parse", "main"), remote)
+        self.assertEqual(self._git(self.instance, "status", "--porcelain", "--untracked-files=all"), "")
         source = read_source(self.instance)
         self.assertIsNotNone(source)
         self.assertEqual(
@@ -1584,24 +1595,21 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
         self.assertEqual(source["product_root"], str(self.context.product_root.resolve()))
         self.assertEqual(source["revision"], product_revision(self.context.product_root))
 
-        recovered = self.root / "recovered"
-        self._git(self.root, "clone", "--quiet", str(self.remote), str(recovered))
-        self.assertEqual(installed_heads(recovered), installed_heads(self.instance))
-        self.assertEqual(read_source(recovered), read_source(self.instance))
+    def test_an_unchanged_pair_is_unchanged(self):
+        upgrade.step_head_registry(self.context)
 
-    def test_unchanged_pair_still_confirms_the_remote_checkpoint(self):
-        self._publish()
+        again = upgrade.step_head_registry(self.context)
 
-        generated, published = self._publish()
+        self.assertEqual(again.status, "unchanged", again.detail)
 
-        self.assertEqual(generated.status, "unchanged")
-        self.assertEqual(published.status, "unchanged", published.detail)
-        self.assertEqual(
-            self._git(self.remote, "rev-parse", "main"),
-            self._git(self.instance, "rev-parse", "HEAD"),
-        )
+    def test_the_publication_step_and_its_git_contract_are_gone(self):
+        self.assertFalse(hasattr(upgrade, "step_publish_head_registry"))
+        self.assertNotIn("publication_policy", {field.name for field in fields(upgrade.UpgradeContext)})
+        for name in ("HEADS_PATHSPEC", "HEADS_CHECKPOINT_MESSAGE", "RECOVERY_RECONCILIATION_MESSAGE"):
+            with self.subTest(name):
+                self.assertFalse(hasattr(state_repo, name))
 
-    def test_verify_accepts_a_published_pair_with_unrelated_instance_dirt(self):
+    def test_verify_accepts_the_pair_with_unrelated_instance_dirt(self):
         tracked = self.instance / "projects" / "operator.yaml"
         tracked.parent.mkdir(parents=True)
         tracked.write_text("id: operator\n", encoding="utf-8")
@@ -1610,9 +1618,8 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
         foreign = self.instance / "skills" / "operator-overlay.toml"
         foreign.parent.mkdir(parents=True)
         foreign.write_text("[roles]\n", encoding="utf-8")
-        generated, published = self._publish()
+        generated = upgrade.step_head_registry(self.context)
         self.assertEqual(generated.status, "changed")
-        self.assertEqual(published.status, "changed", published.detail)
         tracked.write_text("id: operator\nname: changed locally\n", encoding="utf-8")
 
         with (
@@ -1627,126 +1634,16 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
             ["M projects/operator.yaml", "?? skills/operator-overlay.toml"],
         )
 
-    def test_commit_or_push_failure_refuses_success_and_keeps_an_actionable_checkpoint(self):
-        generated = upgrade.step_head_registry(self.context)
-        self.assertEqual(generated.status, "changed")
-        with mock.patch(
-            "ummanu.upgrade.state_repo.commit",
-            side_effect=upgrade.state_repo.StateRepoError("index locked"),
-        ):
-            failed_commit = upgrade.step_publish_head_registry(self.context)
-        self.assertEqual(failed_commit.status, "failed")
-        self.assertIn("index locked", failed_commit.detail)
-
-        failed_push = upgrade.step_publish_head_registry(self.context)
-        self.assertEqual(failed_push.status, "changed", failed_push.detail)
-        self._git(self.instance, "remote", "set-url", "origin", str(self.root / "missing.git"))
-        (self.instance / "heads" / "heads.toml").write_text(
-            (self.context.product_root / "src" / "ummanu" / "runtime" / "heads.toml").read_text(
-                encoding="utf-8"
-            ),
-            encoding="utf-8",
-        )
-        upgrade.step_head_registry(self.context)
-        failed_push = upgrade.step_publish_head_registry(self.context)
-        self.assertEqual(failed_push.status, "failed")
-        self.assertIn("local checkpoint", failed_push.detail)
-        self.assertNotEqual(
-            self._git(self.instance, "rev-parse", "HEAD"), self._git(self.remote, "rev-parse", "main")
-        )
-
-    def test_recovery_retains_failed_publication_continues_and_retries_same_commit(self):
-        self.context.publication_policy = "recovery-degraded"
-        self._git(self.instance, "push", "--quiet", "origin", "main")
-        self._git(self.instance, "remote", "set-url", "origin", str(self.root / "disabled.git"))
-        with mock.patch("ummanu.upgrade.desired_role_worktrees", return_value=[]):
-            first = upgrade.run_steps(
-                self.context,
-                steps=(
-                    upgrade.step_head_registry,
-                    upgrade.step_publish_head_registry,
-                    upgrade.step_worktrees,
-                ),
-            )
-        retained = self._git(self.instance, "rev-parse", "HEAD")
-
-        self.assertEqual([step.status for step in first.steps], ["changed", "degraded", "skipped"])
-        self.assertEqual(first.steps[2].name, "role-worktrees")
-        self.assertIn(retained, first.steps[1].detail)
-        self.assertNotEqual(retained, self._git(self.remote, "rev-parse", "main"))
-
-        self._git(self.instance, "remote", "set-url", "origin", str(self.remote))
-        with mock.patch("ummanu.upgrade.desired_role_worktrees", return_value=[]):
-            second = upgrade.run_steps(
-                self.context,
-                steps=(
-                    upgrade.step_head_registry,
-                    upgrade.step_publish_head_registry,
-                    upgrade.step_worktrees,
-                ),
-            )
-        self.assertEqual([step.status for step in second.steps], ["unchanged", "unchanged", "skipped"])
-        self.assertEqual(self._git(self.instance, "rev-parse", "HEAD"), retained)
-        self.assertEqual(self._git(self.remote, "rev-parse", "main"), retained)
-
-        third = upgrade.run_steps(
-            self.context,
-            steps=(upgrade.step_head_registry, upgrade.step_publish_head_registry),
-        )
-        self.assertEqual([step.status for step in third.steps], ["unchanged", "unchanged"])
-        self.assertEqual(self._git(self.instance, "rev-parse", "HEAD"), retained)
-
-    def test_recovery_divergence_preserves_local_and_remote_history(self):
-        self.context.publication_policy = "recovery-degraded"
-        self._git(self.instance, "push", "--quiet", "origin", "main")
-        self._git(self.instance, "remote", "set-url", "origin", str(self.root / "disabled.git"))
-        generated, publication = self._publish()
-        local = self._git(self.instance, "rev-parse", "HEAD")
-        self.assertEqual((generated.status, publication.status), ("changed", "degraded"))
-
-        other = self.root / "other"
-        self._git(self.root, "clone", "--quiet", str(self.remote), str(other))
-        self._git(other, "config", "user.name", "other operator")
-        self._git(other, "config", "user.email", "other@example.invalid")
-        (other / "remote-note").write_text("advanced independently\n", encoding="utf-8")
-        self._git(other, "add", "remote-note")
-        self._git(other, "commit", "--quiet", "-m", "remote advance")
-        self._git(other, "push", "--quiet", "origin", "main")
-        remote = self._git(self.remote, "rev-parse", "main")
-
-        self._git(self.instance, "remote", "set-url", "origin", str(self.remote))
-        retry = upgrade.step_publish_head_registry(self.context)
-
-        self.assertEqual(retry.status, "degraded")
-        self.assertIn("diverged", retry.detail)
-        self.assertEqual(self._git(self.instance, "rev-parse", "HEAD"), local)
-        self.assertEqual(self._git(self.remote, "rev-parse", "main"), remote)
-
-    def test_ordinary_publication_failure_still_stops_the_materializer(self):
-        self._git(self.instance, "remote", "set-url", "origin", str(self.root / "disabled.git"))
-        with mock.patch("ummanu.upgrade.desired_role_worktrees") as worktrees:
-            result = upgrade.run_steps(
-                self.context,
-                steps=(
-                    upgrade.step_head_registry,
-                    upgrade.step_publish_head_registry,
-                    upgrade.step_worktrees,
-                ),
-            )
-
-        self.assertEqual([step.status for step in result.steps], ["changed", "failed"])
-        worktrees.assert_not_called()
-
     def test_incomplete_or_stale_pair_fails_closed_before_routing(self):
-        self._publish()
-        source = self.instance / "heads" / "source.yaml"
-        source.unlink()
+        upgrade.step_head_registry(self.context)
+        pair = generated_pair(self.instance)
+        pair.source.unlink()
         with self.assertRaisesRegex(HeadRegistryConfigError, "source pin .* is missing"):
             installed_heads(self.instance)
 
         upgrade.step_head_registry(self.context)
-        (self.instance / "heads" / "heads.yaml").write_text(
-            (self.instance / "heads" / "heads.yaml").read_text(encoding="utf-8") + "# stale\n",
+        pair.snapshot.write_text(
+            pair.snapshot.read_text(encoding="utf-8") + "# stale\n",
             encoding="utf-8",
         )
         with self.assertRaisesRegex(HeadRegistryConfigError, "stale or mismatched"):
@@ -1920,7 +1817,11 @@ class InstanceHeadCanonTests(unittest.TestCase):
     )
 
     def instance(self, root: Path, canon: str | None = None) -> Path:
-        (root / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+        (root / "instance.yaml").write_text(
+            f"version: 1\nname: canon\ndata_dir: {root / 'data'}\n"
+            "offsite:\n  instance_remote: git@example.invalid:x/y.git\n",
+            encoding="utf-8",
+        )
         (root / "heads").mkdir(exist_ok=True)
         if canon is not None:
             (root / "heads" / "heads.toml").write_text(canon, encoding="utf-8")
@@ -2038,20 +1939,21 @@ class InstanceHeadCanonTests(unittest.TestCase):
                 self.assertIn(owned, str(caught.exception))
                 self.assertEqual(result.status, "failed")
                 self.assertIn(owned, result.detail)
-                self.assertFalse(snapshot_path(instance).exists())
+                self.assertFalse(generated_pair(instance).snapshot.exists())
 
     def test_status_reports_a_malformed_installed_snapshot_instead_of_crashing(self):
         """`ummanu status` validates the snapshot on its own, so it meets the same shapes."""
         with tempfile.TemporaryDirectory() as tmpdir:
             instance = self.instance(Path(tmpdir))
-            snapshot_path(instance).write_text(
+            generated_pair(instance).snapshot.parent.mkdir(parents=True)
+            generated_pair(instance).snapshot.write_text(
                 "resources:\n  local-sub:\n    account: local\n"
                 "profiles:\n  local-head: []\n"
                 "role_defaults:\n  new_card: local-head\n",
                 encoding="utf-8",
             )
 
-            snapshot = str(snapshot_path(instance))
+            snapshot = str(generated_pair(instance).snapshot)
             with self.assertRaises(HeadRegistryConfigError) as caught:
                 installed_heads(instance)
             record = status._head_registry(instance)
@@ -2071,7 +1973,7 @@ class InstanceHeadCanonTests(unittest.TestCase):
 
                 upgrade.step_head_registry(context)
 
-                header = snapshot_path(instance).read_text(encoding="utf-8").splitlines()[0]
+                header = generated_pair(instance).snapshot.read_text(encoding="utf-8").splitlines()[0]
                 pin = read_source(instance)
                 self.assertIn(str(expected), header)
                 self.assertEqual(pin["canonical"], str(expected))
@@ -2092,13 +1994,15 @@ class InstanceHeadCanonTests(unittest.TestCase):
             )
 
     def context(self, instance: Path) -> upgrade.UpgradeContext:
+        report = _Report()
+        report.data_dir = instance / "data"
         return upgrade.UpgradeContext(
             instance_path=instance,
             product_root=upgrade.running_product_root(),
             base_branch="main",
             dry_run=False,
             units=FakeUnitInstaller(),
-            report=_Report(),
+            report=report,
         )
 
 

@@ -19,9 +19,10 @@
         "cards": {"type": "object", "required": ["total", "active_attempts"]},
         "head_registry": {
           "type": "object",
-          "required": ["snapshot", "canonical", "canonical_owner", "product_root", "revision", "error"],
+          "required": ["snapshot", "canonical", "canonical_owner", "product_root", "revision", "legacy_source", "error"],
           "properties": {
             "snapshot": {"type": "string"},
+            "legacy_source": {"type": ["string", "null"], "description": "The live root's legacy heads.yaml the readers fall back to while <data>/heads/ has none; null otherwise."},
             "canonical": {"type": ["string", "null"]},
             "canonical_owner": {"type": ["string", "null"]},
             "product_root": {"type": ["string", "null"]},

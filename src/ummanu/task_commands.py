@@ -23,6 +23,7 @@ from ummanu.board.task_routing import (
 )
 from ummanu.cli_output import print_json
 from ummanu.config import ConfigError, DataDirError, instance_data_dir, load_config
+from ummanu.head_registry import HeadRegistryConfigError, installed_pair
 from ummanu.onboarding import DEFAULT_INSTANCE
 from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV
 from ummanu.runtime.head import CODEX_LAUNCH_MODES
@@ -779,11 +780,10 @@ def _validate_codex_mode_for_create(args: argparse.Namespace) -> None:
 
 
 def _load_heads(instance: Path) -> dict:
-    instance_file = instance / "instance.yaml" if instance.is_dir() else instance
-    heads_file = instance_file.parent / "heads" / "heads.yaml"
     try:
+        heads_file = installed_pair(instance).snapshot
         loaded = load_config(heads_file)
-    except ConfigError as exc:
+    except (ConfigError, HeadRegistryConfigError) as exc:
         raise TaskError("validation", f"cannot validate --codex-mode: {exc}", 2) from None
     if not isinstance(loaded, dict):
         raise TaskError(

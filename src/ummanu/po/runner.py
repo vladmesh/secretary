@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ummanu.head_registry import HeadRegistryConfigError, installed_pair
 from ummanu.po import PO_REQUEST_ENV, PO_SESSION_ENV
 from ummanu.po.models import DEFAULT_EFFORTS, EffortRefused, require_explicit_effort
 from ummanu.po.store import (
@@ -66,7 +67,7 @@ from ummanu.runtime.head.memory import MemoryScopeError
 from ummanu.runtime.head.local_pty.journal import RUN_EXITED, read_events
 from ummanu.runtime.head.local_pty import protocol
 from ummanu.runtime.head.spec import HeadSpec, load_head_specs
-from ummanu.runtime.heads import Registry, load_registry
+from ummanu.runtime.heads import HeadRegistryError, Registry, load_registry
 
 RUNS_DIR_NAME = "po-runs"
 STOPPED_REASON = "stopped by the owner"
@@ -335,10 +336,10 @@ class PoRunner:
 
     @classmethod
     def for_instance(cls, instance_dir: Path | str, data_dir: Path | str, **kwargs: Any) -> PoRunner:
-        base = Path(instance_dir)
-        if base.name == "instance.yaml":
-            base = base.parent
-        registry_path = base / "heads" / "heads.yaml"
+        try:
+            registry_path = installed_pair(Path(instance_dir)).snapshot
+        except HeadRegistryConfigError as exc:
+            raise HeadRegistryError(str(exc)) from None
         registry: Registry = load_registry(registry_path)
         kwargs.setdefault("head_specs", load_head_specs(registry))
         return cls(PoStore.for_instance(instance_dir), data_dir, **kwargs)

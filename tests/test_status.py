@@ -740,7 +740,9 @@ class HeadRegistrySourceTests(unittest.TestCase):
         self.assertIsNone(registry["error"])
         self.assertEqual(registry["product_root"], str(product_root))
         self.assertEqual(registry["revision"], product_revision(product_root))
-        self.assertTrue(registry["snapshot"].endswith("heads/heads.yaml"))
+        # The generated pair's home is the data directory, and no legacy copy was read.
+        self.assertEqual(registry["snapshot"], str(root / "data" / "heads" / "heads.yaml"))
+        self.assertIsNone(registry["legacy_source"])
         self.assertEqual(registry["canonical_owner"], "product")
         self.assertEqual(
             registry["canonical"],
@@ -766,7 +768,7 @@ class HeadRegistrySourceTests(unittest.TestCase):
 
             snapshot = collect_status(report, offline=True)
             # The snapshot is still what status validates, and it is the one that canon produced.
-            materialized = (root / "heads" / "heads.yaml").read_text(encoding="utf-8")
+            materialized = (root / "data" / "heads" / "heads.yaml").read_text(encoding="utf-8")
             canonical = str(root / "heads" / "heads.toml")
 
         registry = snapshot["installation"]["head_registry"]
@@ -793,13 +795,34 @@ class HeadRegistrySourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             instance = self._instance(root)
-            (root / "heads").mkdir()
-            (root / "heads" / "heads.yaml").write_text("profiles: {}\n", encoding="utf-8")
+            (root / "data" / "heads").mkdir(parents=True)
+            (root / "data" / "heads" / "heads.yaml").write_text("profiles: {}\n", encoding="utf-8")
             report = validate_instance(instance)
 
             snapshot = collect_status(report, offline=True)
 
         self.assertIn("[resources] table", snapshot["installation"]["head_registry"]["error"])
+
+    def test_status_names_the_legacy_live_root_pair_it_fell_back_to(self):
+        """Deploy skew: until `ummanu upgrade` writes `<data>/heads/`, the live root's pair is read."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = self._instance(root)
+            product_root = Path(__file__).resolve().parents[1]
+            materialize_snapshot(root, product_root)
+            record_source(root, product_root)
+            (root / "heads").mkdir()
+            for name in ("heads.yaml", "source.yaml"):
+                (root / "data" / "heads" / name).rename(root / "heads" / name)
+            report = validate_instance(instance)
+
+            snapshot = collect_status(report, offline=True)
+
+        registry = snapshot["installation"]["head_registry"]
+        self.assertEqual(validate(snapshot, "status", "status.json"), [])
+        self.assertIsNone(registry["error"])
+        self.assertEqual(registry["legacy_source"], str(root / "heads" / "heads.yaml"))
+        self.assertEqual(registry["snapshot"], str(root / "heads" / "heads.yaml"))
 
 
 class SecretStoreObservabilityTests(unittest.TestCase):

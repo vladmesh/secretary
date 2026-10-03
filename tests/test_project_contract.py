@@ -16,7 +16,6 @@ asked for it.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import shlex
 import stat
@@ -606,12 +605,11 @@ class CatalogContractTests(unittest.TestCase):
         (self.repo / "src" / "ummanu" / "__init__.py").write_text("", encoding="utf-8")
 
     def catalog(self, adapter_body: str | None = ADAPTER_BODY):
+        from tests.head_registry import write_installed_pair
         from ummanu.dispatch.host import InstanceCatalog
-        from ummanu.head_registry import snapshot_header
 
         instance = self.root / "instance"
-        (instance / "heads").mkdir(parents=True)
-        (instance / "projects").mkdir()
+        (instance / "projects").mkdir(parents=True)
         (instance / "adapters").mkdir()
         (instance / "instance.yaml").write_text(
             "version: 1\nname: contract\ndata_dir: "
@@ -625,14 +623,7 @@ class CatalogContractTests(unittest.TestCase):
             "profiles:\n  head:\n    resource: sub\n    adapter: claude\n"
             "role_defaults:\n  new_card: head\n"
         )
-        rendered = snapshot_header(instance / "heads" / "heads.toml") + snapshot
-        (instance / "heads" / "heads.yaml").write_text(rendered, encoding="utf-8")
-        (instance / "heads" / "source.yaml").write_text(
-            "canonical: " + str(instance / "heads" / "heads.toml") + "\n"
-            "canonical_owner: instance\nproduct_root: /fixture/product\nrevision: fixture\n"
-            "snapshot_sha256: " + hashlib.sha256(rendered.encode("utf-8")).hexdigest() + "\n",
-            encoding="utf-8",
-        )
+        write_installed_pair(instance, snapshot)
         (instance / "projects" / "example.yaml").write_text(
             f"id: example\nrepo: {self.repo}\nadapter: example\nenabled: true\ndefault_branch: main\n",
             encoding="utf-8",

@@ -12,7 +12,7 @@ import yaml
 from tests.support.git import git, make_repo
 from ummanu.config import load_config, validate
 from ummanu.gate import _timed_out, run_gate
-from ummanu.onboarding import ScannerError, project_add
+from ummanu.onboarding import OnboardingStorage, ScannerError, project_add
 from ummanu.provision import apply_provision_result, start_provision
 
 
@@ -23,6 +23,13 @@ class GateTests(unittest.TestCase):
         self.repo = make_repo(self.root)
         self.instance = self.root / "instance"
         self.instance.mkdir()
+        (self.instance / "instance.yaml").write_text(
+            "version: 1\nname: test\n"
+            f"data_dir: {self.root / 'data'}\n"
+            "offsite:\n  instance_remote: git@example.invalid:instance.git\n",
+            encoding="utf-8",
+        )
+        self.storage = OnboardingStorage(self.root / "data")
         self.assertEqual(project_add(str(self.repo), str(self.instance), dry_run=False)[0], 0)
         code, started = start_provision(str(self.instance), "sample-project")
         self.assertEqual(code, 0)
@@ -67,6 +74,7 @@ class GateTests(unittest.TestCase):
         self.assertEqual(code, 0, output)
 
     def assert_no_derived_artifacts(self) -> None:
+        self.assertFalse(self.storage.compatibility_manifests.exists())
         self.assertFalse((self.instance / "compatibility-manifests").exists())
 
     def test_success_enables_and_publishes_versioned_result_without_derived_artifacts(self):
@@ -76,7 +84,7 @@ class GateTests(unittest.TestCase):
         self.assertEqual(validate(result, "gate-result", "result"), [])
         self.assertTrue(load_config(self.binding)["enabled"])
         self.assertEqual(
-            load_config(self.instance / "adapter-drafts/sample-project.yaml")["gate"]["status"], "passed"
+            load_config(self.storage.draft("sample-project"))["gate"]["status"], "passed"
         )
         self.assert_no_derived_artifacts()
         self.assertEqual(run_gate(str(self.instance), "sample-project"), (0, result))
@@ -87,7 +95,7 @@ class GateTests(unittest.TestCase):
 
     def test_binding_with_plane_and_policy_passes_with_identity_only_result(self):
         self.provision()
-        draft_path = self.instance / "adapter-drafts" / "sample-project.yaml"
+        draft_path = self.storage.draft("sample-project")
         binding = load_config(self.binding)
         binding["plane"] = "project"
         binding["policy"] = {"code_concurrency": 1}
@@ -109,7 +117,7 @@ class GateTests(unittest.TestCase):
 
     def test_unexpected_identity_field_still_fails_the_gate(self):
         self.provision()
-        draft_path = self.instance / "adapter-drafts" / "sample-project.yaml"
+        draft_path = self.storage.draft("sample-project")
         draft = load_config(draft_path)
         draft["identity"]["unexpected"] = "value"
         draft_path.write_text(yaml.safe_dump(draft, sort_keys=False), encoding="utf-8")
@@ -120,9 +128,10 @@ class GateTests(unittest.TestCase):
         self.assertEqual(result["status"], "draft_invalid")
         self.assertFalse(load_config(self.binding)["enabled"])
 
-    def test_enable_does_not_read_instance_config(self):
+    def test_enable_reads_nothing_of_the_instance_config_but_its_data_directory(self):
         self.provision()
-        (self.instance / "instance.yaml").write_text("broken: [", encoding="utf-8")
+        # Another project's broken binding fails the instance's own validation; the gate never runs it.
+        (self.instance / "projects" / "other.yaml").write_text("broken: [", encoding="utf-8")
 
         code, result = run_gate(str(self.instance), "sample-project")
 
@@ -131,10 +140,23 @@ class GateTests(unittest.TestCase):
         self.assertTrue(load_config(self.binding)["enabled"])
         self.assert_no_derived_artifacts()
 
+    def test_an_unreadable_instance_config_fails_closed_without_enabling(self):
+        """Where the drafts and gate runs live is the instance's data directory, so an instance.yaml
+        that names none stops the gate by name instead of enabling anything (ummanu-26)."""
+        self.provision()
+        (self.instance / "instance.yaml").write_text("broken: [", encoding="utf-8")
+
+        code, result = run_gate(str(self.instance), "sample-project")
+
+        self.assertEqual(code, 1, result)
+        self.assertEqual(result["status"], "storage_unavailable")
+        self.assertFalse(load_config(self.binding)["enabled"])
+        self.assertFalse(self.storage.gate_runs("sample-project").exists())
+
     def test_stale_disable_ignores_leftover_manifest_artifacts(self):
         self.provision()
         self.assertEqual(run_gate(str(self.instance), "sample-project")[0], 0)
-        leftovers = self.instance / "compatibility-manifests"
+        leftovers = self.storage.compatibility_manifests
         leftovers.mkdir()
         manifest = leftovers / "sample-project.toml"
         manifest.write_text("[workspace]\n", encoding="utf-8")
@@ -158,7 +180,7 @@ class GateTests(unittest.TestCase):
         self.provision()
         code, result = run_gate(str(self.instance), "sample-project")
         self.assertEqual(code, 0, result)
-        path = self.instance / "gate-runs" / "sample-project" / result["run_id"] / "result.json"
+        path = self.storage.gate_runs("sample-project") / result["run_id"] / "result.json"
         path.write_text("{broken", encoding="utf-8")
 
         code, conflict = run_gate(str(self.instance), "sample-project")
@@ -250,7 +272,7 @@ class GateTests(unittest.TestCase):
         code, current = run_gate(str(self.instance), "sample-project")
         self.assertEqual(code, 0, current)
         self.assertGreaterEqual(
-            len(list((self.instance / "gate-runs/sample-project").glob("*/result.json"))), 2
+            len(list(self.storage.gate_runs("sample-project").glob("*/result.json"))), 2
         )
 
         repeat_code, repeated = run_gate(str(self.instance), "sample-project")
@@ -320,7 +342,7 @@ class GateTests(unittest.TestCase):
         }
         self.provision(broad_check=broad_check)
         published = self.adapter.read_bytes()
-        draft = load_config(self.instance / "adapter-drafts/sample-project.yaml")
+        draft = load_config(self.storage.draft("sample-project"))
         self.assertEqual(load_config(self.adapter)["broad_check"], broad_check)
         self.assertEqual(draft["provision"]["adapter"]["broad_check"], broad_check)
 
@@ -336,7 +358,7 @@ class GateTests(unittest.TestCase):
         """A disabled binding provisioned on another adapter is moved onto the project's own by
         project add. The drafted provision does not survive as valid: the gate refuses it, the old
         result is foreign, and the other adapter's file is left as it was."""
-        draft_path = self.instance / "adapter-drafts" / "sample-project.yaml"
+        draft_path = self.storage.draft("sample-project")
         binding = load_config(self.binding)
         binding["adapter"] = "inventory-only"
         draft = load_config(draft_path)

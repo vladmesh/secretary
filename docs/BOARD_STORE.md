@@ -661,7 +661,7 @@ close decisions are relational.
 
 ### 3.11 Not in this schema
 
-Agent runtime and head processes; the head registry (`heads/heads.yaml`, `heads/source.yaml`);
+Agent runtime and head processes; the head registry (`<data>/heads/heads.yaml`, `source.yaml`);
 memory facts and the vector index; personas, adapters, policies; secrets; provider sessions,
 quotas and credentials; run journals (`state/runs/**`); transcripts
 and artifacts; knowledge documents.
@@ -978,7 +978,7 @@ The normalized entity identity (§2.2) is a process property, not data.
 | Data | Location | Writer |
 |---|---|---|
 | project/repository bindings | `<instance>/projects/*.yaml` | operator |
-| adapters, personas, policies, heads canon | `<instance>/adapters/`, `persona/`, `policies/`, `heads/` | operator; `heads/` by the heads writer |
+| adapters, personas, heads canon | `<instance>/adapters/`, `persona/`, `heads/heads.toml` | operator |
 | secrets | `<instance>/secrets/**` | secret store |
 | memory facts | `<instance>/state/memory/facts/**` | memory writer |
 | knowledge, incl. sprint closeouts | `<instance>/state/knowledge/**` | knowledge writer |
