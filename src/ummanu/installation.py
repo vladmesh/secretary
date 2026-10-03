@@ -515,8 +515,19 @@ def _snapshot_checkout(
             offsite_remote = instance_offsite_remote(tree.root / "instance.yaml")
         except DataDirError as exc:
             raise InstallError(f"snapshot instance.yaml: {exc}") from None
+        for location, label in ((data_dir, "data directory"), (repository, "snapshot repository")):
+            # Unsupported layout: whatever is inside the live root has to be written before the
+            # live root is laid out, so it could no longer be absent or empty.
+            if location == target or location.is_relative_to(target):
+                raise InstallError(
+                    f"snapshot instance.yaml puts the {label} {location} inside the live root {target}; "
+                    "a data directory or snapshot repository inside the live root is not supported, "
+                    "nothing was written"
+                )
         live = snapshot_tree.live_root_state(target, tree)
-        bootstrap_evidence = _checked_data_target(data_dir)
+        # The live root may sit inside the data directory (`data_dir: ..`), with this staging beside it.
+        not_data = (target, scratch)
+        bootstrap_evidence = _checked_data_target(data_dir, ignore=not_data)
         existing = _existing_snapshot_tip(repository)
         if dry_run:
             keep = True
@@ -524,10 +535,10 @@ def _snapshot_checkout(
                 tip, repository, tree.root, scratch, True, f"would recover exporter snapshot {tip[:12]}"
             )
         changed = live != "same" or existing != tip
-        inside_data = repository.is_relative_to(data_dir)
-        if inside_data and (not data_dir.exists() or not any(data_dir.iterdir()) or bootstrap_evidence):
+        inside_data = repository.is_relative_to(data_dir) or target.is_relative_to(data_dir)
+        if inside_data and (not _data_target_entries(data_dir, not_data) or bootstrap_evidence):
             # The checkpoint step accepts a data root only empty or laid out by ummanu, so lay it out
-            # before the snapshot repository becomes its first entry.
+            # before the snapshot repository or the live root becomes one of its entries.
             init_layout(data_dir)
         if not existing:
             _adopt_snapshot_repository(staging, repository, installation_user)
@@ -877,14 +888,28 @@ def _valid_existing_layout(data_dir: Path) -> bool:
     return actual == manifest_for(data_dir)
 
 
-def _checked_data_target(data_dir: Path) -> bool:
-    """Refuse a non-empty data target ummanu did not create; True when it holds bootstrap evidence only."""
-    if not data_dir.exists() or not any(data_dir.iterdir()):
+def _data_target_entries(data_dir: Path, ignore: tuple[Path, ...] = ()) -> set[str]:
+    """The data target's entries, less the top-level entry holding each path of `ignore`."""
+    if not data_dir.exists():
+        return set()
+    ignored = {
+        path.relative_to(data_dir).parts[0] for path in ignore if path != data_dir and path.is_relative_to(data_dir)
+    }
+    return {entry.name for entry in data_dir.iterdir()} - ignored
+
+
+def _checked_data_target(data_dir: Path, *, ignore: tuple[Path, ...] = ()) -> bool:
+    """Refuse a non-empty data target ummanu did not create; True when it holds bootstrap evidence only.
+
+    `ignore` names paths inside the data target that are not its contents: a snapshot recovery's
+    live root, when the live root sits inside the data directory, and the staging beside it.
+    """
+    entries = _data_target_entries(data_dir, ignore)
+    if not entries:
         return False
     # An older bootstrap recorded its host unit in `host-managed.json` before checkpoint
     # materialization so the first full reconcile could prove ownership. That one evidence
     # file is compatible with an otherwise empty data root.
-    entries = {entry.name for entry in data_dir.iterdir()}
     bootstrap_evidence = entries == {"host-managed.json"}
     if not bootstrap_evidence and not _valid_existing_layout(data_dir):
         raise InstallError(

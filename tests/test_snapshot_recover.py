@@ -121,7 +121,19 @@ class SnapshotRecoverCase(unittest.TestCase):
         return {p.relative_to(target).as_posix(): p.read_bytes() for p in target.rglob("*") if p.is_file()}
 
     def leftovers(self) -> list[str]:
-        return sorted(p.name for p in self.root.iterdir() if p.name.startswith(".instance."))
+        parent = self.fixture.target.parent
+        return (
+            sorted(p.name for p in parent.iterdir() if p.name.startswith(".instance."))
+            if parent.exists()
+            else []
+        )
+
+    def relocate_data_dir(self, value: str) -> str:
+        """Cut the source again with `data_dir: <value>`, rooted at the live root it is recovered into."""
+        path = self.fixture.source / "instance.yaml"
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace(f"data_dir: {self.fixture.data_dir}\n", f"data_dir: {value}\n"), "utf-8")
+        return self.fixture.cut()
 
     def push_tree(self, edit, *, message: str = "edited by hand") -> str:
         """Commit `edit(work tree)` on top of the remote tip with ordinary Git and push it."""
@@ -284,6 +296,33 @@ class SnapshotRecoveryTests(SnapshotRecoverCase):
             tick_checkpoint_writer(self.fixture.data_dir, self.fixture.target).snapshot_repo, relocated
         )
 
+    def test_a_live_root_inside_the_data_directory_recovers(self):
+        """The layout this sprint deploys: live root `<data>/instance`, `data_dir: ..` and the snapshot
+        repository at its default, `<data>/backup/instance.git`, beside the live root."""
+        data_dir = self.root / "ummanu-data"
+        self.fixture.target = data_dir / "instance"
+        tip = self.relocate_data_dir("..")
+        self.fixture.data_dir = data_dir
+
+        result = self.recover()
+
+        self.assertEqual(result.status, "ok", result.render())
+        repository = data_dir / "backup" / "instance.git"
+        self.assertEqual(git(repository, "rev-parse", SNAPSHOT_REF), tip)
+        self.assertEqual(git(repository, "cat-file", "blob", SNAPSHOT_BASE_REF), tip)
+        self.assertFalse(repository.is_relative_to(self.fixture.target))
+        tree = git(repository, "ls-tree", "-r", "--name-only", "--full-tree", tip).splitlines()
+        self.assertEqual(sorted(self.live_files()), sorted(path for path in tree if is_exported(path)))
+        self.assertTrue((data_dir / "data-manifest.json").is_file())
+        self.assertEqual(self.leftovers(), [])
+        writer = tick_checkpoint_writer(data_dir, self.fixture.target)
+        self.assertIsInstance(writer, SnapshotExporter)
+        self.assertEqual(writer.snapshot_repo, repository.resolve())
+        # A rerun finds the same live root and the same repository beside it.
+        again = self.recover()
+        self.assertEqual(again.status, "ok", again.render())
+        self.assertEqual(self.steps(again)["instance-checkout"][0], "unchanged")
+
 
 class SnapshotRefusalTests(SnapshotRecoverCase):
     def assert_refused_before_writing(self, result, reason: str) -> None:
@@ -347,6 +386,27 @@ class SnapshotRefusalTests(SnapshotRecoverCase):
 
         self.assert_refused_before_writing(result, "9999_from_the_future")
         self.assertIn(f"this product's schema head {head_revision()}", self.steps(result)["install"][1])
+
+    def test_a_data_directory_inside_the_live_root_is_refused_before_anything_is_written(self):
+        self.relocate_data_dir("data")
+        target = self.fixture.target
+
+        for prepared in ("absent", "empty"):
+            with self.subTest(target=prepared):
+                if prepared == "empty":
+                    target.mkdir()
+                result = self.recover()
+
+                self.assertEqual(result.status, "failed", result.render())
+                refusal = self.steps(result)["install"][1]
+                self.assertIn(f"data directory {target / 'data'} inside the live root {target}", refusal)
+                self.assertIn("not supported, nothing was written", refusal)
+                if prepared == "absent":
+                    self.assertFalse(target.exists())
+                else:
+                    self.assertEqual(list(target.iterdir()), [])
+                self.assertFalse(self.fixture.data_dir.exists())
+                self.assertEqual(self.leftovers(), [])
 
     def test_a_divergent_non_empty_live_root_is_refused_and_left_as_it_was(self):
         target = self.fixture.target
