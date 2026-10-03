@@ -618,8 +618,12 @@ class IssueCliActorTests(unittest.TestCase):
                 return {"ref": "issue:x"}
 
         out, err = io.StringIO(), io.StringIO()
+        # The store is a stub, but the command still names an installation: unnamed, it would take
+        # the default live root and refuse it where it is absent, as on a CI runner (ummanu-39).
+        live_root = tempfile.TemporaryDirectory()
+        self.addCleanup(live_root.cleanup)
         with (
-            mock.patch.dict(os.environ, env),
+            mock.patch.dict(os.environ, {**env, "UMMANU_INSTANCE": live_root.name}),
             mock.patch.object(product_issue_commands, "_store", return_value=Store()),
             contextlib.redirect_stdout(out),
             contextlib.redirect_stderr(err),

@@ -8172,6 +8172,9 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                     "external_dependency",
                     "--reason-file",
                     str(reason_file),
+                    # The fixture's board and catalog name this directory as their instance.
+                    "--instance",
+                    str(self.data_dir),
                     "--data-dir",
                     str(self.data_dir),
                     "--request-id",
