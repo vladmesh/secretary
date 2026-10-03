@@ -2432,7 +2432,9 @@ metadata names a sprint. Cards in no sprint keep running. Known gap: a sprint ad
 successful pass is in neither source, so a card in a project it reserves that does not name the sprint
 can advance or be claimed until the next pass that reads the sprint board.
 
-The fence writes one durable `observer_fence_raised` event with `outcome: critical` per reason, and
+The fence writes one durable `observer_fence_raised` event with `outcome: critical` per reason
+(`deferred` under a drain or freeze while the launch only waits for the resume: no record yet, or the
+drain's own deferral; the cards stay fenced and the tick is not degraded), and
 `observer_fence_cleared` once adoption is confirmed: a record for that sprint naming exactly the
 declared profile, with a live pid on disk. An unwritten pid does not clear it, so clearing normally
 happens on a later tick than the launch.

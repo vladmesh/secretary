@@ -1797,6 +1797,17 @@ Each sprint's decision appears under the `observer-reconcile` step:
   visible, and the head launches after `resume`;
 - `sprint-board-unavailable` — the sprint store could not be read; no live head is stopped.
 
+The fence runs before these, as the `observer-fence` step with action `observer-fenced`. Its status:
+
+| state | status | tick |
+| --- | --- | --- |
+| drained, the sprint's observer not launched yet (`observer_not_launched`) or deferred by the drain (`observer_launch_deferred`, reason `pipeline is draining`) | `deferred` | `ok`, exit 0 |
+| anything else: a due launch that failed (a deferral with any other reason), a dead or mismatched head, an abandoned bring-up, a corrupt declaration; and every fence outside a pause | `critical` | `degraded`, exit 3 |
+
+Either way the sprint's cards stay fenced. A recovered host with an open sprint, drained before its
+first tick, therefore reports a green drained tick. On the first tick after `resume` the fence is
+`critical` until the relaunched observer writes its pid.
+
 Timers:
 
 - `UMMANU_OBSERVER_ACK_DEADLINE_SECONDS` (30 minutes) — how long one sent batch may stay

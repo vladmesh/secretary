@@ -613,10 +613,16 @@ database untouched; repair or recreate only the target before retrying.
 
 Install the product with the memory extra. On Ubuntu 24.04, `ummanu bootstrap` installs Docker
 and Compose from the distribution and provisions, migrates and role-verifies the PostgreSQL board
-store, with no recovery phrase or manual board credentials. Heads run on local-pty, which ships
+store, with no recovery phrase or manual board credentials. When the instance enables the web-front
+component (a `host.unit_prefix`, `host.components.web-front` not disabled, the unit not in
+`host.foreign_units`), bootstrap also installs the distribution's `caddy`, which
+`ummanu-web-front.service` runs as `/usr/bin/caddy`; it masks `caddy.service` first, so the package
+never starts an unconfigured listener. Heads run on local-pty, which ships
 with the product; before A20 step 9 bootstrap also installed Orca, the session manager heads then ran
 in, and its X server. `ummanu install` installs no
-runtime and checks that the board store is reachable before changing live state.
+runtime and checks that the board store is reachable before changing live state. With the web front
+enabled it also refuses up front, naming caddy, when `/usr/bin/caddy` is absent; without that check
+the front crash-looped (203/EXEC) and recovery failed only at materializer verify.
 
 ```bash
 python3 -m pip install '.[memory]'
@@ -756,8 +762,8 @@ upgrade`'s instance packing step skips a live root that is not a work tree.
 2. Crosses the recovery ownership barrier: the instance checkout, secrets, locks and declared data root
    are handed to `--installation-user` before that user's Git or remote child can consume a restored
    key. A present key must be a regular non-symlink mode-`0600` file owned by that user.
-3. Checks the remote and checkout, materialised credentials and board reachability. No session
-   manager is required.
+3. Checks the remote and checkout, materialised credentials, board reachability and, when the web
+   front is enabled, `/usr/bin/caddy`. No session manager is required.
 4. Materialises `state/board` and `state/runs` (from the checkout, or from the extracted snapshot
    tree) into a new local data plane, builds derived JSON from the NDJSON and verifies counters
    before any live write. The data target must be empty or laid out by ummanu: the files step 1
@@ -770,16 +776,25 @@ upgrade`'s instance packing step skips a live root that is not a work tree.
    head-registry step, from the canon (the live root's `heads/heads.toml`, else the product default).
    The board import needs it: it validates every open sprint's observer head against this pair, and a
    clean host has none until this step. It is idempotent and runs on every retry.
-6. Idempotently imports the board and rebuilds the memory export and index from `state/memory/facts`
-   (see [Board import](#board-import)).
+6. Idempotently imports the board and rebuilds the memory index from `state/memory/facts` (see
+   [Board import](#board-import)), then publishes the memory export (`<data>/memory/export.ndjson`,
+   `export.json`, `manifest.json`) from the same facts and hands it to `--installation-user`, so
+   `ummanu memory verify` is `ok` right after recovery. The pack step later finds the restored ledger
+   current and writes nothing, so this is the export's only writer on a recovered host. A retry past a
+   completed rebuild keeps the index and still publishes an export that is missing.
 7. Attempts every missing project checkout from the registry through the same remote-execution
    boundary as the instance checkout, and creates the non-secret managed runtime-home files for agent
-   CLIs. Provider authentication stays manual.
+   CLIs. A binding with `enabled: false` (retired, or not yet onboarded) is not cloned: its row has
+   outcome `disabled` and does not count as unavailable. A parent directory recovery creates for a
+   checkout (`~/projects`) is handed to `--installation-user`. Provider authentication stays manual.
 8. Runs the pre-host materialiser. Its head-registry step finds the pair step 5 wrote current
    (whether the checkpoint is a legacy one that still tracks `heads/heads.yaml` or an exporter cut
    that has none, the pair is generated, never read from the remote); it commits and publishes
    nothing. It then synchronises role skills and recreates role worktrees (owned by
-   `--installation-user` under `sudo`).
+   `--installation-user` under `sudo`, the skill roots and the directories above them in the home or
+   data directory included). A role worktree still registered in the product's Git whose directory is
+   gone (a lost workspace root, a host rebuilt from a backup) is added again over that registration; a
+   locked one is refused, and the step reports git's `fatal:` line.
 9. Rebuilds the pipeline worktree's live run journal from the checkpoint, before any dispatcher unit is
    installed or started.
 10. Applies host units, performs any required memory recovery and
@@ -873,8 +888,8 @@ audit/progress or rotates a namespace still bound to the target.
 ### Degraded outcomes
 
 Project failures are isolated after board and memory recovery. Output has one row per binding: project
-id, target state, transport, outcome (`cloned`, `unchanged`, `failed`), sanitised reason and
-retryability. If any row fails, recovery still completes safe host finalisation and the ownership
+id, target state, transport, outcome (`cloned`, `unchanged`, `failed`, `disabled`), sanitised reason
+and retryability. If any row fails, recovery still completes safe host finalisation and the ownership
 handoff, then exits non-zero with `status: degraded`. Invalid global configuration, board/sprint
 parity, memory corruption, unsafe host materialisation and operator interruption stay fatal.
 

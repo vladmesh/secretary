@@ -27,6 +27,7 @@ import hashlib
 from typing import Any
 
 from ummanu.dispatch.observer import (
+    DRAIN_DEFERRED_REASON,
     ObserverRecord,
     commit_event,
     load_observers,
@@ -71,8 +72,14 @@ REASON_DEFERRED = "observer_launch_deferred"
 REASON_ABANDONED = "observer_handle_abandoned"
 REASON_BOARD_UNAVAILABLE = "sprint_board_unavailable"
 
+# A pause claims nothing new and launches no observer, so under one a launch that is merely waiting
+# for the resume is not a failure: the sprint stays fenced, with the outcome status `deferred`
+# instead of `critical`. A launch that was due and failed is still critical.
+PAUSED_LAUNCH_MODES = frozenset({"drain", "freeze"})
+STATUS_DEFERRED = "deferred"
 
-def observer_fence(runtime: Any, payload: dict[str, Any]) -> dict[str, Any]:
+
+def observer_fence(runtime: Any, payload: dict[str, Any], *, pause_mode: str = "") -> dict[str, Any]:
     """Decide which sprints are fenced this tick, before any card is touched.
 
     Returns the fenced sprint refs, the projects those sprints hold, the card refs to leave alone,
@@ -100,7 +107,7 @@ def observer_fence(runtime: Any, payload: dict[str, Any]) -> dict[str, Any]:
     fenced: dict[str, dict[str, Any]] = {}
     outcomes: list[dict[str, Any]] = []
     for ref in sorted(open_sprints):
-        verdict = _sprint_verdict(runtime, open_sprints[ref], observers.get(ref))
+        verdict = _sprint_verdict(runtime, open_sprints[ref], observers.get(ref), pause_mode=pause_mode)
         if verdict is None:
             outcomes.extend(_clear(runtime, state, ref))
             continue
@@ -210,8 +217,14 @@ def _sprint_verdict(
     runtime: Any,
     sprint: dict[str, Any],
     record: ObserverRecord | None,
+    *,
+    pause_mode: str = "",
 ) -> dict[str, Any] | None:
-    """Why this sprint is fenced, or None when it is free to run."""
+    """Why this sprint is fenced, or None when it is free to run.
+
+    `critical: False` marks a launch the pause is holding back: no record yet, or the deferral the
+    drain itself wrote. The reason stays the same one an unpaused tick reports.
+    """
     try:
         decision = observer_decision(runtime, sprint)
     except ObserverMetadataError as exc:
@@ -219,7 +232,18 @@ def _sprint_verdict(
     if decision["kind"] == KIND_NONE:
         return None
     head = str(decision["head"])
+    paused = pause_mode in PAUSED_LAUNCH_MODES
     if record is None:
+        if paused:
+            return {
+                "reason": REASON_NO_RECORD,
+                "message": (
+                    f"declared observer {head} has not been launched: the pipeline is paused "
+                    f"({pause_mode}), so its launch waits for the resume"
+                ),
+                "head": head,
+                "critical": False,
+            }
         return {
             "reason": REASON_NO_RECORD,
             "message": f"declared observer {head} has not been launched",
@@ -241,6 +265,16 @@ def _sprint_verdict(
             "reason": REASON_ABANDONED,
             "message": f"declared observer {head} has an abandoned terminal from a failed bring-up",
             "head": head,
+        }
+    if record.state == "deferred" and paused and record.deferred_reason == DRAIN_DEFERRED_REASON:
+        return {
+            "reason": REASON_DEFERRED,
+            "message": (
+                f"declared observer {head} is not up: {record.deferred_reason}, so its launch waits "
+                "for the resume"
+            ),
+            "head": head,
+            "critical": False,
         }
     if record.state in {"deferred", "pending", "launching"}:
         return {
@@ -279,13 +313,18 @@ def _raise(
     sprint: dict[str, Any],
     verdict: dict[str, Any],
 ) -> dict[str, Any]:
-    """Open or keep the fence on one sprint, writing the critical fact once per reason."""
+    """Open or keep the fence on one sprint, writing the fact once per reason.
+
+    Critical, unless the verdict is a launch a pause holds back: then `deferred`, and the cards are
+    fenced all the same.
+    """
     ref = str(sprint.get("ref") or "")
+    status = "critical" if verdict.get("critical", True) else STATUS_DEFERRED
     previous = state.get(ref)
     previous = previous if isinstance(previous, dict) else None
     if previous is not None and previous.get("reason") == verdict["reason"]:
         return {
-            "status": "critical",
+            "status": status,
             "step": "observer-fence",
             "sprint": ref,
             "action": "observer-fenced",
@@ -310,7 +349,7 @@ def _raise(
             "projects": sorted(_sprint_projects(sprint)),
             "message": verdict["message"],
         },
-        outcome="critical",
+        outcome=status,
     )
     audited = commit_event(runtime, event)
     state[ref] = {
@@ -321,7 +360,7 @@ def _raise(
         "request_id": request_id,
     }
     outcome = {
-        "status": "critical",
+        "status": status,
         "step": "observer-fence",
         "sprint": ref,
         "action": "observer-fenced",

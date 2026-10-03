@@ -47,12 +47,15 @@ from ummanu.board.backend import CARD, board_client
 from ummanu.board.checkpoint_layout import CheckpointBoard, CheckpointLayoutError, open_checkpoint_board
 from ummanu.checkpoint import SNAPSHOT_BASE_REF, SNAPSHOT_BRANCH, SNAPSHOT_REF
 from ummanu.config import (
+    ConfigError,
     DataDirError,
     instance_offsite_remote,
+    load_config,
     recovered_instance_locations,
     validate_instance,
 )
 from ummanu.data import init_layout, manifest_for
+from ummanu.host import foreign_units
 from ummanu.host_apply import (
     SystemdUnitInstaller,
     resolve_runtime_owner,
@@ -71,6 +74,7 @@ from ummanu.memory.client_config import (
     packaged_codex_home,
     seed_codex_home,
 )
+from ummanu.memory_journal import export_memory_snapshot
 from ummanu.projects.availability import ProjectAvailability
 from ummanu.restore import (
     RestoreError,
@@ -81,7 +85,7 @@ from ummanu.restore import (
     restore_state,
 )
 from ummanu.runtime.codex_home import managed_codex_homes
-from ummanu.runtime.paths import PRODUCT_DIRNAME, PRODUCT_ENV
+from ummanu.runtime.paths import PRODUCT_DIRNAME, PRODUCT_ENV, component_enabled
 from ummanu.runtime.shared_state import resolve_pipeline_state_dir
 from ummanu.runtime_env import (
     RuntimeEnvError,
@@ -117,6 +121,9 @@ from ummanu.upgrade import (
 
 CHECKPOINT_BOARD = ("cards.ndjson", "sprints.ndjson", "events.ndjson", "audit.ndjson", "export.json")
 CHECKPOINT_RUNS = ("runs.ndjson", "claims.json", "watermarks.json", "export.json")
+# `packaging/systemd/ummanu-web-front.service` runs the distribution's Caddy at this path.
+WEB_FRONT_COMPONENT = "web-front"
+CADDY_BINARY = Path("/usr/bin/caddy")
 
 
 class InstallError(RuntimeError):
@@ -958,12 +965,45 @@ def _runtime_environment(values: dict[str, str]) -> Iterator[None]:
                 os.environ[key] = value
 
 
+def web_front_wanted(instance_dir: Path) -> bool:
+    """Whether this installation's desired units include `<prefix>web-front.service`.
+
+    The same answer the host plan gives: units exist only under a unit prefix, for an enabled
+    component, and not when the installation declares the name foreign. An instance that cannot be
+    read wants nothing here; the install refuses it on its own terms.
+    """
+    try:
+        instance = load_config(Path(instance_dir) / "instance.yaml")
+    except ConfigError:
+        return False
+    host = instance.get("host") if isinstance(instance, dict) else None
+    if not isinstance(host, dict):
+        return False
+    prefix = host.get("unit_prefix")
+    if not isinstance(prefix, str) or not prefix:
+        return False
+    return component_enabled(host, WEB_FRONT_COMPONENT) and (
+        f"{prefix}{WEB_FRONT_COMPONENT}.service" not in foreign_units(host)
+    )
+
+
+def caddy_installed() -> bool:
+    """Whether the binary `ummanu-web-front.service` executes is on this host."""
+    return os.access(CADDY_BINARY, os.X_OK)
+
+
 def check_prerequisites(instance_dir: Path) -> None:
     # The prerequisite is the board this installation serves cards from: the PostgreSQL store.
     try:
         TaskReader(board_client(instance_dir, serves=(CARD,))).list()
     except TaskError as exc:
         raise InstallError(f"PostgreSQL prerequisite failed: {exc.message}") from None
+    # Up front, not at materializer verify: without it the front crash-loops (203/EXEC).
+    if web_front_wanted(instance_dir) and not caddy_installed():
+        raise InstallError(
+            f"caddy prerequisite failed: the web-front component is enabled and {CADDY_BINARY} is "
+            "absent; install the distribution's caddy (`ummanu bootstrap` does) or disable the component"
+        )
 
 
 def _valid_existing_layout(data_dir: Path) -> bool:
@@ -1355,6 +1395,27 @@ def materialize_head_registry(
     return step.status, step.detail
 
 
+def _publish_recovered_memory_export(data_dir: Path, instance: Path, installation_user: str | None) -> None:
+    """Publish `<data>/memory/export.ndjson` from the recovered facts and hand it to the user.
+
+    The index rebuild writes only the index, and the pack step skips a ledger the restore already
+    matches, so without this `memory verify` finds no export on a recovered host.
+    """
+    try:
+        export_memory_snapshot(data_dir, instance)
+    except (OSError, RuntimeError) as exc:
+        raise InstallError(f"could not publish the memory export: {exc}") from None
+    _set_installation_owner(data_dir / "memory", installation_user)
+
+
+def _unchanged_memory_step(data_dir: Path, instance: Path, installation_user: str | None) -> tuple[str, str]:
+    """A retry past the rebuild: the index stays, and a missing export is still published."""
+    if (data_dir / "memory" / "export.ndjson").is_file():
+        return "unchanged", "checkpoint index already rebuilt"
+    _publish_recovered_memory_export(data_dir, instance, installation_user)
+    return "changed", "checkpoint index already rebuilt; published the memory export"
+
+
 def provision_project_checkouts(
     bindings: list[dict[str, object]],
     installation_user: str | None,
@@ -1407,6 +1468,12 @@ def _provision_project_checkout(
         if isinstance(project_id, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]*", project_id)
         else f"binding-{index + 1}"
     )
+    if binding.get("enabled") is False:
+        # A retired or not-yet-onboarded project: nothing runs against it, so nothing is cloned for
+        # it, and its absence is not an unavailable checkout.
+        return ProjectProvisionResult(
+            display_id, "not-inspected", "not-contacted", "disabled", "disabled", "binding is disabled", False
+        )
     raw_target = binding.get("repo")
     if not isinstance(raw_target, str) or not raw_target:
         return _project_failure(display_id, "invalid", "unknown", "invalid-binding", False)
@@ -1443,7 +1510,11 @@ def _provision_project_checkout(
     temporary: Path | None = None
     claimed_target = False
     try:
+        created = [parent for parent in (target.parent, *target.parent.parents) if not parent.exists()]
         target.parent.mkdir(parents=True, exist_ok=True)
+        if created:
+            # Root creates `~/projects` on a fresh host; the installation user clones into it later.
+            _set_installation_owner(created[-1], installation_user)
         temporary = Path(tempfile.mkdtemp(prefix=f".{target.name}.clone-", dir=target.parent))
         _set_installation_owner(temporary, installation_user)
         staging = temporary / "checkout"
@@ -1794,10 +1865,11 @@ def _restore_without_credentials(
     host = report.host if isinstance(report.host, dict) else {}
     threads = host.get("memory_threads", 1)
     if progress.get("memory") == "complete" and (data_dir / "memory" / "index.sqlite").is_file():
-        result.add("memory", "unchanged", "checkpoint index already rebuilt")
+        result.add("memory", *_unchanged_memory_step(data_dir, target, args.installation_user))
     else:
         _write_recovery_progress(progress_path, identity, memory="started")
         count = rebuild_memory_index(data_dir, target, threads=threads if isinstance(threads, int) else None)
+        _publish_recovered_memory_export(data_dir, target, args.installation_user)
         result.add("memory", "changed", f"rebuilt index for {count} fact(s)")
         _write_recovery_progress(progress_path, identity, memory="complete")
     project_results = provision_project_checkouts(
@@ -2057,7 +2129,7 @@ def install(args: argparse.Namespace) -> InstallResult:
             if (
                 progress.get("memory") == "complete" and (data_dir / "memory" / "index.sqlite").is_file()
             ) or recovered_memory_completion:
-                result.add("memory", "unchanged", "checkpoint index already rebuilt")
+                result.add("memory", *_unchanged_memory_step(data_dir, target, args.installation_user))
                 if recovered_memory_completion:
                     _write_recovery_progress(progress_path, identity, memory="complete")
             else:
@@ -2065,6 +2137,7 @@ def install(args: argparse.Namespace) -> InstallResult:
                 count = rebuild_memory_index(
                     data_dir, target, threads=threads if isinstance(threads, int) else None
                 )
+                _publish_recovered_memory_export(data_dir, target, args.installation_user)
                 result.add("memory", "changed", f"rebuilt index for {count} fact(s)")
                 _write_recovery_progress(progress_path, identity, memory="complete")
             project_results = provision_project_checkouts(
