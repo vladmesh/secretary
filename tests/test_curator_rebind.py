@@ -39,7 +39,7 @@ class CuratorRebindTests(unittest.TestCase):
         self.product_new = self.projects / rewrite.claude_key(product_new)
         self.ws_old_dir = self.projects / rewrite.claude_key(self.old_ws)
         self.ws_new_dir = self.projects / rewrite.claude_key(self.new_ws)
-        self.outside = self.projects / "-home-dev-orca-workspaces-secretary-secretary-1200-card"
+        self.outside = self.projects / "-home-dev-orca-workspaces-relay-relay-1200-card"
         self.new_ws.mkdir(parents=True)
         self.patches = [
             mock.patch.object(cli, "STATE", self.state),
