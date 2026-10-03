@@ -93,6 +93,7 @@ from ummanu.provision import apply_provision_result, render_result, start_provis
 from ummanu.restore import RestoreError, _target, restore_findings
 from ummanu.restore_commands import add_restore_subcommands, run_memory_reindex
 from ummanu.role_skills import add_role_skills_subcommands
+from ummanu.runtime import interactive_workspace
 from ummanu.runtime.codex_preflight import (
     CODEX_HOME_DATA_DIR,
     CODEX_HOME_ENV,
@@ -447,7 +448,8 @@ def build_parser() -> argparse.ArgumentParser:
     shell.add_argument(
         "--workspace",
         default=None,
-        help="workspace dir for codex directory trust (default: current dir)",
+        help="the head's working directory and codex trust directory "
+        "(default: the installation's interactive workspace, <data>/interactive)",
     )
     shell.add_argument(
         "--env-file",
@@ -609,6 +611,8 @@ def run_doctor(args: argparse.Namespace) -> int:
         print("warning: memory model cache is in a temporary directory and can be cleaned unexpectedly")
     for line in _codex_home_lines(_codex_home_status(report)):
         print(line)
+    if report.data_dir is not None:
+        print(interactive_workspace.status_line(interactive_workspace.describe(report.data_dir)))
     if report.warnings:
         print(f"warnings: {len(report.warnings)}")
         for warning in report.warnings:
@@ -767,6 +771,7 @@ def run_status(args: argparse.Namespace) -> int:
         )
     observers = snapshot["dispatcher"]["observers"]
     live = sum(1 for observer in observers if observer["alive"])
+    print(interactive_workspace.status_line(snapshot["installation"]["interactive_workspace"]))
     print(f"sprint observers: {live} live of {len(observers)}")
     sprint_status = snapshot["installation"]["sprints"]
     if sprint_status["error"]:

@@ -112,6 +112,8 @@ The product repository holds no real project bindings, credentials, cards or hos
 product path names a user or a checkout.
 
 The instance repository holds persona, project bindings, adapters and the head canon.
+`persona/AGENTS.md` there is the personal part of the interactive head's persona; see
+[The persona boundary](#the-persona-boundary).
 `state/` in it holds the recovery canon: board, runs, memory facts and knowledge documents.
 `secrets/` holds a metadata catalog and sealed values. The raw installation key and the recovery
 phrase are never stored there ([Recovery](RECOVERY.md#secrets)). The host `runtime.env` is a separate
@@ -478,6 +480,24 @@ Knowledge is not indexed, not returned by `memory_search` and never loaded whole
 context. Format is free markdown. Writes go through `ummanu knowledge write`, which owns only
 `state/knowledge`, takes the shared live-root writer lock, starts no Git child and refuses documents
 containing secrets ([Protocols](PROTOCOLS.md#knowledge)).
+
+### The persona boundary
+
+The interactive head (`ummanu shell`) is the one head with a persona, and it receives it through its
+own workspace, `<data>/interactive` (decision on ummanu-33). `upgrade` and `recover` compose its
+`AGENTS.md` in one function, `ummanu.runtime.interactive_workspace.materialize`:
+
+- the **shared part**, the role contract, shipped in the product as
+  `packaging/interactive-workspace/AGENTS.md`; it carries nothing owner-personal;
+- a separator, then the **personal part**, byte for byte from the live root's `persona/AGENTS.md`
+  (in the snapshot allowlist, so it is exported and recovered with the configuration). Without that
+  file the workspace holds the shared part alone.
+
+`CLAUDE.md` there is `@AGENTS.md`; Codex reads `AGENTS.md` from its cwd. Nothing else receives the
+persona: not the PO workspace, observer, worker or reviewer workspaces, and not the owner's global
+`~/.claude/CLAUDE.md`, which every Claude head on the host loads and the product never writes.
+Hermes is a separate product and keeps its own persona. `tests/test_interactive_workspace.py` holds
+the boundary.
 
 ## Ownership and security
 

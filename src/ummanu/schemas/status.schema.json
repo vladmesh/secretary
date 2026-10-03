@@ -30,6 +30,19 @@
             "error": {"type": ["string", "null"]}
           }
         },
+        "interactive_workspace": {
+          "type": "object",
+          "description": "The interactive head's workspace <data>/interactive and the digests of the shared and personal parts it was composed from.",
+          "required": ["path", "present", "shared", "personal", "drifted", "error"],
+          "properties": {
+            "path": {"type": "string"},
+            "present": {"type": "boolean"},
+            "shared": {"type": ["string", "null"]},
+            "personal": {"type": ["string", "null"], "description": "null when the live root has no persona/AGENTS.md"},
+            "drifted": {"type": "boolean"},
+            "error": {"type": ["string", "null"]}
+          }
+        },
         "sprints": {
           "type": "object",
           "required": ["items", "error"],
