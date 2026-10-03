@@ -3129,6 +3129,33 @@ The role route does not widen the curator protocol. A fact-bearing pending batch
 session identity, its selected-project or all-backlog selector, and its starting cursors. Replay or advance with a
 different identity or selector fails closed.
 
+A role-workspace move is the one supported resolution of a foreign identity: run `ummanu automations curator rebind
+--dry-run`, read the plan, then `ummanu automations curator rebind` with the curator's identity (from the role
+workspace, or with `TA_CURATOR_WORKSPACE` set to it). Run it after a move of the curator's workspace and Claude
+project directories, such as the sprint:1475 rename, and before the next tick, which otherwise refuses with
+`belongs to a different run identity` and names this verb. It follows only the known moves
+(`transition.rewrite.claude_move_paths`), never a string replace, and runs under the cursor-settlement lock:
+
+- the pending identity is rebound only when its workspace is a known old path that no longer exists and the rebound
+  identity is the current run's; the facts in the batch are kept, its cursor keys follow the same moves and its batch
+  id is re-signed. A workspace outside the moves, an old workspace that still exists, or a pending starting cursor
+  that disagrees with the carried cursor is refused with a named reason, and nothing is written;
+- a watermark cursor under a moved Claude project directory goes to its new key only when the old file is absent,
+  the new file exists, and the new key holds no cursor or one equal to or behind it. A new key already ahead wins and
+  the old key is dropped; a cursor never moves backwards. Keys outside the moves, keys whose old file still exists
+  and cursors of different kinds are left as they are. A carried transcript is read from its cursor, so only its new
+  turns are harvested;
+- a run that changes state first appends one `rebind` line to `runs.jsonl` (append-only: never read or replaced)
+  with the counts (rebound, carried, superseded, pending keys, skipped by reason), the from/to workspace and
+  `state_digest`, the digest of the `pending.json` and `watermark.json` it is about to publish; only then does it
+  publish them. A failed append changes nothing. A failed publication is rolled back and followed by a `rebind-failed`
+  line with the same digest; the retry appends a new `rebind` line, and the applied attempt is the one whose digest
+  matches the published state. A second run finds nothing and writes nothing. `--dry-run` writes nothing.
+
+`ummanu doctor` reports `automation_busy_without_advance` for the curator when its supervised head has been answered
+`supervised-busy-skip` for longer than `BUSY_WITHOUT_ADVANCE_HOURS` (6 h) with no `advance` or successful
+`memory_write` in `runs.jsonl` and no head started since. The head is stuck: inspect and stop it rather than wait.
+
 A later intentional baseline is a separate manual operation. It requires one registered canonical project
 or the reserved `review:po` selector,
 an explicit actor, a non-empty reason, and exactly one current opaque cutoff or pending-batch identity. It cannot

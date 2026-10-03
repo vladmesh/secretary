@@ -32,6 +32,12 @@ class PendingError(ValueError):
     pass
 
 
+_FOREIGN_IDENTITY = (
+    "curator pending record belongs to a different run identity; after a role-workspace move, "
+    "run `ummanu automations curator rebind --dry-run`, then `ummanu automations curator rebind`"
+)
+
+
 class LegacyPendingError(PendingError):
     """The pending file is not a versioned record at all (a pre-version-3 or foreign format)."""
 
@@ -398,7 +404,7 @@ def read_pending(st, identity=None, project=None):
     if not isinstance(record, dict) or record.get("version") != PENDING_VERSION:
         raise LegacyPendingError("curator pending record is legacy or unsupported; preserve it and resolve it manually")
     if record.get("identity") != identity:
-        raise PendingError("curator pending record belongs to a different run identity")
+        raise PendingError(_FOREIGN_IDENTITY)
     batch, base = record.get("batch"), record.get("base")
     if not _well_formed_batch(batch) or not isinstance(base, dict):
         raise PendingError("curator pending record has an invalid batch")
@@ -460,7 +466,7 @@ def advance(st, record, identity=None, project=None):
     if not isinstance(record, dict) or record.get("version") != PENDING_VERSION:
         raise PendingError("curator advance requires the versioned pending record")
     if record.get("identity") != identity:
-        raise PendingError("curator pending record belongs to a different run identity")
+        raise PendingError(_FOREIGN_IDENTITY)
     batch, base = record.get("batch"), record.get("base")
     if not isinstance(batch, dict) or not isinstance(base, dict) or not isinstance(batch.get("pending"), dict):
         raise PendingError("curator pending record has an invalid batch")

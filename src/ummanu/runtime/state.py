@@ -47,6 +47,26 @@ class BoardUnavailable(RuntimeError):
 PRECHECK_DEFERRED = 102
 
 
+def append_line_durable(path: Path, line: str) -> None:
+    """Append one complete line to an append-only journal: `O_APPEND`, one `write()`, then `fsync`.
+
+    The file is never read or replaced, so lines that other writers append concurrently survive.
+    A failure raises; a short write is a failure too.
+    """
+    if "\n" in line:
+        raise ValueError("a journal line must not contain a newline")
+    data = (line + "\n").encode("utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    try:
+        written = os.write(descriptor, data)
+        if written != len(data):
+            raise OSError(f"short append to {path}: {written} of {len(data)} bytes")
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def publish_state_atomic(
     writes: list[tuple[Path, str]],
     *,
