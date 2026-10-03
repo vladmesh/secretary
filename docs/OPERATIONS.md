@@ -3145,8 +3145,12 @@ project directories, such as the sprint:1475 rename, and before the next tick, w
   the old key is dropped; a cursor never moves backwards. Keys outside the moves, keys whose old file still exists
   and cursors of different kinds are left as they are. A carried transcript is read from its cursor, so only its new
   turns are harvested;
-- a run that changes state appends one `rebind` line to `runs.jsonl` with the counts (rebound, carried, superseded,
-  pending keys, skipped by reason). A second run finds nothing and writes nothing. `--dry-run` writes nothing.
+- a run that changes state first appends one `rebind` line to `runs.jsonl` (append-only: never read or replaced)
+  with the counts (rebound, carried, superseded, pending keys, skipped by reason), the from/to workspace and
+  `state_digest`, the digest of the `pending.json` and `watermark.json` it is about to publish; only then does it
+  publish them. A failed append changes nothing. A failed publication is rolled back and followed by a `rebind-failed`
+  line with the same digest; the retry appends a new `rebind` line, and the applied attempt is the one whose digest
+  matches the published state. A second run finds nothing and writes nothing. `--dry-run` writes nothing.
 
 `ummanu doctor` reports `automation_busy_without_advance` for the curator when its supervised head has been answered
 `supervised-busy-skip` for longer than `BUSY_WITHOUT_ADVANCE_HOURS` (6 h) with no `advance` or successful

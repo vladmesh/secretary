@@ -20,6 +20,7 @@ The whole plan is refused, with a named reason, rather than half applied.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections import Counter
@@ -53,6 +54,15 @@ class RebindPlan:
     watermark_text: str | None = None
     pending_text: str | None = None
 
+    def digest(self, st) -> str:
+        """`state_digest` of the files after this plan: planned text, or the current bytes it keeps."""
+        def after(text: str | None, path: Path) -> bytes | None:
+            if text is not None:
+                return text.encode("utf-8")
+            return path.read_bytes() if path.exists() else None
+
+        return state_digest(after(self.pending_text, st.pending_file), after(self.watermark_text, st.watermark_file))
+
     @property
     def changed(self) -> bool:
         return self.watermark_text is not None or self.pending_text is not None
@@ -65,6 +75,16 @@ class RebindPlan:
             "pending_keys": len(self.pending_keys),
             "skipped": {reason: self.skipped.get(reason, 0) for reason in SKIP_REASONS},
         }
+
+
+def state_digest(pending: bytes | None, watermark: bytes | None) -> str:
+    """The digest a `rebind` audit line carries: the bytes of `pending.json` and `watermark.json` as
+    the rebind publishes them (None for an absent file), so a reader can match it to the state."""
+    digest = hashlib.sha256()
+    for name, data in (("pending.json", pending), ("watermark.json", watermark)):
+        digest.update(name.encode() + b"\0")
+        digest.update(b"absent\0" if data is None else str(len(data)).encode() + b"\0" + data)
+    return digest.hexdigest()
 
 
 def _position(cursor: object) -> tuple[str, float] | None:

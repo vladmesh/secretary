@@ -33,7 +33,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ummanu.runtime.redact import looks_like_credential, scrub_secrets
-from ummanu.runtime.state import PRECHECK_DEFERRED, PRECHECK_SKIP, AgentState, publish_state_atomic
+from ummanu.runtime.state import (
+    PRECHECK_DEFERRED,
+    PRECHECK_SKIP,
+    AgentState,
+    append_line_durable,
+    publish_state_atomic,
+)
 
 from . import discover, harvest, rebind
 from .memory_protocol import (
@@ -326,12 +332,18 @@ def cmd_precheck() -> int:
 
 
 def cmd_rebind(dry_run: bool) -> int:
-    """Rebind the pending identity and carry moved transcript cursors; audited, idempotent."""
+    """Rebind the pending identity and carry moved transcript cursors; audited, idempotent.
+
+    `runs.jsonl` is append-only here: the `rebind` line is appended durably *before* the state
+    changes and carries the digest of the state it is about to publish.  A failed publication is
+    rolled back and followed by a best-effort `rebind-failed` line with the same digest.
+    """
     def plan() -> rebind.RebindPlan:
         return rebind.plan_rebind(
             STATE, home=Path.home(), projects=discover.CLAUDE_PROJECTS, current=harvest.current_identity()
         )
 
+    journal = STATE.dir / "runs.jsonl"
     try:
         if dry_run:
             result = plan()
@@ -339,29 +351,42 @@ def cmd_rebind(dry_run: bool) -> int:
             with cursor_settlement_transaction():
                 result = plan()
                 if result.changed:
-                    # The audit line is published with the state it describes, as baseline does:
-                    # `log_run` is best-effort, and a rebind without its audit could never be repaired
-                    # because the re-run is a no-op.
-                    journal = STATE.dir / "runs.jsonl"
-                    journal_text = journal.read_text(encoding="utf-8") if journal.exists() else ""
-                    if journal_text and not journal_text.endswith("\n"):
-                        journal_text += "\n"
-                    event = {"ts": datetime.now(UTC).isoformat(), "event": "rebind", **result.counts()}
-                    journal_text += json.dumps(event, ensure_ascii=False) + "\n"
+                    digest = result.digest(STATE)
+                    event = {
+                        "ts": datetime.now(UTC).isoformat(),
+                        "event": "rebind",
+                        **result.counts(),
+                        "from_workspace": result.old_workspace,
+                        "to_workspace": result.new_workspace,
+                        "state_digest": digest,
+                    }
+                    append_line_durable(journal, json.dumps(event, ensure_ascii=False))
                     writes = [
                         (path, text)
                         for path, text in (
                             (STATE.watermark_file, result.watermark_text),
                             (STATE.pending_file, result.pending_text),
-                            (journal, journal_text),
                         )
                         if text is not None
                     ]
-                    publish_state_atomic(writes)
+                    try:
+                        publish_state_atomic(writes)
+                    except OSError as exc:
+                        failed = {
+                            "ts": datetime.now(UTC).isoformat(),
+                            "event": "rebind-failed",
+                            "state_digest": digest,
+                            "error": str(exc),
+                        }
+                        try:
+                            append_line_durable(journal, json.dumps(failed, ensure_ascii=False))
+                        except OSError:
+                            pass
+                        raise
     except rebind.RebindRefused as exc:
         print(f"curator: rebind refused ({exc.reason}): {exc}; state unchanged", file=sys.stderr)
         return 1
-    except (OSError, UnicodeError) as exc:
+    except OSError as exc:
         print(f"curator: rebind failed: {exc}; state unchanged", file=sys.stderr)
         return 1
     for line in rebind.render(result, dry_run=dry_run):

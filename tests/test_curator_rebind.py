@@ -117,8 +117,18 @@ class CuratorRebindTests(unittest.TestCase):
             "pending_moved": pending_moved, "pending_outside": pending_outside,
         }}
 
-    def _snapshot(self) -> dict[str, bytes]:
-        return {path.name: path.read_bytes() for path in sorted(self.state.dir.iterdir()) if path.is_file()}
+    def _snapshot(self, *, journal: bool = True) -> dict[str, bytes]:
+        return {
+            path.name: path.read_bytes()
+            for path in sorted(self.state.dir.iterdir())
+            if path.is_file() and (journal or path.name != "runs.jsonl")
+        }
+
+    def _published_digest(self) -> str:
+        return rebind.state_digest(self.state.pending_file.read_bytes(), self.state.watermark_file.read_bytes())
+
+    def _journal(self) -> list[dict]:
+        return [json.loads(line) for line in (self.state.dir / "runs.jsonl").read_text(encoding="utf-8").splitlines()]
 
     def _run(self, *argv: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -176,7 +186,9 @@ class CuratorRebindTests(unittest.TestCase):
         self.assertEqual(
             {key: value for key, value in audit[0].items() if key != "ts"},
             {"event": "rebind", "rebound": 1, "carried": 2, "superseded": 1, "pending_keys": 1,
-             "skipped": {"outside_moves": 4, "old_exists": 1, "new_missing": 1, "incomparable": 0}},
+             "skipped": {"outside_moves": 4, "old_exists": 1, "new_missing": 1, "incomparable": 0},
+             "from_workspace": str(self.old_ws), "to_workspace": str(self.new_ws),
+             "state_digest": self._published_digest()},
         )
 
         after = self._snapshot()
@@ -207,41 +219,93 @@ class CuratorRebindTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, operations)
 
-    def test_audit_write_failure_restores_state_and_a_retry_applies_once(self) -> None:
+    def test_a_failed_audit_append_changes_nothing_and_exits_non_zero(self) -> None:
         self._fixture()
         before = self._snapshot()
+        with mock.patch("ummanu.runtime.state.os.write", side_effect=OSError("No space left on device")):
+            code, out, err = self._run()
+        self.assertEqual((code, out), (1, ""))
+        self.assertIn("curator: rebind failed: No space left on device; state unchanged", err)
+        self.assertEqual(self._snapshot(journal=False), {k: v for k, v in before.items() if k != "runs.jsonl"})
         journal = self.state.dir / "runs.jsonl"
+        self.assertEqual(journal.read_bytes() if journal.exists() else b"", b"")  # O_CREAT may leave it empty
+
+    def test_a_failed_publication_is_rolled_back_audited_and_a_retry_applies(self) -> None:
+        self._fixture()
+        before = self._snapshot(journal=False)
         real_replace = os.replace
+        faults = [self.state.pending_file]
 
         def replace(source, target, *args, **kwargs):
-            if Path(target) == journal:
-                raise OSError("audit unavailable")
+            # Once, after watermark.json was already replaced; the rollback's own replaces succeed.
+            if faults and Path(target) == faults[0]:
+                faults.pop()
+                raise OSError("pending unavailable")
             return real_replace(source, target, *args, **kwargs)
 
         with mock.patch("ummanu.runtime.state.os.replace", side_effect=replace):
             code, out, err = self._run()
         self.assertEqual((code, out), (1, ""))
-        self.assertIn("curator: rebind failed: audit unavailable; state unchanged", err)
-        self.assertEqual(self._snapshot(), before)
-        self.assertFalse(journal.exists())
+        self.assertIn("curator: rebind failed: pending unavailable; state unchanged", err)
+        self.assertEqual(self._snapshot(journal=False), before)
+        failed = self._journal()
+        self.assertEqual([event["event"] for event in failed], ["rebind", "rebind-failed"])
+        self.assertEqual(failed[1]["state_digest"], failed[0]["state_digest"])
+        self.assertEqual(failed[1]["error"], "pending unavailable")
 
-        code, _, err = self._run()
+        code, out, err = self._run()
         self.assertEqual((code, err), (0, ""))
-        self.assertEqual(self._run()[0], 0)
-        audit = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
-        self.assertEqual([event["event"] for event in audit], ["rebind"])
-        self.assertEqual(audit[0]["rebound"], 1)
-        self.assertEqual(audit[0]["carried"], 2)
+        self.assertIn("curator rebind: rebound; rebound=1 carried=2", out)
+        journal = self._journal()
+        self.assertEqual([event["event"] for event in journal], ["rebind", "rebind-failed", "rebind"])
+        self.assertEqual(journal[2]["state_digest"], journal[0]["state_digest"])
+        self.assertEqual(journal[2]["state_digest"], self._published_digest())
         harvest.read_pending(self.state, harvest.current_identity())
 
-    def test_the_audit_line_is_appended_to_an_existing_journal(self) -> None:
+    def test_concurrent_appends_survive_the_rebind(self) -> None:
         self._fixture()
         journal = self.state.dir / "runs.jsonl"
-        journal.write_text('{"event": "precheck"}', encoding="utf-8")
-        self.assertEqual(self._run()[0], 0)
-        lines = journal.read_text(encoding="utf-8").splitlines()
-        self.assertEqual(lines[0], '{"event": "precheck"}')
-        self.assertEqual([json.loads(line)["event"] for line in lines], ["precheck", "rebind"])
+        journal.write_text('{"event": "precheck", "result": "change"}\n', encoding="utf-8")
+        real_publish = cli.publish_state_atomic
+
+        def publish(writes, **kwargs):
+            # Another writer (a precheck, the dispatcher's busy skip) appends between audit and publish.
+            cli.STATE.log_run("dispatch", action="supervised-busy-skip")
+            self.assertNotIn(journal, [path for path, _ in writes])
+            return real_publish(writes, **kwargs)
+
+        with mock.patch.object(cli, "publish_state_atomic", side_effect=publish):
+            self.assertEqual(self._run()[0], 0)
+        cli.STATE.log_run("precheck", result="no-change")
+        self.assertEqual(
+            [(event["event"], event.get("action") or event.get("result")) for event in self._journal()],
+            [("precheck", "change"), ("rebind", None), ("dispatch", "supervised-busy-skip"), ("precheck", "no-change")],
+        )
+        self.assertEqual(self._journal()[1]["state_digest"], self._published_digest())
+
+    def test_rebind_only_appends_to_the_journal(self) -> None:
+        import ast
+        import inspect
+        import textwrap
+
+        from ummanu.runtime import state as runtime_state
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(cli.cmd_rebind)))
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+        names = {node.func.id if isinstance(node.func, ast.Name) else node.func.attr for node in calls
+                 if isinstance(node.func, (ast.Name, ast.Attribute))}
+        self.assertFalse(names & {"open", "read_text", "read_bytes", "write_text", "write_bytes", "replace", "unlink"})
+        journal_uses = [node for node in ast.walk(tree) if isinstance(node, ast.Name) and node.id == "journal"]
+        appends = [call for call in calls if isinstance(call.func, ast.Name) and call.func.id == "append_line_durable"]
+        self.assertEqual(len(journal_uses), 1 + len(appends))  # the assignment, then only append arguments
+        self.assertTrue(all(isinstance(call.args[0], ast.Name) and call.args[0].id == "journal" for call in appends))
+        for call in calls:
+            if isinstance(call.func, ast.Name) and call.func.id == "publish_state_atomic":
+                self.assertNotIn("journal", ast.dump(call))
+                self.assertNotIn("runs.jsonl", ast.dump(call))
+        helper = inspect.getsource(runtime_state.append_line_durable)
+        self.assertIn("os.O_APPEND", helper)
+        self.assertNotIn("O_TRUNC", helper)
 
     def test_a_carried_cursor_never_moves_backwards(self) -> None:
         fixture = self._fixture()
